@@ -1,14 +1,11 @@
 # mitsupi-loaded
 
-Add-on Mitsupi distribution.
+Mitsupi 的附加分发包。
 
-Includes only:
+它只包含：
 
 - `extensions/go-to-bed.ts`
 - `extensions/goal.ts`
-- `skills/anachb`
 - `skills/apple-mail`
-- `skills/oebb-scotty`
-- `skills/openscad`
 
-Install together with `mitsupi-common` to get the full setup.
+需要与 `mitsupi-common` 一起安装，才能获得完整配置。

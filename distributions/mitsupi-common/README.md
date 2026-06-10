@@ -1,11 +1,8 @@
 # mitsupi-common
 
-Default Mitsupi distribution.
+默认的 Mitsupi 分发包。
 
-Includes everything from `mitsupi` except:
+它包含 `mitsupi` 的全部内容，但不包含：
 
 - `extensions/go-to-bed.ts`
-- `skills/anachb`
 - `skills/apple-mail`
-- `skills/oebb-scotty`
-- `skills/openscad`

@@ -1,8 +1,3 @@
 # Distributions
 
-This folder contains publishable Pi package variants based on `mitsupi`:
-
-- `mitsupi-common`: default/minimal profile
-- `mitsupi-loaded`: add-on profile with travel/CAD extras and opt-in goal mode
-
-`mitsupi-loaded` is intended to be installed together with `mitsupi-common`.
+这个目录当前不再需要保留；本仓库只使用本地同步方式，不依赖分发包说明。

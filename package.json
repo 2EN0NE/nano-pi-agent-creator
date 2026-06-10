@@ -4,7 +4,7 @@
   "description": "Armin's pi coding agent commands, skills, extensions, and themes",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mitsuhiko/agent-stuff.git"
+    "url": "https://github.com/2EN0NE/nano-pi-stuff.git"
   },
   "readme": "README.md",
   "type": "module",
@@ -33,9 +33,23 @@
     "diff": "^8.0.2"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.4.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.7"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "lint:staged": "lint-staged",
+    "lint:fix": "eslint . --fix"
+  },
+  "lint-staged": {
+    "*.js": "eslint --fix"
   }
 }
