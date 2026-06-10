@@ -1,75 +1,85 @@
 # Agent Stuff
 
-This repository contains skills and extensions that I use across projects. Note that I often fine-tune these for specific repos, so some items may need small adjustments before reuse.
+这个仓库是我在不同项目里复用的 Pi 代理资源集合。当前工程只供本人本地使用，不做 npm 发布。
 
-It is released on npm as `mitsupi` for use with the [Pi](https://buildwithpi.ai/) package loader.
+如果你要把当前的命令、扩展、技能和主题同步到本地 Pi 代理目录，直接运行：
 
-## Skills
+```bash
+./scripts/sync-to-local-pi.sh
+```
 
-All skills live in the [`skills`](skills) folder:
+默认会把资源同步到当前项目的 .pi/agents。若需要改成同步到用户目录 ~/.pi/agents，可以这样执行：
 
-* [`/anachb`](skills/anachb) - Query Austrian public transport (VOR AnachB) for departures, routes, and disruptions.
-* [`/apple-mail`](skills/apple-mail) - Search/read Apple Mail local storage and extract attachments.
-* [`/commit`](skills/commit) - Create git commits using concise Conventional Commits-style subjects.
-* [`/frontend-design`](skills/frontend-design) - Design and implement distinctive frontend interfaces.
-* [`/ghidra`](skills/ghidra) - Reverse engineer binaries using Ghidra's headless analyzer.
-* [`/github`](skills/github) - Interact with GitHub using the `gh` CLI (issues, PRs, runs, APIs).
-* [`/google-workspace`](skills/google-workspace) - Access Google Workspace APIs via local helper scripts.
-* [`/librarian`](skills/librarian) - Cache and refresh remote git repositories in `~/.cache/checkouts`.
-* [`/mermaid`](skills/mermaid) - Create and validate Mermaid diagrams with Mermaid CLI tooling.
-* [`/native-web-search`](skills/native-web-search) - Trigger native web search with concise summaries and source URLs.
-* [`/oebb-scotty`](skills/oebb-scotty) - Plan Austrian rail journeys via ÖBB Scotty API.
-* [`/openscad`](skills/openscad) - Create/render OpenSCAD models and export STL files.
-* [`/pi-share`](skills/pi-share) - Load and parse session transcripts from shittycodingagent.ai/buildwithpi/pi.dev URLs.
-* [`/sentry`](skills/sentry) - Fetch and analyze Sentry issues, events, transactions, and logs.
-* [`/summarize`](skills/summarize) - Convert files/URLs to Markdown via `uvx markitdown` and summarize.
-* [`/tmux`](skills/tmux) - Drive tmux sessions via keystrokes and pane output scraping.
-* [`/update-changelog`](skills/update-changelog) - Update changelogs with notable user-facing changes.
-* [`/uv`](skills/uv) - Use `uv` for Python dependency management and script execution.
-* [`/web-browser`](skills/web-browser) - Browser automation via Chrome/Chromium CDP.
+```bash
+./scripts/sync-to-local-pi.sh --target user
+```
 
-## Pi Coding Agent Extensions
+如果想同时同步到两个位置，也可以用：
 
-Custom extensions for Pi Coding Agent are in [`extensions`](extensions):
+```bash
+./scripts/sync-to-local-pi.sh --target both
+```
 
-* [`answer.ts`](extensions/answer.ts) - Interactive TUI for answering questions one by one.
-* [`btw.ts`](extensions/btw.ts) - Simple `/btw` side-chat popover with optional summary injection back into the main chat on close.
-* [`control.ts`](extensions/control.ts) - Session control helpers (list controllable sessions, etc.).
-* [`files.ts`](extensions/files.ts) - Unified file browser with git status + session references and reveal/open/edit/diff actions.
-* [`split-fork.ts`](extensions/split-fork.ts) - `/split-fork` command to branch the current session into a new pi process in a right-hand Ghostty split.
-* [`go-to-bed.ts`](extensions/go-to-bed.ts) - Late-night safety guard with explicit confirmation after midnight.
-* [`goal.ts`](extensions/goal.ts) - Opt-in `/goal` mode with persisted long-running objectives, status controls, and model tools.
-* [`loop.ts`](extensions/loop.ts) - Prompt loop for rapid iterative coding with optional auto-continue.
-* [`multi-edit.ts`](extensions/multi-edit.ts) - Replaces the built-in `edit` tool with batch `multi` edits and Codex-style `patch` support, including preflight validation.
-* [`notify.ts`](extensions/notify.ts) - Native desktop notifications when the agent finishes.
-* [`prompt-editor.ts`](extensions/prompt-editor.ts) - In-editor prompt mode selector with persistence, history, config, and shortcuts.
-* [`review.ts`](extensions/review.ts) - Code review command (working tree, PR-style diff, commits, custom instructions, optional fix loop).
-* [`session-breakdown.ts`](extensions/session-breakdown.ts) - TUI for 7/30/90-day session and cost analysis with usage graph.
-* [`todos.ts`](extensions/todos.ts) - Todo manager extension with file-backed storage and TUI.
-* [`trust-github-repos.ts`](extensions/trust-github-repos.ts) - Automatically remembers trust for GitHub checkouts under `earendil-works` or `mitsuhiko`.
-* [`uv.ts`](extensions/uv.ts) - Helpers for uv-based Python workflows.
-* [`whimsical.ts`](extensions/whimsical.ts) - Replaces the default thinking message with random whimsical phrases.
+脚本会把 [commands](commands)、[extensions](extensions)、[skills](skills) 和 [themes](themes) 同步到目标位置。
+## 目录说明
 
-## Pi Coding Agent Themes
+### Skills
 
-Custom themes are in [`themes`](themes):
+所有技能都在 [skills](skills) 目录中：
+
+* [`/apple-mail`](skills/apple-mail) - 查看和搜索 Apple Mail 本地存储中的邮件，并提取附件。
+* [`/commit`](skills/commit) - 使用简洁的 Conventional Commits 风格创建 git 提交。
+* [`/frontend-design`](skills/frontend-design) - 设计并实现有特色的前端界面。
+* [`/github`](skills/github) - 通过 gh CLI 与 GitHub 交互（Issue、PR、Run、API）。
+* [`/librarian`](skills/librarian) - 缓存并刷新 ~/.cache/checkouts 下的远程 Git 仓库。
+* [`/mermaid`](skills/mermaid) - 使用 Mermaid CLI 创建和校验 Mermaid 图表。
+* [`/native-web-search`](skills/native-web-search) - 触发本机网页搜索，并生成简洁总结与来源链接。
+* [`/sentry`](skills/sentry) - 获取并分析 Sentry 的问题、事件、事务和日志。
+* [`/summarize`](skills/summarize) - 通过 uvx markitdown 将文件/URL 转为 Markdown，并生成摘要。
+* [`/tmux`](skills/tmux) - 通过按键与 pane 输出抓取来驱动 tmux 会话。
+* [`/update-changelog`](skills/update-changelog) - 根据用户可见的改动更新仓库变更日志。
+* [`/uv`](skills/uv) - 使用 uv 管理 Python 依赖并执行脚本。
+* [`/web-browser`](skills/web-browser) - 通过 Chrome/Chromium CDP 实现浏览器自动化。
+
+### Pi Coding Agent Extensions
+
+Pi Coding Agent 的扩展在 [extensions](extensions) 目录中：
+
+* [`answer.ts`](extensions/answer.ts) - 逐个回答问题的交互式 TUI。
+* [`btw.ts`](extensions/btw.ts) - 一个简易的 `/btw` 侧边聊天弹窗，可在关闭时把摘要回注入主会话。
+* [`control.ts`](extensions/control.ts) - 会话控制辅助工具（列出可控会话等）。
+* [`files.ts`](extensions/files.ts) - 统一的文件浏览器，整合 git 状态、会话引用、 reveal/open/edit/diff 等操作。
+* [`split-fork.ts`](extensions/split-fork.ts) - `/split-fork` 命令，可把当前会话分叉到右侧 Ghostty 分屏中的新 pi 进程。
+* [`go-to-bed.ts`](extensions/go-to-bed.ts) - 深夜安全保护，超过午夜后会要求显式确认。
+* [`goal.ts`](extensions/goal.ts) - 可选的 `/goal` 模式，支持长期目标持久化、状态控制和模型工具。
+* [`loop.ts`](extensions/loop.ts) - 快速迭代编码的提示循环，支持可选自动继续。
+* [`multi-edit.ts`](extensions/multi-edit.ts) - 用批量 `multi` 编辑替换内置 `edit` 工具，并支持 Codex 风格的 `patch` 及预检验。
+* [`notify.ts`](extensions/notify.ts) - 代理任务结束后发送桌面原生通知。
+* [`prompt-editor.ts`](extensions/prompt-editor.ts) - 编辑器内的提示词模式选择器，支持持久化、历史记录、配置和快捷键。
+* [`review.ts`](extensions/review.ts) - 代码评审命令，支持工作区、PR 风格 diff、提交、定制指令与可选修复循环。
+* [`session-breakdown.ts`](extensions/session-breakdown.ts) - 7/30/90 天会话与花费分析的 TUI，带用量图表。
+* [`todos.ts`](extensions/todos.ts) - 基于文件存储的 todo 管理扩展，提供 TUI。
+* [`trust-github-repos.ts`](extensions/trust-github-repos.ts) - 自动记住 `earendil-works` 或 `mitsuhiko` 下 GitHub 检出的信任状态。
+* [`uv.ts`](extensions/uv.ts) - 面向 uv 的 Python 工作流辅助工具。
+* [`whimsical.ts`](extensions/whimsical.ts) - 用随机的 whimsical 句子替换默认思考提示。
+
+### Pi Coding Agent Themes
+
+主题文件在 [themes](themes) 目录中：
 
 * [`nightowl.json`](themes/nightowl.json) - Night Owl-inspired theme.
 
-## Distributions
+### 本地同步脚本
 
-This repo also contains distribution packages in [`distributions`](distributions):
+目前的本地同步入口在 [scripts/sync-to-local-pi.sh](scripts/sync-to-local-pi.sh)。
 
-* [`mitsupi-common`](distributions/mitsupi-common) - Minimal/default set (all resources except `anachb`, `apple-mail`, `oebb-scotty`, `openscad`, `go-to-bed`, and `goal`).
-* [`mitsupi-loaded`](distributions/mitsupi-loaded) - Add-on package that provides `anachb`, `apple-mail`, `oebb-scotty`, `openscad`, `go-to-bed`, and `goal`.
+如果只想先做一次预检查，可以运行：
 
-## Plumbing Commands
+```bash
+./scripts/sync-to-local-pi.sh --dry-run
+```
 
-These command files need customization before use. They live in [`plumbing-commands`](plumbing-commands):
-
-* [`/make-release`](plumbing-commands/make-release.md) - Automates repository release with version management.
-
-## Intercepted Commands
+## 拦截命令
 
 Command wrappers live in [`intercepted-commands`](intercepted-commands):
 
