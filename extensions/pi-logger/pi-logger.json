@@ -1,0 +1,20 @@
+{
+  "defaultLevel": "info",
+  "loggers": {
+    "review": "debug",
+    "__lifecycle__": "info"
+  },
+  "appenders": {
+    "file": {
+      "enabled": true,
+      "path": "./.pi/logs",
+      "level": "trace",
+      "pattern": "[%d{ISO}] [%p] [%c] %m%n"
+    },
+    "console": {
+      "enabled": false,
+      "level": "info",
+      "color": true
+    }
+  }
+}
