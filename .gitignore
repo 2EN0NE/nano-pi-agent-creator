@@ -3,3 +3,4 @@ node_modules
 *.profraw
 .pi/
 .vscode/
+.DS_Store
