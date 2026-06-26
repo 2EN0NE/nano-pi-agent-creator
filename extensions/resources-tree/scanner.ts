@@ -1,7 +1,4 @@
-import type {
-	ExtensionContext,
-	ToolInfo,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
 import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -180,8 +177,10 @@ export interface ScannedResources {
 export function scanAllResources(ctx: ExtensionContext): ScannedResources {
 	const userDir = join(homedir(), ".pi", "agent");
 	const projDir = join(ctx.cwd, ".pi");
+	const agentsDir = join(homedir(), ".agents");
 	const user = scanDirResources(userDir, "~/.pi/agent");
 	const project = scanDirResources(projDir, ".pi");
+	const agents = scanDirResources(agentsDir, ".agents");
 	const npm = scanNpmPackagesFromSettings();
 
 	const byType = (items: ResourceItem[]) => ({
@@ -193,11 +192,12 @@ export function scanAllResources(ctx: ExtensionContext): ScannedResources {
 
 	const u = byType(user);
 	const p = byType(project);
+	const a = byType(agents);
 	const n = byType(npm);
 
 	return {
 		context: [...u.context, ...p.context],
-		skills: [...u.skills, ...p.skills, ...n.skills],
+		skills: [...u.skills, ...p.skills, ...a.skills, ...n.skills],
 		extensions: [...u.extensions, ...p.extensions, ...n.extensions],
 		themes: [...u.themes, ...p.themes, ...n.themes],
 	};
@@ -252,6 +252,22 @@ export function loadAllSkillsFromFs(): SkillEntry[] {
 					},
 				});
 			}
+		}
+	}
+
+	// Agent-private skills (~/.agents/skills/ — used by Pi's native loader).
+	const agentsDir = join(homedir(), ".agents", "skills");
+	if (existsSync(agentsDir)) {
+		const loaded = loadSkillsFromDir({ dir: agentsDir, source: "local" });
+		for (const s of loaded.skills) {
+			result.push({
+				name: s.name,
+				filePath: s.filePath,
+				sourceInfo: {
+					source: s.sourceInfo.source,
+					scope: s.sourceInfo.scope as string | undefined,
+				},
+			});
 		}
 	}
 

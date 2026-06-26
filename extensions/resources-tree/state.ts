@@ -6,10 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export const state = {
 	/** Reference to pi API, set by index.ts on startup. */
 	pi: null as ExtensionAPI | null,
-	// ── Skills ─────────────────────────────────────────────────
-	// totalSkills: all loaded from FS (denominator, set once on session_start)
-	// loadedSkills: actually sent to model via <skill name="">    (numerator, updated each before_agent_start)
-	totalSkills: null as SkillEntry[] | null,
+	// ── Skills (populated by scanner + before_agent_start) ──────────
 	loadedSkills: null as SkillEntry[] | null,
 	loadedContextFiles: null as ContextFileEntry[] | null,
 
@@ -29,6 +26,12 @@ export const state = {
 
 	// ── Cached header ───────────────────────────────────────────────
 	cachedHeader: [] as string[],
+
+	// ── Skill counts for widget display ──────────────────────────────
+	/** Count of <name> tags in available_skills XML of system prompt */
+	xmlSkillCount: 0,
+	/** Count of unique skill names from filesystem scan (matches startup header) */
+	fsSkillCount: 0,
 };
 
 /** Get usage ratio for a named resource (tool or skill). */

@@ -44,7 +44,7 @@ function addToolGuidance(options: BuildSystemPromptOptions, basePrompt: string):
 	if (hasTool("write")) {
 		parts.push("• Use the `write` tool to create new files or overwrite existing ones completely.");
 	}
-
+// 注意下面的可用技能，和原生代码所体现的Prompt里的<skills>有区别，两者可能都发送给大模型
 	if (options.skills && options.skills.length > 0) {
 		const skillNames = options.skills.map((s) => s.name).join(", ");
 		parts.push(`\nAvailable skills: ${skillNames}`, "Use skill documentation for best practices on specific tools.");

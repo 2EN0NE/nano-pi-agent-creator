@@ -84,14 +84,7 @@ function usageRatio(name: string): number {
 }
 
 function renderCollapsed(fullWidth: number, theme: Theme): string[] {
-	const totalNames = state.totalSkills
-		? [...new Set(state.totalSkills.map((s) => s.name))]
-		: [];
-	const loadedNames = state.loadedSkills
-		? [...new Set(state.loadedSkills.map((s) => s.name))]
-		: null;
-	const skillCount = totalNames.length;
-	const numerator = loadedNames !== null ? loadedNames.length : "?";
+	const skillCountStr = `${state.xmlSkillCount}/${state.fsSkillCount}`;
 	const promptCount = state.loadedContextFiles?.length ?? 0;
 	const toolActive = state.pi?.getActiveTools().length ?? 0;
 	const toolTotal = state.pi?.getAllTools().length ?? 0;
@@ -105,7 +98,7 @@ function renderCollapsed(fullWidth: number, theme: Theme): string[] {
 			: s + " ".repeat(Math.max(0, cw - vis));
 	};
 
-	const row1 = `${padTo(theme.fg("accent", `Tools ${toolActive}/${toolTotal}`))}${sep}${padTo(theme.fg("accent", `Skills ${numerator}/${skillCount}`))}${sep}${padTo(theme.fg("accent", `Prompt ${promptCount}`))}`;
+	const row1 = `${padTo(theme.fg("accent", `Tools ${toolActive}/${toolTotal}`))}${sep}${padTo(theme.fg("accent", `Skills ${skillCountStr}`))}${sep}${padTo(theme.fg("accent", `Prompt ${promptCount}`))}`;
 
 	const toolsActive =
 		state.recentToolNames.length > 0
@@ -125,7 +118,7 @@ function renderCollapsed(fullWidth: number, theme: Theme): string[] {
 						return `${idx === 0 ? theme.fg("accent", "\u25B6") : ""}${c(n)}`;
 					})
 					.join(theme.fg("borderMuted", " | "))
-			: theme.fg("dim", `${numerator}/${skillCount} loaded`);
+			: theme.fg("dim", `${skillCountStr} loaded`);
 
 	const row2 = `${padTo(toolsActive)}${sep}${padTo(skillsActive)}${sep}${padTo(theme.fg("dim", `${promptCount} file(s)`))}`;
 
