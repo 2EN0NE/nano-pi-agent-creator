@@ -15,6 +15,11 @@ import { createReadStream } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("git-merge-and-resolve");
+
+log.debug("Extension loaded");
 
 interface ConflictBlock {
 	file: string;
@@ -72,6 +77,7 @@ function formatConflicts(ref: string, blocks: ConflictBlock[]): string {
 
 export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", async (_event, ctx) => {
+		log.debug("event: agent_end");
 		const { code: revParseCode } = await pi.exec("git", ["rev-parse", "--git-dir"]);
 		if (revParseCode !== 0) return;
 

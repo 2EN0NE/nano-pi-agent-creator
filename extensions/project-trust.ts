@@ -14,6 +14,11 @@
  */
 
 import type { ExtensionAPI, ProjectTrustEventResult } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("project-trust");
+
+log.debug("Extension loaded");
 
 export default function (pi: ExtensionAPI) {
 	let loadCount = 0;
@@ -24,6 +29,7 @@ export default function (pi: ExtensionAPI) {
 	// trust prompt. Return { trusted: "undecided" } to let another handler or the
 	// built-in flow decide.
 	pi.on("project_trust", async (event, ctx): Promise<ProjectTrustEventResult> => {
+		log.debug("event: project_trust");
 		ctx.ui.notify(`project_trust fired for ${event.cwd} (mode: ${ctx.mode}, load: ${loadCount})`, "info");
 
 		if (!ctx.hasUI) {
@@ -59,6 +65,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", (_event, ctx) => {
+		log.debug("event: session_start");
 		ctx.ui.notify(`project-trust example loaded after trust resolution in ${ctx.cwd}`, "info");
 	});
 }

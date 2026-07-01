@@ -6,6 +6,9 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("protected-paths");
 
 export default function (pi: ExtensionAPI) {
 	const protectedPaths = [".env", ".git/", "node_modules/"];
@@ -17,8 +20,15 @@ export default function (pi: ExtensionAPI) {
 
 		const path = event.input.path as string;
 		const isProtected = protectedPaths.some((p) => path.includes(p));
+		log.debug(
+			"tool=%s, path=%s, protected=%s",
+			event.toolName,
+			path,
+			isProtected,
+		);
 
 		if (isProtected) {
+			log.warn("Blocked %s to protected path: %s", event.toolName, path);
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Blocked write to protected path: ${path}`, "warning");
 			}

@@ -19,7 +19,11 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
@@ -32,6 +36,7 @@ import {
 	Text,
 	type TUI,
 } from "@earendil-works/pi-tui";
+
 
 type ContentBlock = {
 	type?: string;
@@ -104,7 +109,14 @@ const extractPathsFromToolArgs = (args: unknown): string[] => {
 
 	const refs: string[] = [];
 	const record = args as Record<string, unknown>;
-	const directKeys = ["path", "file", "filePath", "filepath", "fileName", "filename"] as const;
+	const directKeys = [
+		"path",
+		"file",
+		"filePath",
+		"filepath",
+		"fileName",
+		"filename",
+	] as const;
 	const listKeys = ["paths", "files", "filePaths"] as const;
 
 	for (const key of directKeys) {
@@ -159,7 +171,9 @@ const extractFileReferencesFromContent = (content: unknown): string[] => {
 
 const extractFileReferencesFromEntry = (entry: SessionEntry): string[] => {
 	if (entry.type === "message") {
-		return "content" in entry.message ? extractFileReferencesFromContent(entry.message.content) : [];
+		return "content" in entry.message
+			? extractFileReferencesFromContent(entry.message.content)
+			: [];
 	}
 
 	if (entry.type === "custom_message") {
@@ -177,11 +191,15 @@ const sanitizeReference = (raw: string): string => {
 	return value;
 };
 
-const isCommentLikeReference = (value: string): boolean => value.startsWith("//");
+const isCommentLikeReference = (value: string): boolean =>
+	value.startsWith("//");
 
 const stripLineSuffix = (value: string): string => {
 	let result = value.replace(/#L\d+(C\d+)?$/i, "");
-	const lastSeparator = Math.max(result.lastIndexOf("/"), result.lastIndexOf("\\"));
+	const lastSeparator = Math.max(
+		result.lastIndexOf("/"),
+		result.lastIndexOf("\\"),
+	);
 	const segmentStart = lastSeparator >= 0 ? lastSeparator + 1 : 0;
 	const segment = result.slice(segmentStart);
 	const colonIndex = segment.indexOf(":");
@@ -245,7 +263,11 @@ const formatDisplayPath = (absolutePath: string, cwd: string): string => {
 	return absolutePath;
 };
 
-const collectRecentFileReferences = (entries: SessionEntry[], cwd: string, limit: number): FileReference[] => {
+const collectRecentFileReferences = (
+	entries: SessionEntry[],
+	cwd: string,
+	limit: number,
+): FileReference[] => {
 	const results: FileReference[] = [];
 	const seen = new Set<string>();
 
@@ -279,12 +301,17 @@ const collectRecentFileReferences = (entries: SessionEntry[], cwd: string, limit
 	return results;
 };
 
-const findLatestFileReference = (entries: SessionEntry[], cwd: string): FileReference | null => {
+const findLatestFileReference = (
+	entries: SessionEntry[],
+	cwd: string,
+): FileReference | null => {
 	const refs = collectRecentFileReferences(entries, cwd, 100);
 	return refs.find((ref) => ref.exists) ?? null;
 };
 
-const toCanonicalPath = (inputPath: string): { canonicalPath: string; isDirectory: boolean } | null => {
+const toCanonicalPath = (
+	inputPath: string,
+): { canonicalPath: string; isDirectory: boolean } | null => {
 	if (!existsSync(inputPath)) {
 		return null;
 	}
@@ -303,7 +330,11 @@ const toCanonicalPathMaybeMissing = (
 ): { canonicalPath: string; isDirectory: boolean; exists: boolean } | null => {
 	const resolvedPath = path.resolve(inputPath);
 	if (!existsSync(resolvedPath)) {
-		return { canonicalPath: path.normalize(resolvedPath), isDirectory: false, exists: false };
+		return {
+			canonicalPath: path.normalize(resolvedPath),
+			isDirectory: false,
+			exists: false,
+		};
 	}
 
 	try {
@@ -311,11 +342,18 @@ const toCanonicalPathMaybeMissing = (
 		const stats = statSync(canonicalPath);
 		return { canonicalPath, isDirectory: stats.isDirectory(), exists: true };
 	} catch {
-		return { canonicalPath: path.normalize(resolvedPath), isDirectory: false, exists: true };
+		return {
+			canonicalPath: path.normalize(resolvedPath),
+			isDirectory: false,
+			exists: true,
+		};
 	}
 };
 
-const collectSessionFileChanges = (entries: SessionEntry[], cwd: string): Map<string, SessionFileChange> => {
+const collectSessionFileChanges = (
+	entries: SessionEntry[],
+	cwd: string,
+): Map<string, SessionFileChange> => {
 	const toolCalls = new Map<string, { path: string; name: FileToolName }>();
 
 	for (const entry of entries) {
@@ -373,10 +411,16 @@ const collectSessionFileChanges = (entries: SessionEntry[], cwd: string): Map<st
 	return fileMap;
 };
 
-const splitNullSeparated = (value: string): string[] => value.split("\0").filter(Boolean);
+const splitNullSeparated = (value: string): string[] =>
+	value.split("\0").filter(Boolean);
 
-const getGitRoot = async (pi: ExtensionAPI, cwd: string): Promise<string | null> => {
-	const result = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd });
+const getGitRoot = async (
+	pi: ExtensionAPI,
+	cwd: string,
+): Promise<string | null> => {
+	const result = await pi.exec("git", ["rev-parse", "--show-toplevel"], {
+		cwd,
+	});
 	if (result.code !== 0) {
 		return null;
 	}
@@ -385,9 +429,14 @@ const getGitRoot = async (pi: ExtensionAPI, cwd: string): Promise<string | null>
 	return root ? root : null;
 };
 
-const getGitStatusMap = async (pi: ExtensionAPI, cwd: string): Promise<Map<string, GitStatusEntry>> => {
+const getGitStatusMap = async (
+	pi: ExtensionAPI,
+	cwd: string,
+): Promise<Map<string, GitStatusEntry>> => {
 	const statusMap = new Map<string, GitStatusEntry>();
-	const statusResult = await pi.exec("git", ["status", "--porcelain=1", "-z"], { cwd });
+	const statusResult = await pi.exec("git", ["status", "--porcelain=1", "-z"], {
+		cwd,
+	});
 	if (statusResult.code !== 0 || !statusResult.stdout) {
 		return statusMap;
 	}
@@ -405,7 +454,9 @@ const getGitStatusMap = async (pi: ExtensionAPI, cwd: string): Promise<Map<strin
 		}
 		if (!filePath) continue;
 
-		const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath);
+		const resolved = path.isAbsolute(filePath)
+			? filePath
+			: path.resolve(cwd, filePath);
 		const canonical = toCanonicalPathMaybeMissing(resolved);
 		if (!canonical) continue;
 		statusMap.set(canonical.canonicalPath, {
@@ -421,11 +472,16 @@ const getGitStatusMap = async (pi: ExtensionAPI, cwd: string): Promise<Map<strin
 const getGitFiles = async (
 	pi: ExtensionAPI,
 	gitRoot: string,
-): Promise<{ tracked: Set<string>; files: Array<{ canonicalPath: string; isDirectory: boolean }> }> => {
+): Promise<{
+	tracked: Set<string>;
+	files: Array<{ canonicalPath: string; isDirectory: boolean }>;
+}> => {
 	const tracked = new Set<string>();
 	const files: Array<{ canonicalPath: string; isDirectory: boolean }> = [];
 
-	const trackedResult = await pi.exec("git", ["ls-files", "-z"], { cwd: gitRoot });
+	const trackedResult = await pi.exec("git", ["ls-files", "-z"], {
+		cwd: gitRoot,
+	});
 	if (trackedResult.code === 0 && trackedResult.stdout) {
 		for (const relativePath of splitNullSeparated(trackedResult.stdout)) {
 			const resolvedPath = path.resolve(gitRoot, relativePath);
@@ -436,7 +492,11 @@ const getGitFiles = async (
 		}
 	}
 
-	const untrackedResult = await pi.exec("git", ["ls-files", "-z", "--others", "--exclude-standard"], { cwd: gitRoot });
+	const untrackedResult = await pi.exec(
+		"git",
+		["ls-files", "-z", "--others", "--exclude-standard"],
+		{ cwd: gitRoot },
+	);
 	if (untrackedResult.code === 0 && untrackedResult.stdout) {
 		for (const relativePath of splitNullSeparated(untrackedResult.stdout)) {
 			const resolvedPath = path.resolve(gitRoot, relativePath);
@@ -449,11 +509,16 @@ const getGitFiles = async (
 	return { tracked, files };
 };
 
-const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<{ files: FileEntry[]; gitRoot: string | null }> => {
+const buildFileEntries = async (
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+): Promise<{ files: FileEntry[]; gitRoot: string | null }> => {
 	const entries = ctx.sessionManager.getBranch();
 	const sessionChanges = collectSessionFileChanges(entries, ctx.cwd);
 	const gitRoot = await getGitRoot(pi, ctx.cwd);
-	const statusMap = gitRoot ? await getGitStatusMap(pi, gitRoot) : new Map<string, GitStatusEntry>();
+	const statusMap = gitRoot
+		? await getGitStatusMap(pi, gitRoot)
+		: new Map<string, GitStatusEntry>();
 
 	let trackedSet = new Set<string>();
 	let gitFiles: Array<{ canonicalPath: string; isDirectory: boolean }> = [];
@@ -465,9 +530,12 @@ const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promis
 
 	const fileMap = new Map<string, FileEntry>();
 
-	const upsertFile = (data: Partial<FileEntry> & { canonicalPath: string; isDirectory: boolean }) => {
+	const upsertFile = (
+		data: Partial<FileEntry> & { canonicalPath: string; isDirectory: boolean },
+	) => {
 		const existing = fileMap.get(data.canonicalPath);
-		const displayPath = data.displayPath ?? formatDisplayPath(data.canonicalPath, ctx.cwd);
+		const displayPath =
+			data.displayPath ?? formatDisplayPath(data.canonicalPath, ctx.cwd);
 
 		if (existing) {
 			fileMap.set(data.canonicalPath, {
@@ -479,8 +547,12 @@ const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promis
 				isReferenced: existing.isReferenced || data.isReferenced === true,
 				inRepo: existing.inRepo || data.inRepo === true,
 				isTracked: existing.isTracked || data.isTracked === true,
-				hasSessionChange: existing.hasSessionChange || data.hasSessionChange === true,
-				lastTimestamp: Math.max(existing.lastTimestamp, data.lastTimestamp ?? 0),
+				hasSessionChange:
+					existing.hasSessionChange || data.hasSessionChange === true,
+				lastTimestamp: Math.max(
+					existing.lastTimestamp,
+					data.lastTimestamp ?? 0,
+				),
 			});
 			return;
 		}
@@ -533,7 +605,9 @@ const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promis
 		});
 	}
 
-	const references = collectRecentFileReferences(entries, ctx.cwd, 200).filter((ref) => ref.exists);
+	const references = collectRecentFileReferences(entries, ctx.cwd, 200).filter(
+		(ref) => ref.exists,
+	);
 	for (const ref of references) {
 		const canonical = toCanonicalPath(ref.path);
 		if (!canonical) continue;
@@ -632,20 +706,28 @@ const getEditableContent = (target: FileEntry): EditCheckResult => {
 const showActionSelector = async (
 	ctx: ExtensionContext,
 	options: { canQuickLook: boolean; canEdit: boolean; canDiff: boolean },
-): Promise<"reveal" | "quicklook" | "open" | "edit" | "addToPrompt" | "diff" | null> => {
+): Promise<
+	"reveal" | "quicklook" | "open" | "edit" | "addToPrompt" | "diff" | null
+> => {
 	const actions: SelectItem[] = [
 		...(options.canDiff ? [{ value: "diff", label: "Diff in VS Code" }] : []),
 		{ value: "reveal", label: "Reveal in Finder" },
 		{ value: "open", label: "Open" },
 		{ value: "addToPrompt", label: "Add to prompt" },
-		...(options.canQuickLook ? [{ value: "quicklook", label: "Open in Quick Look" }] : []),
+		...(options.canQuickLook
+			? [{ value: "quicklook", label: "Open in Quick Look" }]
+			: []),
 		...(options.canEdit ? [{ value: "edit", label: "Edit" }] : []),
 	];
 
-	return ctx.ui.custom<"reveal" | "quicklook" | "open" | "edit" | "addToPrompt" | "diff" | null>((tui, theme, _kb, done) => {
+	return ctx.ui.custom<
+		"reveal" | "quicklook" | "open" | "edit" | "addToPrompt" | "diff" | null
+	>((tui, theme, _kb, done) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-		container.addChild(new Text(theme.fg("accent", theme.bold("Choose action"))));
+		container.addChild(
+			new Text(theme.fg("accent", theme.bold("Choose action"))),
+		);
 
 		const selectList = new SelectList(actions, actions.length, {
 			selectedPrefix: (text) => theme.fg("accent", text),
@@ -655,11 +737,22 @@ const showActionSelector = async (
 			noMatch: (text) => theme.fg("warning", text),
 		});
 
-		selectList.onSelect = (item) => done(item.value as "reveal" | "quicklook" | "open" | "edit" | "addToPrompt" | "diff");
+		selectList.onSelect = (item) =>
+			done(
+				item.value as
+					| "reveal"
+					| "quicklook"
+					| "open"
+					| "edit"
+					| "addToPrompt"
+					| "diff",
+			);
 		selectList.onCancel = () => done(null);
 
 		container.addChild(selectList);
-		container.addChild(new Text(theme.fg("dim", "Press enter to confirm or esc to cancel")));
+		container.addChild(
+			new Text(theme.fg("dim", "Press enter to confirm or esc to cancel")),
+		);
 		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 
 		return {
@@ -677,7 +770,11 @@ const showActionSelector = async (
 	});
 };
 
-const openPath = async (pi: ExtensionAPI, ctx: ExtensionContext, target: FileEntry): Promise<void> => {
+const openPath = async (
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	target: FileEntry,
+): Promise<void> => {
 	if (!existsSync(target.resolvedPath)) {
 		ctx.ui.notify(`File not found: ${target.displayPath}`, "error");
 		return;
@@ -686,12 +783,17 @@ const openPath = async (pi: ExtensionAPI, ctx: ExtensionContext, target: FileEnt
 	const command = process.platform === "darwin" ? "open" : "xdg-open";
 	const result = await pi.exec(command, [target.resolvedPath]);
 	if (result.code !== 0) {
-		const errorMessage = result.stderr?.trim() || `Failed to open ${target.displayPath}`;
+		const errorMessage =
+			result.stderr?.trim() || `Failed to open ${target.displayPath}`;
 		ctx.ui.notify(errorMessage, "error");
 	}
 };
 
-const openExternalEditor = (tui: TUI, editorCmd: string, content: string): string | null => {
+const openExternalEditor = (
+	tui: TUI,
+	editorCmd: string,
+	content: string,
+): string | null => {
 	const tmpFile = path.join(os.tmpdir(), `pi-files-edit-${Date.now()}.txt`);
 
 	try {
@@ -699,7 +801,9 @@ const openExternalEditor = (tui: TUI, editorCmd: string, content: string): strin
 		tui.stop();
 
 		const [editor, ...editorArgs] = editorCmd.split(" ");
-		const result = spawnSync(editor, [...editorArgs, tmpFile], { stdio: "inherit" });
+		const result = spawnSync(editor, [...editorArgs, tmpFile], {
+			stdio: "inherit",
+		});
 
 		if (result.status === 0) {
 			return readFileSync(tmpFile, "utf8").replace(/\n$/, "");
@@ -709,30 +813,35 @@ const openExternalEditor = (tui: TUI, editorCmd: string, content: string): strin
 	} finally {
 		try {
 			unlinkSync(tmpFile);
-		} catch {
-		}
+		} catch {}
 		tui.start();
 		tui.requestRender(true);
 	}
 };
 
-const editPath = async (ctx: ExtensionContext, target: FileEntry, content: string): Promise<void> => {
+const editPath = async (
+	ctx: ExtensionContext,
+	target: FileEntry,
+	content: string,
+): Promise<void> => {
 	const editorCmd = process.env.VISUAL || process.env.EDITOR;
 	if (!editorCmd) {
 		ctx.ui.notify("No editor configured. Set $VISUAL or $EDITOR.", "warning");
 		return;
 	}
 
-	const updated = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-		const status = new Text(theme.fg("dim", `Opening ${editorCmd}...`));
+	const updated = await ctx.ui.custom<string | null>(
+		(tui, theme, _kb, done) => {
+			const status = new Text(theme.fg("dim", `Opening ${editorCmd}...`));
 
-		queueMicrotask(() => {
-			const result = openExternalEditor(tui, editorCmd, content);
-			done(result);
-		});
+			queueMicrotask(() => {
+				const result = openExternalEditor(tui, editorCmd, content);
+				done(result);
+			});
 
-		return status;
-	});
+			return status;
+		},
+	);
 
 	if (updated === null) {
 		ctx.ui.notify("Edit cancelled", "info");
@@ -746,13 +855,18 @@ const editPath = async (ctx: ExtensionContext, target: FileEntry, content: strin
 	}
 };
 
-const revealPath = async (pi: ExtensionAPI, ctx: ExtensionContext, target: FileEntry): Promise<void> => {
+const revealPath = async (
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	target: FileEntry,
+): Promise<void> => {
 	if (!existsSync(target.resolvedPath)) {
 		ctx.ui.notify(`File not found: ${target.displayPath}`, "error");
 		return;
 	}
 
-	const isDirectory = target.isDirectory || statSync(target.resolvedPath).isDirectory();
+	const isDirectory =
+		target.isDirectory || statSync(target.resolvedPath).isDirectory();
 	let command = "open";
 	let args: string[] = [];
 
@@ -760,17 +874,24 @@ const revealPath = async (pi: ExtensionAPI, ctx: ExtensionContext, target: FileE
 		args = isDirectory ? [target.resolvedPath] : ["-R", target.resolvedPath];
 	} else {
 		command = "xdg-open";
-		args = [isDirectory ? target.resolvedPath : path.dirname(target.resolvedPath)];
+		args = [
+			isDirectory ? target.resolvedPath : path.dirname(target.resolvedPath),
+		];
 	}
 
 	const result = await pi.exec(command, args);
 	if (result.code !== 0) {
-		const errorMessage = result.stderr?.trim() || `Failed to reveal ${target.displayPath}`;
+		const errorMessage =
+			result.stderr?.trim() || `Failed to reveal ${target.displayPath}`;
 		ctx.ui.notify(errorMessage, "error");
 	}
 };
 
-const quickLookPath = async (pi: ExtensionAPI, ctx: ExtensionContext, target: FileEntry): Promise<void> => {
+const quickLookPath = async (
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	target: FileEntry,
+): Promise<void> => {
 	if (process.platform !== "darwin") {
 		ctx.ui.notify("Quick Look is only available on macOS", "warning");
 		return;
@@ -781,7 +902,8 @@ const quickLookPath = async (pi: ExtensionAPI, ctx: ExtensionContext, target: Fi
 		return;
 	}
 
-	const isDirectory = target.isDirectory || statSync(target.resolvedPath).isDirectory();
+	const isDirectory =
+		target.isDirectory || statSync(target.resolvedPath).isDirectory();
 	if (isDirectory) {
 		ctx.ui.notify("Quick Look only works on files", "warning");
 		return;
@@ -789,26 +911,42 @@ const quickLookPath = async (pi: ExtensionAPI, ctx: ExtensionContext, target: Fi
 
 	const result = await pi.exec("qlmanage", ["-p", target.resolvedPath]);
 	if (result.code !== 0) {
-		const errorMessage = result.stderr?.trim() || `Failed to Quick Look ${target.displayPath}`;
+		const errorMessage =
+			result.stderr?.trim() || `Failed to Quick Look ${target.displayPath}`;
 		ctx.ui.notify(errorMessage, "error");
 	}
 };
 
-const openDiff = async (pi: ExtensionAPI, ctx: ExtensionContext, target: FileEntry, gitRoot: string | null): Promise<void> => {
+const openDiff = async (
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	target: FileEntry,
+	gitRoot: string | null,
+): Promise<void> => {
 	if (!gitRoot) {
 		ctx.ui.notify("Git repository not found", "warning");
 		return;
 	}
 
-	const relativePath = path.relative(gitRoot, target.resolvedPath).split(path.sep).join("/");
+	const relativePath = path
+		.relative(gitRoot, target.resolvedPath)
+		.split(path.sep)
+		.join("/");
 	const tmpDir = mkdtempSync(path.join(os.tmpdir(), "pi-files-"));
 	const tmpFile = path.join(tmpDir, path.basename(target.displayPath));
 
-	const existsInHead = await pi.exec("git", ["cat-file", "-e", `HEAD:${relativePath}`], { cwd: gitRoot });
+	const existsInHead = await pi.exec(
+		"git",
+		["cat-file", "-e", `HEAD:${relativePath}`],
+		{ cwd: gitRoot },
+	);
 	if (existsInHead.code === 0) {
-		const result = await pi.exec("git", ["show", `HEAD:${relativePath}`], { cwd: gitRoot });
+		const result = await pi.exec("git", ["show", `HEAD:${relativePath}`], {
+			cwd: gitRoot,
+		});
 		if (result.code !== 0) {
-			const errorMessage = result.stderr?.trim() || `Failed to diff ${target.displayPath}`;
+			const errorMessage =
+				result.stderr?.trim() || `Failed to diff ${target.displayPath}`;
 			ctx.ui.notify(errorMessage, "error");
 			return;
 		}
@@ -819,13 +957,20 @@ const openDiff = async (pi: ExtensionAPI, ctx: ExtensionContext, target: FileEnt
 
 	let workingPath = target.resolvedPath;
 	if (!existsSync(target.resolvedPath)) {
-		workingPath = path.join(tmpDir, `pi-files-working-${path.basename(target.displayPath)}`);
+		workingPath = path.join(
+			tmpDir,
+			`pi-files-working-${path.basename(target.displayPath)}`,
+		);
 		writeFileSync(workingPath, "", "utf8");
 	}
 
-	const openResult = await pi.exec("code", ["--diff", tmpFile, workingPath], { cwd: gitRoot });
+	const openResult = await pi.exec("code", ["--diff", tmpFile, workingPath], {
+		cwd: gitRoot,
+	});
 	if (openResult.code !== 0) {
-		const errorMessage = openResult.stderr?.trim() || `Failed to open diff for ${target.displayPath}`;
+		const errorMessage =
+			openResult.stderr?.trim() ||
+			`Failed to open diff for ${target.displayPath}`;
 		ctx.ui.notify(errorMessage, "error");
 	}
 };
@@ -855,114 +1000,148 @@ const showFileSelector = async (
 	});
 
 	let quickAction: "diff" | null = null;
-	const selection = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
-		const container = new Container();
-		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-		container.addChild(new Text(theme.fg("accent", theme.bold(" Select file")), 0, 0));
+	const selection = await ctx.ui.custom<string | null>(
+		(tui, theme, keybindings, done) => {
+			const container = new Container();
+			container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
+			container.addChild(
+				new Text(theme.fg("accent", theme.bold(" Select file")), 0, 0),
+			);
 
-		const searchInput = new Input();
-		container.addChild(searchInput);
-		container.addChild(new Spacer(1));
+			const searchInput = new Input();
+			container.addChild(searchInput);
+			container.addChild(new Spacer(1));
 
-		const listContainer = new Container();
-		container.addChild(listContainer);
-		container.addChild(
-			new Text(theme.fg("dim", "Type to filter • enter to select • ctrl+shift+d diff • esc to cancel"), 0, 0),
-		);
-		container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
+			const listContainer = new Container();
+			container.addChild(listContainer);
+			container.addChild(
+				new Text(
+					theme.fg(
+						"dim",
+						"Type to filter • enter to select • ctrl+shift+d diff • esc to cancel",
+					),
+					0,
+					0,
+				),
+			);
+			container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 
-		let filteredItems = items;
-		let selectList: SelectList | null = null;
+			let filteredItems = items;
+			let selectList: SelectList | null = null;
 
-		const updateList = () => {
-			listContainer.clear();
-			if (filteredItems.length === 0) {
-				listContainer.addChild(new Text(theme.fg("warning", "  No matching files"), 0, 0));
-				selectList = null;
-				return;
-			}
-
-			selectList = new SelectList(filteredItems, Math.min(filteredItems.length, 12), {
-				selectedPrefix: (text) => theme.fg("accent", text),
-				selectedText: (text) => theme.fg("accent", text),
-				description: (text) => theme.fg("muted", text),
-				scrollInfo: (text) => theme.fg("dim", text),
-				noMatch: (text) => theme.fg("warning", text),
-			});
-
-			if (selectedPath) {
-				const index = filteredItems.findIndex((item) => item.value === selectedPath);
-				if (index >= 0) {
-					selectList.setSelectedIndex(index);
-				}
-			}
-
-			selectList.onSelect = (item) => done(item.value as string);
-			selectList.onCancel = () => done(null);
-
-			listContainer.addChild(selectList);
-		};
-
-		const applyFilter = () => {
-			const query = searchInput.getValue();
-			filteredItems = query
-				? fuzzyFilter(items, query, (item) => `${item.label} ${item.value} ${item.description ?? ""}`)
-				: items;
-			updateList();
-		};
-
-		applyFilter();
-
-		return {
-			render(width: number) {
-				return container.render(width);
-			},
-			invalidate() {
-				container.invalidate();
-			},
-			handleInput(data: string) {
-				if (matchesKey(data, "ctrl+shift+d")) {
-					const selected = selectList?.getSelectedItem();
-					if (selected) {
-						const file = files.find((entry) => entry.canonicalPath === selected.value);
-						const canDiff = file?.isTracked && !file.isDirectory && Boolean(gitRoot);
-						if (!canDiff) {
-							ctx.ui.notify("Diff is only available for tracked files", "warning");
-							return;
-						}
-						quickAction = "diff";
-						done(selected.value as string);
-						return;
-					}
-				}
-
-				if (
-					keybindings.matches(data, "tui.select.up") ||
-					keybindings.matches(data, "tui.select.down") ||
-					keybindings.matches(data, "tui.select.confirm") ||
-					keybindings.matches(data, "tui.select.cancel")
-				) {
-					if (selectList) {
-						selectList.handleInput(data);
-					} else if (keybindings.matches(data, "tui.select.cancel")) {
-						done(null);
-					}
-					tui.requestRender();
+			const updateList = () => {
+				listContainer.clear();
+				if (filteredItems.length === 0) {
+					listContainer.addChild(
+						new Text(theme.fg("warning", "  No matching files"), 0, 0),
+					);
+					selectList = null;
 					return;
 				}
 
-				searchInput.handleInput(data);
-				applyFilter();
-				tui.requestRender();
-			},
-		};
-	});
+				selectList = new SelectList(
+					filteredItems,
+					Math.min(filteredItems.length, 12),
+					{
+						selectedPrefix: (text) => theme.fg("accent", text),
+						selectedText: (text) => theme.fg("accent", text),
+						description: (text) => theme.fg("muted", text),
+						scrollInfo: (text) => theme.fg("dim", text),
+						noMatch: (text) => theme.fg("warning", text),
+					},
+				);
 
-	const selected = selection ? files.find((file) => file.canonicalPath === selection) ?? null : null;
+				if (selectedPath) {
+					const index = filteredItems.findIndex(
+						(item) => item.value === selectedPath,
+					);
+					if (index >= 0) {
+						selectList.setSelectedIndex(index);
+					}
+				}
+
+				selectList.onSelect = (item) => done(item.value as string);
+				selectList.onCancel = () => done(null);
+
+				listContainer.addChild(selectList);
+			};
+
+			const applyFilter = () => {
+				const query = searchInput.getValue();
+				filteredItems = query
+					? fuzzyFilter(
+							items,
+							query,
+							(item) => `${item.label} ${item.value} ${item.description ?? ""}`,
+						)
+					: items;
+				updateList();
+			};
+
+			applyFilter();
+
+			return {
+				render(width: number) {
+					return container.render(width);
+				},
+				invalidate() {
+					container.invalidate();
+				},
+				handleInput(data: string) {
+					if (matchesKey(data, "ctrl+shift+d")) {
+						const selected = selectList?.getSelectedItem();
+						if (selected) {
+							const file = files.find(
+								(entry) => entry.canonicalPath === selected.value,
+							);
+							const canDiff =
+								file?.isTracked && !file.isDirectory && Boolean(gitRoot);
+							if (!canDiff) {
+								ctx.ui.notify(
+									"Diff is only available for tracked files",
+									"warning",
+								);
+								return;
+							}
+							quickAction = "diff";
+							done(selected.value as string);
+							return;
+						}
+					}
+
+					if (
+						keybindings.matches(data, "tui.select.up") ||
+						keybindings.matches(data, "tui.select.down") ||
+						keybindings.matches(data, "tui.select.confirm") ||
+						keybindings.matches(data, "tui.select.cancel")
+					) {
+						if (selectList) {
+							selectList.handleInput(data);
+						} else if (keybindings.matches(data, "tui.select.cancel")) {
+							done(null);
+						}
+						tui.requestRender();
+						return;
+					}
+
+					searchInput.handleInput(data);
+					applyFilter();
+					tui.requestRender();
+				},
+			};
+		},
+	);
+
+	const selected = selection
+		? (files.find((file) => file.canonicalPath === selection) ?? null)
+		: null;
 	return { selected, quickAction };
 };
 
-const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> => {
+const runFileBrowser = async (
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+): Promise<void> => {
 	if (!ctx.hasUI) {
 		ctx.ui.notify("Files requires interactive mode", "error");
 		return;
@@ -976,7 +1155,12 @@ const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 
 	let lastSelectedPath: string | null = null;
 	while (true) {
-		const { selected, quickAction } = await showFileSelector(ctx, files, lastSelectedPath, gitRoot);
+		const { selected, quickAction } = await showFileSelector(
+			ctx,
+			files,
+			lastSelectedPath,
+			gitRoot,
+		);
 		if (!selected) {
 			ctx.ui.notify("Files cancelled", "info");
 			return;
@@ -986,7 +1170,8 @@ const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 
 		const canQuickLook = process.platform === "darwin" && !selected.isDirectory;
 		const editCheck = getEditableContent(selected);
-		const canDiff = selected.isTracked && !selected.isDirectory && Boolean(gitRoot);
+		const canDiff =
+			selected.isTracked && !selected.isDirectory && Boolean(gitRoot);
 
 		if (quickAction === "diff") {
 			await openDiff(pi, ctx, selected, gitRoot);

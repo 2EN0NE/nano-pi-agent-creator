@@ -21,6 +21,7 @@
 ```
 
 脚本会把 [commands](commands)、[extensions](extensions)、[skills](skills) 和 [themes](themes) 同步到目标位置。
+
 ## 目录说明
 
 ### Skills
@@ -88,3 +89,16 @@ Command wrappers live in [`intercepted-commands`](intercepted-commands):
 * [`poetry`](intercepted-commands/poetry)
 * [`python`](intercepted-commands/python)
 * [`python3`](intercepted-commands/python3)
+
+## 本地依赖：@zenone/pi-logger
+
+`@zenone/pi-logger` 是一个本地 npm 包（来自 `extensions/pi-logger/`），不发布到 npm registry。所有扩展通过 `import { createLogger } from "@zenone/pi-logger"` 使用日志功能。
+
+在新电脑上 clone 工程后需要执行：
+
+```bash
+# 安装所有依赖（会自动安装 @zenone/pi-logger）
+npm install
+```
+
+这会将 `extensions/pi-logger/` 通过 `file:` 协议软链接到 `node_modules/@zenone/pi-logger`，供 pi 的 jiti 加载器解析。

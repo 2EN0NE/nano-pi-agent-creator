@@ -10,36 +10,59 @@
  * 3. Use /commands extensions to filter by source
  */
 
-import type { ExtensionAPI, SlashCommandInfo } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	SlashCommandInfo,
+} from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("commands");
 
 export default function commandsExtension(pi: ExtensionAPI) {
+	log.debug("Registering /commands command");
 	pi.registerCommand("commands", {
 		description: "List available slash commands",
 		getArgumentCompletions: (prefix) => {
 			const sources = ["extension", "prompt", "skill"];
 			const filtered = sources.filter((s) => s.startsWith(prefix));
-			return filtered.length > 0 ? filtered.map((s) => ({ value: s, label: s })) : null;
+			return filtered.length > 0
+				? filtered.map((s) => ({ value: s, label: s }))
+				: null;
 		},
 		handler: async (args, ctx) => {
 			const commands = pi.getCommands();
 			const sourceFilter = args.trim() as "extension" | "prompt" | "skill" | "";
 
-			// Filter by source if specified
-			const filtered = sourceFilter ? commands.filter((c) => c.source === sourceFilter) : commands;
+			const filtered = sourceFilter
+				? commands.filter((c) => c.source === sourceFilter)
+				: commands;
+			log.info(
+				"Executed /commands: filter=%s, total=%d, filtered=%d",
+				sourceFilter || "(all)",
+				commands.length,
+				filtered.length,
+			);
 
 			if (filtered.length === 0) {
-				ctx.ui.notify(sourceFilter ? `No ${sourceFilter} commands found` : "No commands found", "info");
+				ctx.ui.notify(
+					sourceFilter
+						? `No ${sourceFilter} commands found`
+						: "No commands found",
+					"info",
+				);
 				return;
 			}
 
-			// Build selection items grouped by source
 			const formatCommand = (cmd: SlashCommandInfo): string => {
 				const desc = cmd.description ? ` - ${cmd.description}` : "";
 				return `/${cmd.name}${desc}`;
 			};
 
 			const items: string[] = [];
-			const sources: Array<{ key: "extension" | "prompt" | "skill"; label: string }> = [
+			const sources: Array<{
+				key: "extension" | "prompt" | "skill";
+				label: string;
+			}> = [
 				{ key: "extension", label: "Extensions" },
 				{ key: "prompt", label: "Prompts" },
 				{ key: "skill", label: "Skills" },
@@ -53,15 +76,16 @@ export default function commandsExtension(pi: ExtensionAPI) {
 				}
 			}
 
-			// Show in a selector (user can scroll and see all commands)
 			const selected = await ctx.ui.select("Available Commands", items);
 
-			// If user selected a command (not a header), offer to show its path
 			if (selected && !selected.startsWith("---")) {
-				const cmdName = selected.split(" - ")[0].slice(1); // Remove leading /
+				const cmdName = selected.split(" - ")[0].slice(1);
 				const cmd = commands.find((c) => c.name === cmdName);
 				if (cmd?.sourceInfo.path) {
-					const showPath = await ctx.ui.confirm(cmd.name, `View source path?\n${cmd.sourceInfo.path}`);
+					const showPath = await ctx.ui.confirm(
+						cmd.name,
+						`View source path?\n${cmd.sourceInfo.path}`,
+					);
 					if (showPath) {
 						ctx.ui.notify(cmd.sourceInfo.path, "info");
 					}

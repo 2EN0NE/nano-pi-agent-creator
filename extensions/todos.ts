@@ -29,12 +29,23 @@
  * Use `/todos` to bring up the visual todo manager or just let the LLM use them
  * naturally.
  */
-import { DynamicBorder, copyToClipboard, getMarkdownTheme, keyHint, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import {
+	DynamicBorder,
+	copyToClipboard,
+	getMarkdownTheme,
+	keyHint,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type Theme,
+} from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("todos");
 import crypto from "node:crypto";
 import {
 	Container,
@@ -108,13 +119,20 @@ const TodoParams = Type.Object({
 	id: Type.Optional(
 		Type.String({ description: "Todo id (TODO-<hex> or raw hex filename)" }),
 	),
-	title: Type.Optional(Type.String({ description: "Short summary shown in lists" })),
+	title: Type.Optional(
+		Type.String({ description: "Short summary shown in lists" }),
+	),
 	status: Type.Optional(Type.String({ description: "Todo status" })),
 	tags: Type.Optional(Type.Array(Type.String({ description: "Todo tag" }))),
 	body: Type.Optional(
-		Type.String({ description: "Long-form details (markdown). Update replaces; append adds." }),
+		Type.String({
+			description:
+				"Long-form details (markdown). Update replaces; append adds.",
+		}),
 	),
-	force: Type.Optional(Type.Boolean({ description: "Override another session's assignment" })),
+	force: Type.Optional(
+		Type.Boolean({ description: "Override another session's assignment" }),
+	),
 });
 
 type TodoAction =
@@ -142,12 +160,24 @@ type TodoMenuAction =
 	| "view";
 
 type TodoToolDetails =
-	| { action: "list" | "list-all"; todos: TodoFrontMatter[]; currentSessionId?: string; error?: string }
 	| {
-			action: "get" | "create" | "update" | "append" | "delete" | "claim" | "release";
+			action: "list" | "list-all";
+			todos: TodoFrontMatter[];
+			currentSessionId?: string;
+			error?: string;
+	  }
+	| {
+			action:
+				| "get"
+				| "create"
+				| "update"
+				| "append"
+				| "delete"
+				| "claim"
+				| "release";
 			todo: TodoRecord;
 			error?: string;
-		};
+	  };
 
 function formatTodoId(id: string): string {
 	return `${TODO_ID_PREFIX}${id}`;
@@ -200,11 +230,16 @@ function sortTodos(todos: TodoFrontMatter[]): TodoFrontMatter[] {
 
 function buildTodoSearchText(todo: TodoFrontMatter): string {
 	const tags = todo.tags.join(" ");
-	const assignment = todo.assigned_to_session ? `assigned:${todo.assigned_to_session}` : "";
+	const assignment = todo.assigned_to_session
+		? `assigned:${todo.assigned_to_session}`
+		: "";
 	return `${formatTodoId(todo.id)} ${todo.id} ${todo.title} ${tags} ${todo.status} ${assignment}`.trim();
 }
 
-function filterTodos(todos: TodoFrontMatter[], query: string): TodoFrontMatter[] {
+function filterTodos(
+	todos: TodoFrontMatter[],
+	query: string,
+): TodoFrontMatter[] {
 	const trimmed = query.trim();
 	if (!trimmed) return todos;
 
@@ -279,7 +314,10 @@ class TodoSelectorComponent extends Container implements Focusable {
 		onCancel: () => void,
 		initialSearchInput?: string,
 		currentSessionId?: string,
-		private onQuickAction?: (todo: TodoFrontMatter, action: "work" | "refine") => void,
+		private onQuickAction?: (
+			todo: TodoFrontMatter,
+			action: "work" | "refine",
+		) => void,
 	) {
 		super();
 		this.tui = tui;
@@ -335,7 +373,9 @@ class TodoSelectorComponent extends Container implements Focusable {
 	}
 
 	private updateHeader(): void {
-		const openCount = this.allTodos.filter((todo) => !isTodoClosed(todo.status)).length;
+		const openCount = this.allTodos.filter(
+			(todo) => !isTodoClosed(todo.status),
+		).length;
 		const closedCount = this.allTodos.length - openCount;
 		const title = `Todos (${openCount} open, ${closedCount} closed)`;
 		this.headerText.setText(this.theme.fg("accent", this.theme.bold(title)));
@@ -352,7 +392,10 @@ class TodoSelectorComponent extends Container implements Focusable {
 
 	private applyFilter(query: string): void {
 		this.filteredTodos = filterTodos(this.allTodos, query);
-		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredTodos.length - 1));
+		this.selectedIndex = Math.min(
+			this.selectedIndex,
+			Math.max(0, this.filteredTodos.length - 1),
+		);
 		this.updateList();
 	}
 
@@ -360,16 +403,24 @@ class TodoSelectorComponent extends Container implements Focusable {
 		this.listContainer.clear();
 
 		if (this.filteredTodos.length === 0) {
-			this.listContainer.addChild(new Text(this.theme.fg("muted", "  No matching todos"), 0, 0));
+			this.listContainer.addChild(
+				new Text(this.theme.fg("muted", "  No matching todos"), 0, 0),
+			);
 			return;
 		}
 
 		const maxVisible = 10;
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredTodos.length - maxVisible),
+			Math.min(
+				this.selectedIndex - Math.floor(maxVisible / 2),
+				this.filteredTodos.length - maxVisible,
+			),
 		);
-		const endIndex = Math.min(startIndex + maxVisible, this.filteredTodos.length);
+		const endIndex = Math.min(
+			startIndex + maxVisible,
+			this.filteredTodos.length,
+		);
 
 		for (let i = startIndex; i < endIndex; i += 1) {
 			const todo = this.filteredTodos[i];
@@ -380,7 +431,11 @@ class TodoSelectorComponent extends Container implements Focusable {
 			const titleColor = isSelected ? "accent" : closed ? "dim" : "text";
 			const statusColor = closed ? "dim" : "success";
 			const tagText = todo.tags.length ? ` [${todo.tags.join(", ")}]` : "";
-			const assignmentText = renderAssignmentSuffix(this.theme, todo, this.currentSessionId);
+			const assignmentText = renderAssignmentSuffix(
+				this.theme,
+				todo,
+				this.currentSessionId,
+			);
 			const line =
 				prefix +
 				this.theme.fg("accent", formatTodoId(todo.id)) +
@@ -406,13 +461,19 @@ class TodoSelectorComponent extends Container implements Focusable {
 		const kb = this.keybindings;
 		if (kb.matches(keyData, "tui.select.up")) {
 			if (this.filteredTodos.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredTodos.length - 1 : this.selectedIndex - 1;
+			this.selectedIndex =
+				this.selectedIndex === 0
+					? this.filteredTodos.length - 1
+					: this.selectedIndex - 1;
 			this.updateList();
 			return;
 		}
 		if (kb.matches(keyData, "tui.select.down")) {
 			if (this.filteredTodos.length === 0) return;
-			this.selectedIndex = this.selectedIndex === this.filteredTodos.length - 1 ? 0 : this.selectedIndex + 1;
+			this.selectedIndex =
+				this.selectedIndex === this.filteredTodos.length - 1
+					? 0
+					: this.selectedIndex + 1;
 			this.updateList();
 			return;
 		}
@@ -427,7 +488,8 @@ class TodoSelectorComponent extends Container implements Focusable {
 		}
 		if (matchesKey(keyData, Key.ctrlShift("r"))) {
 			const selected = this.filteredTodos[this.selectedIndex];
-			if (selected && this.onQuickAction) this.onQuickAction(selected, "refine");
+			if (selected && this.onQuickAction)
+				this.onQuickAction(selected, "refine");
 			return;
 		}
 		if (matchesKey(keyData, Key.ctrlShift("w"))) {
@@ -472,10 +534,24 @@ class TodoActionMenuComponent extends Container {
 				? [{ value: "reopen", label: "reopen", description: "Reopen todo" }]
 				: [{ value: "close", label: "close", description: "Close todo" }]),
 			...(todo.assigned_to_session
-				? [{ value: "release", label: "release", description: "Release assignment" }]
+				? [
+						{
+							value: "release",
+							label: "release",
+							description: "Release assignment",
+						},
+					]
 				: []),
-			{ value: "copyPath", label: "copy path", description: "Copy absolute path to clipboard" },
-			{ value: "copyText", label: "copy text", description: "Copy title and body to clipboard" },
+			{
+				value: "copyPath",
+				label: "copy path",
+				description: "Copy absolute path to clipboard",
+			},
+			{
+				value: "copyText",
+				label: "copy text",
+				description: "Copy title and body to clipboard",
+			},
 			{ value: "delete", label: "delete", description: "Delete todo" },
 		];
 
@@ -497,7 +573,8 @@ class TodoActionMenuComponent extends Container {
 			noMatch: (text) => theme.fg("warning", text),
 		});
 
-		this.selectList.onSelect = (item) => this.onSelectCallback(item.value as TodoMenuAction);
+		this.selectList.onSelect = (item) =>
+			this.onSelectCallback(item.value as TodoMenuAction);
 		this.selectList.onCancel = () => this.onCancelCallback();
 
 		this.addChild(this.selectList);
@@ -518,7 +595,11 @@ class TodoDeleteConfirmComponent extends Container {
 	private selectList: SelectList;
 	private onConfirm: (confirmed: boolean) => void;
 
-	constructor(theme: Theme, message: string, onConfirm: (confirmed: boolean) => void) {
+	constructor(
+		theme: Theme,
+		message: string,
+		onConfirm: (confirmed: boolean) => void,
+	) {
 		super();
 		this.onConfirm = onConfirm;
 
@@ -578,7 +659,12 @@ class TodoDetailOverlayComponent {
 		this.keybindings = keybindings;
 		this.todo = todo;
 		this.onAction = onAction;
-		this.markdown = new Markdown(this.getMarkdownText(), 1, 0, getMarkdownTheme());
+		this.markdown = new Markdown(
+			this.getMarkdownText(),
+			1,
+			0,
+			getMarkdownTheme(),
+		);
 	}
 
 	private getMarkdownText(): string {
@@ -604,11 +690,17 @@ class TodoDetailOverlayComponent {
 			this.scrollBy(1);
 			return;
 		}
-		if (kb.matches(keyData, "tui.select.pageUp") || matchesKey(keyData, Key.left)) {
+		if (
+			kb.matches(keyData, "tui.select.pageUp") ||
+			matchesKey(keyData, Key.left)
+		) {
 			this.scrollBy(-this.viewHeight || -1);
 			return;
 		}
-		if (kb.matches(keyData, "tui.select.pageDown") || matchesKey(keyData, Key.right)) {
+		if (
+			kb.matches(keyData, "tui.select.pageDown") ||
+			matchesKey(keyData, Key.right)
+		) {
 			this.scrollBy(this.viewHeight || 1);
 			return;
 		}
@@ -620,7 +712,10 @@ class TodoDetailOverlayComponent {
 		const footerLines = 3;
 		const borderLines = 2;
 		const innerWidth = Math.max(10, width - 2);
-		const contentHeight = Math.max(1, maxHeight - headerLines - footerLines - borderLines);
+		const contentHeight = Math.max(
+			1,
+			maxHeight - headerLines - footerLines - borderLines,
+		);
 
 		const markdownLines = this.markdown.render(innerWidth);
 		this.totalLines = markdownLines.length;
@@ -628,7 +723,10 @@ class TodoDetailOverlayComponent {
 		const maxScroll = Math.max(0, this.totalLines - contentHeight);
 		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
 
-		const visibleLines = markdownLines.slice(this.scrollOffset, this.scrollOffset + contentHeight);
+		const visibleLines = markdownLines.slice(
+			this.scrollOffset,
+			this.scrollOffset + contentHeight,
+		);
 		const lines: string[] = [];
 
 		lines.push(this.buildTitleLine(innerWidth));
@@ -651,14 +749,23 @@ class TodoDetailOverlayComponent {
 		const framedLines = lines.map((line) => {
 			const truncated = truncateToWidth(line, innerWidth);
 			const padding = Math.max(0, innerWidth - visibleWidth(truncated));
-			return borderColor("│") + truncated + " ".repeat(padding) + borderColor("│");
+			return (
+				borderColor("│") + truncated + " ".repeat(padding) + borderColor("│")
+			);
 		});
 
-		return [top, ...framedLines, bottom].map((line) => truncateToWidth(line, width));
+		return [top, ...framedLines, bottom].map((line) =>
+			truncateToWidth(line, width),
+		);
 	}
 
 	invalidate(): void {
-		this.markdown = new Markdown(this.getMarkdownText(), 1, 0, getMarkdownTheme());
+		this.markdown = new Markdown(
+			this.getMarkdownText(),
+			1,
+			0,
+			getMarkdownTheme(),
+		);
 	}
 
 	private getMaxHeight(): number {
@@ -686,7 +793,9 @@ class TodoDetailOverlayComponent {
 	private buildMetaLine(width: number): string {
 		const status = this.todo.status || "open";
 		const statusColor = isTodoClosed(status) ? "dim" : "success";
-		const tagText = this.todo.tags.length ? this.todo.tags.join(", ") : "no tags";
+		const tagText = this.todo.tags.length
+			? this.todo.tags.join(", ")
+			: "no tags";
 		const line =
 			this.theme.fg("accent", formatTodoId(this.todo.id)) +
 			this.theme.fg("muted", " • ") +
@@ -697,7 +806,9 @@ class TodoDetailOverlayComponent {
 	}
 
 	private buildActionLine(width: number): string {
-		const work = this.theme.fg("accent", "enter") + this.theme.fg("muted", " work on todo");
+		const work =
+			this.theme.fg("accent", "enter") +
+			this.theme.fg("muted", " work on todo");
 		const back = this.theme.fg("dim", "esc back");
 		const nav = this.theme.fg("dim", "↑/↓: move. ←/→: page.");
 		const pieces = [work, back, nav];
@@ -705,8 +816,14 @@ class TodoDetailOverlayComponent {
 		let line = pieces.join(this.theme.fg("muted", " • "));
 		if (this.totalLines > this.viewHeight) {
 			const start = Math.min(this.totalLines, this.scrollOffset + 1);
-			const end = Math.min(this.totalLines, this.scrollOffset + this.viewHeight);
-			const scrollInfo = this.theme.fg("dim", ` ${start}-${end}/${this.totalLines}`);
+			const end = Math.min(
+				this.totalLines,
+				this.scrollOffset + this.viewHeight,
+			);
+			const scrollInfo = this.theme.fg(
+				"dim",
+				` ${start}-${end}/${this.totalLines}`,
+			);
 			line += scrollInfo;
 		}
 
@@ -715,7 +832,10 @@ class TodoDetailOverlayComponent {
 
 	private scrollBy(delta: number): void {
 		const maxScroll = Math.max(0, this.totalLines - this.viewHeight);
-		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset + delta, maxScroll));
+		this.scrollOffset = Math.max(
+			0,
+			Math.min(this.scrollOffset + delta, maxScroll),
+		);
 	}
 }
 
@@ -741,7 +861,9 @@ function getTodoSettingsPath(todosDir: string): string {
 
 function normalizeTodoSettings(raw: Partial<TodoSettings>): TodoSettings {
 	const gc = raw.gc ?? DEFAULT_TODO_SETTINGS.gc;
-	const gcDays = Number.isFinite(raw.gcDays) ? raw.gcDays : DEFAULT_TODO_SETTINGS.gcDays;
+	const gcDays = Number.isFinite(raw.gcDays)
+		? raw.gcDays
+		: DEFAULT_TODO_SETTINGS.gcDays;
 	return {
 		gc: Boolean(gc),
 		gcDays: Math.max(0, Math.floor(gcDays)),
@@ -762,7 +884,10 @@ async function readTodoSettings(todosDir: string): Promise<TodoSettings> {
 	return normalizeTodoSettings(data);
 }
 
-async function garbageCollectTodos(todosDir: string, settings: TodoSettings): Promise<void> {
+async function garbageCollectTodos(
+	todosDir: string,
+	settings: TodoSettings,
+): Promise<void> {
 	if (!settings.gc) return;
 
 	let entries: string[] = [];
@@ -822,13 +947,20 @@ function parseFrontMatter(text: string, idFallback: string): TodoFrontMatter {
 		if (!parsed || typeof parsed !== "object") return data;
 		if (typeof parsed.id === "string" && parsed.id) data.id = parsed.id;
 		if (typeof parsed.title === "string") data.title = parsed.title;
-		if (typeof parsed.status === "string" && parsed.status) data.status = parsed.status;
-		if (typeof parsed.created_at === "string") data.created_at = parsed.created_at;
-		if (typeof parsed.assigned_to_session === "string" && parsed.assigned_to_session.trim()) {
+		if (typeof parsed.status === "string" && parsed.status)
+			data.status = parsed.status;
+		if (typeof parsed.created_at === "string")
+			data.created_at = parsed.created_at;
+		if (
+			typeof parsed.assigned_to_session === "string" &&
+			parsed.assigned_to_session.trim()
+		) {
 			data.assigned_to_session = parsed.assigned_to_session;
 		}
 		if (Array.isArray(parsed.tags)) {
-			data.tags = parsed.tags.filter((tag): tag is string => typeof tag === "string");
+			data.tags = parsed.tags.filter(
+				(tag): tag is string => typeof tag === "string",
+			);
 		}
 	} catch {
 		return data;
@@ -854,13 +986,13 @@ function findJsonObjectEnd(content: string): number {
 				escaped = true;
 				continue;
 			}
-			if (char === "\"") {
+			if (char === '"') {
 				inString = false;
 			}
 			continue;
 		}
 
-		if (char === "\"") {
+		if (char === '"') {
 			inString = true;
 			continue;
 		}
@@ -879,7 +1011,10 @@ function findJsonObjectEnd(content: string): number {
 	return -1;
 }
 
-function splitFrontMatter(content: string): { frontMatter: string; body: string } {
+function splitFrontMatter(content: string): {
+	frontMatter: string;
+	body: string;
+} {
 	if (!content.startsWith("{")) {
 		return { frontMatter: "", body: content };
 	}
@@ -932,7 +1067,10 @@ async function ensureTodosDir(todosDir: string) {
 	await fs.mkdir(todosDir, { recursive: true });
 }
 
-async function readTodoFile(filePath: string, idFallback: string): Promise<TodoRecord> {
+async function readTodoFile(
+	filePath: string,
+	idFallback: string,
+): Promise<TodoRecord> {
 	const content = await fs.readFile(filePath, "utf8");
 	return parseTodoContent(content, idFallback);
 }
@@ -988,17 +1126,23 @@ async function acquireLock(
 			};
 		} catch (error: any) {
 			if (error?.code !== "EEXIST") {
-				return { error: `Failed to acquire lock: ${error?.message ?? "unknown error"}` };
+				return {
+					error: `Failed to acquire lock: ${error?.message ?? "unknown error"}`,
+				};
 			}
 			const stats = await fs.stat(lockPath).catch(() => null);
 			const lockAge = stats ? now - stats.mtimeMs : LOCK_TTL_MS + 1;
 			if (lockAge <= LOCK_TTL_MS) {
 				const info = await readLockInfo(lockPath);
 				const owner = info?.session ? ` (session ${info.session})` : "";
-				return { error: `Todo ${displayTodoId(id)} is locked${owner}. Try again later.` };
+				return {
+					error: `Todo ${displayTodoId(id)} is locked${owner}. Try again later.`,
+				};
 			}
 			if (!ctx.hasUI) {
-				return { error: `Todo ${displayTodoId(id)} lock is stale; rerun in interactive mode to steal it.` };
+				return {
+					error: `Todo ${displayTodoId(id)} lock is stale; rerun in interactive mode to steal it.`,
+				};
 			}
 			const ok = await ctx.ui.confirm(
 				"Todo locked",
@@ -1104,7 +1248,9 @@ function getTodoStatus(todo: TodoFrontMatter): string {
 }
 
 function formatAssignmentSuffix(todo: TodoFrontMatter): string {
-	return todo.assigned_to_session ? ` (assigned: ${todo.assigned_to_session})` : "";
+	return todo.assigned_to_session
+		? ` (assigned: ${todo.assigned_to_session})`
+		: "";
 }
 
 function renderAssignmentSuffix(
@@ -1157,7 +1303,8 @@ function splitTodosByAssignment(todos: TodoFrontMatter[]): {
 function formatTodoList(todos: TodoFrontMatter[]): string {
 	if (!todos.length) return "No todos.";
 
-	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
+	const { assignedTodos, openTodos, closedTodos } =
+		splitTodosByAssignment(todos);
 	const lines: string[] = [];
 	const pushSection = (label: string, sectionTodos: TodoFrontMatter[]) => {
 		lines.push(`${label} (${sectionTodos.length}):`);
@@ -1182,8 +1329,12 @@ function serializeTodoForAgent(todo: TodoRecord): string {
 }
 
 function serializeTodoListForAgent(todos: TodoFrontMatter[]): string {
-	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
-	const mapTodo = (todo: TodoFrontMatter) => ({ ...todo, id: formatTodoId(todo.id) });
+	const { assignedTodos, openTodos, closedTodos } =
+		splitTodosByAssignment(todos);
+	const mapTodo = (todo: TodoFrontMatter) => ({
+		...todo,
+		id: formatTodoId(todo.id),
+	});
 	return JSON.stringify(
 		{
 			assigned: assignedTodos.map(mapTodo),
@@ -1195,10 +1346,16 @@ function serializeTodoListForAgent(todos: TodoFrontMatter[]): string {
 	);
 }
 
-function renderTodoHeading(theme: Theme, todo: TodoFrontMatter, currentSessionId?: string): string {
+function renderTodoHeading(
+	theme: Theme,
+	todo: TodoFrontMatter,
+	currentSessionId?: string,
+): string {
 	const closed = isTodoClosed(getTodoStatus(todo));
 	const titleColor = closed ? "dim" : "text";
-	const tagText = todo.tags.length ? theme.fg("dim", ` [${todo.tags.join(", ")}]`) : "";
+	const tagText = todo.tags.length
+		? theme.fg("dim", ` [${todo.tags.join(", ")}]`)
+		: "";
 	const assignmentText = renderAssignmentSuffix(theme, todo, currentSessionId);
 	return (
 		theme.fg("accent", formatTodoId(todo.id)) +
@@ -1217,7 +1374,8 @@ function renderTodoList(
 ): string {
 	if (!todos.length) return theme.fg("dim", "No todos");
 
-	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
+	const { assignedTodos, openTodos, closedTodos } =
+		splitTodosByAssignment(todos);
 	const lines: string[] = [];
 	const pushSection = (label: string, sectionTodos: TodoFrontMatter[]) => {
 		lines.push(theme.fg("muted", `${label} (${sectionTodos.length})`));
@@ -1225,12 +1383,18 @@ function renderTodoList(
 			lines.push(theme.fg("dim", "  none"));
 			return;
 		}
-		const maxItems = expanded ? sectionTodos.length : Math.min(sectionTodos.length, 3);
+		const maxItems = expanded
+			? sectionTodos.length
+			: Math.min(sectionTodos.length, 3);
 		for (let i = 0; i < maxItems; i++) {
-			lines.push(`  ${renderTodoHeading(theme, sectionTodos[i], currentSessionId)}`);
+			lines.push(
+				`  ${renderTodoHeading(theme, sectionTodos[i], currentSessionId)}`,
+			);
 		}
 		if (!expanded && sectionTodos.length > maxItems) {
-			lines.push(theme.fg("dim", `  ... ${sectionTodos.length - maxItems} more`));
+			lines.push(
+				theme.fg("dim", `  ... ${sectionTodos.length - maxItems} more`),
+			);
 		}
 	};
 
@@ -1248,7 +1412,11 @@ function renderTodoList(
 	return lines.join("\n");
 }
 
-function renderTodoDetail(theme: Theme, todo: TodoRecord, expanded: boolean): string {
+function renderTodoDetail(
+	theme: Theme,
+	todo: TodoRecord,
+	expanded: boolean,
+): string {
 	const summary = renderTodoHeading(theme, todo);
 	if (!expanded) return summary;
 
@@ -1274,12 +1442,19 @@ function appendExpandHint(theme: Theme, text: string): string {
 	return `${text}\n${theme.fg("dim", `(${keyHint("app.tools.expand", "to expand")})`)}`;
 }
 
-async function ensureTodoExists(filePath: string, id: string): Promise<TodoRecord | null> {
+async function ensureTodoExists(
+	filePath: string,
+	id: string,
+): Promise<TodoRecord | null> {
 	if (!existsSync(filePath)) return null;
 	return readTodoFile(filePath, id);
 }
 
-async function appendTodoBody(filePath: string, todo: TodoRecord, text: string): Promise<TodoRecord> {
+async function appendTodoBody(
+	filePath: string,
+	todo: TodoRecord,
+	text: string,
+): Promise<TodoRecord> {
 	const spacer = todo.body.trim().length ? "\n\n" : "";
 	todo.body = `${todo.body.replace(/\s+$/, "")}${spacer}${text.trim()}\n`;
 	await writeTodoFile(filePath, todo);
@@ -1304,7 +1479,8 @@ async function updateTodoStatus(
 
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
-		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
+		if (!existing)
+			return { error: `Todo ${displayTodoId(id)} not found` } as const;
 		existing.status = status;
 		clearAssignmentIfClosed(existing);
 		await writeTodoFile(filePath, existing);
@@ -1336,7 +1512,8 @@ async function claimTodoAssignment(
 	const sessionId = ctx.sessionManager.getSessionId();
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
-		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
+		if (!existing)
+			return { error: `Todo ${displayTodoId(id)} not found` } as const;
 		if (isTodoClosed(existing.status)) {
 			return { error: `Todo ${displayTodoId(id)} is closed` } as const;
 		}
@@ -1378,7 +1555,8 @@ async function releaseTodoAssignment(
 	const sessionId = ctx.sessionManager.getSessionId();
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
-		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
+		if (!existing)
+			return { error: `Todo ${displayTodoId(id)} not found` } as const;
 		const assigned = existing.assigned_to_session;
 		if (!assigned) {
 			return existing;
@@ -1417,7 +1595,8 @@ async function deleteTodo(
 
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
-		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
+		if (!existing)
+			return { error: `Todo ${displayTodoId(id)} not found` } as const;
 		await fs.unlink(filePath);
 		return existing;
 	});
@@ -1439,6 +1618,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 	const todosDirLabel = getTodosDirLabel(process.cwd());
 
+	log.debug("registerTool");
 	pi.registerTool({
 		name: "todo",
 		label: "Todo",
@@ -1446,7 +1626,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 			`Manage file-based todos in ${todosDirLabel} (list, list-all, get, create, update, append, delete, claim, release). ` +
 			"Title is the short summary; body is long-form markdown notes (update replaces, append adds). " +
 			"Todo ids are shown as TODO-<hex>; id parameters accept TODO-<hex> or the raw hex filename. " +
-			"Claim tasks before working on them to avoid conflicts, and close them when complete.", 
+			"Claim tasks before working on them to avoid conflicts, and close them when complete.",
 		parameters: TodoParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1460,7 +1640,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 					const listedTodos = [...assignedTodos, ...openTodos];
 					const currentSessionId = ctx.sessionManager.getSessionId();
 					return {
-						content: [{ type: "text", text: serializeTodoListForAgent(listedTodos) }],
+						content: [
+							{ type: "text", text: serializeTodoListForAgent(listedTodos) },
+						],
 						details: { action: "list", todos: listedTodos, currentSessionId },
 					};
 				}
@@ -1564,21 +1746,28 @@ export default function todosExtension(pi: ExtensionAPI) {
 							details: { action: "update", error: "not found" },
 						};
 					}
-					const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
-						const existing = await ensureTodoExists(filePath, normalizedId);
-						if (!existing) return { error: `Todo ${displayId} not found` } as const;
+					const result = await withTodoLock(
+						todosDir,
+						normalizedId,
+						ctx,
+						async () => {
+							const existing = await ensureTodoExists(filePath, normalizedId);
+							if (!existing)
+								return { error: `Todo ${displayId} not found` } as const;
 
-						existing.id = normalizedId;
-						if (params.title !== undefined) existing.title = params.title;
-						if (params.status !== undefined) existing.status = params.status;
-						if (params.tags !== undefined) existing.tags = params.tags;
-						if (params.body !== undefined) existing.body = params.body;
-						if (!existing.created_at) existing.created_at = new Date().toISOString();
-						clearAssignmentIfClosed(existing);
+							existing.id = normalizedId;
+							if (params.title !== undefined) existing.title = params.title;
+							if (params.status !== undefined) existing.status = params.status;
+							if (params.tags !== undefined) existing.tags = params.tags;
+							if (params.body !== undefined) existing.body = params.body;
+							if (!existing.created_at)
+								existing.created_at = new Date().toISOString();
+							clearAssignmentIfClosed(existing);
 
-						await writeTodoFile(filePath, existing);
-						return existing;
-					});
+							await writeTodoFile(filePath, existing);
+							return existing;
+						},
+					);
 
 					if (typeof result === "object" && "error" in result) {
 						return {
@@ -1589,7 +1778,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					const updatedTodo = result as TodoRecord;
 					return {
-						content: [{ type: "text", text: serializeTodoForAgent(updatedTodo) }],
+						content: [
+							{ type: "text", text: serializeTodoForAgent(updatedTodo) },
+						],
 						details: { action: "update", todo: updatedTodo },
 					};
 				}
@@ -1617,15 +1808,25 @@ export default function todosExtension(pi: ExtensionAPI) {
 							details: { action: "append", error: "not found" },
 						};
 					}
-					const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
-						const existing = await ensureTodoExists(filePath, normalizedId);
-						if (!existing) return { error: `Todo ${displayId} not found` } as const;
-						if (!params.body || !params.body.trim()) {
-							return existing;
-						}
-						const updated = await appendTodoBody(filePath, existing, params.body);
-						return updated;
-					});
+					const result = await withTodoLock(
+						todosDir,
+						normalizedId,
+						ctx,
+						async () => {
+							const existing = await ensureTodoExists(filePath, normalizedId);
+							if (!existing)
+								return { error: `Todo ${displayId} not found` } as const;
+							if (!params.body || !params.body.trim()) {
+								return existing;
+							}
+							const updated = await appendTodoBody(
+								filePath,
+								existing,
+								params.body,
+							);
+							return updated;
+						},
+					);
 
 					if (typeof result === "object" && "error" in result) {
 						return {
@@ -1636,7 +1837,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					const updatedTodo = result as TodoRecord;
 					return {
-						content: [{ type: "text", text: serializeTodoForAgent(updatedTodo) }],
+						content: [
+							{ type: "text", text: serializeTodoForAgent(updatedTodo) },
+						],
 						details: { action: "append", todo: updatedTodo },
 					};
 				}
@@ -1662,7 +1865,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 					const updatedTodo = result as TodoRecord;
 					return {
-						content: [{ type: "text", text: serializeTodoForAgent(updatedTodo) }],
+						content: [
+							{ type: "text", text: serializeTodoForAgent(updatedTodo) },
+						],
 						details: { action: "claim", todo: updatedTodo },
 					};
 				}
@@ -1688,7 +1893,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 					const updatedTodo = result as TodoRecord;
 					return {
-						content: [{ type: "text", text: serializeTodoForAgent(updatedTodo) }],
+						content: [
+							{ type: "text", text: serializeTodoForAgent(updatedTodo) },
+						],
 						details: { action: "release", todo: updatedTodo },
 					};
 				}
@@ -1717,20 +1924,25 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 
 					return {
-						content: [{ type: "text", text: serializeTodoForAgent(result as TodoRecord) }],
+						content: [
+							{
+								type: "text",
+								text: serializeTodoForAgent(result as TodoRecord),
+							},
+						],
 						details: { action: "delete", todo: result as TodoRecord },
 					};
 				}
 			}
 		},
 
-
 		renderCall(args, theme) {
 			const action = typeof args.action === "string" ? args.action : "";
 			const id = typeof args.id === "string" ? args.id : "";
 			const normalizedId = id ? normalizeTodoId(id) : "";
 			const title = typeof args.title === "string" ? args.title : "";
-			let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", action);
+			let text =
+				theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", action);
 			if (normalizedId) {
 				text += " " + theme.fg("accent", formatTodoId(normalizedId));
 			}
@@ -1755,7 +1967,12 @@ export default function todosExtension(pi: ExtensionAPI) {
 			}
 
 			if (details.action === "list" || details.action === "list-all") {
-				let text = renderTodoList(theme, details.todos, expanded, details.currentSessionId);
+				let text = renderTodoList(
+					theme,
+					details.todos,
+					expanded,
+					details.currentSessionId,
+				);
 				if (!expanded) {
 					const { closedTodos } = splitTodosByAssignment(details.todos);
 					if (closedTodos.length) {
@@ -1787,7 +2004,10 @@ export default function todosExtension(pi: ExtensionAPI) {
 										: null;
 			if (actionLabel) {
 				const lines = text.split("\n");
-				lines[0] = theme.fg("success", "✓ ") + theme.fg("muted", `${actionLabel} `) + lines[0];
+				lines[0] =
+					theme.fg("success", "✓ ") +
+					theme.fg("muted", `${actionLabel} `) +
+					lines[0];
 				text = lines.join("\n");
 			}
 			if (!expanded) {
@@ -1797,6 +2017,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	log.debug("registerCommand: todos");
 	pi.registerCommand("todos", {
 		description: "List todos from .pi/todos",
 		handler: async (args, ctx) => {
@@ -1807,7 +2028,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 			if (!ctx.hasUI) {
 				const text = formatTodoList(todos);
-				console.log(text);
+				log.info(text);
 				return;
 			}
 
@@ -1818,25 +2039,21 @@ export default function todosExtension(pi: ExtensionAPI) {
 				let selector: TodoSelectorComponent | null = null;
 				let actionMenu: TodoActionMenuComponent | null = null;
 				let deleteConfirm: TodoDeleteConfirmComponent | null = null;
-				let activeComponent:
-					| {
-							render: (width: number) => string[];
-							invalidate: () => void;
-							handleInput?: (data: string) => void;
-							focused?: boolean;
-						}
-					| null = null;
+				let activeComponent: {
+					render: (width: number) => string[];
+					invalidate: () => void;
+					handleInput?: (data: string) => void;
+					focused?: boolean;
+				} | null = null;
 				let wrapperFocused = false;
 
 				const setActiveComponent = (
-					component:
-						| {
-								render: (width: number) => string[];
-								invalidate: () => void;
-								handleInput?: (data: string) => void;
-								focused?: boolean;
-							}
-						| null,
+					component: {
+						render: (width: number) => string[];
+						invalidate: () => void;
+						handleInput?: (data: string) => void;
+						focused?: boolean;
+					} | null,
 				) => {
 					if (activeComponent && "focused" in activeComponent) {
 						activeComponent.focused = false;
@@ -1855,7 +2072,8 @@ export default function todosExtension(pi: ExtensionAPI) {
 						copyToClipboard(absolutePath);
 						ctx.ui.notify(`Copied ${absolutePath} to clipboard`, "info");
 					} catch (error) {
-						const message = error instanceof Error ? error.message : String(error);
+						const message =
+							error instanceof Error ? error.message : String(error);
 						ctx.ui.notify(message, "error");
 					}
 				};
@@ -1868,12 +2086,15 @@ export default function todosExtension(pi: ExtensionAPI) {
 						copyToClipboard(text);
 						ctx.ui.notify("Copied todo text to clipboard", "info");
 					} catch (error) {
-						const message = error instanceof Error ? error.message : String(error);
+						const message =
+							error instanceof Error ? error.message : String(error);
 						ctx.ui.notify(message, "error");
 					}
 				};
 
-				const resolveTodoRecord = async (todo: TodoFrontMatter): Promise<TodoRecord | null> => {
+				const resolveTodoRecord = async (
+					todo: TodoFrontMatter,
+				): Promise<TodoRecord | null> => {
 					const filePath = getTodoPath(todosDir, todo.id);
 					const record = await ensureTodoExists(filePath, todo.id);
 					if (!record) {
@@ -1883,7 +2104,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 					return record;
 				};
 
-				const openTodoOverlay = async (record: TodoRecord): Promise<TodoOverlayAction> => {
+				const openTodoOverlay = async (
+					record: TodoRecord,
+				): Promise<TodoOverlayAction> => {
 					const action = await ctx.ui.custom<TodoOverlayAction>(
 						(overlayTui, overlayTheme, overlayKeybindings, overlayDone) =>
 							new TodoDetailOverlayComponent(
@@ -1895,7 +2118,11 @@ export default function todosExtension(pi: ExtensionAPI) {
 							),
 						{
 							overlay: true,
-							overlayOptions: { width: "80%", maxHeight: "80%", anchor: "center" },
+							overlayOptions: {
+								width: "80%",
+								maxHeight: "80%",
+								anchor: "center",
+							},
 						},
 					);
 
@@ -1931,7 +2158,12 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 
 					if (action === "release") {
-						const result = await releaseTodoAssignment(todosDir, record.id, ctx, true);
+						const result = await releaseTodoAssignment(
+							todosDir,
+							record.id,
+							ctx,
+							true,
+						);
 						if ("error" in result) {
 							ctx.ui.notify(result.error, "error");
 							return "stay";
@@ -1955,7 +2187,12 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 
 					const nextStatus = action === "close" ? "closed" : "open";
-					const result = await updateTodoStatus(todosDir, record.id, nextStatus, ctx);
+					const result = await updateTodoStatus(
+						todosDir,
+						record.id,
+						nextStatus,
+						ctx,
+					);
 					if ("error" in result) {
 						ctx.ui.notify(result.error, "error");
 						return "stay";
@@ -1970,7 +2207,10 @@ export default function todosExtension(pi: ExtensionAPI) {
 					return "stay";
 				};
 
-				const handleActionSelection = async (record: TodoRecord, action: TodoMenuAction) => {
+				const handleActionSelection = async (
+					record: TodoRecord,
+					action: TodoMenuAction,
+				) => {
 					if (action === "view") {
 						const overlayAction = await openTodoOverlay(record);
 						if (overlayAction === "work") {
@@ -1985,16 +2225,20 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					if (action === "delete") {
 						const message = `Delete todo ${formatTodoId(record.id)}? This cannot be undone.`;
-						deleteConfirm = new TodoDeleteConfirmComponent(theme, message, (confirmed) => {
-							if (!confirmed) {
-								setActiveComponent(actionMenu);
-								return;
-							}
-							void (async () => {
-								await applyTodoAction(record, "delete");
-								setActiveComponent(selector);
-							})();
-						});
+						deleteConfirm = new TodoDeleteConfirmComponent(
+							theme,
+							message,
+							(confirmed) => {
+								if (!confirmed) {
+									setActiveComponent(actionMenu);
+									return;
+								}
+								void (async () => {
+									await applyTodoAction(record, "delete");
+									setActiveComponent(selector);
+								})();
+							},
+						);
 						setActiveComponent(deleteConfirm);
 						return;
 					}
@@ -2078,5 +2322,4 @@ export default function todosExtension(pi: ExtensionAPI) {
 			}
 		},
 	});
-
 }

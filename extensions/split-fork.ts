@@ -2,6 +2,11 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { existsSync, promises as fs } from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("split-fork");
+
+log.debug("Extension loaded");
 
 const GHOSTTY_SPLIT_SCRIPT = `on run argv
 	set targetCwd to item 1 of argv
@@ -92,6 +97,7 @@ async function createForkedSession(ctx: ExtensionCommandContext): Promise<string
 }
 
 export default function (pi: ExtensionAPI): void {
+	log.debug("registerCommand: split-fork");
 	pi.registerCommand("split-fork", {
 		description: "Fork this session into a new pi process in a right-hand Ghostty split. Usage: /split-fork [optional prompt]",
 		handler: async (args, ctx) => {

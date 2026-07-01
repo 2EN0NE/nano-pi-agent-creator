@@ -4,6 +4,11 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
 import type { Dirent } from "node:fs";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("prompt-editor");
+
+log.debug("Extension loaded");
 
 // =============================================================================
 // Modes
@@ -1198,6 +1203,7 @@ function applyEditor(pi: ExtensionAPI, ctx: ExtensionContext) {
 // =============================================================================
 
 export default function (pi: ExtensionAPI) {
+	log.debug("registerCommand: mode");
 	pi.registerCommand("mode", {
 		description: "Select prompt mode",
 		handler: async (args, ctx) => {
@@ -1255,6 +1261,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		log.debug("event: session_start");
 		lastObservedModel = { provider: ctx.model?.provider, modelId: ctx.model?.id };
 		await ensureRuntime(pi, ctx);
 		customOverlay = null;
@@ -1273,6 +1280,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("model_select", async (event, ctx) => {
+		log.debug("event: model_select");
 		// Always track the last observed model for overlay/store correctness.
 		lastObservedModel = { provider: event.model.provider, modelId: event.model.id };
 

@@ -9,29 +9,9 @@ import {
 	toggleCollapsed,
 } from "./widget/core.js";
 import { openSettings } from "./widget/settings.js";
+import { createLogger } from "@zenone/pi-logger";
 
-// ── Logging helpers ───────────────────────────────────────────────
-// Uses pi.events.emit() directly — same EventBus channel as pi-logger.
-// Unlike importing createLogger from pi-logger/api.js, this avoids
-// module caching issues when running as a separate extension.
-
-const LOG_EVENT_CHANNEL = "pi:log";
-const LOG_SOURCE = "resources-tree";
-
-function emitLog(
-	pi: ExtensionAPI,
-	level: string,
-	message: string,
-	details?: unknown,
-): void {
-	pi.events.emit(LOG_EVENT_CHANNEL, {
-		level,
-		source: LOG_SOURCE,
-		message,
-		details,
-		timestamp: Date.now(),
-	});
-}
+const log = createLogger("resources-tree");
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -209,7 +189,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 
 		// ── Debug logging (emitted to pi-logger EventBus if available) ──
-		emitLog(pi, "info", "before_agent_start skill_counts", {
+		log.info("before_agent_start skill_counts", {
 			xmlSkillCount: state.xmlSkillCount,
 			fsSkillCount: state.fsSkillCount,
 		});
@@ -314,7 +294,7 @@ export default function (pi: ExtensionAPI): void {
 
 		const oldCount = state.xmlSkillCount;
 		if (oldCount !== actualCount) {
-			emitLog(pi, "info", "xmlSkillCount set from provider payload", {
+			log.info("xmlSkillCount set from provider payload", {
 				old: oldCount,
 				new: actualCount,
 			});
@@ -339,6 +319,9 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerShortcut("ctrl+shift+z", {
 		description: "Toggle resource tree panel expand/collapse",
 		handler: (ctx) => {
+			log.debug("toggleCollapsed fired", {
+				collapsed: state.widgetCollapsed,
+			});
 			toggleCollapsed(ctx);
 		},
 	});

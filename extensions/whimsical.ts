@@ -1,4 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("whimsical");
+
+log.debug("Extension loaded");
 
 const messages = [
   // Short
@@ -465,10 +470,12 @@ function pickRandom(): string {
 
 export default function (pi: ExtensionAPI) {
   pi.on("turn_start", async (_event, ctx) => {
+		log.debug("event: turn_start");
     ctx.ui.setWorkingMessage(pickRandom());
   });
 
   pi.on("turn_end", async (_event, ctx) => {
+		log.debug("event: turn_end");
     ctx.ui.setWorkingMessage(); // Reset for next time
   });
 }

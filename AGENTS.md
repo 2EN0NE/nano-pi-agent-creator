@@ -42,7 +42,42 @@ pi -a --no-session -e ./extensions/foo.ts -p "test prompt"
 
 详情和完整流程见 [`skills/e2e-test/SKILL.md`](skills/e2e-test/SKILL.md)。
 
-## 本地同步
+## 扩展开发
+
+Pi 扩展放在 [extensions](extensions) 目录中；修改时请在这里更新。若需要参考内部实现，可查看 `pi-mono`，但不要改动其源码。
+
+### 日志接入要求
+
+所有新建或修改的扩展**必须接入 pi-logger 统一日志体系**，禁止使用裸 `console.log/error`。
+
+接入方式：
+
+```typescript
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("your-extension-name");
+
+// 使用：
+log.info("信息");
+log.debug("详情");
+log.warn("警告");
+log.error("错误");
+```
+
+> ⚠️ **本地依赖说明**：`@zenone/pi-logger` 是一个本地 npm 包，不会发布到 npm registry。
+> 在新电脑上 clone 本工程后，需要先执行以下命令使其可用：
+>
+> ```bash
+> # 在工程根目录执行（已在 package.json 中声明为 devDependency）
+> npm install
+> ```
+>
+> 这会从 `extensions/pi-logger/` 通过 `file:` 协议安装到 `node_modules/` 下，
+> 使得 jiti（pi 的扩展加载器）可以解析 `import { createLogger } from "@zenone/pi-logger"`。
+
+日志输出由 pi-logger 的配置文件统一管控（`pi-logger.json`），扩展本身无需关心输出目的地和级别过滤。详细说明见 [skills/pi-logger/SKILL.md](skills/pi-logger/SKILL.md)
+
+### 本地同步
 
 这个仓库当前只面向本人本地使用，不做正式发布。
 
@@ -69,27 +104,3 @@ pi -a --no-session -e ./extensions/foo.ts -p "test prompt"
 ```bash
 ./scripts/sync-to-local-pi.sh --dry-run
 ```
-
-## 扩展开发
-
-Pi 扩展放在 [extensions](extensions) 目录中；修改时请在这里更新。若需要参考内部实现，可查看 `pi-mono`，但不要改动其源码。
-
-### 日志接入要求
-
-所有新建或修改的扩展**必须接入 pi-logger 统一日志体系**，禁止使用裸 `console.log/error`。
-
-接入方式：
-
-```typescript
-import { createLogger } from "./pi-logger/api.js";
-
-const log = createLogger("your-extension-name");
-
-// 使用：
-log.info("信息");
-log.debug("详情");
-log.warn("警告");
-log.error("错误");
-```
-
-日志输出由 pi-logger 的配置文件统一管控（`pi-logger.json`），扩展本身无需关心输出目的地和级别过滤。详细说明见./skills/pi-logger/SKILL.md

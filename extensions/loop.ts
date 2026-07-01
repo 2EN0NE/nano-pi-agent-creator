@@ -12,6 +12,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { compact } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("loop");
+
+log.debug("Extension loaded");
 
 type LoopMode = "tests" | "custom" | "self";
 
@@ -337,6 +342,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	log.debug("registerCommand: loop");
 	pi.registerCommand("loop", {
 		description: "Start a follow-up loop until a breakout condition is met",
 		handler: async (args, ctx) => {
@@ -382,6 +388,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
+		log.debug("event: agent_end");
 		if (!loopState.active) return;
 
 		if (ctx.hasUI && wasLastAssistantAborted(event.messages)) {
@@ -399,6 +406,8 @@ export default function loopExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
+		log.debug("event: session_before_compact");
+		log.debug("event: session_before_compact");
 		if (!loopState.active || !loopState.mode || !ctx.model) return;
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
 		if (!auth.ok) return;
@@ -444,6 +453,8 @@ export default function loopExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		log.debug("event: session_start");
+		log.debug("event: session_start");
 		await restoreLoopState(ctx);
 	});
 

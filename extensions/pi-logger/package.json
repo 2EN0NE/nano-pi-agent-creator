@@ -1,16 +1,19 @@
 {
-  "name": "@jojo/pi-logger",
+  "name": "@zenone/pi-logger",
   "version": "0.1.0",
   "description": "Unified logging system for pi extensions — SLF4J/Logback-style logger API, config-driven output, and automatic lifecycle capture for third-party extensions",
   "type": "module",
+  "exports": {
+    ".": {
+      "import": "./api.ts"
+    },
+    "./types": {
+      "import": "./types.ts"
+    }
+  },
   "keywords": [
     "pi-extension",
     "logging",
     "logger"
-  ],
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
-  }
+  ]
 }

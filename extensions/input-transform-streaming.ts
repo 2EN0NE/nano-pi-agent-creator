@@ -12,11 +12,17 @@
  *   pi -e ./examples/extensions/input-transform-streaming.ts
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("input-transform-streaming");
+
+log.debug("Extension loaded");
 
 const TRIGGER = /\b(changes?|diff|modified)\b/i;
 
 export default function (pi: ExtensionAPI) {
 	pi.on("input", async (event) => {
+		log.debug("event: input");
 		// During steering, skip the exec call — corrections should be fast
 		if (event.streamingBehavior === "steer") {
 			return { action: "continue" };

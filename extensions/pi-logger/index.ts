@@ -33,6 +33,8 @@ import type {
 import type { SelectItem } from "@earendil-works/pi-tui";
 import { Container, SelectList, Text } from "@earendil-works/pi-tui";
 import { initEventBus } from "./api.js";
+import type { LogEvent, LogLevel } from "./types.js";
+import { LOG_EVENT_CHANNEL, LOG_LEVELS } from "./types.js";
 import {
 	loadConfiguration,
 	getRuntimeConfig,
@@ -50,12 +52,6 @@ import {
 	getLogDir,
 } from "./appenders/file-appender.js";
 import { writeConsoleLog } from "./appenders/console-appender.js";
-import {
-	type LogEvent,
-	type LogLevel,
-	LOG_EVENT_CHANNEL,
-	LOG_LEVELS,
-} from "./types.js";
 
 // ============================================================================
 // In-memory ring buffer for /log tail

@@ -10,6 +10,11 @@
 import { complete, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { BorderedLoader } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("qna");
+
+log.debug("Extension loaded");
 
 const SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering and format them for the user to fill in.
 
@@ -28,6 +33,7 @@ A:
 Keep questions in the order they appeared. Be concise.`;
 
 export default function (pi: ExtensionAPI) {
+	log.debug("registerCommand: qna");
 	pi.registerCommand("qna", {
 		description: "Extract questions from last assistant message into editor",
 		handler: async (_args, ctx) => {

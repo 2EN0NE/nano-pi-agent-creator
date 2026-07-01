@@ -8,6 +8,11 @@
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("structured-output");
+
+log.debug("Extension loaded");
 
 interface StructuredOutputDetails {
 	headline: string;

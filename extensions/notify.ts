@@ -10,6 +10,11 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("notify");
+
+log.debug("Extension loaded");
 
 /**
  * Send a desktop notification via OSC 777 escape sequence.
@@ -81,6 +86,7 @@ const formatNotification = (text: string | null): { title: string; body: string 
 
 export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", async (event) => {
+		log.debug("event: agent_end");
 		const lastText = extractLastAssistantText(event.messages ?? []);
 		const { title, body } = formatNotification(lastText);
 		notify(title, body);

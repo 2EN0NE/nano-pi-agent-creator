@@ -50,7 +50,13 @@ import type {
 	ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { complete, type Model, type Api, type UserMessage, type TextContent } from "@earendil-works/pi-ai";
+import {
+	complete,
+	type Model,
+	type Api,
+	type UserMessage,
+	type TextContent,
+} from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Box, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -58,6 +64,9 @@ import { promises as fs } from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("control");
 
 const CONTROL_FLAG = "session-control";
 const CONTROL_TARGET_FLAG = "control-session";
@@ -203,11 +212,21 @@ function getSocketPath(sessionId: string): string {
 }
 
 function isSafeSessionId(sessionId: string): boolean {
-	return !sessionId.includes("/") && !sessionId.includes("\\") && !sessionId.includes("..") && sessionId.length > 0;
+	return (
+		!sessionId.includes("/") &&
+		!sessionId.includes("\\") &&
+		!sessionId.includes("..") &&
+		sessionId.length > 0
+	);
 }
 
 function isSafeAlias(alias: string): boolean {
-	return !alias.includes("/") && !alias.includes("\\") && !alias.includes("..") && alias.length > 0;
+	return (
+		!alias.includes("/") &&
+		!alias.includes("\\") &&
+		!alias.includes("..") &&
+		alias.length > 0
+	);
 }
 
 function getAliasPath(alias: string): string {
@@ -237,7 +256,9 @@ async function removeSocket(socketPath: string | null): Promise<void> {
 }
 
 // TODO: add GC for stale sockets/aliases older than 7 days.
-async function removeAliasesForSocket(socketPath: string | null): Promise<void> {
+async function removeAliasesForSocket(
+	socketPath: string | null,
+): Promise<void> {
 	if (!socketPath) return;
 	try {
 		const entries = await fs.readdir(CONTROL_DIR, { withFileTypes: true });
@@ -261,7 +282,10 @@ async function removeAliasesForSocket(socketPath: string | null): Promise<void> 
 	}
 }
 
-async function createAliasSymlink(sessionId: string, alias: string): Promise<void> {
+async function createAliasSymlink(
+	sessionId: string,
+	alias: string,
+): Promise<void> {
 	if (!alias || !isSafeAlias(alias)) return;
 	const aliasPath = getAliasPath(alias);
 	const target = `${sessionId}${SOCKET_SUFFIX}`;
@@ -281,7 +305,9 @@ async function createAliasSymlink(sessionId: string, alias: string): Promise<voi
 	}
 }
 
-async function resolveSessionIdFromAlias(alias: string): Promise<string | null> {
+async function resolveSessionIdFromAlias(
+	alias: string,
+): Promise<string | null> {
 	if (!alias || !isSafeAlias(alias)) return null;
 	const aliasPath = getAliasPath(alias);
 	try {
@@ -371,11 +397,16 @@ async function getLiveSessions(): Promise<LiveSessionInfo[]> {
 		sessions.push({ sessionId, name, aliases, socketPath });
 	}
 
-	sessions.sort((a, b) => (a.name ?? a.sessionId).localeCompare(b.name ?? b.sessionId));
+	sessions.sort((a, b) =>
+		(a.name ?? a.sessionId).localeCompare(b.name ?? b.sessionId),
+	);
 	return sessions;
 }
 
-async function syncAlias(state: SocketState, ctx: ExtensionContext): Promise<void> {
+async function syncAlias(
+	state: SocketState,
+	ctx: ExtensionContext,
+): Promise<void> {
 	if (!state.server || !state.socketPath) return;
 	const alias = getSessionAlias(ctx);
 	if (alias && alias !== state.alias) {
@@ -417,7 +448,9 @@ function parseCommand(line: string): { command?: RpcCommand; error?: string } {
 		}
 		return { command: parsed };
 	} catch (error) {
-		return { error: error instanceof Error ? error.message : "Failed to parse command" };
+		return {
+			error: error instanceof Error ? error.message : "Failed to parse command",
+		};
 	}
 }
 
@@ -431,7 +464,9 @@ interface ExtractedMessage {
 	timestamp: number;
 }
 
-function getLastAssistantMessage(ctx: ExtensionContext): ExtractedMessage | undefined {
+function getLastAssistantMessage(
+	ctx: ExtensionContext,
+): ExtractedMessage | undefined {
 	const branch = ctx.sessionManager.getBranch();
 
 	for (let i = branch.length - 1; i >= 0; i--) {
@@ -439,7 +474,9 @@ function getLastAssistantMessage(ctx: ExtensionContext): ExtractedMessage | unde
 		if (entry.type === "message") {
 			const msg = entry.message;
 			if ("role" in msg && msg.role === "assistant") {
-				const content = Array.isArray(msg.content) ? msg.content : [{ type: "text", text: msg.content }];
+				const content = Array.isArray(msg.content)
+					? msg.content
+					: [{ type: "text", text: msg.content }];
 				const textParts = content
 					.filter((c): c is { type: "text"; text: string } => c.type === "text")
 					.map((c) => c.text);
@@ -463,7 +500,11 @@ function getMessagesSinceLastPrompt(ctx: ExtensionContext): ExtractedMessage[] {
 	let lastUserIndex = -1;
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const entry = branch[i];
-		if (entry.type === "message" && "role" in entry.message && entry.message.role === "user") {
+		if (
+			entry.type === "message" &&
+			"role" in entry.message &&
+			entry.message.role === "user"
+		) {
 			lastUserIndex = i;
 			break;
 		}
@@ -476,7 +517,9 @@ function getMessagesSinceLastPrompt(ctx: ExtensionContext): ExtractedMessage[] {
 		if (entry.type === "message") {
 			const msg = entry.message;
 			if ("role" in msg && (msg.role === "user" || msg.role === "assistant")) {
-				const content = Array.isArray(msg.content) ? msg.content : [{ type: "text", text: msg.content }];
+				const content = Array.isArray(msg.content)
+					? msg.content
+					: [{ type: "text", text: msg.content }];
 				const textParts = content
 					.filter((c): c is { type: "text"; text: string } => c.type === "text")
 					.map((c) => c.text);
@@ -501,7 +544,9 @@ function getFirstEntryId(ctx: ExtensionContext): string | undefined {
 	return root?.id ?? entries[0]?.id;
 }
 
-function extractTextContent(content: string | Array<TextContent | { type: string }>): string {
+function extractTextContent(
+	content: string | Array<TextContent | { type: string }>,
+): string {
 	if (typeof content === "string") return content;
 	return content
 		.filter((c): c is TextContent => c.type === "text")
@@ -526,9 +571,14 @@ function parseSenderInfo(text: string): SenderInfo | null {
 
 	if (raw.startsWith("{")) {
 		try {
-			const parsed = JSON.parse(raw) as { sessionId?: unknown; sessionName?: unknown };
-			const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
-			const sessionName = typeof parsed.sessionName === "string" ? parsed.sessionName.trim() : "";
+			const parsed = JSON.parse(raw) as {
+				sessionId?: unknown;
+				sessionName?: unknown;
+			};
+			const sessionId =
+				typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
+			const sessionName =
+				typeof parsed.sessionName === "string" ? parsed.sessionName.trim() : "";
 			if (sessionId || sessionName) {
 				return {
 					sessionId: sessionId || undefined,
@@ -557,7 +607,11 @@ function formatSenderInfo(info: SenderInfo | null): string | null {
 	return null;
 }
 
-const renderSessionMessage: MessageRenderer = (message, { expanded }, theme) => {
+const renderSessionMessage: MessageRenderer = (
+	message,
+	{ expanded },
+	theme,
+) => {
 	const rawContent = extractTextContent(message.content);
 	const senderInfo = parseSenderInfo(rawContent);
 	let text = stripSenderInfo(rawContent);
@@ -571,9 +625,14 @@ const renderSessionMessage: MessageRenderer = (message, { expanded }, theme) => 
 	}
 
 	const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
-	const labelBase = theme.fg("customMessageLabel", `\x1b[1m[${message.customType}]\x1b[22m`);
+	const labelBase = theme.fg(
+		"customMessageLabel",
+		`\x1b[1m[${message.customType}]\x1b[22m`,
+	);
 	const senderText = formatSenderInfo(senderInfo);
-	const label = senderText ? `${labelBase} ${theme.fg("dim", `from ${senderText}`)}` : labelBase;
+	const label = senderText
+		? `${labelBase} ${theme.fg("dim", `from ${senderText}`)}`
+		: labelBase;
 	box.addChild(new Text(label, 0, 0));
 	box.addChild(new Spacer(1));
 	box.addChild(
@@ -594,12 +653,25 @@ async function handleCommand(
 	command: RpcCommand,
 	socket: net.Socket,
 ): Promise<void> {
-	const id = "id" in command && typeof command.id === "string" ? command.id : undefined;
-	const respond = (success: boolean, commandName: string, data?: unknown, error?: string) => {
+	const id =
+		"id" in command && typeof command.id === "string" ? command.id : undefined;
+	const respond = (
+		success: boolean,
+		commandName: string,
+		data?: unknown,
+		error?: string,
+	) => {
 		if (state.context) {
 			void syncAlias(state, state.context);
 		}
-		writeResponse(socket, { type: "response", command: commandName, success, data, error, id });
+		writeResponse(socket, {
+			type: "response",
+			command: commandName,
+			success,
+			data,
+			error,
+			id,
+		});
 	};
 
 	const ctx = state.context;
@@ -620,11 +692,14 @@ async function handleCommand(
 	// Subscribe to turn_end
 	if (command.type === "subscribe") {
 		if (command.event === "turn_end") {
-			const subscriptionId = id ?? `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+			const subscriptionId =
+				id ?? `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 			state.turnEndSubscriptions.push({ socket, subscriptionId });
 
 			const cleanup = () => {
-				const idx = state.turnEndSubscriptions.findIndex((s) => s.subscriptionId === subscriptionId);
+				const idx = state.turnEndSubscriptions.findIndex(
+					(s) => s.subscriptionId === subscriptionId,
+				);
 				if (idx !== -1) state.turnEndSubscriptions.splice(idx, 1);
 			};
 			socket.once("close", cleanup);
@@ -633,7 +708,12 @@ async function handleCommand(
 			respond(true, "subscribe", { subscriptionId, event: "turn_end" });
 			return;
 		}
-		respond(false, "subscribe", undefined, `Unknown event type: ${command.event}`);
+		respond(
+			false,
+			"subscribe",
+			undefined,
+			`Unknown event type: ${command.event}`,
+		);
 		return;
 	}
 
@@ -658,7 +738,12 @@ async function handleCommand(
 
 		const model = await selectSummarizationModel(ctx.model, ctx.modelRegistry);
 		if (!model) {
-			respond(false, "get_summary", undefined, "No model available for summarization");
+			respond(
+				false,
+				"get_summary",
+				undefined,
+				"No model available for summarization",
+			);
 			return;
 		}
 
@@ -675,7 +760,12 @@ async function handleCommand(
 
 			const userMessage: UserMessage = {
 				role: "user",
-				content: [{ type: "text", text: `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_SUMMARY_PROMPT}` }],
+				content: [
+					{
+						type: "text",
+						text: `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_SUMMARY_PROMPT}`,
+					},
+				],
 				timestamp: Date.now(),
 			};
 
@@ -685,7 +775,10 @@ async function handleCommand(
 				{ apiKey: auth.apiKey, headers: auth.headers },
 			);
 
-			if (response.stopReason === "aborted" || response.stopReason === "error") {
+			if (
+				response.stopReason === "aborted" ||
+				response.stopReason === "error"
+			) {
 				respond(false, "get_summary", undefined, "Summarization failed");
 				return;
 			}
@@ -697,7 +790,12 @@ async function handleCommand(
 
 			respond(true, "get_summary", { summary, model: model.id });
 		} catch (error) {
-			respond(false, "get_summary", undefined, error instanceof Error ? error.message : "Summarization failed");
+			respond(
+				false,
+				"get_summary",
+				undefined,
+				error instanceof Error ? error.message : "Summarization failed",
+			);
 		}
 		return;
 	}
@@ -705,7 +803,12 @@ async function handleCommand(
 	// Clear session
 	if (command.type === "clear") {
 		if (!ctx.isIdle()) {
-			respond(false, "clear", undefined, "Session is busy - wait for turn to complete");
+			respond(
+				false,
+				"clear",
+				undefined,
+				"Session is busy - wait for turn to complete",
+			);
 			return;
 		}
 
@@ -725,17 +828,29 @@ async function handleCommand(
 			// Summarization requires navigateTree which we don't have direct access to
 			// Return an error for now - the caller should clear without summarize
 			// or use a different approach
-			respond(false, "clear", undefined, "Clear with summarization not supported via RPC - use summarize=false");
+			respond(
+				false,
+				"clear",
+				undefined,
+				"Clear with summarization not supported via RPC - use summarize=false",
+			);
 			return;
 		}
 
 		// Access internal session manager to rewind (type assertion to access non-readonly methods)
 		try {
-			const sessionManager = ctx.sessionManager as unknown as { rewindTo(id: string): void };
+			const sessionManager = ctx.sessionManager as unknown as {
+				rewindTo(id: string): void;
+			};
 			sessionManager.rewindTo(firstEntryId);
 			respond(true, "clear", { cleared: true, targetId: firstEntryId });
 		} catch (error) {
-			respond(false, "clear", undefined, error instanceof Error ? error.message : "Clear failed");
+			respond(
+				false,
+				"clear",
+				undefined,
+				error instanceof Error ? error.message : "Clear failed",
+			);
 		}
 		return;
 	}
@@ -770,14 +885,23 @@ async function handleCommand(
 	}
 
 	const unsupportedType = (command as { type: string }).type;
-	respond(false, unsupportedType, undefined, `Unsupported command: ${unsupportedType}`);
+	respond(
+		false,
+		unsupportedType,
+		undefined,
+		`Unsupported command: ${unsupportedType}`,
+	);
 }
 
 // ============================================================================
 // Server Management
 // ============================================================================
 
-async function createServer(pi: ExtensionAPI, state: SocketState, socketPath: string): Promise<net.Server> {
+async function createServer(
+	pi: ExtensionAPI,
+	state: SocketState,
+	socketPath: string,
+): Promise<net.Server> {
 	const server = net.createServer((socket) => {
 		socket.setEncoding("utf8");
 		let buffer = "";
@@ -830,7 +954,10 @@ async function sendRpcCommand(
 	socketPath: string,
 	command: RpcCommand,
 	options: RpcClientOptions = {},
-): Promise<{ response: RpcResponse; event?: { message?: ExtractedMessage; turnIndex?: number } }> {
+): Promise<{
+	response: RpcResponse;
+	event?: { message?: ExtractedMessage; turnIndex?: number };
+}> {
 	const { timeout = 5000, waitForEvent } = options;
 
 	return new Promise((resolve, reject) => {
@@ -854,7 +981,10 @@ async function sendRpcCommand(
 
 			// If waiting for turn_end, also subscribe
 			if (waitForEvent === "turn_end") {
-				const subscribeCmd: RpcSubscribeCommand = { type: "subscribe", event: "turn_end" };
+				const subscribeCmd: RpcSubscribeCommand = {
+					type: "subscribe",
+					event: "turn_end",
+				};
 				socket.write(`${JSON.stringify(subscribeCmd)}\n`);
 			}
 		});
@@ -888,7 +1018,11 @@ async function sendRpcCommand(
 					}
 
 					// Handle turn_end event
-					if (msg.type === "event" && msg.event === "turn_end" && waitForEvent === "turn_end") {
+					if (
+						msg.type === "event" &&
+						msg.event === "turn_end" &&
+						waitForEvent === "turn_end"
+					) {
 						cleanup();
 						socket.end();
 						if (!response) {
@@ -911,7 +1045,11 @@ async function sendRpcCommand(
 	});
 }
 
-async function startControlServer(pi: ExtensionAPI, state: SocketState, ctx: ExtensionContext): Promise<void> {
+async function startControlServer(
+	pi: ExtensionAPI,
+	state: SocketState,
+	ctx: ExtensionContext,
+): Promise<void> {
 	await ensureControlDir();
 	const sessionId = ctx.sessionManager.getSessionId();
 	const socketPath = getSocketPath(sessionId);
@@ -961,7 +1099,10 @@ function updateStatus(ctx: ExtensionContext | null, enabled: boolean): void {
 	ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", `session ${sessionId}`));
 }
 
-function updateSessionEnv(ctx: ExtensionContext | null, enabled: boolean): void {
+function updateSessionEnv(
+	ctx: ExtensionContext | null,
+	enabled: boolean,
+): void {
 	if (!enabled) {
 		delete process.env.PI_SESSION_ID;
 		return;
@@ -978,7 +1119,9 @@ function wasBooleanFlagPassed(flagName: string): boolean {
 }
 
 function shouldRegisterControlTools(pi: ExtensionAPI): boolean {
-	return pi.getFlag(CONTROL_FLAG) === true || wasBooleanFlagPassed(CONTROL_FLAG);
+	return (
+		pi.getFlag(CONTROL_FLAG) === true || wasBooleanFlagPassed(CONTROL_FLAG)
+	);
 }
 
 // ============================================================================
@@ -987,7 +1130,8 @@ function shouldRegisterControlTools(pi: ExtensionAPI): boolean {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag(CONTROL_FLAG, {
-		description: "Enable per-session control socket under ~/.pi/session-control",
+		description:
+			"Enable per-session control socket under ~/.pi/session-control",
 		type: "boolean",
 	});
 	pi.registerFlag(CONTROL_TARGET_FLAG, {
@@ -1008,7 +1152,8 @@ export default function (pi: ExtensionAPI) {
 		type: "string",
 	});
 	pi.registerFlag(CONTROL_SEND_INCLUDE_SENDER_FLAG, {
-		description: "Include <sender_info> in startup messages (advanced; default: false)",
+		description:
+			"Include <sender_info> in startup messages (advanced; default: false)",
 		type: "boolean",
 	});
 
@@ -1055,6 +1200,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		log.debug("event: session_start");
 		await refreshServer(ctx);
 		if (!cliSendHandled) {
 			cliSendHandled = true;
@@ -1063,6 +1209,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		log.debug("event: session_shutdown");
 		if (state.aliasTimer) {
 			clearInterval(state.aliasTimer);
 			state.aliasTimer = null;
@@ -1074,6 +1221,7 @@ export default function (pi: ExtensionAPI) {
 
 	// Fire turn_end events to subscribers
 	pi.on("turn_end", (event: TurnEndEvent, ctx: ExtensionContext) => {
+		log.debug("event: turn_end");
 		if (state.turnEndSubscriptions.length === 0) return;
 
 		void syncAlias(state, ctx);
@@ -1100,6 +1248,7 @@ export default function (pi: ExtensionAPI) {
 // ============================================================================
 
 function registerSessionTool(pi: ExtensionAPI, state: SocketState): void {
+	log.debug("registerTool");
 	pi.registerTool({
 		name: "send_to_session",
 		label: "Send To Session",
@@ -1141,18 +1290,27 @@ Note: If you ask the target session to reply back via sender_info, do not use wa
 
 Messages automatically include sender session info for replies. When you want a response, instruct the target session to reply directly to the sender by calling send_to_session with the sender_info reference (do not poll get_message).`,
 		parameters: Type.Object({
-			sessionId: Type.Optional(Type.String({ description: "Target session id (UUID)" })),
-			sessionName: Type.Optional(Type.String({ description: "Target session name (alias)" })),
+			sessionId: Type.Optional(
+				Type.String({ description: "Target session id (UUID)" }),
+			),
+			sessionName: Type.Optional(
+				Type.String({ description: "Target session name (alias)" }),
+			),
 			action: Type.Optional(
 				StringEnum(["send", "get_message", "get_summary", "clear"] as const, {
 					description: "Action to perform (default: send)",
 					default: "send",
 				}),
 			),
-			message: Type.Optional(Type.String({ description: "Message to send (required for action=send)" })),
+			message: Type.Optional(
+				Type.String({
+					description: "Message to send (required for action=send)",
+				}),
+			),
 			mode: Type.Optional(
 				StringEnum(["steer", "follow_up"] as const, {
-					description: "Delivery mode for send: steer (immediate) or follow_up (after task)",
+					description:
+						"Delivery mode for send: steer (immediate) or follow_up (after task)",
 					default: "steer",
 				}),
 			),
@@ -1190,7 +1348,9 @@ Messages automatically include sender session info for replies. When you want a 
 				}
 				if (targetSessionId && targetSessionId !== sessionId) {
 					return {
-						content: [{ type: "text", text: "Session name does not match session id" }],
+						content: [
+							{ type: "text", text: "Session name does not match session id" },
+						],
 						isError: true,
 						details: { error: "Session name does not match session id" },
 					};
@@ -1200,7 +1360,9 @@ Messages automatically include sender session info for replies. When you want a 
 
 			if (!targetSessionId) {
 				return {
-					content: [{ type: "text", text: "Missing session id or session name" }],
+					content: [
+						{ type: "text", text: "Missing session id or session name" },
+					],
 					isError: true,
 					details: { error: "Missing session id or session name" },
 				};
@@ -1212,10 +1374,17 @@ Messages automatically include sender session info for replies. When you want a 
 			try {
 				// Handle each action
 				if (action === "get_message") {
-					const result = await sendRpcCommand(socketPath, { type: "get_message" });
+					const result = await sendRpcCommand(socketPath, {
+						type: "get_message",
+					});
 					if (!result.response.success) {
 						return {
-							content: [{ type: "text", text: `Failed: ${result.response.error ?? "unknown error"}` }],
+							content: [
+								{
+									type: "text",
+									text: `Failed: ${result.response.error ?? "unknown error"}`,
+								},
+							],
 							isError: true,
 							details: result,
 						};
@@ -1223,7 +1392,9 @@ Messages automatically include sender session info for replies. When you want a 
 					const data = result.response.data as { message?: ExtractedMessage };
 					if (!data?.message) {
 						return {
-							content: [{ type: "text", text: "No assistant message found in session" }],
+							content: [
+								{ type: "text", text: "No assistant message found in session" },
+							],
 							details: result,
 						};
 					}
@@ -1234,15 +1405,27 @@ Messages automatically include sender session info for replies. When you want a 
 				}
 
 				if (action === "get_summary") {
-					const result = await sendRpcCommand(socketPath, { type: "get_summary" }, { timeout: 60000 });
+					const result = await sendRpcCommand(
+						socketPath,
+						{ type: "get_summary" },
+						{ timeout: 60000 },
+					);
 					if (!result.response.success) {
 						return {
-							content: [{ type: "text", text: `Failed: ${result.response.error ?? "unknown error"}` }],
+							content: [
+								{
+									type: "text",
+									text: `Failed: ${result.response.error ?? "unknown error"}`,
+								},
+							],
 							isError: true,
 							details: result,
 						};
 					}
-					const data = result.response.data as { summary?: string; model?: string };
+					const data = result.response.data as {
+						summary?: string;
+						model?: string;
+					};
 					if (!data?.summary) {
 						return {
 							content: [{ type: "text", text: "No summary generated" }],
@@ -1250,22 +1433,41 @@ Messages automatically include sender session info for replies. When you want a 
 						};
 					}
 					return {
-						content: [{ type: "text", text: `Summary (via ${data.model}):\n\n${data.summary}` }],
+						content: [
+							{
+								type: "text",
+								text: `Summary (via ${data.model}):\n\n${data.summary}`,
+							},
+						],
 						details: { summary: data.summary, model: data.model },
 					};
 				}
 
 				if (action === "clear") {
-					const result = await sendRpcCommand(socketPath, { type: "clear", summarize: false }, { timeout: 10000 });
+					const result = await sendRpcCommand(
+						socketPath,
+						{ type: "clear", summarize: false },
+						{ timeout: 10000 },
+					);
 					if (!result.response.success) {
 						return {
-							content: [{ type: "text", text: `Failed to clear: ${result.response.error ?? "unknown error"}` }],
+							content: [
+								{
+									type: "text",
+									text: `Failed to clear: ${result.response.error ?? "unknown error"}`,
+								},
+							],
 							isError: true,
 							details: result,
 						};
 					}
-					const data = result.response.data as { cleared?: boolean; alreadyAtRoot?: boolean };
-					const msg = data?.alreadyAtRoot ? "Session already at root" : "Session cleared";
+					const data = result.response.data as {
+						cleared?: boolean;
+						alreadyAtRoot?: boolean;
+					};
+					const msg = data?.alreadyAtRoot
+						? "Session already at root"
+						: "Session cleared";
 					return {
 						content: [{ type: "text", text: msg }],
 						details: data,
@@ -1275,18 +1477,22 @@ Messages automatically include sender session info for replies. When you want a 
 				// action === "send"
 				if (!params.message || params.message.trim().length === 0) {
 					return {
-						content: [{ type: "text", text: "Missing message for send action" }],
+						content: [
+							{ type: "text", text: "Missing message for send action" },
+						],
 						isError: true,
 						details: { error: "Missing message" },
 					};
 				}
 
-				const senderSessionName = state.context?.sessionManager.getSessionName()?.trim();
+				const senderSessionName = state.context?.sessionManager
+					.getSessionName()
+					?.trim();
 				const senderInfo = senderSessionId
 					? `\n\n<sender_info>${JSON.stringify({
-						sessionId: senderSessionId,
-						sessionName: senderSessionName || undefined,
-					})}</sender_info>`
+							sessionId: senderSessionId,
+							sessionName: senderSessionName || undefined,
+						})}</sender_info>`
 					: "";
 
 				const sendCommand: RpcSendCommand = {
@@ -1301,7 +1507,12 @@ Messages automatically include sender session info for replies. When you want a 
 					const result = await sendRpcCommand(socketPath, sendCommand);
 					if (!result.response.success) {
 						return {
-							content: [{ type: "text", text: `Failed: ${result.response.error ?? "unknown error"}` }],
+							content: [
+								{
+									type: "text",
+									text: `Failed: ${result.response.error ?? "unknown error"}`,
+								},
+							],
 							isError: true,
 							details: result,
 						};
@@ -1321,7 +1532,12 @@ Messages automatically include sender session info for replies. When you want a 
 
 					if (!result.response.success) {
 						return {
-							content: [{ type: "text", text: `Failed: ${result.response.error ?? "unknown error"}` }],
+							content: [
+								{
+									type: "text",
+									text: `Failed: ${result.response.error ?? "unknown error"}`,
+								},
+							],
 							isError: true,
 							details: result,
 						};
@@ -1330,14 +1546,22 @@ Messages automatically include sender session info for replies. When you want a 
 					const lastMessage = result.event?.message;
 					if (!lastMessage) {
 						return {
-							content: [{ type: "text", text: "Turn completed but no assistant message found" }],
+							content: [
+								{
+									type: "text",
+									text: "Turn completed but no assistant message found",
+								},
+							],
 							details: { turnIndex: result.event?.turnIndex },
 						};
 					}
 
 					return {
 						content: [{ type: "text", text: lastMessage.content }],
-						details: { message: lastMessage, turnIndex: result.event?.turnIndex },
+						details: {
+							message: lastMessage,
+							turnIndex: result.event?.turnIndex,
+						},
 					};
 				}
 
@@ -1345,18 +1569,29 @@ Messages automatically include sender session info for replies. When you want a 
 				const result = await sendRpcCommand(socketPath, sendCommand);
 				if (!result.response.success) {
 					return {
-						content: [{ type: "text", text: `Failed: ${result.response.error ?? "unknown error"}` }],
+						content: [
+							{
+								type: "text",
+								text: `Failed: ${result.response.error ?? "unknown error"}`,
+							},
+						],
 						isError: true,
 						details: result,
 					};
 				}
 
 				return {
-					content: [{ type: "text", text: `Message sent to session ${displayTarget || targetSessionId}` }],
+					content: [
+						{
+							type: "text",
+							text: `Message sent to session ${displayTarget || targetSessionId}`,
+						},
+					],
 					details: result.response.data,
 				};
 			} catch (error) {
-				const message = error instanceof Error ? error.message : "Unknown error";
+				const message =
+					error instanceof Error ? error.message : "Unknown error";
 				return {
 					content: [{ type: "text", text: `Failed: ${message}` }],
 					isError: true,
@@ -1368,7 +1603,8 @@ Messages automatically include sender session info for replies. When you want a 
 		renderCall(args, theme) {
 			const action = args.action ?? "send";
 			const sessionRef = args.sessionName ?? args.sessionId ?? "...";
-			const shortSessionRef = sessionRef.length > 12 ? sessionRef.slice(0, 8) + "..." : sessionRef;
+			const shortSessionRef =
+				sessionRef.length > 12 ? sessionRef.slice(0, 8) + "..." : sessionRef;
 
 			// Build the header line
 			let header = theme.fg("toolTitle", theme.bold("→ session "));
@@ -1394,7 +1630,9 @@ Messages automatically include sender session info for replies. When you want a 
 				const firstLine = preview.split("\n")[0];
 				const hasMore = preview.includes("\n") || msg.length > 80;
 				return new Text(
-					header + "\n  " + theme.fg("dim", `"${firstLine}${hasMore ? "..." : ""}"`),
+					header +
+						"\n  " +
+						theme.fg("dim", `"${firstLine}${hasMore ? "..." : ""}"`),
 					0,
 					0,
 				);
@@ -1409,8 +1647,15 @@ Messages automatically include sender session info for replies. When you want a 
 
 			// Error case
 			if (isError || details?.error) {
-				const errorMsg = (details?.error as string) || result.content[0]?.type === "text" ? (result.content[0] as { type: "text"; text: string }).text : "Unknown error";
-				return new Text(theme.fg("error", "✗ ") + theme.fg("error", errorMsg), 0, 0);
+				const errorMsg =
+					(details?.error as string) || result.content[0]?.type === "text"
+						? (result.content[0] as { type: "text"; text: string }).text
+						: "Unknown error";
+				return new Text(
+					theme.fg("error", "✗ ") + theme.fg("error", errorMsg),
+					0,
+					0,
+				);
 			}
 
 			// Detect action from details structure
@@ -1426,25 +1671,36 @@ Messages automatically include sender session info for replies. When you want a 
 
 				if (expanded) {
 					const container = new Container();
-					container.addChild(new Text(icon + theme.fg("muted", " Message received"), 0, 0));
+					container.addChild(
+						new Text(icon + theme.fg("muted", " Message received"), 0, 0),
+					);
 					container.addChild(new Spacer(1));
-					container.addChild(new Markdown(message.content, 0, 0, getMarkdownTheme()));
+					container.addChild(
+						new Markdown(message.content, 0, 0, getMarkdownTheme()),
+					);
 					if (hasTurnIndex) {
 						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("dim", `Turn #${details.turnIndex}`), 0, 0));
+						container.addChild(
+							new Text(theme.fg("dim", `Turn #${details.turnIndex}`), 0, 0),
+						);
 					}
 					return container;
 				}
 
 				// Collapsed view - show preview
-				const preview = message.content.length > 200
-					? message.content.slice(0, 200) + "..."
-					: message.content;
+				const preview =
+					message.content.length > 200
+						? message.content.slice(0, 200) + "..."
+						: message.content;
 				const lines = preview.split("\n").slice(0, 5);
 				let text = icon + theme.fg("muted", " Message received");
-				if (hasTurnIndex) text += theme.fg("dim", ` (turn #${details.turnIndex})`);
+				if (hasTurnIndex)
+					text += theme.fg("dim", ` (turn #${details.turnIndex})`);
 				text += "\n" + theme.fg("toolOutput", lines.join("\n"));
-				if (message.content.split("\n").length > 5 || message.content.length > 200) {
+				if (
+					message.content.split("\n").length > 5 ||
+					message.content.length > 200
+				) {
 					text += "\n" + theme.fg("dim", "(Ctrl+O to expand)");
 				}
 				return new Text(text, 0, 0);
@@ -1466,7 +1722,8 @@ Messages automatically include sender session info for replies. When you want a 
 					return container;
 				}
 
-				const preview = summary.length > 200 ? summary.slice(0, 200) + "..." : summary;
+				const preview =
+					summary.length > 200 ? summary.slice(0, 200) + "..." : summary;
 				const lines = preview.split("\n").slice(0, 5);
 				let text = icon + theme.fg("muted", " Summary");
 				if (model) text += theme.fg("dim", ` via ${model}`);
@@ -1481,7 +1738,9 @@ Messages automatically include sender session info for replies. When you want a 
 			if (hasCleared) {
 				const alreadyAtRoot = details.alreadyAtRoot as boolean | undefined;
 				const icon = theme.fg("success", "✓");
-				const msg = alreadyAtRoot ? "Session already at root" : "Session cleared";
+				const msg = alreadyAtRoot
+					? "Session already at root"
+					: "Session cleared";
 				return new Text(icon + " " + theme.fg("muted", msg), 0, 0);
 			}
 
@@ -1497,7 +1756,11 @@ Messages automatically include sender session info for replies. When you want a 
 			// Fallback - just show the text content
 			const text = result.content[0];
 			const content = text?.type === "text" ? text.text : "(no output)";
-			return new Text(theme.fg("success", "✓ ") + theme.fg("muted", content), 0, 0);
+			return new Text(
+				theme.fg("success", "✓ ") + theme.fg("muted", content),
+				0,
+				0,
+			);
 		},
 	});
 }
@@ -1507,10 +1770,12 @@ Messages automatically include sender session info for replies. When you want a 
 // ============================================================================
 
 function registerListSessionsTool(pi: ExtensionAPI): void {
+	log.debug("registerTool");
 	pi.registerTool({
 		name: "list_sessions",
 		label: "List Sessions",
-		description: "List live sessions that expose a control socket (optionally with session names). Use this for discovery only; for the current session id in shell/bash use $PI_SESSION_ID.",
+		description:
+			"List live sessions that expose a control socket (optionally with session names). Use this for discovery only; for the current session id in shell/bash use $PI_SESSION_ID.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
 			const sessions = await getLiveSessions();
@@ -1528,7 +1793,9 @@ function registerListSessionsTool(pi: ExtensionAPI): void {
 			});
 
 			return {
-				content: [{ type: "text", text: `Live sessions:\n${lines.join("\n")}` }],
+				content: [
+					{ type: "text", text: `Live sessions:\n${lines.join("\n")}` },
+				],
 				details: { sessions },
 			};
 		},
@@ -1546,14 +1813,18 @@ type StartupControlSendOptions = {
 function normalizeMode(raw: string): "steer" | "follow_up" | null {
 	const value = raw.trim().toLowerCase();
 	if (value === "steer") return "steer";
-	if (value === "follow_up" || value === "follow-up" || value === "followup") return "follow_up";
+	if (value === "follow_up" || value === "follow-up" || value === "followup")
+		return "follow_up";
 	return null;
 }
 
-function normalizeWaitUntil(raw: string): "turn_end" | "message_processed" | null {
+function normalizeWaitUntil(
+	raw: string,
+): "turn_end" | "message_processed" | null {
 	const value = raw.trim().toLowerCase();
 	if (value === "turn_end" || value === "turn-end") return "turn_end";
-	if (value === "message_processed" || value === "message-processed") return "message_processed";
+	if (value === "message_processed" || value === "message-processed")
+		return "message_processed";
 	return null;
 }
 
@@ -1564,7 +1835,10 @@ function getStringFlag(pi: ExtensionAPI, name: string): string | undefined {
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function parseStartupControlSendOptions(pi: ExtensionAPI): { options?: StartupControlSendOptions; error?: string } {
+function parseStartupControlSendOptions(pi: ExtensionAPI): {
+	options?: StartupControlSendOptions;
+	error?: string;
+} {
 	const target = getStringFlag(pi, CONTROL_TARGET_FLAG);
 	const message = getStringFlag(pi, CONTROL_SEND_MESSAGE_FLAG);
 
@@ -1572,16 +1846,22 @@ function parseStartupControlSendOptions(pi: ExtensionAPI): { options?: StartupCo
 		return {};
 	}
 	if (target && !message) {
-		return { error: `Missing --${CONTROL_SEND_MESSAGE_FLAG} (required with --${CONTROL_TARGET_FLAG})` };
+		return {
+			error: `Missing --${CONTROL_SEND_MESSAGE_FLAG} (required with --${CONTROL_TARGET_FLAG})`,
+		};
 	}
 	if (!target && message) {
-		return { error: `Missing --${CONTROL_TARGET_FLAG} (required with --${CONTROL_SEND_MESSAGE_FLAG})` };
+		return {
+			error: `Missing --${CONTROL_TARGET_FLAG} (required with --${CONTROL_SEND_MESSAGE_FLAG})`,
+		};
 	}
 
 	const rawMode = getStringFlag(pi, CONTROL_SEND_MODE_FLAG) ?? "steer";
 	const mode = normalizeMode(rawMode);
 	if (!mode) {
-		return { error: `Invalid --${CONTROL_SEND_MODE_FLAG}: ${rawMode}. Use steer|follow_up.` };
+		return {
+			error: `Invalid --${CONTROL_SEND_MODE_FLAG}: ${rawMode}. Use steer|follow_up.`,
+		};
 	}
 
 	const rawWait = getStringFlag(pi, CONTROL_SEND_WAIT_FLAG);
@@ -1596,7 +1876,8 @@ function parseStartupControlSendOptions(pi: ExtensionAPI): { options?: StartupCo
 		waitUntil = normalized;
 	}
 
-	const includeSenderInfo = pi.getFlag(CONTROL_SEND_INCLUDE_SENDER_FLAG) === true;
+	const includeSenderInfo =
+		pi.getFlag(CONTROL_SEND_INCLUDE_SENDER_FLAG) === true;
 
 	return {
 		options: {
@@ -1609,19 +1890,26 @@ function parseStartupControlSendOptions(pi: ExtensionAPI): { options?: StartupCo
 	};
 }
 
-function reportStartupControlSend(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
+function reportStartupControlSend(
+	ctx: ExtensionContext,
+	message: string,
+	level: "info" | "warning" | "error" = "info",
+): void {
 	if (ctx.hasUI) {
 		ctx.ui.notify(message, level);
 		return;
 	}
 	if (level === "error") {
-		console.error(message);
+		log.error(message);
 		return;
 	}
-	console.log(message);
+	log.info(message);
 }
 
-async function maybeHandleStartupControlSend(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+async function maybeHandleStartupControlSend(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+): Promise<void> {
 	const parsed = parseStartupControlSendOptions(pi);
 	if (!parsed.options) {
 		if (parsed.error) {
@@ -1630,7 +1918,8 @@ async function maybeHandleStartupControlSend(pi: ExtensionAPI, ctx: ExtensionCon
 		return;
 	}
 
-	const { target, message, mode, waitUntil, includeSenderInfo } = parsed.options;
+	const { target, message, mode, waitUntil, includeSenderInfo } =
+		parsed.options;
 	let targetSessionId = await resolveSessionIdFromAlias(target);
 	if (!targetSessionId && isSafeSessionId(target)) {
 		targetSessionId = target;
@@ -1644,21 +1933,25 @@ async function maybeHandleStartupControlSend(pi: ExtensionAPI, ctx: ExtensionCon
 	const socketPath = getSocketPath(targetSessionId);
 	const alive = await isSocketAlive(socketPath);
 	if (!alive) {
-		reportStartupControlSend(ctx, `Target session not reachable: ${target}`, "error");
+		reportStartupControlSend(
+			ctx,
+			`Target session not reachable: ${target}`,
+			"error",
+		);
 		return;
 	}
 
 	const senderInfo = includeSenderInfo
 		? (() => {
-			const senderSessionId = ctx.sessionManager.getSessionId();
-			const senderSessionName = ctx.sessionManager.getSessionName()?.trim();
-			return senderSessionId
-				? `\n\n<sender_info>${JSON.stringify({
-					sessionId: senderSessionId,
-					sessionName: senderSessionName || undefined,
-				})}</sender_info>`
-				: "";
-		})()
+				const senderSessionId = ctx.sessionManager.getSessionId();
+				const senderSessionName = ctx.sessionManager.getSessionName()?.trim();
+				return senderSessionId
+					? `\n\n<sender_info>${JSON.stringify({
+							sessionId: senderSessionId,
+							sessionName: senderSessionName || undefined,
+						})}</sender_info>`
+					: "";
+			})()
 		: "";
 
 	const sendCommand: RpcSendCommand = {
@@ -1674,12 +1967,19 @@ async function maybeHandleStartupControlSend(pi: ExtensionAPI, ctx: ExtensionCon
 				waitForEvent: "turn_end",
 			});
 			if (!result.response.success) {
-				reportStartupControlSend(ctx, `Failed to send: ${result.response.error ?? "unknown error"}`, "error");
+				reportStartupControlSend(
+					ctx,
+					`Failed to send: ${result.response.error ?? "unknown error"}`,
+					"error",
+				);
 				return;
 			}
 			const lastMessage = result.event?.message;
 			if (!lastMessage?.content) {
-				reportStartupControlSend(ctx, `Message delivered to ${target}; turn completed without assistant output.`);
+				reportStartupControlSend(
+					ctx,
+					`Message delivered to ${target}; turn completed without assistant output.`,
+				);
 				return;
 			}
 			if (ctx.hasUI) {
@@ -1692,22 +1992,33 @@ async function maybeHandleStartupControlSend(pi: ExtensionAPI, ctx: ExtensionCon
 					{ triggerTurn: false },
 				);
 			} else {
-				console.log(lastMessage.content);
+				log.info(lastMessage.content);
 			}
 			return;
 		}
 
-		const result = await sendRpcCommand(socketPath, sendCommand, { timeout: 30000 });
+		const result = await sendRpcCommand(socketPath, sendCommand, {
+			timeout: 30000,
+		});
 		if (!result.response.success) {
-			reportStartupControlSend(ctx, `Failed to send: ${result.response.error ?? "unknown error"}`, "error");
+			reportStartupControlSend(
+				ctx,
+				`Failed to send: ${result.response.error ?? "unknown error"}`,
+				"error",
+			);
 			return;
 		}
 
-		const waitLabel = waitUntil === "message_processed" ? " (message processed)" : "";
+		const waitLabel =
+			waitUntil === "message_processed" ? " (message processed)" : "";
 		reportStartupControlSend(ctx, `Message sent to ${target}${waitLabel}`);
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : "unknown error";
-		reportStartupControlSend(ctx, `Failed to send to ${target}: ${msg}`, "error");
+		reportStartupControlSend(
+			ctx,
+			`Failed to send to ${target}: ${msg}`,
+			"error",
+		);
 	}
 }
 
@@ -1717,7 +2028,10 @@ function registerControlSessionsCommand(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			if (pi.getFlag(CONTROL_FLAG) !== true) {
 				if (ctx.hasUI) {
-					ctx.ui.notify("Session control not enabled (use --session-control)", "warning");
+					ctx.ui.notify(
+						"Session control not enabled (use --session-control)",
+						"warning",
+					);
 				}
 				return;
 			}
@@ -1726,12 +2040,14 @@ function registerControlSessionsCommand(pi: ExtensionAPI): void {
 			const currentSessionId = ctx.sessionManager.getSessionId();
 			const lines = sessions.map((session) => {
 				const name = session.name ? ` (${session.name})` : "";
-				const current = session.sessionId === currentSessionId ? " (current)" : "";
+				const current =
+					session.sessionId === currentSessionId ? " (current)" : "";
 				return `- ${session.sessionId}${name}${current}`;
 			});
-			const content = sessions.length === 0
-				? "No live sessions found."
-				: `Controllable sessions:\n${lines.join("\n")}`;
+			const content =
+				sessions.length === 0
+					? "No live sessions found."
+					: `Controllable sessions:\n${lines.join("\n")}`;
 
 			pi.sendMessage(
 				{

@@ -13,6 +13,11 @@
  */
 
 import type { BuildSystemPromptOptions, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("prompt-customizer");
+
+log.debug("Extension loaded");
 
 /**
  * Adds tool-specific guidance that adapts to the active tool set.
@@ -85,6 +90,7 @@ If you have additional requirements, configure them via --append-system-prompt o
 
 export default function promptCustomizer(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event) => {
+		log.debug("event: before_agent_start");
 		const { systemPrompt, systemPromptOptions } = event;
 
 		const customPrompt = addToolGuidance(systemPromptOptions, systemPrompt);

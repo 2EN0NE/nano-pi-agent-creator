@@ -29,6 +29,11 @@ import { execSync } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
 import { Type } from "typebox";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("truncated-tool");
+
+log.debug("Extension loaded");
 
 const RgParams = Type.Object({
 	pattern: Type.String({ description: "Search pattern (regex)" }),

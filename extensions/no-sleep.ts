@@ -9,6 +9,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("no-sleep");
+
+log.debug("Extension loaded");
 
 const MACOS = process.platform === "darwin";
 
@@ -146,26 +151,31 @@ export default function noSleepExtension(pi: ExtensionAPI) {
 	process.once("exit", cleanupOnProcessExit);
 
 	pi.on("session_start", (_event, ctx) => {
+		log.debug("event: session_start");
 		agentActive = false;
 		reconcile(ctx);
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
+		log.debug("event: agent_start");
 		agentActive = true;
 		reconcile(ctx);
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
+		log.debug("event: agent_end");
 		agentActive = false;
 		reconcile(ctx);
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		log.debug("event: session_shutdown");
 		agentActive = false;
 		stop(ctx);
 		process.off("exit", cleanupOnProcessExit);
 	});
 
+	log.debug("registerCommand: no-sleep");
 	pi.registerCommand("no-sleep", {
 		description: "Show or change macOS sleep-prevention status",
 		handler: async (args, ctx) => {

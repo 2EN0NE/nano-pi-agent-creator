@@ -40,13 +40,23 @@
  *
  * Linux also requires: bubblewrap, socat, ripgrep
  */
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("sandbox");
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import {
+	SandboxManager,
+	type SandboxRuntimeConfig,
+} from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { type BashOperations, createBashTool, getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+	type BashOperations,
+	createBashTool,
+	getAgentDir,
+} from "@earendil-works/pi-coding-agent";
 
 interface SandboxConfig extends SandboxRuntimeConfig {
 	enabled?: boolean;
@@ -87,7 +97,7 @@ function loadConfig(cwd: string): SandboxConfig {
 		try {
 			globalConfig = JSON.parse(readFileSync(globalConfigPath, "utf-8"));
 		} catch (e) {
-			console.error(`Warning: Could not parse ${globalConfigPath}: ${e}`);
+			log.warn("Could not parse %s: %s", globalConfigPath, e);
 		}
 	}
 
@@ -95,14 +105,17 @@ function loadConfig(cwd: string): SandboxConfig {
 		try {
 			projectConfig = JSON.parse(readFileSync(projectConfigPath, "utf-8"));
 		} catch (e) {
-			console.error(`Warning: Could not parse ${projectConfigPath}: ${e}`);
+			log.warn("Could not parse %s: %s", projectConfigPath, e);
 		}
 	}
 
 	return deepMerge(deepMerge(DEFAULT_CONFIG, globalConfig), projectConfig);
 }
 
-function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): SandboxConfig {
+function deepMerge(
+	base: SandboxConfig,
+	overrides: Partial<SandboxConfig>,
+): SandboxConfig {
 	const result: SandboxConfig = { ...base };
 
 	if (overrides.enabled !== undefined) result.enabled = overrides.enabled;
@@ -117,13 +130,17 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
 		ignoreViolations?: Record<string, string[]>;
 		enableWeakerNestedSandbox?: boolean;
 	};
-	const extResult = result as { ignoreViolations?: Record<string, string[]>; enableWeakerNestedSandbox?: boolean };
+	const extResult = result as {
+		ignoreViolations?: Record<string, string[]>;
+		enableWeakerNestedSandbox?: boolean;
+	};
 
 	if (extOverrides.ignoreViolations) {
 		extResult.ignoreViolations = extOverrides.ignoreViolations;
 	}
 	if (extOverrides.enableWeakerNestedSandbox !== undefined) {
-		extResult.enableWeakerNestedSandbox = extOverrides.enableWeakerNestedSandbox;
+		extResult.enableWeakerNestedSandbox =
+			extOverrides.enableWeakerNestedSandbox;
 	}
 
 	return result;
@@ -281,12 +298,18 @@ export default function (pi: ExtensionAPI) {
 			const writeCount = config.filesystem?.allowWrite?.length ?? 0;
 			ctx.ui.setStatus(
 				"sandbox",
-				ctx.ui.theme.fg("accent", `🔒 Sandbox: ${networkCount} domains, ${writeCount} write paths`),
+				ctx.ui.theme.fg(
+					"accent",
+					`🔒 Sandbox: ${networkCount} domains, ${writeCount} write paths`,
+				),
 			);
 			ctx.ui.notify("Sandbox initialized", "info");
 		} catch (err) {
 			sandboxEnabled = false;
-			ctx.ui.notify(`Sandbox initialization failed: ${err instanceof Error ? err.message : err}`, "error");
+			ctx.ui.notify(
+				`Sandbox initialization failed: ${err instanceof Error ? err.message : err}`,
+				"error",
+			);
 		}
 	});
 

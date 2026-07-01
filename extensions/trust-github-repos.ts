@@ -8,6 +8,11 @@
  */
 
 import type { ExtensionAPI, ProjectTrustEventResult } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("trust-github-repos");
+
+log.debug("Extension loaded");
 
 const TRUSTED_GITHUB_OWNERS = new Set(["earendil-works", "mitsuhiko"]);
 const GIT_TIMEOUT_MS = 5_000;

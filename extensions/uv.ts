@@ -23,6 +23,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("uv");
+
+log.debug("Extension loaded");
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const interceptedCommandsPath = join(__dirname, "..", "intercepted-commands");

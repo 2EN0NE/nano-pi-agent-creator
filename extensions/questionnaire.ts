@@ -8,6 +8,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("questionnaire");
+
+log.debug("Extension loaded");
 
 // Types
 interface QuestionOption {

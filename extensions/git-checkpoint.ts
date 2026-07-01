@@ -6,6 +6,11 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("git-checkpoint");
+
+log.debug("Extension loaded");
 
 export default function (pi: ExtensionAPI) {
 	const checkpoints = new Map<string, string>();
@@ -18,6 +23,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_start", async () => {
+		log.debug("event: turn_start");
 		// Create a git stash entry before LLM makes changes
 		const { stdout } = await pi.exec("git", ["stash", "create"]);
 		const ref = stdout.trim();
@@ -27,6 +33,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_fork", async (event, ctx) => {
+		log.debug("event: session_before_fork");
 		const ref = checkpoints.get(event.entryId);
 		if (!ref) return;
 
@@ -47,6 +54,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async () => {
+		log.debug("event: agent_end");
 		// Clear checkpoints after agent completes
 		checkpoints.clear();
 	});

@@ -3,6 +3,11 @@ import { randomUUID } from "node:crypto";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("goal");
+
+log.debug("Extension loaded");
 
 const STATE_TYPE = "goal";
 const UI_MESSAGE_TYPE = "goal-ui";
@@ -402,10 +407,13 @@ export default function goalExtension(pi: ExtensionAPI) {
 		updateStatus(ctx);
 	}
 
+	log.debug("event: session_start");
 	pi.on("session_start", async (_event, ctx) => reconstructState(ctx));
+	log.debug("event: session_tree");
 	pi.on("session_tree", async (_event, ctx) => reconstructState(ctx));
 
 	pi.on("before_agent_start", async (event) => {
+		log.debug("event: before_agent_start");
 		const snapshot = currentGoalSnapshot();
 		if (!snapshot || snapshot.status !== "active") return;
 		return {
@@ -414,11 +422,13 @@ export default function goalExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_start", async (_event, _ctx) => {
+		log.debug("event: agent_start");
 		continuationQueued = false;
 		activeGoalIdAtAgentStart = goal?.status === "active" ? goal.id : null;
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
+		log.debug("event: agent_end");
 		if (!goal) return;
 		let changed = false;
 		if (activeGoalIdAtAgentStart === goal.id) {
@@ -446,6 +456,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("context", async (event) => {
+		log.debug("event: context");
 		let lastContinuationIndex = -1;
 		for (let i = 0; i < event.messages.length; i++) {
 			const msg = event.messages[i] as { customType?: string; details?: { goalId?: string } };
@@ -466,6 +477,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 		};
 	});
 
+	log.debug("registerCommand: goal");
 	pi.registerCommand("goal", {
 		description: "Set or view the goal for a long-running task",
 		getArgumentCompletions: (prefix: string) => {
@@ -544,6 +556,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	log.debug("registerTool");
 	pi.registerTool({
 		name: "get_goal",
 		label: "Get Goal",
@@ -561,6 +574,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	log.debug("registerTool");
 	pi.registerTool({
 		name: "create_goal",
 		label: "Create Goal",
@@ -589,6 +603,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	log.debug("registerTool");
 	pi.registerTool({
 		name: "update_goal",
 		label: "Update Goal",

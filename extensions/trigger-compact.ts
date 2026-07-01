@@ -3,6 +3,11 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("trigger-compact");
+
+log.debug("Extension loaded");
 
 // ===== Strategy Types =====
 
@@ -129,6 +134,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("turn_end", (_event, ctx) => {
+		log.debug("event: turn_end");
 		const usage = ctx.getContextUsage();
 		const currentTokens = usage?.tokens ?? null;
 
@@ -160,11 +166,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_compact", () => {
+		log.debug("event: session_compact");
 		// Core (or another extension) initiated a compaction outside our extension.
 		// Reset our crossing detector so we can re-trigger on the next build-up.
 		previousTokens = 0;
 	});
 
+	log.debug("registerCommand: trigger-compact");
 	pi.registerCommand("trigger-compact", {
 		description:
 			"Trigger compaction immediately. Usage: `trigger-compact [strategy:]` or `trigger-compact [custom instructions]`. " +

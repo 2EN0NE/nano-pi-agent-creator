@@ -6,8 +6,8 @@
  * Config file locations (merged, later takes precedence):
  *   1. ./extensions/pi-logger/pi-logger.json   (plugin-bundled default)
  *   2. ~/.pi/agents/pi-logger.json              (user global)
- *   3. <project-root>/.pi/pi-logger.json         (project overrides)
- *      (searched recursively upward from cwd)
+ *   3. <project-root>/.pi/pi-logger.json         (project .pi/ config)
+ *   4. <project-root>/pi-logger.json or upward  (project-root / upward search)
  *
  * Hierarchy rules (matches Log4j/Logback):
  *   Given logger name "review.file-scanner":
@@ -185,7 +185,8 @@ export function getRuntimeConfig(): Readonly<LoggerRuntimeConfig> {
  * Search order (later wins):
  *   1. Plugin-bundled default: alongside this module
  *   2. User global: ~/.pi/agents/pi-logger.json
- *   3. Project-local: first pi-logger.json found walking upward from cwd
+ *   3. Project-local .pi/: <project-root>/.pi/pi-logger.json
+ *   4. Project-local upward: first pi-logger.json walking upward from cwd
  *
  * @param cwd - Current working directory (project root hint for upward search)
  */
@@ -208,7 +209,12 @@ export function loadConfiguration(cwd: string): void {
 	const userGlobal = loadConfigFile(userGlobalPath);
 	if (userGlobal) merged = mergeConfig(merged, userGlobal);
 
-	// 3) Project-local (recursive upward from cwd)
+	// 3) Project-local .pi/ (<project-root>/.pi/pi-logger.json)
+	const dotPiPath = join(cwd, ".pi", CONFIG_FILE);
+	const dotPiCfg = loadConfigFile(dotPiPath);
+	if (dotPiCfg) merged = mergeConfig(merged, dotPiCfg);
+
+	// 4) Project-local upward (recursive upward from cwd)
 	if (projectPath) {
 		const projectCfg = loadConfigFile(projectPath);
 		if (projectCfg) merged = mergeConfig(merged, projectCfg);

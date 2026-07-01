@@ -20,6 +20,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("claude-rules");
+
+log.debug("Extension loaded");
 
 /**
  * Recursively find all .md files in a directory
@@ -52,6 +57,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
 
 	// Scan for rules on session start
 	pi.on("session_start", async (_event, ctx) => {
+		log.debug("event: session_start");
 		rulesDir = path.join(ctx.cwd, ".claude", "rules");
 		ruleFiles = findMarkdownFiles(rulesDir);
 
@@ -62,6 +68,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
 
 	// Append available rules to system prompt
 	pi.on("before_agent_start", async (event) => {
+		log.debug("event: before_agent_start");
 		if (ruleFiles.length === 0) {
 			return;
 		}

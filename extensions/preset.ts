@@ -41,9 +41,22 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Container, Key, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("preset");
+
+import {
+	Container,
+	Key,
+	type SelectItem,
+	SelectList,
+	Text,
+} from "@earendil-works/pi-tui";
 
 // Preset configuration
 interface Preset {
@@ -90,7 +103,9 @@ function loadPresets(cwd: string): PresetsConfig {
 			const content = readFileSync(projectPath, "utf-8");
 			projectPresets = JSON.parse(content);
 		} catch (err) {
-			console.error(`Failed to load project presets from ${projectPath}: ${err}`);
+			console.error(
+				`Failed to load project presets from ${projectPath}: ${err}`,
+			);
 		}
 	}
 
@@ -119,7 +134,11 @@ export default function presetExtension(pi: ExtensionAPI) {
 	/**
 	 * Apply a preset configuration.
 	 */
-	async function applyPreset(name: string, preset: Preset, ctx: ExtensionContext): Promise<boolean> {
+	async function applyPreset(
+		name: string,
+		preset: Preset,
+		ctx: ExtensionContext,
+	): Promise<boolean> {
 		// Snapshot state before the first preset is applied (i.e. only when transitioning from no-preset)
 		if (activePresetName === undefined) {
 			originalState = {
@@ -135,10 +154,16 @@ export default function presetExtension(pi: ExtensionAPI) {
 			if (model) {
 				const success = await pi.setModel(model);
 				if (!success) {
-					ctx.ui.notify(`Preset "${name}": No API key for ${preset.provider}/${preset.model}`, "warning");
+					ctx.ui.notify(
+						`Preset "${name}": No API key for ${preset.provider}/${preset.model}`,
+						"warning",
+					);
 				}
 			} else {
-				ctx.ui.notify(`Preset "${name}": Model ${preset.provider}/${preset.model} not found`, "warning");
+				ctx.ui.notify(
+					`Preset "${name}": Model ${preset.provider}/${preset.model} not found`,
+					"warning",
+				);
 			}
 		}
 
@@ -151,10 +176,15 @@ export default function presetExtension(pi: ExtensionAPI) {
 		if (preset.tools && preset.tools.length > 0) {
 			const allToolNames = pi.getAllTools().map((t) => t.name);
 			const validTools = preset.tools.filter((t) => allToolNames.includes(t));
-			const invalidTools = preset.tools.filter((t) => !allToolNames.includes(t));
+			const invalidTools = preset.tools.filter(
+				(t) => !allToolNames.includes(t),
+			);
 
 			if (invalidTools.length > 0) {
-				ctx.ui.notify(`Preset "${name}": Unknown tools: ${invalidTools.join(", ")}`, "warning");
+				ctx.ui.notify(
+					`Preset "${name}": Unknown tools: ${invalidTools.join(", ")}`,
+					"warning",
+				);
 			}
 
 			if (validTools.length > 0) {
@@ -186,7 +216,9 @@ export default function presetExtension(pi: ExtensionAPI) {
 		}
 		if (preset.instructions) {
 			const truncated =
-				preset.instructions.length > 30 ? `${preset.instructions.slice(0, 27)}...` : preset.instructions;
+				preset.instructions.length > 30
+					? `${preset.instructions.slice(0, 27)}...`
+					: preset.instructions;
 			parts.push(`"${truncated}"`);
 		}
 
@@ -200,7 +232,10 @@ export default function presetExtension(pi: ExtensionAPI) {
 		const presetNames = Object.keys(presets);
 
 		if (presetNames.length === 0) {
-			ctx.ui.notify("No presets defined. Add presets to ~/.pi/agent/presets.json or .pi/presets.json", "warning");
+			ctx.ui.notify(
+				"No presets defined. Add presets to ~/.pi/agent/presets.json or .pi/presets.json",
+				"warning",
+			);
 			return;
 		}
 
@@ -222,45 +257,51 @@ export default function presetExtension(pi: ExtensionAPI) {
 			description: "Clear active preset, restore defaults",
 		});
 
-		const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-			const container = new Container();
-			container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
+		const result = await ctx.ui.custom<string | null>(
+			(tui, theme, _kb, done) => {
+				const container = new Container();
+				container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 
-			// Header
-			container.addChild(new Text(theme.fg("accent", theme.bold("Select Preset"))));
+				// Header
+				container.addChild(
+					new Text(theme.fg("accent", theme.bold("Select Preset"))),
+				);
 
-			// SelectList with themed styling
-			const selectList = new SelectList(items, Math.min(items.length, 10), {
-				selectedPrefix: (text) => theme.fg("accent", text),
-				selectedText: (text) => theme.fg("accent", text),
-				description: (text) => theme.fg("muted", text),
-				scrollInfo: (text) => theme.fg("dim", text),
-				noMatch: (text) => theme.fg("warning", text),
-			});
+				// SelectList with themed styling
+				const selectList = new SelectList(items, Math.min(items.length, 10), {
+					selectedPrefix: (text) => theme.fg("accent", text),
+					selectedText: (text) => theme.fg("accent", text),
+					description: (text) => theme.fg("muted", text),
+					scrollInfo: (text) => theme.fg("dim", text),
+					noMatch: (text) => theme.fg("warning", text),
+				});
 
-			selectList.onSelect = (item) => done(item.value);
-			selectList.onCancel = () => done(null);
+				selectList.onSelect = (item) => done(item.value);
+				selectList.onCancel = () => done(null);
 
-			container.addChild(selectList);
+				container.addChild(selectList);
 
-			// Footer hint
-			container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel")));
+				// Footer hint
+				container.addChild(
+					new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel")),
+				);
 
-			container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
+				container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 
-			return {
-				render(width: number) {
-					return container.render(width);
-				},
-				invalidate() {
-					container.invalidate();
-				},
-				handleInput(data: string) {
-					selectList.handleInput(data);
-					tui.requestRender();
-				},
-			};
-		});
+				return {
+					render(width: number) {
+						return container.render(width);
+					},
+					invalidate() {
+						container.invalidate();
+					},
+					handleInput(data: string) {
+						selectList.handleInput(data);
+						tui.requestRender();
+					},
+				};
+			},
+		);
 
 		if (!result) return;
 
@@ -295,7 +336,10 @@ export default function presetExtension(pi: ExtensionAPI) {
 	 */
 	function updateStatus(ctx: ExtensionContext) {
 		if (activePresetName) {
-			ctx.ui.setStatus("preset", ctx.ui.theme.fg("accent", `preset:${activePresetName}`));
+			ctx.ui.setStatus(
+				"preset",
+				ctx.ui.theme.fg("accent", `preset:${activePresetName}`),
+			);
 		} else {
 			ctx.ui.setStatus("preset", undefined);
 		}
@@ -308,14 +352,18 @@ export default function presetExtension(pi: ExtensionAPI) {
 	async function cyclePreset(ctx: ExtensionContext): Promise<void> {
 		const presetNames = getPresetOrder();
 		if (presetNames.length === 0) {
-			ctx.ui.notify("No presets defined. Add presets to ~/.pi/agent/presets.json or .pi/presets.json", "warning");
+			ctx.ui.notify(
+				"No presets defined. Add presets to ~/.pi/agent/presets.json or .pi/presets.json",
+				"warning",
+			);
 			return;
 		}
 
 		const cycleList = ["(none)", ...presetNames];
 		const currentName = activePresetName ?? "(none)";
 		const currentIndex = cycleList.indexOf(currentName);
-		const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % cycleList.length;
+		const nextIndex =
+			currentIndex === -1 ? 0 : (currentIndex + 1) % cycleList.length;
 		const nextName = cycleList[nextIndex];
 
 		if (nextName === "(none)") {
@@ -343,6 +391,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 		updateStatus(ctx);
 	}
 
+	log.debug("registerShortcut");
 	pi.registerShortcut(Key.ctrlShift("u"), {
 		description: "Cycle presets",
 		handler: async (ctx) => {
@@ -351,6 +400,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 	});
 
 	// Register /preset command
+	log.debug("registerCommand: preset");
 	pi.registerCommand("preset", {
 		description: "Switch preset configuration",
 		handler: async (args, ctx) => {
@@ -361,7 +411,10 @@ export default function presetExtension(pi: ExtensionAPI) {
 
 				if (!preset) {
 					const available = Object.keys(presets).join(", ") || "(none defined)";
-					ctx.ui.notify(`Unknown preset "${name}". Available: ${available}`, "error");
+					ctx.ui.notify(
+						`Unknown preset "${name}". Available: ${available}`,
+						"error",
+					);
 					return;
 				}
 
@@ -378,6 +431,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 
 	// Inject preset instructions into system prompt
 	pi.on("before_agent_start", async (event) => {
+		log.debug("event: before_agent_start");
 		if (activePreset?.instructions) {
 			return {
 				systemPrompt: `${event.systemPrompt}\n\n${activePreset.instructions}`,
@@ -387,6 +441,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 
 	// Initialize on session start
 	pi.on("session_start", async (_event, ctx) => {
+		log.debug("event: session_start");
 		// Load presets from config files
 		presets = loadPresets(ctx.cwd);
 
@@ -399,14 +454,20 @@ export default function presetExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(`Preset "${presetFlag}" activated`, "info");
 			} else {
 				const available = Object.keys(presets).join(", ") || "(none defined)";
-				ctx.ui.notify(`Unknown preset "${presetFlag}". Available: ${available}`, "warning");
+				ctx.ui.notify(
+					`Unknown preset "${presetFlag}". Available: ${available}`,
+					"warning",
+				);
 			}
 		}
 
 		// Restore preset from session state
 		const entries = ctx.sessionManager.getEntries();
 		const presetEntry = entries
-			.filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "preset-state")
+			.filter(
+				(e: { type: string; customType?: string }) =>
+					e.type === "custom" && e.customType === "preset-state",
+			)
 			.pop() as { data?: { name: string } } | undefined;
 
 		if (presetEntry?.data?.name && !presetFlag) {
@@ -423,6 +484,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 
 	// Persist preset state
 	pi.on("turn_start", async () => {
+		log.debug("event: turn_start");
 		if (activePresetName) {
 			pi.appendEntry("preset-state", { name: activePresetName });
 		}

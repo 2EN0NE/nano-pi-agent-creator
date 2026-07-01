@@ -32,7 +32,7 @@ import type {
 	ExtensionContext,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { createLogger } from "./pi-logger/api.js";
+import { createLogger } from "@zenone/pi-logger";
 
 const log = createLogger("review");
 import { DynamicBorder, BorderedLoader } from "@earendil-works/pi-coding-agent";

@@ -19,6 +19,11 @@ import * as Diff from "diff";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, unlink as fsUnlink, writeFile as fsWriteFile } from "fs/promises";
 import { isAbsolute, resolve as resolvePath } from "path";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("multi-edit");
+
+log.debug("Extension loaded");
 
 const editItemSchema = Type.Object({
 	path: Type.Optional(Type.String({ description: "Path to the file to edit (relative or absolute). Inherits from top-level path if omitted." })),

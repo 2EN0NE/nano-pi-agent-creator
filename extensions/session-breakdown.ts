@@ -15,7 +15,10 @@
  * - Brightness: selected metric per day (log-scaled)
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { BorderedLoader } from "@earendil-works/pi-coding-agent";
 import {
 	Key,
@@ -30,6 +33,9 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { createReadStream, type Dirent } from "node:fs";
 import readline from "node:readline";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("session-breakdown");
 
 type ModelKey = string; // `${provider}/${model}`
 type CwdKey = string; // normalized cwd path
@@ -37,7 +43,12 @@ type DowKey = string; // "Mon", "Tue", etc.
 type TodKey = string; // "after-midnight", "morning", "afternoon", "evening", "night"
 type BreakdownView = "model" | "cwd" | "dow" | "tod";
 
-function sliceByColumn(line: string, startCol: number, length: number, strict = false): string {
+function sliceByColumn(
+	line: string,
+	startCol: number,
+	length: number,
+	strict = false,
+): string {
 	if (length <= 0) return "";
 	const endCol = startCol + length;
 	const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -48,7 +59,10 @@ function sliceByColumn(line: string, startCol: number, length: number, strict = 
 
 	while (i < line.length) {
 		if (line[i] === "\x1b") {
-			const match = /^\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[PX^_][^\x1b]*(?:\x1b\\)|[@-_])/.exec(line.slice(i));
+			const match =
+				/^\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[PX^_][^\x1b]*(?:\x1b\\)|[@-_])/.exec(
+					line.slice(i),
+				);
 			if (match) {
 				if (currentCol >= startCol && currentCol < endCol) {
 					result += match[0];
@@ -85,13 +99,14 @@ function sliceByColumn(line: string, startCol: number, length: number, strict = 
 
 const DOW_NAMES: DowKey[] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-const TOD_BUCKETS: { key: TodKey; label: string; from: number; to: number }[] = [
-	{ key: "after-midnight", label: "After midnight (0–5)", from: 0, to: 5 },
-	{ key: "morning", label: "Morning (6–11)", from: 6, to: 11 },
-	{ key: "afternoon", label: "Afternoon (12–16)", from: 12, to: 16 },
-	{ key: "evening", label: "Evening (17–21)", from: 17, to: 21 },
-	{ key: "night", label: "Night (22–23)", from: 22, to: 23 },
-];
+const TOD_BUCKETS: { key: TodKey; label: string; from: number; to: number }[] =
+	[
+		{ key: "after-midnight", label: "After midnight (0–5)", from: 0, to: 5 },
+		{ key: "morning", label: "Morning (6–11)", from: 6, to: 11 },
+		{ key: "afternoon", label: "Afternoon (12–16)", from: 12, to: 16 },
+		{ key: "evening", label: "Evening (17–21)", from: 17, to: 21 },
+		{ key: "night", label: "Night (22–23)", from: 22, to: 23 },
+	];
 
 function todBucketForHour(hour: number): TodKey {
 	for (const b of TOD_BUCKETS) {
@@ -261,7 +276,11 @@ function weightedMix(colors: Array<{ color: RGB; weight: number }>): RGB {
 		b += c.color.b * c.weight;
 	}
 	if (total <= 0) return EMPTY_CELL_BG;
-	return { r: Math.round(r / total), g: Math.round(g / total), b: Math.round(b / total) };
+	return {
+		r: Math.round(r / total),
+		g: Math.round(g / total),
+		b: Math.round(b / total),
+	};
 }
 
 function ansiBg(rgb: RGB, text: string): string {
@@ -364,7 +383,10 @@ function mondayIndex(date: Date): number {
 	return (date.getDay() + 6) % 7;
 }
 
-function modelKeyFromParts(provider?: unknown, model?: unknown): ModelKey | null {
+function modelKeyFromParts(
+	provider?: unknown,
+	model?: unknown,
+): ModelKey | null {
 	const p = typeof provider === "string" ? provider.trim() : "";
 	const m = typeof model === "string" ? model.trim() : "";
 	if (!p && !m) return null;
@@ -377,7 +399,12 @@ function normalizedLowerString(value: unknown): string {
 	return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
-function isFauxModelReference(parts: { api?: unknown; provider?: unknown; model?: unknown; modelId?: unknown }): boolean {
+function isFauxModelReference(parts: {
+	api?: unknown;
+	provider?: unknown;
+	model?: unknown;
+	modelId?: unknown;
+}): boolean {
 	// pi-ai's test/mock provider is registered as api "faux:<random>" with provider "faux"
 	// and default model ids like "faux-1".  It can emit token estimates, but those are
 	// synthetic and should not affect real session usage breakdowns.
@@ -391,14 +418,22 @@ function isFauxModelReference(parts: { api?: unknown; provider?: unknown; model?
 
 function parseSessionStartFromFilename(name: string): Date | null {
 	// Example: 2026-02-02T21-52-28-774Z_<uuid>.jsonl
-	const m = name.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z_/);
+	const m = name.match(
+		/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z_/,
+	);
 	if (!m) return null;
 	const iso = `${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`;
 	const d = new Date(iso);
 	return Number.isFinite(d.getTime()) ? d : null;
 }
 
-function extractProviderModelAndUsage(obj: any): { api?: any; provider?: any; model?: any; modelId?: any; usage?: any } {
+function extractProviderModelAndUsage(obj: any): {
+	api?: any;
+	provider?: any;
+	model?: any;
+	modelId?: any;
+	usage?: any;
+} {
 	// Session format varies across versions.
 	// - Newer: { provider, model, usage } on the message wrapper
 	// - Older: { message: { provider, model, usage } }
@@ -461,7 +496,10 @@ function extractTokensTotal(usage: any): number {
 	if (total > 0) return total;
 
 	// nested tokens object
-	total = readNum(usage?.tokens?.total) || readNum(usage?.tokens?.totalTokens) || readNum(usage?.tokens?.total_tokens);
+	total =
+		readNum(usage?.tokens?.total) ||
+		readNum(usage?.tokens?.totalTokens) ||
+		readNum(usage?.tokens?.total_tokens);
 	if (total > 0) return total;
 
 	// sum of parts
@@ -532,7 +570,10 @@ async function walkSessionFiles(
 	return out;
 }
 
-async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise<ParsedSession | null> {
+async function parseSessionFile(
+	filePath: string,
+	signal?: AbortSignal,
+): Promise<ParsedSession | null> {
 	const fileName = path.basename(filePath);
 	let startedAt = parseSessionStartFromFilename(fileName);
 	let currentModel: ModelKey | null = null;
@@ -577,7 +618,13 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 			}
 
 			if (obj?.type === "model_change") {
-				if (isFauxModelReference({ api: obj.api, provider: obj.provider, modelId: obj.modelId })) {
+				if (
+					isFauxModelReference({
+						api: obj.api,
+						provider: obj.provider,
+						modelId: obj.modelId,
+					})
+				) {
 					currentModel = null;
 					currentModelIsFaux = true;
 					continue;
@@ -594,8 +641,11 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 
 			if (obj?.type !== "message") continue;
 
-			const { api, provider, model, modelId, usage } = extractProviderModelAndUsage(obj);
-			const explicitMk = modelKeyFromParts(provider, model) ?? modelKeyFromParts(provider, modelId);
+			const { api, provider, model, modelId, usage } =
+				extractProviderModelAndUsage(obj);
+			const explicitMk =
+				modelKeyFromParts(provider, model) ??
+				modelKeyFromParts(provider, modelId);
 			if (isFauxModelReference({ api, provider, model, modelId })) {
 				currentModel = null;
 				currentModelIsFaux = true;
@@ -630,7 +680,11 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 		stream.destroy();
 	}
 
-	if (!startedAt || (messages === 0 && modelsUsed.size === 0 && tokens === 0 && totalCost === 0)) return null;
+	if (
+		!startedAt ||
+		(messages === 0 && modelsUsed.size === 0 && tokens === 0 && totalCost === 0)
+	)
+		return null;
 	const dayKeyLocal = toLocalDayKey(startedAt);
 	const dow = DOW_NAMES[mondayIndex(startedAt)];
 	const tod = todBucketForHour(startedAt.getHours());
@@ -752,8 +806,14 @@ function addSessionToRange(range: RangeAgg, session: ParsedSession): void {
 	if (cwd) {
 		day.sessionsByCwd.set(cwd, (day.sessionsByCwd.get(cwd) ?? 0) + 1);
 		range.cwdSessions.set(cwd, (range.cwdSessions.get(cwd) ?? 0) + 1);
-		day.messagesByCwd.set(cwd, (day.messagesByCwd.get(cwd) ?? 0) + session.messages);
-		range.cwdMessages.set(cwd, (range.cwdMessages.get(cwd) ?? 0) + session.messages);
+		day.messagesByCwd.set(
+			cwd,
+			(day.messagesByCwd.get(cwd) ?? 0) + session.messages,
+		);
+		range.cwdMessages.set(
+			cwd,
+			(range.cwdMessages.get(cwd) ?? 0) + session.messages,
+		);
 		day.tokensByCwd.set(cwd, (day.tokensByCwd.get(cwd) ?? 0) + session.tokens);
 		range.cwdTokens.set(cwd, (range.cwdTokens.get(cwd) ?? 0) + session.tokens);
 		day.costByCwd.set(cwd, (day.costByCwd.get(cwd) ?? 0) + session.totalCost);
@@ -763,29 +823,43 @@ function addSessionToRange(range: RangeAgg, session: ParsedSession): void {
 	// Day-of-week aggregation
 	const dow = session.dow;
 	range.dowSessions.set(dow, (range.dowSessions.get(dow) ?? 0) + 1);
-	range.dowMessages.set(dow, (range.dowMessages.get(dow) ?? 0) + session.messages);
+	range.dowMessages.set(
+		dow,
+		(range.dowMessages.get(dow) ?? 0) + session.messages,
+	);
 	range.dowTokens.set(dow, (range.dowTokens.get(dow) ?? 0) + session.tokens);
 	range.dowCost.set(dow, (range.dowCost.get(dow) ?? 0) + session.totalCost);
 
 	// Time-of-day aggregation
 	const tod = session.tod;
 	day.sessionsByTod.set(tod, (day.sessionsByTod.get(tod) ?? 0) + 1);
-	day.messagesByTod.set(tod, (day.messagesByTod.get(tod) ?? 0) + session.messages);
+	day.messagesByTod.set(
+		tod,
+		(day.messagesByTod.get(tod) ?? 0) + session.messages,
+	);
 	day.tokensByTod.set(tod, (day.tokensByTod.get(tod) ?? 0) + session.tokens);
 	day.costByTod.set(tod, (day.costByTod.get(tod) ?? 0) + session.totalCost);
 	range.todSessions.set(tod, (range.todSessions.get(tod) ?? 0) + 1);
-	range.todMessages.set(tod, (range.todMessages.get(tod) ?? 0) + session.messages);
+	range.todMessages.set(
+		tod,
+		(range.todMessages.get(tod) ?? 0) + session.messages,
+	);
 	range.todTokens.set(tod, (range.todTokens.get(tod) ?? 0) + session.tokens);
 	range.todCost.set(tod, (range.todCost.get(tod) ?? 0) + session.totalCost);
 }
 
-function sortMapByValueDesc<K extends string>(m: Map<K, number>): Array<{ key: K; value: number }> {
+function sortMapByValueDesc<K extends string>(
+	m: Map<K, number>,
+): Array<{ key: K; value: number }> {
 	return [...m.entries()]
 		.map(([key, value]) => ({ key, value }))
 		.sort((a, b) => b.value - a.value);
 }
 
-function choosePaletteFromLast30Days(range30: RangeAgg, topN = 4): {
+function choosePaletteFromLast30Days(
+	range30: RangeAgg,
+	topN = 4,
+): {
 	modelColors: Map<ModelKey, RGB>;
 	otherColor: RGB;
 	orderedModels: ModelKey[];
@@ -814,7 +888,10 @@ function choosePaletteFromLast30Days(range30: RangeAgg, topN = 4): {
 	};
 }
 
-function chooseCwdPaletteFromLast30Days(range30: RangeAgg, topN = 4): {
+function chooseCwdPaletteFromLast30Days(
+	range30: RangeAgg,
+	topN = 4,
+): {
 	cwdColors: Map<CwdKey, RGB>;
 	otherColor: RGB;
 	orderedCwds: CwdKey[];
@@ -844,16 +921,19 @@ function chooseCwdPaletteFromLast30Days(range30: RangeAgg, topN = 4): {
 
 // Fixed palette for day-of-week: weekdays get cool tones, weekend gets warm
 const DOW_PALETTE: RGB[] = [
-	{ r: 47, g: 129, b: 247 },  // Mon – blue
-	{ r: 64, g: 196, b: 99 },   // Tue – green
+	{ r: 47, g: 129, b: 247 }, // Mon – blue
+	{ r: 64, g: 196, b: 99 }, // Tue – green
 	{ r: 163, g: 113, b: 247 }, // Wed – purple
-	{ r: 47, g: 175, b: 200 },  // Thu – teal
+	{ r: 47, g: 175, b: 200 }, // Thu – teal
 	{ r: 100, g: 200, b: 150 }, // Fri – mint
-	{ r: 255, g: 159, b: 10 },  // Sat – orange
-	{ r: 244, g: 67, b: 54 },   // Sun – red
+	{ r: 255, g: 159, b: 10 }, // Sat – orange
+	{ r: 244, g: 67, b: 54 }, // Sun – red
 ];
 
-function buildDowPalette(): { dowColors: Map<DowKey, RGB>; orderedDows: DowKey[] } {
+function buildDowPalette(): {
+	dowColors: Map<DowKey, RGB>;
+	orderedDows: DowKey[];
+} {
 	const dowColors = new Map<DowKey, RGB>();
 	for (let i = 0; i < DOW_NAMES.length; i++) {
 		dowColors.set(DOW_NAMES[i], DOW_PALETTE[i]);
@@ -863,14 +943,17 @@ function buildDowPalette(): { dowColors: Map<DowKey, RGB>; orderedDows: DowKey[]
 
 // Fixed palette for time-of-day buckets
 const TOD_PALETTE: Map<TodKey, RGB> = new Map([
-	["after-midnight", { r: 100, g: 60, b: 180 }],  // deep purple
-	["morning", { r: 255, g: 200, b: 50 }],          // golden yellow
-	["afternoon", { r: 64, g: 196, b: 99 }],         // green
-	["evening", { r: 47, g: 129, b: 247 }],           // blue
-	["night", { r: 60, g: 40, b: 140 }],              // dark indigo
+	["after-midnight", { r: 100, g: 60, b: 180 }], // deep purple
+	["morning", { r: 255, g: 200, b: 50 }], // golden yellow
+	["afternoon", { r: 64, g: 196, b: 99 }], // green
+	["evening", { r: 47, g: 129, b: 247 }], // blue
+	["night", { r: 60, g: 40, b: 140 }], // dark indigo
 ]);
 
-function buildTodPalette(): { todColors: Map<TodKey, RGB>; orderedTods: TodKey[] } {
+function buildTodPalette(): {
+	todColors: Map<TodKey, RGB>;
+	orderedTods: TodKey[];
+} {
 	const todColors = new Map<TodKey, RGB>();
 	const orderedTods: TodKey[] = [];
 	for (const b of TOD_BUCKETS) {
@@ -899,7 +982,12 @@ function dayMixedColor(
 		return c ?? otherColor;
 	} else if (view === "tod") {
 		if (mode === "tokens") {
-			map = day.tokens > 0 ? day.tokensByTod : day.messages > 0 ? day.messagesByTod : day.sessionsByTod;
+			map =
+				day.tokens > 0
+					? day.tokensByTod
+					: day.messages > 0
+						? day.messagesByTod
+						: day.sessionsByTod;
 		} else if (mode === "messages") {
 			map = day.messages > 0 ? day.messagesByTod : day.sessionsByTod;
 		} else {
@@ -907,7 +995,12 @@ function dayMixedColor(
 		}
 	} else if (view === "cwd") {
 		if (mode === "tokens") {
-			map = day.tokens > 0 ? day.tokensByCwd : day.messages > 0 ? day.messagesByCwd : day.sessionsByCwd;
+			map =
+				day.tokens > 0
+					? day.tokensByCwd
+					: day.messages > 0
+						? day.messagesByCwd
+						: day.sessionsByCwd;
 		} else if (mode === "messages") {
 			map = day.messages > 0 ? day.messagesByCwd : day.sessionsByCwd;
 		} else {
@@ -915,7 +1008,12 @@ function dayMixedColor(
 		}
 	} else {
 		if (mode === "tokens") {
-			map = day.tokens > 0 ? day.tokensByModel : day.messages > 0 ? day.messagesByModel : day.sessionsByModel;
+			map =
+				day.tokens > 0
+					? day.tokensByModel
+					: day.messages > 0
+						? day.messagesByModel
+						: day.sessionsByModel;
 		} else if (mode === "messages") {
 			map = day.messages > 0 ? day.messagesByModel : day.sessionsByModel;
 		} else {
@@ -938,14 +1036,20 @@ function graphMetricForRange(
 ): { kind: "sessions" | "messages" | "tokens"; max: number; denom: number } {
 	if (mode === "tokens") {
 		const maxTokens = Math.max(0, ...range.days.map((d) => d.tokens));
-		if (maxTokens > 0) return { kind: "tokens", max: maxTokens, denom: Math.log1p(maxTokens) };
+		if (maxTokens > 0)
+			return { kind: "tokens", max: maxTokens, denom: Math.log1p(maxTokens) };
 		// fall back if tokens aren't available
 		mode = "messages";
 	}
 
 	if (mode === "messages") {
 		const maxMessages = Math.max(0, ...range.days.map((d) => d.messages));
-		if (maxMessages > 0) return { kind: "messages", max: maxMessages, denom: Math.log1p(maxMessages) };
+		if (maxMessages > 0)
+			return {
+				kind: "messages",
+				max: maxMessages,
+				denom: Math.log1p(maxMessages),
+			};
 		// fall back if messages aren't available
 		mode = "sessions";
 	}
@@ -1044,7 +1148,11 @@ function displayModelName(modelKey: string): string {
 	return idx === -1 ? modelKey : modelKey.slice(idx + 1);
 }
 
-function renderLegendItems(modelColors: Map<ModelKey, RGB>, orderedModels: ModelKey[], otherColor: RGB): string[] {
+function renderLegendItems(
+	modelColors: Map<ModelKey, RGB>,
+	orderedModels: ModelKey[],
+	otherColor: RGB,
+): string[] {
 	const items: string[] = [];
 	for (const mk of orderedModels) {
 		const c = modelColors.get(mk);
@@ -1066,7 +1174,11 @@ function fitRight(text: string, width: number): string {
 	return " ".repeat(Math.max(0, width - w)) + t;
 }
 
-function renderLegendBlock(leftLabel: string, items: string[], width: number): string[] {
+function renderLegendBlock(
+	leftLabel: string,
+	items: string[],
+	width: number,
+): string[] {
 	if (width <= 0) return [];
 	if (items.length === 0) return [truncateToWidth(leftLabel, width)];
 
@@ -1089,7 +1201,11 @@ function renderLegendBlock(leftLabel: string, items: string[], width: number): s
 	return lines;
 }
 
-function renderModelTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8): string[] {
+function renderModelTable(
+	range: RangeAgg,
+	mode: MeasurementMode,
+	maxRows = 8,
+): string[] {
 	// Keep this relatively narrow: model + selected metric + cost + share.
 	const metric = graphMetricForRange(range, mode);
 	const kind = metric.kind;
@@ -1113,11 +1229,18 @@ function renderModelTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8): 
 	const rows = sorted.slice(0, maxRows);
 
 	const valueWidth = kind === "tokens" ? 10 : 8;
-	const modelWidth = Math.min(52, Math.max("model".length, ...rows.map((r) => r.key.length)));
+	const modelWidth = Math.min(
+		52,
+		Math.max("model".length, ...rows.map((r) => r.key.length)),
+	);
 
 	const lines: string[] = [];
-	lines.push(`${padRight("model", modelWidth)}  ${padLeft(label, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("share", 6)}`);
-	lines.push(`${"-".repeat(modelWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(6)}`);
+	lines.push(
+		`${padRight("model", modelWidth)}  ${padLeft(label, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("share", 6)}`,
+	);
+	lines.push(
+		`${"-".repeat(modelWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(6)}`,
+	);
 
 	for (const r of rows) {
 		const value = perModel.get(r.key) ?? 0;
@@ -1135,7 +1258,11 @@ function renderModelTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8): 
 	return lines;
 }
 
-function renderCwdTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8): string[] {
+function renderCwdTable(
+	range: RangeAgg,
+	mode: MeasurementMode,
+	maxRows = 8,
+): string[] {
 	const metric = graphMetricForRange(range, mode);
 	const kind = metric.kind;
 
@@ -1159,11 +1286,18 @@ function renderCwdTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8): st
 
 	const valueWidth = kind === "tokens" ? 10 : 8;
 	const displayPaths = rows.map((r) => abbreviatePath(r.key, 40));
-	const cwdWidth = Math.min(42, Math.max("directory".length, ...displayPaths.map((p) => p.length)));
+	const cwdWidth = Math.min(
+		42,
+		Math.max("directory".length, ...displayPaths.map((p) => p.length)),
+	);
 
 	const lines: string[] = [];
-	lines.push(`${padRight("directory", cwdWidth)}  ${padLeft(label, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("share", 6)}`);
-	lines.push(`${"-".repeat(cwdWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(6)}`);
+	lines.push(
+		`${padRight("directory", cwdWidth)}  ${padLeft(label, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("share", 6)}`,
+	);
+	lines.push(
+		`${"-".repeat(cwdWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(6)}`,
+	);
 
 	for (let i = 0; i < rows.length; i++) {
 		const r = rows[i];
@@ -1185,7 +1319,11 @@ function renderCwdTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8): st
 function dowMetricForRange(
 	range: RangeAgg,
 	mode: MeasurementMode,
-): { kind: "sessions" | "messages" | "tokens"; perDow: Map<DowKey, number>; total: number } {
+): {
+	kind: "sessions" | "messages" | "tokens";
+	perDow: Map<DowKey, number>;
+	total: number;
+} {
 	const metric = graphMetricForRange(range, mode);
 	const kind = metric.kind;
 
@@ -1209,7 +1347,8 @@ function renderDowDistributionLines(
 	const pctWidth = 4; // "100%"
 	const valueWidth = kind === "tokens" ? 10 : 8;
 	const showValue = width >= dayWidth + 1 + 10 + 1 + pctWidth + 1 + valueWidth;
-	const fixedWidth = dayWidth + 1 + 1 + pctWidth + (showValue ? 1 + valueWidth : 0);
+	const fixedWidth =
+		dayWidth + 1 + 1 + pctWidth + (showValue ? 1 + valueWidth : 0);
 	const barWidth = Math.max(1, width - fixedWidth);
 	const fallbackColor: RGB = { r: 160, g: 160, b: 160 };
 
@@ -1241,8 +1380,12 @@ function renderDowTable(range: RangeAgg, mode: MeasurementMode): string[] {
 	const dowWidth = 5; // "day  "
 
 	const lines: string[] = [];
-	lines.push(`${padRight("day", dowWidth)}  ${padLeft(kind, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("share", 6)}`);
-	lines.push(`${"-".repeat(dowWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(6)}`);
+	lines.push(
+		`${padRight("day", dowWidth)}  ${padLeft(kind, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("share", 6)}`,
+	);
+	lines.push(
+		`${"-".repeat(dowWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(6)}`,
+	);
 
 	// Always show in Mon–Sun order
 	for (const dow of DOW_NAMES) {
@@ -1279,8 +1422,12 @@ function renderTodTable(range: RangeAgg, mode: MeasurementMode): string[] {
 	const todWidth = 22; // widest label
 
 	const lines: string[] = [];
-	lines.push(`${padRight("time of day", todWidth)}  ${padLeft(kind, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("share", 6)}`);
-	lines.push(`${"-".repeat(todWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(6)}`);
+	lines.push(
+		`${padRight("time of day", todWidth)}  ${padLeft(kind, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("share", 6)}`,
+	);
+	lines.push(
+		`${"-".repeat(todWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(6)}`,
+	);
 
 	// Always show in chronological order
 	for (const b of TOD_BUCKETS) {
@@ -1311,9 +1458,16 @@ function renderLeftRight(left: string, right: string, width: number): string {
 	return left + " ".repeat(pad) + rightText;
 }
 
-function rangeSummary(range: RangeAgg, days: number, mode: MeasurementMode): string {
+function rangeSummary(
+	range: RangeAgg,
+	days: number,
+	mode: MeasurementMode,
+): string {
 	const avg = range.sessions > 0 ? range.totalCost / range.sessions : 0;
-	const costPart = range.totalCost > 0 ? `${formatUsd(range.totalCost)} · avg ${formatUsd(avg)}/session` : `$0.0000`;
+	const costPart =
+		range.totalCost > 0
+			? `${formatUsd(range.totalCost)} · avg ${formatUsd(avg)}/session`
+			: `$0.0000`;
 
 	if (mode === "tokens") {
 		return `Last ${days} days: ${formatCount(range.sessions)} sessions · ${formatCount(range.totalTokens)} tokens · ${costPart}`;
@@ -1334,11 +1488,22 @@ async function computeBreakdown(
 	const range90 = ranges.get(90)!;
 	const start90 = range90.days[0].date;
 
-	onProgress?.({ phase: "scan", foundFiles: 0, parsedFiles: 0, totalFiles: 0, currentFile: undefined });
-
-	const candidates = await walkSessionFiles(SESSION_ROOT, start90, signal, (found) => {
-		onProgress?.({ phase: "scan", foundFiles: found });
+	onProgress?.({
+		phase: "scan",
+		foundFiles: 0,
+		parsedFiles: 0,
+		totalFiles: 0,
+		currentFile: undefined,
 	});
+
+	const candidates = await walkSessionFiles(
+		SESSION_ROOT,
+		start90,
+		signal,
+		(found) => {
+			onProgress?.({ phase: "scan", foundFiles: found });
+		},
+	);
 
 	const totalFiles = candidates.length;
 	onProgress?.({
@@ -1353,7 +1518,12 @@ async function computeBreakdown(
 	for (const filePath of candidates) {
 		if (signal?.aborted) break;
 		parsedFiles += 1;
-		onProgress?.({ phase: "parse", parsedFiles, totalFiles, currentFile: path.basename(filePath) });
+		onProgress?.({
+			phase: "parse",
+			parsedFiles,
+			totalFiles,
+			currentFile: path.basename(filePath),
+		});
 
 		const session = await parseSessionFile(filePath, signal);
 		if (!session) continue;
@@ -1374,7 +1544,14 @@ async function computeBreakdown(
 	const cwdPalette = chooseCwdPaletteFromLast30Days(ranges.get(30)!, 4);
 	const dowPalette = buildDowPalette();
 	const todPalette = buildTodPalette();
-	return { generatedAt: now, ranges, palette, cwdPalette, dowPalette, todPalette };
+	return {
+		generatedAt: now,
+		ranges,
+		palette,
+		cwdPalette,
+		dowPalette,
+		todPalette,
+	};
 }
 
 class BreakdownComponent implements Component {
@@ -1399,23 +1576,33 @@ class BreakdownComponent implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || data.toLowerCase() === "q") {
+		if (
+			matchesKey(data, Key.escape) ||
+			matchesKey(data, Key.ctrl("c")) ||
+			data.toLowerCase() === "q"
+		) {
 			this.onDone();
 			return;
 		}
 
-		if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab")) || data.toLowerCase() === "t") {
+		if (
+			matchesKey(data, Key.tab) ||
+			matchesKey(data, Key.shift("tab")) ||
+			data.toLowerCase() === "t"
+		) {
 			const order: MeasurementMode[] = ["sessions", "messages", "tokens"];
 			const idx = Math.max(0, order.indexOf(this.measurement));
 			const dir = matchesKey(data, Key.shift("tab")) ? -1 : 1;
-			this.measurement = order[(idx + order.length + dir) % order.length] ?? "sessions";
+			this.measurement =
+				order[(idx + order.length + dir) % order.length] ?? "sessions";
 			this.invalidate();
 			this.tui.requestRender();
 			return;
 		}
 
 		const prev = () => {
-			this.rangeIndex = (this.rangeIndex + RANGE_DAYS.length - 1) % RANGE_DAYS.length;
+			this.rangeIndex =
+				(this.rangeIndex + RANGE_DAYS.length - 1) % RANGE_DAYS.length;
 			this.invalidate();
 			this.tui.requestRender();
 		};
@@ -1428,10 +1615,16 @@ class BreakdownComponent implements Component {
 		if (matchesKey(data, Key.left) || data.toLowerCase() === "h") prev();
 		if (matchesKey(data, Key.right) || data.toLowerCase() === "l") next();
 
-		if (matchesKey(data, Key.up) || matchesKey(data, Key.down) || data.toLowerCase() === "j" || data.toLowerCase() === "k") {
+		if (
+			matchesKey(data, Key.up) ||
+			matchesKey(data, Key.down) ||
+			data.toLowerCase() === "j" ||
+			data.toLowerCase() === "k"
+		) {
 			const views: BreakdownView[] = ["model", "cwd", "dow", "tod"];
 			const idx = views.indexOf(this.view);
-			const dir = matchesKey(data, Key.up) || data.toLowerCase() === "k" ? -1 : 1;
+			const dir =
+				matchesKey(data, Key.up) || data.toLowerCase() === "k" ? -1 : 1;
 			this.view = views[(idx + views.length + dir) % views.length] ?? "model";
 			this.invalidate();
 			this.tui.requestRender();
@@ -1518,12 +1711,22 @@ class BreakdownComponent implements Component {
 			}
 		}
 
-		const graphDescriptor = this.view === "dow" ? `share of ${metric.kind} by weekday` : `${metric.kind}/day`;
-		const summary = rangeSummary(range, selectedDays, metric.kind) + dim(`   (graph: ${graphDescriptor})`);
+		const graphDescriptor =
+			this.view === "dow"
+				? `share of ${metric.kind} by weekday`
+				: `${metric.kind}/day`;
+		const summary =
+			rangeSummary(range, selectedDays, metric.kind) +
+			dim(`   (graph: ${graphDescriptor})`);
 
 		let graphLines: string[];
 		if (this.view === "dow") {
-			graphLines = renderDowDistributionLines(range, this.measurement, this.data.dowPalette.dowColors, width);
+			graphLines = renderDowDistributionLines(
+				range,
+				this.measurement,
+				this.data.dowPalette.dowColors,
+				width,
+			);
 		} else {
 			const maxScale = selectedDays === 7 ? 4 : selectedDays === 30 ? 3 : 2;
 			const weeks = weeksForRange(range);
@@ -1531,7 +1734,8 @@ class BreakdownComponent implements Component {
 			const gap = 1;
 			const graphArea = Math.max(1, width - leftMargin);
 			// Each week column uses: cellWidth + gap. Last column also gets gap (fine; we truncate anyway).
-			const idealCellWidth = Math.floor((graphArea + gap) / Math.max(1, weeks)) - gap;
+			const idealCellWidth =
+				Math.floor((graphArea + gap) / Math.max(1, weeks)) - gap;
 			const cellWidth = Math.min(maxScale, Math.max(1, idealCellWidth));
 
 			graphLines = renderGraphLines(
@@ -1544,14 +1748,22 @@ class BreakdownComponent implements Component {
 			);
 		}
 		const tableLines =
-			this.view === "model" ? renderModelTable(range, metric.kind, 8)
-			: this.view === "cwd" ? renderCwdTable(range, metric.kind, 8)
-			: this.view === "dow" ? renderDowTable(range, metric.kind)
-			: renderTodTable(range, metric.kind);
+			this.view === "model"
+				? renderModelTable(range, metric.kind, 8)
+				: this.view === "cwd"
+					? renderCwdTable(range, metric.kind, 8)
+					: this.view === "dow"
+						? renderDowTable(range, metric.kind)
+						: renderTodTable(range, metric.kind);
 
 		const lines: string[] = [];
 		lines.push(truncateToWidth(header, width));
-		lines.push(truncateToWidth(dim("←/→ range · ↑/↓ view · tab metric · q to close"), width));
+		lines.push(
+			truncateToWidth(
+				dim("←/→ range · ↑/↓ view · tab metric · q to close"),
+				width,
+			),
+		);
 		lines.push("");
 		lines.push(truncateToWidth(summary, width));
 		lines.push("");
@@ -1568,9 +1780,11 @@ class BreakdownComponent implements Component {
 			if (showSideLegend) {
 				const legendBlock: string[] = [];
 				const legendTitle =
-					this.view === "model" ? "Top models (30d palette):"
-					: this.view === "cwd" ? "Top directories (30d palette):"
-					: "Time of day:";
+					this.view === "model"
+						? "Top models (30d palette):"
+						: this.view === "cwd"
+							? "Top directories (30d palette):"
+							: "Time of day:";
 				legendBlock.push(dim(legendTitle));
 				legendBlock.push(...legendItems);
 				// Fit into 7 rows (same as graph). If too many, show a final "+N more" line.
@@ -1578,7 +1792,10 @@ class BreakdownComponent implements Component {
 				let legendLines = legendBlock.slice(0, maxLegendRows);
 				if (legendBlock.length > maxLegendRows) {
 					const remaining = legendBlock.length - (maxLegendRows - 1);
-					legendLines = [...legendBlock.slice(0, maxLegendRows - 1), dim(`+${remaining} more`)];
+					legendLines = [
+						...legendBlock.slice(0, maxLegendRows - 1),
+						dim(`+${remaining} more`),
+					];
 				}
 				while (legendLines.length < graphLines.length) legendLines.push("");
 
@@ -1589,7 +1806,10 @@ class BreakdownComponent implements Component {
 
 				for (let i = 0; i < graphLines.length; i++) {
 					const left = padRightAnsi(graphLines[i] ?? "", graphWidth);
-					const right = truncateToWidth(legendLines[i] ?? "", Math.max(0, legendWidth));
+					const right = truncateToWidth(
+						legendLines[i] ?? "",
+						Math.max(0, legendWidth),
+					);
 					lines.push(truncateToWidth(left + " ".repeat(sep) + right, width));
 				}
 			} else {
@@ -1598,9 +1818,11 @@ class BreakdownComponent implements Component {
 				lines.push("");
 				// Compact legend below, left-aligned.
 				const legendTitleBelow =
-					this.view === "model" ? "Top models (30d palette):"
-					: this.view === "cwd" ? "Top directories (30d palette):"
-					: "Time of day:";
+					this.view === "model"
+						? "Top models (30d palette):"
+						: this.view === "cwd"
+							? "Top directories (30d palette):"
+							: "Time of day:";
 				lines.push(truncateToWidth(dim(legendTitleBelow), width));
 				for (const it of legendItems) lines.push(truncateToWidth(it, width));
 			}
@@ -1611,14 +1833,17 @@ class BreakdownComponent implements Component {
 
 		// Ensure no overly long lines (truncateToWidth already), but keep at least 1 line.
 		this.cachedWidth = width;
-		this.cachedLines = lines.map((l) => (visibleWidth(l) > width ? truncateToWidth(l, width) : l));
+		this.cachedLines = lines.map((l) =>
+			visibleWidth(l) > width ? truncateToWidth(l, width) : l,
+		);
 		return this.cachedLines;
 	}
 }
 
 export default function sessionBreakdownExtension(pi: ExtensionAPI) {
 	pi.registerCommand("session-breakdown", {
-		description: "Interactive breakdown of last 7/30/90 days of ~/.pi session usage (sessions/messages/tokens + cost by model)",
+		description:
+			"Interactive breakdown of last 7/30/90 days of ~/.pi session usage (sessions/messages/tokens + cost by model)",
 		handler: async (_args, ctx: ExtensionContext) => {
 			if (!ctx.hasUI) {
 				// Non-interactive fallback: just notify.
@@ -1636,66 +1861,73 @@ export default function sessionBreakdownExtension(pi: ExtensionAPI) {
 			}
 
 			let aborted = false;
-			const data = await ctx.ui.custom<BreakdownData | null>((tui, theme, _kb, done) => {
-				const baseMessage = "Analyzing sessions (last 90 days)…";
-				const loader = new BorderedLoader(tui, theme, baseMessage);
+			const data = await ctx.ui.custom<BreakdownData | null>(
+				(tui, theme, _kb, done) => {
+					const baseMessage = "Analyzing sessions (last 90 days)…";
+					const loader = new BorderedLoader(tui, theme, baseMessage);
 
-				const startedAt = Date.now();
-				const progress: BreakdownProgressState = {
-					phase: "scan",
-					foundFiles: 0,
-					parsedFiles: 0,
-					totalFiles: 0,
-					currentFile: undefined,
-				};
+					const startedAt = Date.now();
+					const progress: BreakdownProgressState = {
+						phase: "scan",
+						foundFiles: 0,
+						parsedFiles: 0,
+						totalFiles: 0,
+						currentFile: undefined,
+					};
 
-				const renderMessage = (): string => {
-					const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-					if (progress.phase === "scan") {
-						return `${baseMessage}  scanning (${formatCount(progress.foundFiles)} files) · ${elapsed}s`;
-					}
-					if (progress.phase === "parse") {
-						return `${baseMessage}  parsing (${formatCount(progress.parsedFiles)}/${formatCount(progress.totalFiles)}) · ${elapsed}s`;
-					}
-					return `${baseMessage}  finalizing · ${elapsed}s`;
-				};
+					const renderMessage = (): string => {
+						const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+						if (progress.phase === "scan") {
+							return `${baseMessage}  scanning (${formatCount(progress.foundFiles)} files) · ${elapsed}s`;
+						}
+						if (progress.phase === "parse") {
+							return `${baseMessage}  parsing (${formatCount(progress.parsedFiles)}/${formatCount(progress.totalFiles)}) · ${elapsed}s`;
+						}
+						return `${baseMessage}  finalizing · ${elapsed}s`;
+					};
 
-				let intervalId: NodeJS.Timeout | null = null;
-				const stopTicker = () => {
-					if (intervalId) {
-						clearInterval(intervalId);
-						intervalId = null;
-					}
-				};
+					let intervalId: NodeJS.Timeout | null = null;
+					const stopTicker = () => {
+						if (intervalId) {
+							clearInterval(intervalId);
+							intervalId = null;
+						}
+					};
 
-				// Update every 0.5s so long-running scans show some visible progress.
-				setBorderedLoaderMessage(loader, renderMessage());
-				intervalId = setInterval(() => {
+					// Update every 0.5s so long-running scans show some visible progress.
 					setBorderedLoaderMessage(loader, renderMessage());
-				}, 500);
+					intervalId = setInterval(() => {
+						setBorderedLoaderMessage(loader, renderMessage());
+					}, 500);
 
-				loader.onAbort = () => {
-					aborted = true;
-					stopTicker();
-					done(null);
-				};
-
-				computeBreakdown(loader.signal, (update) => Object.assign(progress, update))
-					.then((d) => {
+					loader.onAbort = () => {
+						aborted = true;
 						stopTicker();
-						if (!aborted) done(d);
-					})
-					.catch((err) => {
-						stopTicker();
-						console.error("session-breakdown: failed to analyze sessions", err);
-						if (!aborted) done(null);
-					});
+						done(null);
+					};
 
-				return loader;
-			});
+					computeBreakdown(loader.signal, (update) =>
+						Object.assign(progress, update),
+					)
+						.then((d) => {
+							stopTicker();
+							if (!aborted) done(d);
+						})
+						.catch((err) => {
+							stopTicker();
+							log.error("failed to analyze sessions", err);
+							if (!aborted) done(null);
+						});
+
+					return loader;
+				},
+			);
 
 			if (!data) {
-				ctx.ui.notify(aborted ? "Cancelled" : "Failed to analyze sessions", aborted ? "info" : "error");
+				ctx.ui.notify(
+					aborted ? "Cancelled" : "Failed to analyze sessions",
+					aborted ? "info" : "error",
+				);
 				return;
 			}
 

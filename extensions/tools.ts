@@ -12,6 +12,11 @@
 import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("tools");
+
+log.debug("Extension loaded");
 
 // State persisted to session
 interface ToolsState {
@@ -64,6 +69,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 	}
 
 	// Register /tools command
+	log.debug("registerCommand: tools");
 	pi.registerCommand("tools", {
 		description: "Enable/disable tools",
 		handler: async (_args, ctx) => {
@@ -136,11 +142,13 @@ export default function toolsExtension(pi: ExtensionAPI) {
 
 	// Restore state on session start
 	pi.on("session_start", async (_event, ctx) => {
+		log.debug("event: session_start");
 		restoreFromBranch(ctx);
 	});
 
 	// Restore state when navigating the session tree
 	pi.on("session_tree", async (_event, ctx) => {
+		log.debug("event: session_tree");
 		restoreFromBranch(ctx);
 	});
 }

@@ -18,6 +18,7 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
+
 /** File-path (absolute) → SHA-256 hex hash of file contents at session start. */
 const initialFileHashes = new Map<string, string>();
 

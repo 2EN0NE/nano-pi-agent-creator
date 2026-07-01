@@ -29,7 +29,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createLogger } from "./pi-logger/api.js";
+import { createLogger } from "@zenone/pi-logger";
 
 const log = createLogger("skills");
 
