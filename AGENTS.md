@@ -77,6 +77,41 @@ log.error("错误");
 
 日志输出由 pi-logger 的配置文件统一管控（`pi-logger.json`），扩展本身无需关心输出目的地和级别过滤。详细说明见 [skills/pi-logger/SKILL.md](skills/pi-logger/SKILL.md)
 
+### 测试辅助扩展（跨扩展交互测试）
+
+当测试的扩展需要与其它扩展交互（如 tools.ts 拦截动态注册工具），可编写专用测试辅助扩展。
+
+**约定：** 测试辅助扩展放在 `test/extensions/<target>/helpers/` 目录下。
+
+**示例：** `test/extensions/tools/helpers/dynamic-registrar.ts`
+
+- 通过 `pi.registerTool()` 模拟 MCP 工具的注册行为
+- 测试用例中通过手动拷贝 + `pi -a --no-session` 运行，不使用 `run_pi_and_check`（因其只搜索 `extensions/` 目录）
+- 参考模板：
+
+```typescript
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createLogger } from "@zenone/pi-logger";
+
+const log = createLogger("my-helper");
+
+export default function (pi: ExtensionAPI) {
+  pi.registerTool({
+    name: "mock_tool",
+    label: "Mock Tool",
+    description: "...",
+    parameters: { type: "object", properties: {}, required: [] },
+    execute: async () => ({
+      content: [{ type: "text", text: "mock result" }],
+      details: undefined,
+    }),
+  });
+  log.info("mock_tool registered");
+}
+```
+
+测试用例中使用手动隔离环境（见 `test/extensions/tools/smoke.test.sh` 的场景 4/5）。
+
 ### 本地同步
 
 这个仓库当前只面向本人本地使用，不做正式发布。
