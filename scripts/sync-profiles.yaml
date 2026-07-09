@@ -1,0 +1,58 @@
+# Sync Profiles Configuration
+#
+# Each profile defines which source resources to sync and where.
+# Profiles are loaded from this file (project-local) merged with
+# ~/.pi/agent/sync-profiles.yaml (global). Project-local takes precedence.
+#
+# Resource types:
+#   extensions/ — .ts files or directories with index.ts
+#   skills/     — directories with SKILL.md
+#   themes/     — .json files
+#   prompts/    — command scripts (source dir: prompts/)
+#
+# Resource lists support:
+#   "*"        — all resources of that type
+#   ["name"]   — specific resources by name (without extension)
+#   exclude:   — per-type list of names to exclude (applied after include)
+
+profiles:
+  # ── Project Full Sync ────────────────────────────────────────
+  # Sync everything to the project's .pi directory.
+  # This is the default profile when no --profile is specified.
+  full-project:
+    description: "Sync all resources to project .pi directory"
+    target: "./.pi"
+    extensions: "*"
+    skills: "*"
+    themes: "*"
+    prompts: ["*"]
+    exclude:
+      extensions: []
+      skills: []
+      themes: []
+      prompts: []
+
+  # ── Development Test ──────────────────────────────────────────
+  # Sync a minimal subset to a project-local test directory.
+  dev-test:
+    description: "Minimal test environment for extension development"
+    target: "./.pi/test"
+    extensions: ["pi-logger", "review"]
+    skills: []
+    themes: []
+    prompts: []
+    # exclude not needed for this small profile
+
+  # ── User Global Install ──────────────────────────────────────
+  # Sync everything (minus heavy/optional items) to ~/.pi/agent/
+  # so pi.dev discovers them automatically.
+  user-install:
+    description: "Install all resources to user's global pi agent directory"
+    target: "~/.pi/agent"
+    extensions: "*"
+    skills: "*"
+    themes: "*"
+    prompts: ["*"]
+    exclude:
+      extensions: ["sandbox"] # sandbox needs manual npm install setup
+      skills: []

@@ -1,26 +1,84 @@
 # Agent Stuff
 
-这个仓库是我在不同项目里复用的 Pi 代理资源集合。当前工程只供本人本地使用，不做 npm 发布。
+> 这个仓库是我在不同项目里复用的 Pi 代理资源集合。
 
-如果你要把当前的命令、扩展、技能和主题同步到本地 Pi 代理目录，直接运行：
+## 🚀 快速开始
 
-```bash
-./scripts/sync-to-local-pi.sh
-```
+要在本地 Pi 代理中使用这些扩展、技能和主题，请按以下步骤操作：
 
-默认会把资源同步到当前项目的 .pi/agents。若需要改成同步到用户目录 ~/.pi/agents，可以这样执行：
+### 1. 安装依赖
 
 ```bash
-./scripts/sync-to-local-pi.sh --target user
+# 在工程根目录执行
+npm install
 ```
 
-如果想同时同步到两个位置，也可以用：
+这会安装所有必需的依赖，包括通过 `file:` 协议引用的本地包 `@zenone/pi-logger`。
+
+> ⚠️ `@zenone/pi-logger` 是一个本地 npm 包（位于 `extensions/pi-logger/`），**不发布到 npm registry**。
+> `npm install` 会通过 `file:extensions/pi-logger` 将其软链接到 `node_modules/@zenone/pi-logger`，
+> 供 Pi 的 jiti 加载器解析使用。
+
+### 2. 配置同步 Profile
+
+编辑 [`scripts/sync-profiles.yaml`](scripts/sync-profiles.yaml)，按需调整 Profile：
+
+```yaml
+profiles:
+  user-install:
+    description: "安装所有资源到用户全局 Pi 代理目录"
+    target: "~/.pi/agent"          # 目标目录
+    extensions: "*"                 # 同步全部扩展
+    skills: "*"                     # 同步全部技能
+    themes: "*"                     # 同步全部主题
+    prompts: ["*"]                  # 同步全部命令提示
+    exclude:
+      extensions: ["sandbox"]       # 排除某些扩展（如需要手动 npm install 的）
+```
+
+你也可以创建多个 Profile 用于不同场景（开发测试、生产安装等）。
+
+### 3. 同步到本地 Pi 代理
 
 ```bash
-./scripts/sync-to-local-pi.sh --target both
+# 默认同步到项目目录（.pi/），供 Pi 自动发现所有扩展、技能和主题
+npx tsx scripts/sync-to-local-pi.ts
+
+# 也可指定 Profile
+npx tsx scripts/sync-to-local-pi.ts --profile user-install
 ```
 
-脚本会把 [commands](commands)、[extensions](extensions)、[skills](skills) 和 [themes](themes) 同步到目标位置。
+### 4. 启动 Pi
+
+同步完成后，启动 Pi 即可自动发现这些扩展、技能和主题：
+
+```bash
+pi
+```
+
+## 📦 同步脚本
+
+详细用法、配置文件参考、内联模式、增量同步机制、npm install 处理等请参见 [docs/sync-tool.md](docs/sync-tool.md)。
+
+### 快速参考
+
+```bash
+# 查看帮助
+npx tsx scripts/sync-to-local-pi.ts --help
+
+# 同步到项目目录（默认 Profile）
+npx tsx scripts/sync-to-local-pi.ts
+
+# 同步到用户全局目录（供 Pi 自动发现）
+npx tsx scripts/sync-to-local-pi.ts --profile user-install
+
+# 开发时快速测试（内联模式，无需编辑配置文件）
+npx tsx scripts/sync-to-local-pi.ts --ext sandbox --target ./.pi/test
+```
+
+## 本地依赖解析
+
+当扩展通过 `file:` 协议引用本地包（如 `@zenone/pi-logger`）时，同步脚本会自动处理依赖解析。详见 [docs/sync-tool.md](docs/sync-tool.md#本地依赖处理)。
 
 ## 目录说明
 
@@ -69,36 +127,4 @@ Pi Coding Agent 的扩展在 [extensions](extensions) 目录中：
 主题文件在 [themes](themes) 目录中：
 
 * [`nightowl.json`](themes/nightowl.json) - Night Owl-inspired theme.
-
-### 本地同步脚本
-
-目前的本地同步入口在 [scripts/sync-to-local-pi.sh](scripts/sync-to-local-pi.sh)。
-
-如果只想先做一次预检查，可以运行：
-
-```bash
-./scripts/sync-to-local-pi.sh --dry-run
-```
-
-## 拦截命令
-
-Command wrappers live in [`intercepted-commands`](intercepted-commands):
-
-* [`pip`](intercepted-commands/pip)
-* [`pip3`](intercepted-commands/pip3)
-* [`poetry`](intercepted-commands/poetry)
-* [`python`](intercepted-commands/python)
-* [`python3`](intercepted-commands/python3)
-
-## 本地依赖：@zenone/pi-logger
-
-`@zenone/pi-logger` 是一个本地 npm 包（来自 `extensions/pi-logger/`），不发布到 npm registry。所有扩展通过 `import { createLogger } from "@zenone/pi-logger"` 使用日志功能。
-
-在新电脑上 clone 工程后需要执行：
-
-```bash
-# 安装所有依赖（会自动安装 @zenone/pi-logger）
-npm install
-```
-
-这会将 `extensions/pi-logger/` 通过 `file:` 协议软链接到 `node_modules/@zenone/pi-logger`，供 pi 的 jiti 加载器解析。
+* [`modern-dark.json`](themes/modern-dark.json) - Modern Dark theme.

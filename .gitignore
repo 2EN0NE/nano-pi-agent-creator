@@ -6,4 +6,10 @@ node_modules
 .DS_Store
 test/results/
 
+# pi-lens — runtime caches and work state (regenerated automatically)
+.pi-lens/
+
+# Sync tool — runtime log (regenerated automatically)
+scripts/sync-to-local-pi.log
+
 .worktrees/

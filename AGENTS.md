@@ -112,30 +112,27 @@ export default function (pi: ExtensionAPI) {
 
 测试用例中使用手动隔离环境（见 `test/extensions/tools/smoke.test.sh` 的场景 4/5）。
 
-### 本地同步
+---
 
-这个仓库当前只面向本人本地使用，不做正式发布。
+## 本地同步
 
-如需把资源同步到本地 Pi 代理目录，请执行：
+本仓库的 extension、skill、theme、prompt 开发使用 `scripts/sync-to-local-pi.ts` 管理同步。
 
-```bash
-./scripts/sync-to-local-pi.sh
-```
+### 工作要求
 
-默认会把资源同步到当前项目的 .pi/agents；如果要改成同步到用户目录 ~/.pi/agents，可使用：
+- **所有扩展/技能/主题的开发和测试**必须通过该工具管理，禁止手动复制文件到目标目录
+- **开发流程**：在源目录编码 → 内联模式同步到测试目录 → 在 Pi 中测试 → 通过后同步到用户目录
+- **最终交付**：开发完成后，必须同步到 `~/.pi/agent/`，完成 UAT 测试确认无误
+- **Profile 配置**：修改 `scripts/sync-profiles.yaml` 时需保证 `exclude` 列表准确，不同 Profile 用途清晰
 
-```bash
-./scripts/sync-to-local-pi.sh --target user
-```
-
-如果要同时同步到两个位置，则用：
+### 快速参考
 
 ```bash
-./scripts/sync-to-local-pi.sh --target both
+# 开发中快速测试（内联模式，指定具体资源和目标）
+npx tsx scripts/sync-to-local-pi.ts --ext foo --target ./.pi/test
+
+# 完成开发后部署到用户目录
+npx tsx scripts/sync-to-local-pi.ts --profile user-install
 ```
 
-如果只想预览要同步的内容，可先运行：
-
-```bash
-./scripts/sync-to-local-pi.sh --dry-run
-```
+详细用法参考 [docs/sync-tool.md](docs/sync-tool.md)。

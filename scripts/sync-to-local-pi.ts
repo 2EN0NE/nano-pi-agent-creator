@@ -1,0 +1,942 @@
+#!/usr/bin/env node
+
+/**
+ * sync-to-local-pi.ts — Profile-driven sync tool for pi.dev resources.
+ *
+ * Reads a YAML config (sync-profiles.yaml), selects a profile, and syncs
+ * the specified extensions/skills/themes/prompts from the project source
+ * directories to a target directory (e.g. .pi/ or ~/.pi/agent/).
+ *
+ * Features:
+ *  - Config-driven profiles (YAML, project + global merge)
+ *  - Selective include with per-type exclude support
+ *  - Incremental sync (mtime + size comparison)
+ *  - Automatic npm install detection for packages with dependencies
+ *  - Append log with timestamps
+ *  - Dry-run mode
+ *
+ * Usage:
+ *   npx tsx scripts/sync-to-local-pi.ts [options]
+ *
+ * Options:
+ *   --profile <name>   Sync only the named profile
+ *   --all              Sync all defined profiles
+ *   --dry-run          Preview only, no writes
+ *   --config <path>    Path to YAML config (default: ./scripts/sync-profiles.yaml)
+ *   -h, --help         Show help
+ */
+
+import {
+	readFileSync,
+	existsSync,
+	mkdirSync,
+	statSync,
+	cpSync,
+	rmSync,
+	appendFileSync,
+	readdirSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { join, dirname, resolve, isAbsolute, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
+import * as yaml from "js-yaml";
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Constants
+// ══════════════════════════════════════════════════════════════════════════════
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = resolve(SCRIPT_DIR, "..");
+const DEFAULT_CONFIG_PATH = join(SCRIPT_DIR, "sync-profiles.yaml");
+const GLOBAL_CONFIG_PATH = join(
+	homedir(),
+	".pi",
+	"agent",
+	"sync-profiles.yaml",
+);
+const LOG_FILE = join(SCRIPT_DIR, "sync-to-local-pi.log");
+
+// Supported resource types (matching pi.dev resource directory names)
+const RESOURCE_TYPES = ["extensions", "skills", "themes", "prompts"] as const;
+type ResourceType = (typeof RESOURCE_TYPES)[number];
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Types
+// ══════════════════════════════════════════════════════════════════════════════
+
+interface ProfileConfig {
+	description?: string;
+	target: string; // target directory (relative to project root or absolute)
+	extensions: string[] | "*";
+	skills: string[] | "*";
+	themes: string[] | "*";
+	prompts: string[] | "*";
+	exclude?: Partial<Record<ResourceType, string[]>>;
+}
+
+interface SyncProfilesConfig {
+	profiles: Record<string, ProfileConfig>;
+}
+
+interface ResolvedResource {
+	type: ResourceType;
+	name: string;
+	sourcePath: string; // absolute path in source project
+	targetPath: string; // absolute path in target directory
+	isDirectory: boolean; // true for dir-based extensions, skills, etc.
+}
+
+type SyncAction = "NEW" | "UPDATE" | "SKIP";
+
+// (SyncLogEntry type removed — unused; log entries are written directly)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CLI Argument Parsing
+// ══════════════════════════════════════════════════════════════════════════════
+
+interface CLIOptions {
+	profile: string | null;
+	all: boolean;
+	dryRun: boolean;
+	config: string;
+	// Inline mode args
+	inline: boolean;
+	inlineExtensions: string[];
+	inlineSkills: string[];
+	inlineThemes: string[];
+	inlinePrompts: string[];
+	inlineTarget: string | null;
+}
+
+function parseArgs(): CLIOptions {
+	const args = process.argv.slice(2);
+	const opts: CLIOptions = {
+		profile: null,
+		all: false,
+		dryRun: false,
+		config: DEFAULT_CONFIG_PATH,
+		inline: false,
+		inlineExtensions: [],
+		inlineSkills: [],
+		inlineThemes: [],
+		inlinePrompts: [],
+		inlineTarget: null,
+	};
+
+	for (let i = 0; i < args.length; i++) {
+		switch (args[i]) {
+			case "--profile":
+			case "-p":
+				opts.profile = args[++i] ?? null;
+				break;
+			case "--all":
+			case "-a":
+				opts.all = true;
+				break;
+			case "--dry-run":
+			case "-n":
+				opts.dryRun = true;
+				break;
+			case "--config":
+			case "-c":
+				opts.config = args[++i] ?? DEFAULT_CONFIG_PATH;
+				break;
+			case "--ext":
+			case "--extension":
+				opts.inline = true;
+				opts.inlineExtensions.push(args[++i] ?? "");
+				break;
+			case "--skill":
+				opts.inline = true;
+				opts.inlineSkills.push(args[++i] ?? "");
+				break;
+			case "--theme":
+				opts.inline = true;
+				opts.inlineThemes.push(args[++i] ?? "");
+				break;
+			case "--prompt":
+				opts.inline = true;
+				opts.inlinePrompts.push(args[++i] ?? "");
+				break;
+			case "--target":
+			case "-t":
+				opts.inlineTarget = args[++i] ?? null;
+				if (opts.inlineTarget) opts.inline = true;
+				break;
+			case "-h":
+			case "--help":
+				printHelp();
+				process.exit(0);
+			default:
+				console.error(`Unknown argument: ${args[i]}`);
+				printHelp();
+				process.exit(1);
+		}
+	}
+
+	return opts;
+}
+
+function printHelp(): void {
+	console.log(`Usage: npx tsx scripts/sync-to-local-pi.ts [options]
+
+Profile-driven sync tool for pi.dev resources.
+
+MODES (choose one):
+  Profile mode (default):   --profile <name>  or  --all
+  Inline mode:              --ext <name> --target <dir>  (and/or --skill, --theme, --prompt)
+
+Options:
+  --profile <name>   -p   Sync only the named profile
+  --all              -a   Sync all defined profiles
+  --dry-run          -n   Preview only, no writes
+  --config <path>    -c   Path to YAML config (default: scripts/sync-profiles.yaml)
+
+Inline mode options:
+  --ext <name>            Extension name to sync (repeatable)
+  --skill <name>          Skill name to sync (repeatable)
+  --theme <name>          Theme name to sync (repeatable)
+  --prompt <name>         Prompt name to sync (repeatable)
+  --target <dir>     -t   Target directory (required in inline mode)
+
+  -h, --help              Show this help
+
+Examples:
+  npx tsx scripts/sync-to-local-pi.ts                     # default profile (full-project)
+  npx tsx scripts/sync-to-local-pi.ts --profile user-install  # global install
+  npx tsx scripts/sync-to-local-pi.ts --all --dry-run          # preview all profiles
+  npx tsx scripts/sync-to-local-pi.ts --ext sandbox --target ./.pi/test
+  npx tsx scripts/sync-to-local-pi.ts --ext sandbox --ext pi-logger --target ~/.pi/agent
+`);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Logging
+// ══════════════════════════════════════════════════════════════════════════════
+
+function writeLog(level: "INFO" | "WARN" | "ERROR", message: string): void {
+	const now = new Date();
+	const pad = (n: number) => String(n).padStart(2, "0");
+	const offset = -now.getTimezoneOffset();
+	const offsetSign = offset >= 0 ? "+" : "-";
+	const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
+	const offsetMins = pad(Math.abs(offset) % 60);
+	const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${String(now.getMilliseconds()).padStart(3, "0")}${offsetSign}${offsetHours}:${offsetMins}`;
+	const line = `[${timestamp}] [${level}] ${message}\n`;
+
+	// Always write to log file (create dir if needed)
+	try {
+		const dir = dirname(LOG_FILE);
+		if (!existsSync(dir)) {
+			mkdirSync(dir, { recursive: true });
+		}
+		appendFileSync(LOG_FILE, line, "utf8");
+	} catch (err) {
+		console.error(`Failed to write log: ${err}`);
+	}
+
+	// Also print to console (with color for dry-run/warn/error)
+	if (level === "ERROR") {
+		console.error(`  ${level}: ${message}`);
+	} else if (level === "WARN") {
+		console.warn(`  ${level}: ${message}`);
+	} else if (level === "INFO") {
+		console.log(`  ${level}: ${message}`);
+	}
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Config Loading (project + global merge, project takes precedence)
+// ══════════════════════════════════════════════════════════════════════════════
+
+function loadConfig(configPath: string): SyncProfilesConfig {
+	let merged: SyncProfilesConfig = { profiles: {} };
+
+	// 1. Load global config (~/.pi/agent/sync-profiles.yaml)
+	if (existsSync(GLOBAL_CONFIG_PATH)) {
+		try {
+			const raw = readFileSync(GLOBAL_CONFIG_PATH, "utf8");
+			const parsed = yaml.load(raw) as SyncProfilesConfig;
+			if (parsed?.profiles) {
+				merged = parsed;
+			}
+		} catch (err) {
+			console.warn(
+				`Warning: Failed to load global config ${GLOBAL_CONFIG_PATH}: ${err}`,
+			);
+		}
+	}
+
+	// 2. Load project-local config (overrides global)
+	if (existsSync(configPath)) {
+		try {
+			const raw = readFileSync(configPath, "utf8");
+			const parsed = yaml.load(raw) as SyncProfilesConfig;
+			if (parsed?.profiles) {
+				// Merge: project-local profiles override global ones with the same name
+				merged = {
+					profiles: { ...merged.profiles, ...parsed.profiles },
+				};
+			}
+		} catch (err) {
+			console.error(
+				`Error: Failed to load project config ${configPath}: ${err}`,
+			);
+			process.exit(1);
+		}
+	} else {
+		console.error(`Error: Config file not found: ${configPath}`);
+		process.exit(1);
+	}
+
+	return merged;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Profile Selection
+// ══════════════════════════════════════════════════════════════════════════════
+
+function selectProfiles(
+	config: SyncProfilesConfig,
+	opts: CLIOptions,
+): Array<{ name: string; profile: ProfileConfig }> {
+	const profileNames = Object.keys(config.profiles);
+
+	if (profileNames.length === 0) {
+		console.error("Error: No profiles defined in config.");
+		process.exit(1);
+	}
+
+	if (opts.all) {
+		return profileNames.map((name) => ({
+			name,
+			profile: config.profiles[name],
+		}));
+	}
+
+	if (opts.profile) {
+		if (!config.profiles[opts.profile]) {
+			console.error(
+				`Error: Profile "${opts.profile}" not found. Available: ${profileNames.join(", ")}`,
+			);
+			process.exit(1);
+		}
+		return [{ name: opts.profile, profile: config.profiles[opts.profile] }];
+	}
+
+	// Default: use first profile
+	const firstName = profileNames[0];
+	console.log(`No profile specified, using default: "${firstName}"`);
+	return [{ name: firstName, profile: config.profiles[firstName] }];
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Resource Resolution
+// ══════════════════════════════════════════════════════════════════════════════
+
+function expandTargetPath(target: string, projectRoot: string): string {
+	if (target.startsWith("~")) {
+		return join(homedir(), target.slice(1));
+	}
+	if (isAbsolute(target)) {
+		return target;
+	}
+	return resolve(projectRoot, target);
+}
+
+/**
+ * Resolve a list of resource names in a source directory.
+ * Returns the full paths of matching items.
+ */
+function resolveSourceItems(
+	type: ResourceType,
+	names: string[] | "*",
+	exclude: string[] | undefined,
+	projectRoot: string,
+): string[] {
+	const sourceDir = join(projectRoot, type);
+	if (!existsSync(sourceDir)) {
+		return [];
+	}
+
+	// Build list of available items
+	const available: string[] = [];
+	const entries = readdirSync(sourceDir, { withFileTypes: true });
+
+	for (const entry of entries) {
+		const name = entry.name;
+
+		if (type === "extensions") {
+			// .ts file or directory with index.ts
+			if (entry.isFile() && name.endsWith(".ts")) {
+				available.push(name.slice(0, -3)); // remove .ts
+			} else if (
+				entry.isDirectory() &&
+				existsSync(join(sourceDir, name, "index.ts"))
+			) {
+				available.push(name);
+			}
+		} else if (type === "skills") {
+			if (
+				entry.isDirectory() &&
+				existsSync(join(sourceDir, name, "SKILL.md"))
+			) {
+				available.push(name);
+			}
+		} else if (type === "themes") {
+			if (entry.isFile() && name.endsWith(".json")) {
+				available.push(name.slice(0, -5)); // remove .json
+			}
+		} else if (type === "prompts") {
+			// Any file or directory in prompts/ dir
+			if (entry.isFile() || entry.isDirectory()) {
+				available.push(name);
+			}
+		}
+	}
+
+	// Filter by names list
+	let selected: string[];
+	if (names === "*") {
+		selected = [...available];
+	} else {
+		selected = names.filter((n) => available.includes(n));
+		const missing = names.filter((n) => !available.includes(n));
+		for (const m of missing) {
+			console.warn(`  Warning: ${type} "${m}" not found in ${sourceDir}`);
+		}
+	}
+
+	// Apply exclude list
+	if (exclude && exclude.length > 0) {
+		selected = selected.filter((n) => !exclude.includes(n));
+	}
+
+	return selected.sort();
+}
+
+/**
+ * Build a ResolvedResource with source and target paths.
+ */
+function buildResource(
+	type: ResourceType,
+	name: string,
+	projectRoot: string,
+	targetDir: string,
+): ResolvedResource {
+	const sourceDir = join(projectRoot, type);
+	const targetSubDir = join(targetDir, type);
+
+	let sourcePath: string;
+	let targetPath: string;
+	let isDirectory = false;
+
+	if (type === "extensions") {
+		// Check for directory extension first, then .ts file
+		const dirPath = join(sourceDir, name, "index.ts");
+		if (existsSync(dirPath)) {
+			sourcePath = join(sourceDir, name);
+			targetPath = join(targetSubDir, name);
+			isDirectory = true;
+		} else {
+			sourcePath = join(sourceDir, `${name}.ts`);
+			targetPath = join(targetSubDir, `${name}.ts`);
+			isDirectory = false;
+		}
+	} else if (type === "skills") {
+		sourcePath = join(sourceDir, name);
+		targetPath = join(targetSubDir, name);
+		isDirectory = true;
+	} else if (type === "themes") {
+		sourcePath = join(sourceDir, `${name}.json`);
+		targetPath = join(targetSubDir, `${name}.json`);
+		isDirectory = false;
+	} else if (type === "prompts") {
+		// prompts can be files or directories
+		const filePath = join(sourceDir, name);
+		if (existsSync(filePath)) {
+			sourcePath = filePath;
+			targetPath = join(targetSubDir, name);
+			isDirectory = statSync(sourcePath).isDirectory();
+		} else {
+			// Fallback: treat as file
+			sourcePath = join(sourceDir, name);
+			targetPath = join(targetSubDir, name);
+			isDirectory = false;
+		}
+	} else {
+		throw new Error(`Unknown resource type: ${type}`);
+	}
+
+	return { type, name, sourcePath, targetPath, isDirectory };
+}
+
+/**
+ * Resolve all resources to sync for a given profile.
+ */
+function resolveResources(
+	profile: ProfileConfig,
+	projectRoot: string,
+): ResolvedResource[] {
+	const targetDir = expandTargetPath(profile.target, projectRoot);
+	const resources: ResolvedResource[] = [];
+
+	for (const type of RESOURCE_TYPES) {
+		const names = profile[type]; // string[] | "*"
+		const exclude = profile.exclude?.[type];
+		const selectedNames = resolveSourceItems(type, names, exclude, projectRoot);
+
+		for (const name of selectedNames) {
+			resources.push(buildResource(type, name, projectRoot, targetDir));
+		}
+	}
+
+	return resources;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Sync Core — Copy with Incremental Logic
+// ══════════════════════════════════════════════════════════════════════════════
+
+interface SyncResult {
+	action: SyncAction;
+	resource: ResolvedResource;
+}
+
+/**
+ * Compare a source file to its target by mtime and size.
+ * Returns true if the source should be copied (source is newer or different size).
+ */
+function needsUpdate(sourcePath: string, targetPath: string): boolean {
+	if (!existsSync(targetPath)) return true;
+
+	try {
+		const srcStat = statSync(sourcePath);
+		const tgtStat = statSync(targetPath);
+
+		// Only update if source is newer (mtime) or different size
+		const srcMtime = Math.floor(srcStat.mtimeMs / 1000);
+		const tgtMtime = Math.floor(tgtStat.mtimeMs / 1000);
+		return srcMtime > tgtMtime || srcStat.size !== tgtStat.size;
+	} catch (err) {
+		console.warn(`Warning: needsUpdate() failed for ${sourcePath}: ${err}`);
+		return true;
+	}
+}
+
+/** Directories to skip when comparing for incremental sync */
+const IGNORE_DIRS = new Set(["node_modules", ".git", ".svn", ".hg"]);
+
+/**
+ * Recursively compare directories for incremental sync.
+ * Returns true if any file within differs.
+ * Skips node_modules and other generated directories.
+ */
+function dirNeedsUpdate(sourceDir: string, targetDir: string): boolean {
+	if (!existsSync(targetDir)) return true;
+
+	try {
+		const srcEntries = readdirSync(sourceDir, { withFileTypes: true });
+		for (const entry of srcEntries) {
+			// Skip ignored directories (node_modules, .git, etc.)
+			if (entry.isDirectory() && IGNORE_DIRS.has(entry.name)) continue;
+
+			const srcPath = join(sourceDir, entry.name);
+			const tgtPath = join(targetDir, entry.name);
+			if (entry.isDirectory()) {
+				if (dirNeedsUpdate(srcPath, tgtPath)) return true;
+			} else {
+				if (needsUpdate(srcPath, tgtPath)) return true;
+			}
+		}
+		// Also check for files in target that don't exist in source
+		const tgtEntries = readdirSync(targetDir, { withFileTypes: true });
+		for (const entry of tgtEntries) {
+			if (entry.isDirectory() && IGNORE_DIRS.has(entry.name)) continue;
+			const srcPath = join(sourceDir, entry.name);
+			if (!existsSync(srcPath)) return true; // file deleted from source
+		}
+	} catch (err) {
+		console.warn(`Warning: dirNeedsUpdate() failed for ${sourceDir}: ${err}`);
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * Copy a single file from source to target, creating parent dirs.
+ */
+function copyFile(sourcePath: string, targetPath: string): void {
+	mkdirSync(dirname(targetPath), { recursive: true });
+	cpSync(sourcePath, targetPath, { force: true });
+}
+
+/**
+ * Copy a directory recursively from source to target.
+ */
+function copyDir(sourceDir: string, targetDir: string): void {
+	mkdirSync(targetDir, { recursive: true });
+
+	const entries = readdirSync(sourceDir, { withFileTypes: true });
+	for (const entry of entries) {
+		const srcPath = join(sourceDir, entry.name);
+		const tgtPath = join(targetDir, entry.name);
+
+		if (entry.isDirectory()) {
+			copyDir(srcPath, tgtPath);
+		} else {
+			copyFile(srcPath, tgtPath);
+		}
+	}
+}
+
+/**
+ * Remove target files that no longer exist in the source.
+ */
+function cleanStaleFiles(sourceDir: string, targetDir: string): string[] {
+	const removed: string[] = [];
+	if (!existsSync(targetDir)) return removed;
+
+	try {
+		const tgtEntries = readdirSync(targetDir, { withFileTypes: true });
+		for (const entry of tgtEntries) {
+			const srcPath = join(sourceDir, entry.name);
+			const tgtPath = join(targetDir, entry.name);
+
+			if (!existsSync(srcPath)) {
+				// Stale — remove it
+				if (entry.isDirectory()) {
+					rmSync(tgtPath, { recursive: true, force: true });
+				} else {
+					rmSync(tgtPath, { force: true });
+				}
+				removed.push(tgtPath);
+			} else if (entry.isDirectory()) {
+				// Recurse into subdirectories
+				removed.push(...cleanStaleFiles(srcPath, tgtPath));
+			}
+		}
+	} catch (err) {
+		console.warn(`Warning: cleanStaleFiles() failed for ${targetDir}: ${err}`);
+	}
+
+	return removed;
+}
+
+/**
+ * Sync a single resource. Returns the action taken.
+ */
+function syncResource(
+	resource: ResolvedResource,
+	dryRun: boolean,
+	cleanStale: boolean,
+): SyncResult {
+	const { sourcePath, targetPath, isDirectory } = resource;
+
+	// Determine if update is needed
+	let shouldUpdate: boolean;
+	if (isDirectory) {
+		shouldUpdate = dirNeedsUpdate(sourcePath, targetPath);
+	} else {
+		shouldUpdate = needsUpdate(sourcePath, targetPath);
+	}
+
+	if (!shouldUpdate && existsSync(targetPath)) {
+		return { action: "SKIP", resource };
+	}
+
+	const action: SyncAction = existsSync(targetPath) ? "UPDATE" : "NEW";
+
+	if (!dryRun) {
+		mkdirSync(dirname(targetPath), { recursive: true });
+
+		if (isDirectory) {
+			// Remove old content first to avoid stale files
+			if (existsSync(targetPath)) {
+				rmSync(targetPath, { recursive: true, force: true });
+			}
+			copyDir(sourcePath, targetPath);
+		} else {
+			copyFile(sourcePath, targetPath);
+		}
+
+		// Clean stale files in target (for directories)
+		if (cleanStale && isDirectory && existsSync(targetPath)) {
+			cleanStaleFiles(sourcePath, targetPath);
+		}
+	}
+
+	return { action, resource };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// npm install Handling
+// ══════════════════════════════════════════════════════════════════════════════
+
+interface NpmInstallResult {
+	path: string;
+	success: boolean;
+	output: string;
+}
+
+/**
+ * Check if a directory has a package.json with dependencies.
+ */
+function hasDependencies(dir: string): boolean {
+	const pkgPath = join(dir, "package.json");
+	if (!existsSync(pkgPath)) return false;
+
+	try {
+		const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+		if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0)
+			return true;
+		if (pkg.peerDependencies && Object.keys(pkg.peerDependencies).length > 0)
+			return true;
+		return false;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Run npm install in a directory. Returns the result.
+ */
+function runNpmInstall(dir: string, dryRun: boolean): NpmInstallResult {
+	if (dryRun) {
+		return {
+			path: dir,
+			success: true,
+			output: "[dry-run] npm install would run here",
+		};
+	}
+
+	try {
+		const output = execSync("npm install", {
+			cwd: dir,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+			timeout: 120_000, // 2 minute timeout
+		});
+		return { path: dir, success: true, output: output.trim() };
+	} catch (err: unknown) {
+		const error = err as { stdout?: string; stderr?: string; message?: string };
+		const msg =
+			error.stderr || error.stdout || error.message || "unknown error";
+		return { path: dir, success: false, output: msg };
+	}
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Profile Processing (shared by config mode and inline mode)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Sync a single profile: resolve resources, copy files, run npm install, log results.
+ */
+async function processProfile(
+	name: string,
+	profile: ProfileConfig,
+	opts: CLIOptions,
+): Promise<void> {
+	writeLog("INFO", `Profile "${name}" started`);
+
+	const targetDir = expandTargetPath(profile.target, PROJECT_ROOT);
+	const resources = resolveResources(profile, PROJECT_ROOT);
+
+	if (resources.length === 0) {
+		console.log(`  📦 [${name}] No resources to sync.`);
+		writeLog("INFO", `Profile "${name}" completed (0 resources)`);
+		return;
+	}
+
+	console.log(`  📦 [${name}] ${profile.description || ""}`);
+	console.log(`      Target: ${targetDir}`);
+	console.log(`      Resources: ${resources.length} total`);
+	console.log();
+
+	// Group by type for display
+	const byType: Record<string, ResolvedResource[]> = {};
+	for (const r of resources) {
+		if (!byType[r.type]) byType[r.type] = [];
+		byType[r.type].push(r);
+	}
+	for (const [type, items] of Object.entries(byType)) {
+		console.log(
+			`      ${type}/ (${items.length}): ${items.map((i) => i.name).join(", ")}`,
+		);
+	}
+	console.log();
+
+	// Sync each resource
+	let newCount = 0;
+	let updateCount = 0;
+	let skipCount = 0;
+
+	for (const resource of resources) {
+		const result = syncResource(resource, opts.dryRun, true);
+
+		const label = `${resource.type}:${resource.name}`;
+		const targetRel = relative(PROJECT_ROOT, resource.targetPath);
+
+		switch (result.action) {
+			case "NEW":
+				console.log(`    ✅ [NEW] ${label} → ${targetRel}`);
+				writeLog("INFO", `[NEW] ${label} → ${resource.targetPath}`);
+				newCount++;
+				break;
+			case "UPDATE":
+				console.log(`    🔄 [UPDATE] ${label} → ${targetRel}`);
+				writeLog("INFO", `[UPDATE] ${label} → ${resource.targetPath}`);
+				updateCount++;
+				break;
+			case "SKIP":
+				if (!opts.dryRun) {
+					console.log(`    ⏭️  [SKIP] ${label} (unchanged)`);
+				}
+				skipCount++;
+				break;
+		}
+	}
+
+	// npm install detection for synced resources
+	let npmCount = 0;
+	let npmFailCount = 0;
+
+	for (const resource of resources) {
+		const checkPath = resource.isDirectory
+			? resource.targetPath
+			: dirname(resource.targetPath);
+
+		const hasDep = hasDependencies(checkPath);
+		if (hasDep && !opts.dryRun) {
+			console.log(
+				`      ⚙️  Running npm install in ${relative(PROJECT_ROOT, checkPath)}...`,
+			);
+			writeLog("WARN", `Running npm install in ${checkPath}`);
+
+			const result = runNpmInstall(checkPath, opts.dryRun);
+			if (result.success) {
+				console.log(
+					`      ✅ npm install completed in ${relative(PROJECT_ROOT, checkPath)}`,
+				);
+				writeLog("INFO", `npm install completed successfully in ${checkPath}`);
+				npmCount++;
+			} else {
+				console.error(
+					`      ❌ npm install failed in ${relative(PROJECT_ROOT, checkPath)}`,
+				);
+				console.error(`         ${result.output.slice(0, 200)}`);
+				writeLog(
+					"ERROR",
+					`npm install failed in ${checkPath}: ${result.output.slice(0, 200)}`,
+				);
+				npmFailCount++;
+			}
+		} else if (hasDep && opts.dryRun) {
+			console.log(
+				`      ⚙️  [dry-run] npm install would run in ${relative(PROJECT_ROOT, checkPath)}`,
+			);
+		}
+	}
+
+	// Summary for this profile
+	const summaryParts: string[] = [];
+	if (newCount > 0) summaryParts.push(`${newCount} new`);
+	if (updateCount > 0) summaryParts.push(`${updateCount} updated`);
+	if (skipCount > 0 && opts.dryRun)
+		summaryParts.push(`${skipCount} would-be-skipped`);
+	else if (skipCount > 0) summaryParts.push(`${skipCount} skipped`);
+	if (npmCount > 0) summaryParts.push(`${npmCount} npm installs`);
+	if (npmFailCount > 0)
+		summaryParts.push(`${npmFailCount} npm installs FAILED`);
+
+	const summary =
+		summaryParts.length > 0 ? summaryParts.join(", ") : "no changes";
+	console.log(`\n  ✅ [${name}] Done — ${summary}`);
+	console.log();
+
+	writeLog(
+		"INFO",
+		`Profile "${name}" completed (${resources.length} resources, ${summary})`,
+	);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Main Execution
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function main(): Promise<void> {
+	const opts = parseArgs();
+
+	console.log(`\n🔧 Pi Sync Tool — Profile-Driven Resource Sync\n`);
+
+	if (opts.dryRun) {
+		console.log("  ⚠️  DRY RUN MODE — no files will be written\n");
+	}
+
+	// ── Inline mode: build ad-hoc profile from CLI args ─────────────
+	if (opts.inline) {
+		if (!opts.inlineTarget) {
+			console.error("Error: --target is required in inline mode");
+			process.exit(1);
+		}
+		if (
+			opts.inlineExtensions.length === 0 &&
+			opts.inlineSkills.length === 0 &&
+			opts.inlineThemes.length === 0 &&
+			opts.inlinePrompts.length === 0
+		) {
+			console.error(
+				"Error: At least one of --ext, --skill, --theme, or --prompt is required in inline mode",
+			);
+			process.exit(1);
+		}
+
+		const inlineProfile: ProfileConfig = {
+			description: `Inline sync (${opts.inlineExtensions.length} ext, ${opts.inlineSkills.length} skill, ${opts.inlineThemes.length} theme, ${opts.inlinePrompts.length} prompt)`,
+			target: opts.inlineTarget,
+			extensions: opts.inlineExtensions.length > 0 ? opts.inlineExtensions : [],
+			skills: opts.inlineSkills.length > 0 ? opts.inlineSkills : [],
+			themes: opts.inlineThemes.length > 0 ? opts.inlineThemes : [],
+			prompts: opts.inlinePrompts.length > 0 ? opts.inlinePrompts : [],
+		};
+
+		await processProfile("(inline)", inlineProfile, opts);
+		writeLog("INFO", `Inline sync completed (target: ${inlineProfile.target})`);
+		console.log(`  ✨ Inline sync done!`);
+		console.log(`     Log: ${LOG_FILE}`);
+		console.log();
+		return;
+	}
+
+	// ── Config mode: load profiles from YAML ──────────────────────
+	const config = loadConfig(opts.config);
+	const profiles = selectProfiles(config, opts);
+
+	console.log(`  Config: ${opts.config}`);
+
+	if (opts.all) {
+		console.log(`  Profiles: ALL (${profiles.length} total)`);
+	} else {
+		console.log(`  Profile: "${profiles[0].name}"`);
+	}
+	console.log();
+
+	for (const { name, profile } of profiles) {
+		await processProfile(name, profile, opts);
+	}
+
+	const totalProfiles = profiles.length;
+	const mode = opts.dryRun ? " (dry run)" : "";
+	console.log(`  ✨ All done! ${totalProfiles} profile(s) synced${mode}`);
+	console.log(`     Log: ${LOG_FILE}`);
+	console.log();
+}
+
+main().catch((err) => {
+	console.error("Fatal error:", err);
+	writeLog("ERROR", `Fatal error: ${err}`);
+	process.exit(1);
+});
