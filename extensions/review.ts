@@ -13,6 +13,7 @@
  * - `/review` - show interactive selector
  * - `/review pr 123` - review PR #123 (checks out locally)
  * - `/review pr https://github.com/owner/repo/pull/123` - review PR from URL
+ * - `/review staged` - review staged changes only
  * - `/review uncommitted` - review uncommitted changes directly
  * - `/review branch main` - review against main branch
  * - `/review commit abc123` - review specific commit
@@ -386,6 +387,7 @@ function hasBlockingReviewFindings(messageText: string): boolean {
 
 // Review target types (matching Codex's approach)
 type ReviewTarget =
+	| { type: "staged" }
 	| { type: "uncommitted" }
 	| { type: "baseBranch"; branch: string }
 	| { type: "commit"; sha: string; title?: string }
@@ -393,6 +395,9 @@ type ReviewTarget =
 	| { type: "folder"; paths: string[] };
 
 // Prompts (adapted from Codex)
+const STAGED_PROMPT =
+	"Review the currently staged code changes (what would be committed with `git commit`). Only use `git diff --staged` and `git diff --staged --stat` to inspect the changes. Do not include unstaged or untracked files. Provide prioritized, actionable findings.";
+
 const UNCOMMITTED_PROMPT =
 	"Review the current code changes (staged, unstaged, and untracked files) and provide prioritized findings.";
 
@@ -804,6 +809,9 @@ async function buildReviewPrompt(
 	const includeLocalChanges = options?.includeLocalChanges === true;
 
 	switch (target.type) {
+		case "staged":
+			return STAGED_PROMPT;
+
 		case "uncommitted":
 			return UNCOMMITTED_PROMPT;
 
@@ -857,6 +865,9 @@ async function buildReviewPrompt(
  */
 function getUserFacingHint(target: ReviewTarget): string {
 	switch (target.type) {
+		case "staged":
+			return "staged changes";
+
 		case "uncommitted":
 			return "current changes";
 		case "baseBranch":
@@ -965,6 +976,11 @@ async function waitForLoopTurnToStart(
 
 // Review preset options for the selector (keep this order stable)
 const REVIEW_PRESETS = [
+	{
+		value: "staged",
+		label: "Review staged changes only",
+		description: "(index vs commit)",
+	},
 	{
 		value: "uncommitted",
 		label: "Review uncommitted changes",
@@ -1179,6 +1195,9 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 			// Handle each preset type
 			switch (result) {
+				case "staged":
+					return { type: "staged" };
+
 				case "uncommitted":
 					return { type: "uncommitted" };
 
@@ -1799,6 +1818,9 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		const subcommand = parts[0]?.toLowerCase();
 
 		switch (subcommand) {
+			case "staged":
+				return { target: { type: "staged" }, extraInstruction };
+
 			case "uncommitted":
 				return { target: { type: "uncommitted" }, extraInstruction };
 
