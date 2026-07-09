@@ -4,7 +4,7 @@
  * Java Logback-style hierarchical logger configuration.
  *
  * Config file locations (merged, later takes precedence):
- *   1. ./extensions/pi-logger/pi-logger.json   (plugin-bundled default)
+ *   1. ./extensions/meta/pi-logger/pi-logger.json   (plugin-bundled default)
  *   2. ~/.pi/agents/pi-logger.json              (user global)
  *   3. <project-root>/.pi/pi-logger.json         (project .pi/ config)
  *   4. <project-root>/pi-logger.json or upward  (project-root / upward search)

@@ -124,7 +124,7 @@ run_pi_and_check() {
 	local test_home="$ROOT_DIR/.pi/tmp/$slug"
 	mkdir -p "$test_home/.pi/extensions" "$test_home/.pi/logs"
 
-	# 拷贝依赖
+	# 拷贝依赖（支持递归搜索 extensions/ 子目录）
 	if [[ -n "$extensions" ]]; then
 		local -a DEPS
 		IFS=',' read -ra DEPS <<<"$extensions"
@@ -132,19 +132,35 @@ run_pi_and_check() {
 			local dn
 			dn=$(echo "$dep" | xargs)
 			[[ -z "$dn" ]] && continue
+
+			# Check flat path first (backward compatibility)
 			if [[ -d "$ROOT_DIR/extensions/$dn" ]]; then
 				cp -r "$ROOT_DIR/extensions/$dn" "$test_home/.pi/extensions/$dn"
 			elif [[ -f "$ROOT_DIR/extensions/$dn.ts" ]]; then
 				cp "$ROOT_DIR/extensions/$dn.ts" "$test_home/.pi/extensions/$dn.ts"
 			else
-				echo "WARNING: dependency '$dn' not found"
+				# Search recursively in category subdirectories
+				local found=""
+				while IFS= read -r -d '' match; do
+					found="$match"
+					break
+				done < <(find "$ROOT_DIR/extensions" -maxdepth 3 -name "$dn.ts" -o -type d -name "$dn" -exec test -f '{}/index.ts' \; -print0 2>/dev/null)
+				if [[ -n "$found" ]]; then
+					if [[ -d "$found" ]]; then
+						cp -r "$found" "$test_home/.pi/extensions/$dn"
+					else
+						cp "$found" "$test_home/.pi/extensions/$dn.ts"
+					fi
+				else
+					echo "WARNING: dependency '$dn' not found in extensions/ (including subdirectories)"
+				fi
 			fi
 		done
 	fi
 
 	# 拷贝 pi-logger 配置
-	if [[ -f "$ROOT_DIR/extensions/pi-logger/pi-logger.json" ]]; then
-		cp "$ROOT_DIR/extensions/pi-logger/pi-logger.json" "$test_home/.pi/pi-logger.json" 2>/dev/null || true
+	if [[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]]; then
+		cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" "$test_home/.pi/pi-logger.json" 2>/dev/null || true
 	fi
 
 	local padded

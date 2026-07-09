@@ -35,6 +35,7 @@ import {
 	rmSync,
 	appendFileSync,
 	readdirSync,
+	type Dirent,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, resolve, isAbsolute, relative } from "node:path";
@@ -346,6 +347,91 @@ function expandTargetPath(target: string, projectRoot: string): string {
 }
 
 /**
+ * Recursively scan a directory for extension items (.ts files or directories with index.ts).
+ * Skips node_modules and hidden directories.
+ */
+function scanExtensionsRecursively(dir: string, depth: number): string[] {
+	if (depth > 6) return [];
+	const results: string[] = [];
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	for (const entry of entries) {
+		// Skip hidden, node_modules, and category directories at top level (tui/, auto/, etc.)
+		if (entry.name.startsWith(".")) continue;
+		if (entry.name === "node_modules") continue;
+
+		const fullPath = join(dir, entry.name);
+
+		if (entry.isFile() && entry.name.endsWith(".ts")) {
+			results.push(entry.name.slice(0, -3)); // remove .ts
+		} else if (entry.isDirectory()) {
+			// If it has an index.ts, it's an extension directory
+			if (existsSync(join(fullPath, "index.ts"))) {
+				results.push(entry.name);
+			} else {
+				// Otherwise recurse into it (it's a category directory like tui/, auto/, etc.)
+				results.push(...scanExtensionsRecursively(fullPath, depth + 1));
+			}
+		}
+	}
+	return results;
+}
+
+/**
+ * Recursively find an extension by name in the extensions directory tree.
+ * Returns { relativePath, isDirectory } or null if not found.
+ */
+function findExtensionByName(
+	name: string,
+	extRoot: string,
+): { relativePath: string; isDirectory: boolean } | null {
+	function search(
+		dir: string,
+		depth: number,
+	): { relativePath: string; isDirectory: boolean } | null {
+		if (depth > 6) return null;
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return null;
+		}
+		for (const entry of entries) {
+			if (entry.name.startsWith(".")) continue;
+			if (entry.name === "node_modules") continue;
+
+			const fullPath = join(dir, entry.name);
+
+			// Check if this entry itself is the named extension
+			if (entry.isFile() && entry.name === `${name}.ts`) {
+				return {
+					relativePath: relative(extRoot, fullPath),
+					isDirectory: false,
+				};
+			}
+			if (
+				entry.isDirectory() &&
+				entry.name === name &&
+				existsSync(join(fullPath, "index.ts"))
+			) {
+				return { relativePath: relative(extRoot, fullPath), isDirectory: true };
+			}
+			// Recurse into subdirectories (category directories)
+			if (entry.isDirectory()) {
+				const result = search(fullPath, depth + 1);
+				if (result) return result;
+			}
+		}
+		return null;
+	}
+	return search(extRoot, 0);
+}
+
+/**
  * Resolve a list of resource names in a source directory.
  * Returns the full paths of matching items.
  */
@@ -362,36 +448,32 @@ function resolveSourceItems(
 
 	// Build list of available items
 	const available: string[] = [];
-	const entries = readdirSync(sourceDir, { withFileTypes: true });
 
-	for (const entry of entries) {
-		const name = entry.name;
+	if (type === "extensions") {
+		// Recursively scan all subdirectories (tui/, auto/, etc.)
+		available.push(...scanExtensionsRecursively(sourceDir, 0));
+	} else {
+		const entries = readdirSync(sourceDir, { withFileTypes: true });
 
-		if (type === "extensions") {
-			// .ts file or directory with index.ts
-			if (entry.isFile() && name.endsWith(".ts")) {
-				available.push(name.slice(0, -3)); // remove .ts
-			} else if (
-				entry.isDirectory() &&
-				existsSync(join(sourceDir, name, "index.ts"))
-			) {
-				available.push(name);
-			}
-		} else if (type === "skills") {
-			if (
-				entry.isDirectory() &&
-				existsSync(join(sourceDir, name, "SKILL.md"))
-			) {
-				available.push(name);
-			}
-		} else if (type === "themes") {
-			if (entry.isFile() && name.endsWith(".json")) {
-				available.push(name.slice(0, -5)); // remove .json
-			}
-		} else if (type === "prompts") {
-			// Any file or directory in prompts/ dir
-			if (entry.isFile() || entry.isDirectory()) {
-				available.push(name);
+		for (const entry of entries) {
+			const name = entry.name;
+
+			if (type === "skills") {
+				if (
+					entry.isDirectory() &&
+					existsSync(join(sourceDir, name, "SKILL.md"))
+				) {
+					available.push(name);
+				}
+			} else if (type === "themes") {
+				if (entry.isFile() && name.endsWith(".json")) {
+					available.push(name.slice(0, -5)); // remove .json
+				}
+			} else if (type === "prompts") {
+				// Any file or directory in prompts/ dir
+				if (entry.isFile() || entry.isDirectory()) {
+					available.push(name);
+				}
 			}
 		}
 	}
@@ -433,13 +515,16 @@ function buildResource(
 	let isDirectory = false;
 
 	if (type === "extensions") {
-		// Check for directory extension first, then .ts file
-		const dirPath = join(sourceDir, name, "index.ts");
-		if (existsSync(dirPath)) {
-			sourcePath = join(sourceDir, name);
-			targetPath = join(targetSubDir, name);
-			isDirectory = true;
+		// Search recursively through subdirectories (tui/, auto/, etc.)
+		const found = findExtensionByName(name, sourceDir);
+		if (found) {
+			sourcePath = join(sourceDir, found.relativePath);
+			targetPath = found.isDirectory
+				? join(targetSubDir, name)
+				: join(targetSubDir, `${name}.ts`);
+			isDirectory = found.isDirectory;
 		} else {
+			// Fallback for backward compatibility (flat dir)
 			sourcePath = join(sourceDir, `${name}.ts`);
 			targetPath = join(targetSubDir, `${name}.ts`);
 			isDirectory = false;

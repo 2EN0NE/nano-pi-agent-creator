@@ -16,7 +16,7 @@ pi-logger 提供三个能力：
 
 ```bash
 # 方案 A：项目本地（推荐开发用）
-cp -r path/to/pi-logger ./extensions/pi-logger
+cp -r path/to/pi-logger ./extensions/meta/pi-logger
 
 # 方案 B：全局安装（跨项目使用）
 cp -r path/to/pi-logger ~/.pi/agent/extensions/pi-logger
@@ -31,7 +31,7 @@ cp -r path/to/pi-logger ~/.pi/agent/extensions/pi-logger
   "pi": {
     "extensions": [
       "./extensions",
-      "./extensions/pi-logger"
+      "./extensions/meta/pi-logger"
     ]
   }
 }
@@ -66,7 +66,7 @@ cp -r path/to/pi-logger ~/.pi/agent/extensions/pi-logger
 ```
 
 配置文件搜索顺序（后面的覆盖前面的）：
-1. 插件自带：`extensions/pi-logger/pi-logger.json`
+1. 插件自带：`extensions/meta/pi-logger/pi-logger.json`
 2. 用户全局：`~/.pi/agents/pi-logger.json`
 3. 项目本地：从 cwd 向上递归查找，找到的第一个 `pi-logger.json`
 

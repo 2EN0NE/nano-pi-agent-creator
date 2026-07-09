@@ -6,6 +6,8 @@
 #
 # Resource types:
 #   extensions/ — .ts files or directories with index.ts
+#                 (supports recursive search in subdirectories: tui/, context/,
+#                  security/, auto/, accuracy/, verification/, meta/)
 #   skills/     — directories with SKILL.md
 #   themes/     — .json files
 #   prompts/    — command scripts (source dir: prompts/)
@@ -14,6 +16,10 @@
 #   "*"        — all resources of that type
 #   ["name"]   — specific resources by name (without extension)
 #   exclude:   — per-type list of names to exclude (applied after include)
+#
+# Note: For extensions, you specify just the name (e.g., "sandbox", "review").
+#       The sync script will search recursively through all category subdirectories
+#       to find the file — you don't need to know which category it's in.
 
 profiles:
   # ── Project Full Sync ────────────────────────────────────────

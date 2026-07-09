@@ -27,13 +27,13 @@ setup_test_home() {
 	mkdir -p "$test_home/.pi/extensions" "$test_home/.pi/logs"
 
 	# Always copy pi-logger (needed for log output)
-	cp -r "$ROOT_DIR/extensions/pi-logger" "$test_home/.pi/extensions/pi-logger"
+	cp -r "$ROOT_DIR/extensions/meta/pi-logger" "$test_home/.pi/extensions/pi-logger"
 	cp "$ROOT_DIR/pi-logger.json" "$test_home/pi-logger.json" 2>/dev/null || true
 
 	for name in "$@"; do
 		case "$name" in
 		tools)
-			cp "$ROOT_DIR/extensions/tools.ts" "$test_home/.pi/extensions/tools.ts"
+			cp "$ROOT_DIR/extensions/meta/tools.ts" "$test_home/.pi/extensions/tools.ts"
 			;;
 		ctx-simulator)
 			cp "$ROOT_DIR/test/extensions/tools/helpers/z-ctx-simulator.ts" \

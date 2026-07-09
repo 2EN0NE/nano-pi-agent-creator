@@ -69,14 +69,16 @@ profiles:
 
 ### 资源类型与目录映射
 
-| 资源类型 | 源目录 | 目标子目录 |
-|---------|--------|-----------|
-| extensions | `extensions/` | `<target>/extensions/` |
-| skills | `skills/` | `<target>/skills/` |
-| themes | `themes/` | `<target>/themes/` |
-| prompts | `prompts/` | `<target>/prompts/` |
+| 资源类型 | 源目录 | 目标子目录 | 说明 |
+|---------|--------|-----------|------|
+| extensions | `extensions/` (含 `tui/` `context/` `security/` `auto/` `accuracy/` `verification/` `meta/` 子目录) | `<target>/extensions/` | 按功能分类存放，同步脚本递归搜索所有子目录，按名字匹配 |
+| skills | `skills/` | `<target>/skills/` | |
+| themes | `themes/` | `<target>/themes/` | |
+| prompts | `prompts/` | `<target>/prompts/` | |
 
 > `intercepted-commands/` 目录不同步，保留原名用于独立用途。
+
+> **扩展分类说明**：`extensions/` 下现有 7 个分类子目录，同步脚本的 `--ext <name>` 模式会自动递归搜索，用户无需关心扩展在哪个子目录下。详情见 [AGENTS.md](../AGENTS.md#扩展分类体系)。
 
 ### 配置合并规则
 
@@ -126,7 +128,7 @@ npx tsx scripts/sync-to-local-pi.ts --profile user-install
 ```json
 {
   "devDependencies": {
-    "@zenone/pi-logger": "file:extensions/pi-logger"
+    "@zenone/pi-logger": "file:extensions/meta/pi-logger"
   }
 }
 ```
@@ -157,7 +159,7 @@ ln -s /path/to/project/extensions/pi-logger ~/.pi/agent/extensions/sandbox/node_
 **全局 npm link**：如果依赖在多个扩展间共享，也可以通过 `npm link` 注册到全局：
 
 ```bash
-cd extensions/pi-logger && npm link
+cd extensions/meta/pi-logger && npm link
 cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 ```
 
@@ -174,7 +176,7 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 
 | 包名 | 源路径 | 说明 |
 |------|--------|------|
-| `@zenone/pi-logger` | `extensions/pi-logger/` | 统一日志系统，所有扩展必须接入 |
+| `@zenone/pi-logger` | `extensions/meta/pi-logger/` | 统一日志系统，所有扩展必须接入 |
 
 ## 日志
 

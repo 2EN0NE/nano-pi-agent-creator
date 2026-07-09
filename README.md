@@ -15,8 +15,8 @@ npm install
 
 这会安装所有必需的依赖，包括通过 `file:` 协议引用的本地包 `@zenone/pi-logger`。
 
-> ⚠️ `@zenone/pi-logger` 是一个本地 npm 包（位于 `extensions/pi-logger/`），**不发布到 npm registry**。
-> `npm install` 会通过 `file:extensions/pi-logger` 将其软链接到 `node_modules/@zenone/pi-logger`，
+> ⚠️ `@zenone/pi-logger` 是一个本地 npm 包（位于 `extensions/meta/pi-logger/`），**不发布到 npm registry**。
+> `npm install` 会通过 `file:extensions/meta/pi-logger` 将其软链接到 `node_modules/@zenone/pi-logger`，
 > 供 Pi 的 jiti 加载器解析使用。
 
 ### 2. 配置同步 Profile
@@ -102,25 +102,86 @@ npx tsx scripts/sync-to-local-pi.ts --ext sandbox --target ./.pi/test
 
 ### Pi Coding Agent Extensions
 
-Pi Coding Agent 的扩展在 [extensions](extensions) 目录中：
+Pi Coding Agent 的扩展在 [extensions](extensions) 目录中，按功能分类存放：
 
-* [`answer.ts`](extensions/answer.ts) - 逐个回答问题的交互式 TUI。
-* [`btw.ts`](extensions/btw.ts) - 一个简易的 `/btw` 侧边聊天弹窗，可在关闭时把摘要回注入主会话。
-* [`control.ts`](extensions/control.ts) - 会话控制辅助工具（列出可控会话等）。
-* [`files.ts`](extensions/files.ts) - 统一的文件浏览器，整合 git 状态、会话引用、 reveal/open/edit/diff 等操作。
-* [`split-fork.ts`](extensions/split-fork.ts) - `/split-fork` 命令，可把当前会话分叉到右侧 Ghostty 分屏中的新 pi 进程。
-* [`go-to-bed.ts`](extensions/go-to-bed.ts) - 深夜安全保护，超过午夜后会要求显式确认。
-* [`goal.ts`](extensions/goal.ts) - 可选的 `/goal` 模式，支持长期目标持久化、状态控制和模型工具。
-* [`loop.ts`](extensions/loop.ts) - 快速迭代编码的提示循环，支持可选自动继续。
-* [`multi-edit.ts`](extensions/multi-edit.ts) - 用批量 `multi` 编辑替换内置 `edit` 工具，并支持 Codex 风格的 `patch` 及预检验。
-* [`notify.ts`](extensions/notify.ts) - 代理任务结束后发送桌面原生通知。
-* [`prompt-editor.ts`](extensions/prompt-editor.ts) - 编辑器内的提示词模式选择器，支持持久化、历史记录、配置和快捷键。
-* [`review.ts`](extensions/review.ts) - 代码评审命令，支持工作区、PR 风格 diff、提交、定制指令与可选修复循环。
-* [`session-breakdown.ts`](extensions/session-breakdown.ts) - 7/30/90 天会话与花费分析的 TUI，带用量图表。
-* [`todos.ts`](extensions/todos.ts) - 基于文件存储的 todo 管理扩展，提供 TUI。
-* [`trust-github-repos.ts`](extensions/trust-github-repos.ts) - 自动记住 `earendil-works` 或 `mitsuhiko` 下 GitHub 检出的信任状态。
-* [`uv.ts`](extensions/uv.ts) - 面向 uv 的 Python 工作流辅助工具。
-* [`whimsical.ts`](extensions/whimsical.ts) - 用随机的 whimsical 句子替换默认思考提示。
+#### 🖥️ [tui/](extensions/tui) — 交互界面
+
+| 扩展 | 说明 |
+|------|------|
+| [`answer.ts`](extensions/tui/answer.ts) | 逐个回答问题的交互式 TUI |
+| [`btw.ts`](extensions/tui/btw.ts) | 简易的 `/btw` 侧边聊天弹窗，关闭时可把摘要回注入主会话 |
+| [`files.ts`](extensions/tui/files.ts) | 统一的文件浏览器，整合 git 状态、会话引用、reveal/open/edit/diff |
+| [`qna.ts`](extensions/tui/qna.ts) | Q&A 提取，将问题加载到编辑器填写 |
+| [`questionnaire.ts`](extensions/tui/questionnaire.ts) | 问卷工具，支持单选/多标签页 |
+| [`session-breakdown.ts`](extensions/tui/session-breakdown.ts) | 7/30/90 天会话与花费分析 TUI，带用量图表 |
+| [`split-fork.ts`](extensions/tui/split-fork.ts) | `/split-fork` 命令，分叉到 Ghostty 分屏新 pi 进程 |
+| [`whimsical.ts`](extensions/tui/whimsical.ts) | 用随机的 whimsical 句子替换默认思考提示 |
+
+#### 🧩 [context/](extensions/context) — 上下文组装
+
+| 扩展 | 说明 |
+|------|------|
+| [`claude-rules.ts`](extensions/context/claude-rules.ts) | 扫描 `.claude/rules/` 注入 system prompt |
+| [`custom-compaction.ts`](extensions/context/custom-compaction.ts) | 自定义 compaction 行为为全量总结 |
+| [`goal.ts`](extensions/context/goal.ts) | 可选的 `/goal` 模式，支持长期目标持久化、状态控制 |
+| [`input-transform-streaming.ts`](extensions/context/input-transform-streaming.ts) | 流式输入转换，在 user input 到达模型前处理 |
+| [`prompt-customizer.ts`](extensions/context/prompt-customizer.ts) | 根据活跃工具和技能自定义 system prompt |
+| [`prompt-editor.ts`](extensions/context/prompt-editor.ts) | 编辑器内的提示词模式选择器，支持持久化/历史/快捷键 |
+| [`resources-tree/`](extensions/context/resources-tree/) | 资源树扫描，在 system header 中展示可用资源 |
+
+#### 🔒 [security/](extensions/security) — 审计与安全
+
+| 扩展 | 说明 |
+|------|------|
+| [`confirm-destructive.ts`](extensions/security/confirm-destructive.ts) | 破坏性操作前确认（clear/switch/branch） |
+| [`dirty-repo-guard.ts`](extensions/security/dirty-repo-guard.ts) | 有未提交变更时阻止会话切换 |
+| [`permission-gate.ts`](extensions/security/permission-gate.ts) | 危险 bash 命令前确认（rm -rf / sudo / chmod 777） |
+| [`protected-paths.ts`](extensions/security/protected-paths.ts) | 阻止 write/edit 到敏感路径（.env / .git/） |
+| [`project-trust.ts`](extensions/security/project-trust.ts) | 项目信任机制 |
+| [`trust-github-repos.ts`](extensions/security/trust-github-repos.ts) | 自动记住受信 GitHub 所有者的检出信任状态 |
+| [`sandbox/`](extensions/security/sandbox/) | OS 级沙箱执行 bash（sandbox-exec / bubblewrap） |
+
+#### ⚙️ [auto/](extensions/auto) — 自动化
+
+| 扩展 | 说明 |
+|------|------|
+| [`auto-stage-on-exit.ts`](extensions/auto/auto-stage-on-exit.ts) | 退出时自动暂存变更文件 |
+| [`file-trigger.ts`](extensions/auto/file-trigger.ts) | 文件触发器，外部系统可通过写入文件发消息 |
+| [`git-checkpoint.ts`](extensions/auto/git-checkpoint.ts) | 每轮对话创建 git stash checkpoint |
+| [`git-merge-and-resolve.ts`](extensions/auto/git-merge-and-resolve.ts) | 自动合并上游跟踪分支，冲突时引导解决 |
+| [`go-to-bed.ts`](extensions/auto/go-to-bed.ts) | 深夜安全保护，超过午夜后要求显式确认 |
+| [`loop.ts`](extensions/auto/loop.ts) | 快速迭代编码的提示循环，支持可选自动继续 |
+| [`no-sleep.ts`](extensions/auto/no-sleep.ts) | 防止 macOS 在 agent 运行时休眠 |
+| [`notify.ts`](extensions/auto/notify.ts) | 代理任务结束后发送桌面原生通知 |
+| [`trigger-compact.ts`](extensions/auto/trigger-compact.ts) | 自动触发上下文压缩 |
+
+#### 🎯 [accuracy/](extensions/accuracy) — 更精准强大信息获取与操作工具
+
+| 扩展 | 说明 |
+|------|------|
+| [`control.ts`](extensions/accuracy/control.ts) | 会话控制辅助工具（列出可控会话、跨会话通信） |
+| [`multi-edit.ts`](extensions/accuracy/multi-edit.ts) | 替换内置 edit，支持批量 multi 和 Codex 风格 patch 及预检验 |
+| [`structured-output.ts`](extensions/accuracy/structured-output.ts) | 结构化输出工具，支持 terminate: true |
+| [`todos.ts`](extensions/accuracy/todos.ts) | 基于文件存储的 todo 管理扩展 |
+| [`truncated-tool.ts`](extensions/accuracy/truncated-tool.ts) | 工具输出截断示例（rg 包装器） |
+| [`uv.ts`](extensions/accuracy/uv.ts) | 面向 uv 的 Python 工作流辅助工具 |
+
+#### ✅ [verification/](extensions/verification) — 验证与评估
+
+| 扩展 | 说明 |
+|------|------|
+| [`review.ts`](extensions/verification/review.ts) | 代码评审命令，支持工作区、PR 风格 diff、提交、定制指令 |
+
+#### 🔧 [meta/](extensions/meta) — 元插件
+
+| 扩展 | 说明 |
+|------|------|
+| [`commands.ts`](extensions/meta/commands.ts) | `/commands` 列出所有可用命令 |
+| [`preset.ts`](extensions/meta/preset.ts) | 预设配置管理（model/tools/instructions），支持 CLI/命令/快捷键 |
+| [`skills.ts`](extensions/meta/skills.ts) | `/skills` 交互式启停技能，持久化配置 |
+| [`tools.ts`](extensions/meta/tools.ts) | `/tools` 交互式启停工具，支持 MCP 延迟注册 |
+| [`pi-logger/`](extensions/meta/pi-logger/) | 统一日志基础设施，所有扩展通过 `createLogger()` 接入 |
+| [`pi-rate-limiter/`](extensions/meta/pi-rate-limiter/) | 速率限制基础设施，主动节流 + 自动恢复 |
 
 ### Pi Coding Agent Themes
 

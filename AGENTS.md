@@ -46,6 +46,38 @@ pi -a --no-session -e ./extensions/foo.ts -p "test prompt"
 
 Pi 扩展放在 [extensions](extensions) 目录中；修改时请在这里更新。若需要参考内部实现，可查看 `pi-mono`，但不要改动其源码。
 
+### 扩展分类体系
+
+`extensions/` 按功能分为 7 个子目录，新扩展必须归入对应分类，不得放回顶层：
+
+| 目录 | 分类 | 说明 |
+|------|------|------|
+| `tui/` | 交互界面 | 提供终端交互式 UI 的插件（命令面板、选择器、编辑器等） |
+| `context/` | 上下文组装 | 修改/增强/组装 system prompt 或会话上下文的插件 |
+| `security/` | 审计与安全 | 提供安全保护、审计、权限控制的插件 |
+| `auto/` | 自动化 | 自动执行任务的插件，无需或少量用户交互 |
+| `accuracy/` | 更精准强大信息获取与操作工具 | 增强或替换内置工具，提供更强大/精准的操作能力 |
+| `verification/` | 验证与评估 | 代码审查、质量评估、验证检查的插件 |
+| `meta/` | 元插件 | 管理其他插件/工具的插件、管理预设配置的插件，以及提供基础服务的插件 |
+
+**分类原则：**
+- 按插件**核心功能**归类，一个插件只放入一个目录
+- 如果插件有多个功能维度，以其主要目的为准
+- 新增扩展时，先判断属于哪个分类，创建对应的 `.ts` 文件或目录放入对应子目录
+- 不允许直接在 `extensions/` 顶层添加文件（顶层仅保留分类子目录）
+
+**开发示例：**
+```bash
+# 添加一个新 TUI 插件
+touch extensions/tui/my-picker.ts
+
+# 添加一个新的自动化插件（目录形式，带 index.ts）
+mkdir -p extensions/auto/my-watcher
+touch extensions/auto/my-watcher/index.ts
+```
+
+> ⚠️ **注意**：`pi-logger/` 和 `pi-rate-limiter/` 虽然本质是基础设施，但它们是作为 Pi 扩展机制实现的，因此归入 `meta/`（元插件）。
+
 ### 日志接入要求
 
 所有新建或修改的扩展**必须接入 pi-logger 统一日志体系**，禁止使用裸 `console.log/error`。
