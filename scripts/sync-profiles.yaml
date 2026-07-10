@@ -33,7 +33,7 @@ profiles:
     themes: "*"
     prompts: ["*"]
     exclude:
-      extensions: []
+      extensions: ["pi-rate-limiter", "sandbox"]
       skills: []
       themes: []
       prompts: []

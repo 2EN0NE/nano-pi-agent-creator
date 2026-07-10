@@ -420,8 +420,9 @@ function findExtensionByName(
 			) {
 				return { relativePath: relative(extRoot, fullPath), isDirectory: true };
 			}
-			// Recurse into subdirectories (category directories)
-			if (entry.isDirectory()) {
+			// Recurse into subdirectories, but skip directory extensions
+			// (directories with index.ts — their internals aren't separate extensions)
+			if (entry.isDirectory() && !existsSync(join(fullPath, "index.ts"))) {
 				const result = search(fullPath, depth + 1);
 				if (result) return result;
 			}
@@ -478,16 +479,28 @@ function resolveSourceItems(
 		}
 	}
 
+	// Normalize ["*"] to "*" for cleaner wildcard handling
+	let effectiveNames = names;
+	if (
+		Array.isArray(effectiveNames) &&
+		effectiveNames.length === 1 &&
+		effectiveNames[0] === "*"
+	) {
+		effectiveNames = "*";
+	}
+
 	// Filter by names list
 	let selected: string[];
-	if (names === "*") {
+	if (effectiveNames === "*") {
 		selected = [...available];
-	} else {
-		selected = names.filter((n) => available.includes(n));
-		const missing = names.filter((n) => !available.includes(n));
+	} else if (Array.isArray(effectiveNames)) {
+		selected = effectiveNames.filter((n) => available.includes(n));
+		const missing = effectiveNames.filter((n) => !available.includes(n));
 		for (const m of missing) {
 			console.warn(`  Warning: ${type} "${m}" not found in ${sourceDir}`);
 		}
+	} else {
+		selected = [];
 	}
 
 	// Apply exclude list
