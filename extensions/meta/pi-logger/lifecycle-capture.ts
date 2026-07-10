@@ -177,10 +177,27 @@ export function setupLifecycleCapture(
 
 	pi.on(
 		"message_end",
-		(event: { message: { role?: string; usage?: unknown } }) => {
+		(event: {
+			message: {
+				role?: string;
+				stopReason?: string;
+				usage?: unknown;
+				content?: { type?: string }[];
+			};
+		}) => {
 			const role = event.message?.role ?? "unknown";
 			const usage = event.message?.usage;
-			emit(pi, "info", `[msg] ← ${role}`, { role, usage: usage ?? undefined });
+			const stopReason = event.message?.stopReason;
+			const contentTypes = event.message?.content
+				?.map((c) => c.type)
+				.filter(Boolean)
+				.join(",");
+			emit(pi, "info", `[msg] ← ${role}`, {
+				role,
+				stopReason: stopReason ?? undefined,
+				contentTypes: contentTypes || undefined,
+				usage: usage ?? undefined,
+			});
 		},
 	);
 
