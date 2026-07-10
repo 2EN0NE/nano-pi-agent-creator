@@ -15,7 +15,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { createLogger } from "@zenone/pi-logger";
 
-import { computeSigma, pickWorstDimension } from "./sigma.js";
+import {
+	computeSigma,
+	pickWorstDimension,
+	computeColorLevel,
+} from "./sigma.js";
+import type { ColorLevel } from "./sigma.js";
 import { MetricsTracker } from "./metrics.js";
 import { appendSession, loadSessions } from "./session-store.js";
 import type { SessionMetrics } from "./session-store.js";
@@ -113,12 +118,32 @@ export default function whimsicalExtension(pi: ExtensionAPI) {
 			worst.result.level,
 		);
 
+		// Compute max color level across all dimensions
+		let maxColorLevel: ColorLevel = 0;
+		for (const dim of DIMENSION_KEYS) {
+			const cl = computeColorLevel(results[dim].zScore);
+			if (cl > maxColorLevel) maxColorLevel = cl;
+		}
+
+		// Map color level to theme color name
+		const colorNames: Record<ColorLevel, string> = {
+			0: "thinkingOff",
+			1: "thinkingMinimal",
+			2: "thinkingLow",
+			3: "thinkingMedium",
+			4: "thinkingHigh",
+			5: "thinkingXhigh",
+		};
+		const coloredMsg = ctx.ui.theme.fg(colorNames[maxColorLevel] as any, msg);
+
 		// Structured info log for e2e test verification
 		log.info(
-			"whimsical:refresh dimension=%s level=%d zScore=%s message=%s thinkingSteps=%d avgTurns=%s questions=%d tools=%d",
+			"whimsical:refresh dimension=%s level=%d zScore=%s colorLevel=%d colorName=%s message=%s thinkingSteps=%d avgTurns=%s questions=%d tools=%d",
 			worst.dimension,
 			worst.result.level,
 			worst.result.zScore.toFixed(3),
+			maxColorLevel,
+			colorNames[maxColorLevel],
 			msg,
 			snapshot.thinkingSteps,
 			snapshot.avgTurnsPerQuestion.toFixed(3),
@@ -126,7 +151,7 @@ export default function whimsicalExtension(pi: ExtensionAPI) {
 			snapshot.toolTypesUsed,
 		);
 
-		ctx.ui.setWorkingMessage(msg);
+		ctx.ui.setWorkingMessage(coloredMsg);
 	}
 
 	// -------------------------------------------------------------------------

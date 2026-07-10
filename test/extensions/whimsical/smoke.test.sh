@@ -41,6 +41,22 @@ test_it "logs whimsical:refresh with dimension and level" <<'TEST'
       echo "FAIL: level not found: $line"
       exit 1
     fi
+
+    # Check it has a colorLevel= field (0-5)
+    if echo "$line" | grep -qE 'colorLevel=[0-5]'; then
+      echo "PASS: colorLevel field valid"
+    else
+      echo "FAIL: colorLevel not found: $line"
+      exit 1
+    fi
+
+    # Check it has a colorName= field (one of the 6 thinking colors)
+    if echo "$line" | grep -qE 'colorName=(thinkingOff|thinkingMinimal|thinkingLow|thinkingMedium|thinkingHigh|thinkingXhigh)'; then
+      echo "PASS: colorName field valid"
+    else
+      echo "FAIL: colorName not recognized: $line"
+      exit 1
+    fi
   else
     echo "FAIL: No log directory found"
     exit 1

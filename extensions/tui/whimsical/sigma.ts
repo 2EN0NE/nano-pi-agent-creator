@@ -4,6 +4,9 @@
  * All functions operate on arrays of numeric session metrics.
  */
 
+/** 6-level color scheme based on z-score direction and magnitude */
+export type ColorLevel = 0 | 1 | 2 | 3 | 4 | 5;
+
 export interface SigmaResult {
 	mean: number;
 	std: number;
@@ -11,6 +14,27 @@ export interface SigmaResult {
 	zScore: number;
 	/** Sigma level: 0 = |z| < 1, 1 = 1 ≤ |z| < 2, 2 = |z| ≥ 2 */
 	level: 0 | 1 | 2;
+}
+
+/**
+ * Map a z-score to a 6-level color scheme.
+ *
+ *   Level 0:  z < -2σ       → thinkingOff
+ *   Level 1: -2σ ≤ z < -1σ  → thinkingMinimal
+ *   Level 2: -1σ ≤ z <  1σ  → thinkingLow
+ *   Level 3:  1σ ≤ z <  2σ  → thinkingMedium
+ *   Level 4:  2σ ≤ z <  3σ  → thinkingHigh
+ *   Level 5:  z ≥  3σ       → thinkingXhigh
+ *
+ * When std = 0 (< 2 historical sessions), z=0 → level 2 (neutral).
+ */
+export function computeColorLevel(zScore: number): ColorLevel {
+	if (zScore >= 3) return 5;
+	if (zScore >= 2) return 4;
+	if (zScore >= 1) return 3;
+	if (zScore >= -1) return 2;
+	if (zScore >= -2) return 1;
+	return 0;
 }
 
 /**
