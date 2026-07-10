@@ -436,6 +436,56 @@ function findExtensionByName(
  * Resolve a list of resource names in a source directory.
  * Returns the full paths of matching items.
  */
+/**
+ * Scan the target directory for existing items per resource type.
+ * Returns the list of item names (without extension for files) found in target.
+ */
+function scanTargetExistingItems(
+	type: ResourceType,
+	targetDir: string,
+): string[] {
+	const typeDir = join(targetDir, type);
+	if (!existsSync(typeDir)) return [];
+
+	const items: string[] = [];
+	try {
+		const entries = readdirSync(typeDir, { withFileTypes: true });
+		for (const entry of entries) {
+			const name = entry.name;
+			if (name.startsWith(".")) continue;
+
+			if (type === "extensions") {
+				if (entry.isFile() && name.endsWith(".ts")) {
+					items.push(name.slice(0, -3));
+				} else if (
+					entry.isDirectory() &&
+					existsSync(join(typeDir, name, "index.ts"))
+				) {
+					items.push(name);
+				}
+			} else if (type === "skills") {
+				if (
+					entry.isDirectory() &&
+					existsSync(join(typeDir, name, "SKILL.md"))
+				) {
+					items.push(name);
+				}
+			} else if (type === "themes") {
+				if (entry.isFile() && name.endsWith(".json")) {
+					items.push(name.slice(0, -5));
+				}
+			} else if (type === "prompts") {
+				if (entry.isFile() || entry.isDirectory()) {
+					items.push(name);
+				}
+			}
+		}
+	} catch {
+		return [];
+	}
+	return items.sort();
+}
+
 function resolveSourceItems(
 	type: ResourceType,
 	names: string[] | "*",
@@ -867,9 +917,27 @@ async function processProfile(
 	}
 	console.log();
 
+	// ── Scan target for existing items (to detect stale/deletion candidates) ──
+	const targetExistingNames: Record<ResourceType, string[]> = {
+		extensions: [], skills: [], themes: [], prompts: [],
+	};
+	for (const t of RESOURCE_TYPES) {
+		targetExistingNames[t] = scanTargetExistingItems(t, targetDir);
+	}
+	const sourceNames: Record<ResourceType, Set<string>> = {
+		extensions: new Set(), skills: new Set(), themes: new Set(), prompts: new Set(),
+	};
+	for (const r of resources) {
+		sourceNames[r.type].add(r.name);
+	}
+
 	// Sync each resource
-	let newCount = 0;
-	let updateCount = 0;
+	const newItems: Record<ResourceType, string[]> = {
+		extensions: [], skills: [], themes: [], prompts: [],
+	};
+	const updatedItems: Record<ResourceType, string[]> = {
+		extensions: [], skills: [], themes: [], prompts: [],
+	};
 	let skipCount = 0;
 
 	for (const resource of resources) {
@@ -882,12 +950,12 @@ async function processProfile(
 			case "NEW":
 				console.log(`    ✅ [NEW] ${label} → ${targetRel}`);
 				writeLog("INFO", `[NEW] ${label} → ${resource.targetPath}`);
-				newCount++;
+				newItems[resource.type].push(resource.name);
 				break;
 			case "UPDATE":
 				console.log(`    🔄 [UPDATE] ${label} → ${targetRel}`);
 				writeLog("INFO", `[UPDATE] ${label} → ${resource.targetPath}`);
-				updateCount++;
+				updatedItems[resource.type].push(resource.name);
 				break;
 			case "SKIP":
 				if (!opts.dryRun) {
@@ -939,10 +1007,15 @@ async function processProfile(
 		}
 	}
 
-	// Summary for this profile
+	// ── Summary for this profile ──
+	const newTotal = Object.values(newItems).reduce((a, b) => a + b.length, 0);
+	const updatedTotal = Object.values(updatedItems).reduce(
+		(a, b) => a + b.length,
+		0,
+	);
 	const summaryParts: string[] = [];
-	if (newCount > 0) summaryParts.push(`${newCount} new`);
-	if (updateCount > 0) summaryParts.push(`${updateCount} updated`);
+	if (newTotal > 0) summaryParts.push(`${newTotal} new`);
+	if (updatedTotal > 0) summaryParts.push(`${updatedTotal} updated`);
 	if (skipCount > 0 && opts.dryRun)
 		summaryParts.push(`${skipCount} would-be-skipped`);
 	else if (skipCount > 0) summaryParts.push(`${skipCount} skipped`);
@@ -953,6 +1026,55 @@ async function processProfile(
 	const summary =
 		summaryParts.length > 0 ? summaryParts.join(", ") : "no changes";
 	console.log(`\n  ✅ [${name}] Done — ${summary}`);
+
+	// ── Per-category breakdown (NEW / UPDATED / DELETE CANDIDATES) ──
+	const absTarget = expandTargetPath(profile.target, PROJECT_ROOT);
+	let hasDeletes = false;
+
+	console.log(`\n  🗂️  "${name}" — per-category breakdown:\n`);
+	for (const t of RESOURCE_TYPES) {
+		const n = newItems[t].length;
+		const u = updatedItems[t].length;
+		const candidates = targetExistingNames[t].filter(
+			(item) => !sourceNames[t].has(item),
+		);
+		const d = candidates.length;
+
+		const parts: string[] = [];
+		if (n > 0) parts.push(`${n} NEW`);
+		if (u > 0) parts.push(`${u} UPDATED`);
+		if (d > 0) parts.push(`${d} DELETE CANDIDATE${d > 1 ? "S" : ""}`);
+		const status =
+			parts.length > 0 ? ` [${parts.join(" | ")}]` : " [no changes]";
+
+		console.log(`    ${t}/${status}`);
+
+		if (d > 0) {
+			hasDeletes = true;
+			for (const c of candidates) {
+				// Construct the correct path with original file extension
+				let fullPath: string;
+				if (t === "extensions") {
+					// Could be a .ts file or a directory with index.ts
+					const tsPath = join(absTarget, t, c + ".ts");
+					if (existsSync(tsPath)) {
+						fullPath = tsPath;
+					} else {
+						fullPath = join(absTarget, t, c);
+					}
+				} else if (t === "themes") {
+					fullPath = join(absTarget, t, c + ".json");
+				} else {
+					fullPath = join(absTarget, t, c);
+				}
+				console.log(`      🗑️  rm -rf ${fullPath}`);
+			}
+		}
+	}
+
+	if (!hasDeletes) {
+		console.log(`      (no items outside source scope — nothing to clean up)`);
+	}
 	console.log();
 
 	writeLog(

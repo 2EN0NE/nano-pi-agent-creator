@@ -25,7 +25,7 @@ profiles:
   # ── Project Full Sync ────────────────────────────────────────
   # Sync everything to the project's .pi directory.
   # This is the default profile when no --profile is specified.
-  full-project:
+  project:
     description: "Sync all resources to project .pi directory"
     target: "./.pi"
     extensions: "*"
@@ -40,25 +40,25 @@ profiles:
 
   # ── Development Test ──────────────────────────────────────────
   # Sync a minimal subset to a project-local test directory.
-  dev-test:
-    description: "Minimal test environment for extension development"
-    target: "./.pi/test"
-    extensions: ["pi-logger", "review"]
-    skills: []
-    themes: []
-    prompts: []
+#  dev-test:
+#    description: "Minimal test environment for extension development"
+#    target: "./.pi/test"
+#    extensions: ["pi-logger", "review"]
+#    skills: []
+#    themes: []
+#    prompts: []
     # exclude not needed for this small profile
 
   # ── User Global Install ──────────────────────────────────────
   # Sync everything (minus heavy/optional items) to ~/.pi/agent/
   # so pi.dev discovers them automatically.
-  user-install:
-    description: "Install all resources to user's global pi agent directory"
-    target: "~/.pi/agent"
-    extensions: "*"
-    skills: "*"
-    themes: "*"
-    prompts: ["*"]
-    exclude:
-      extensions: ["sandbox"] # sandbox needs manual npm install setup
-      skills: []
+#  user-install:
+#    description: "Install all resources to user's global pi agent directory"
+#    target: "~/.pi/agent"
+#    extensions: "*"
+#    skills: "*"
+#    themes: "*"
+#    prompts: ["*"]
+#    exclude:
+#      extensions: ["sandbox"] # sandbox needs manual npm install setup
+#      skills: []
