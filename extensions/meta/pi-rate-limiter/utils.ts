@@ -124,7 +124,9 @@ export function getExtensionDir(): string {
  * Parse a minimal subset of YAML sufficient for this extension's config.
  * Supports top-level key: value pairs only. Numbers and booleans are auto-detected.
  */
-export function parseSimpleYaml(text: string): Record<string, string | number | boolean> {
+export function parseSimpleYaml(
+	text: string,
+): Record<string, string | number | boolean> {
 	const result: Record<string, string | number | boolean> = {};
 	for (const raw of text.split("\n")) {
 		const line = raw.trim();
@@ -150,10 +152,26 @@ export function parseSimpleYaml(text: string): Record<string, string | number | 
 // Config loading (4-layer priority)
 // ============================================================================
 
-export function loadYamlConfig(cwd: string, extensionDir: string): Partial<RateLimitConfig> {
+export function loadYamlConfig(
+	cwd: string,
+	extensionDir: string,
+): Partial<RateLimitConfig> {
 	const builtinPath = join(extensionDir, "pi-rate-limiter.yaml");
-	const globalPath = join(homedir(), ".pi", "agent", "extensions", "pi-rate-limiter.yaml");
-	const projectPath = join(cwd, ".pi", "agent", "extensions", "pi-rate-limiter.yaml");
+	const globalPath = join(
+		homedir(),
+		".pi",
+		"agent",
+		"extensions-data",
+		"pi-rate-limiter",
+		"pi-rate-limiter.yaml",
+	);
+	const projectPath = join(
+		cwd,
+		".pi",
+		"agent",
+		"extensions",
+		"pi-rate-limiter.yaml",
+	);
 
 	let merged: Partial<RateLimitConfig> = {};
 
@@ -163,16 +181,28 @@ export function loadYamlConfig(cwd: string, extensionDir: string): Partial<RateL
 				const raw = readFileSync(path, "utf8");
 				const parsed = parseSimpleYaml(raw);
 				const picked: Partial<RateLimitConfig> = {};
-				if ("maxRequestsPerMinute" in parsed) picked.maxRequestsPerMinute = Number(parsed.maxRequestsPerMinute);
-				if ("maxTokensPerMinute" in parsed) picked.maxTokensPerMinute = Number(parsed.maxTokensPerMinute);
-				if ("autoResumeOn432" in parsed) picked.autoResumeOn432 = Boolean(parsed.autoResumeOn432);
-				if ("tokenEstimateRatio" in parsed) picked.tokenEstimateRatio = Number(parsed.tokenEstimateRatio);
-				if ("throttleThresholdPercent" in parsed) picked.throttleThresholdPercent = Number(parsed.throttleThresholdPercent);
-				if ("globalRateLimit" in parsed) picked.globalRateLimit = Boolean(parsed.globalRateLimit);
-				if ("heartbeatIntervalMs" in parsed) picked.heartbeatIntervalMs = Number(parsed.heartbeatIntervalMs);
-				if ("lockTimeoutMs" in parsed) picked.lockTimeoutMs = Number(parsed.lockTimeoutMs);
-				if ("staleProcessTimeoutMs" in parsed) picked.staleProcessTimeoutMs = Number(parsed.staleProcessTimeoutMs);
-				if ("adaptiveRateLimit" in parsed) picked.adaptiveRateLimit = Boolean(parsed.adaptiveRateLimit);
+				if ("maxRequestsPerMinute" in parsed)
+					picked.maxRequestsPerMinute = Number(parsed.maxRequestsPerMinute);
+				if ("maxTokensPerMinute" in parsed)
+					picked.maxTokensPerMinute = Number(parsed.maxTokensPerMinute);
+				if ("autoResumeOn432" in parsed)
+					picked.autoResumeOn432 = Boolean(parsed.autoResumeOn432);
+				if ("tokenEstimateRatio" in parsed)
+					picked.tokenEstimateRatio = Number(parsed.tokenEstimateRatio);
+				if ("throttleThresholdPercent" in parsed)
+					picked.throttleThresholdPercent = Number(
+						parsed.throttleThresholdPercent,
+					);
+				if ("globalRateLimit" in parsed)
+					picked.globalRateLimit = Boolean(parsed.globalRateLimit);
+				if ("heartbeatIntervalMs" in parsed)
+					picked.heartbeatIntervalMs = Number(parsed.heartbeatIntervalMs);
+				if ("lockTimeoutMs" in parsed)
+					picked.lockTimeoutMs = Number(parsed.lockTimeoutMs);
+				if ("staleProcessTimeoutMs" in parsed)
+					picked.staleProcessTimeoutMs = Number(parsed.staleProcessTimeoutMs);
+				if ("adaptiveRateLimit" in parsed)
+					picked.adaptiveRateLimit = Boolean(parsed.adaptiveRateLimit);
 				if ("modelProfiles" in parsed) {
 					try {
 						const mp = JSON.parse(String(parsed.modelProfiles));
@@ -191,17 +221,24 @@ export function loadYamlConfig(cwd: string, extensionDir: string): Partial<RateL
 	return merged;
 }
 
-export function mergeConfig(base: RateLimitConfig, overrides: Partial<RateLimitConfig>): RateLimitConfig {
+export function mergeConfig(
+	base: RateLimitConfig,
+	overrides: Partial<RateLimitConfig>,
+): RateLimitConfig {
 	return {
-		maxRequestsPerMinute: overrides.maxRequestsPerMinute ?? base.maxRequestsPerMinute,
+		maxRequestsPerMinute:
+			overrides.maxRequestsPerMinute ?? base.maxRequestsPerMinute,
 		maxTokensPerMinute: overrides.maxTokensPerMinute ?? base.maxTokensPerMinute,
 		autoResumeOn432: overrides.autoResumeOn432 ?? base.autoResumeOn432,
 		tokenEstimateRatio: overrides.tokenEstimateRatio ?? base.tokenEstimateRatio,
-		throttleThresholdPercent: overrides.throttleThresholdPercent ?? base.throttleThresholdPercent,
+		throttleThresholdPercent:
+			overrides.throttleThresholdPercent ?? base.throttleThresholdPercent,
 		globalRateLimit: overrides.globalRateLimit ?? base.globalRateLimit,
-		heartbeatIntervalMs: overrides.heartbeatIntervalMs ?? base.heartbeatIntervalMs,
+		heartbeatIntervalMs:
+			overrides.heartbeatIntervalMs ?? base.heartbeatIntervalMs,
 		lockTimeoutMs: overrides.lockTimeoutMs ?? base.lockTimeoutMs,
-		staleProcessTimeoutMs: overrides.staleProcessTimeoutMs ?? base.staleProcessTimeoutMs,
+		staleProcessTimeoutMs:
+			overrides.staleProcessTimeoutMs ?? base.staleProcessTimeoutMs,
 		modelProfiles: overrides.modelProfiles ?? base.modelProfiles,
 		adaptiveRateLimit: overrides.adaptiveRateLimit ?? base.adaptiveRateLimit,
 	};
@@ -211,7 +248,10 @@ export function mergeConfig(base: RateLimitConfig, overrides: Partial<RateLimitC
 // Token estimation
 // ============================================================================
 
-export function estimateTokensFromPayload(payload: unknown, ratio: number): number {
+export function estimateTokensFromPayload(
+	payload: unknown,
+	ratio: number,
+): number {
 	if (!payload || typeof payload !== "object") return 0;
 	const p = payload as Record<string, unknown>;
 	const messages = p.messages;
@@ -291,7 +331,10 @@ export function detectModelFromPayload(payload: unknown): string | undefined {
 	return undefined;
 }
 
-export function matchModelProfile(modelId: string, profiles: ModelProfile[]): ModelProfile | undefined {
+export function matchModelProfile(
+	modelId: string,
+	profiles: ModelProfile[],
+): ModelProfile | undefined {
 	for (const profile of profiles) {
 		const pattern = profile.modelPattern;
 		// Regex: starts and ends with /
@@ -324,7 +367,8 @@ export function getEffectiveLimits(
 			return {
 				maxReq: profile.maxRequestsPerMinute,
 				maxTok: profile.maxTokensPerMinute,
-				thresholdPercent: profile.throttleThresholdPercent ?? config.throttleThresholdPercent,
+				thresholdPercent:
+					profile.throttleThresholdPercent ?? config.throttleThresholdPercent,
 			};
 		}
 	}

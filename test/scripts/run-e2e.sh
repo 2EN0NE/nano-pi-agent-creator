@@ -144,7 +144,7 @@ run_pi_and_check() {
 				while IFS= read -r -d '' match; do
 					found="$match"
 					break
-				done < <(find "$ROOT_DIR/extensions" -maxdepth 3 -name "$dn.ts" -o -type d -name "$dn" -exec test -f '{}/index.ts' \; -print0 2>/dev/null)
+				done < <(find "$ROOT_DIR/extensions" -maxdepth 3 -name "$dn.ts" -print0 -o -type d -name "$dn" -exec test -f '{}/index.ts' \; -print0 2>/dev/null)
 				if [[ -n "$found" ]]; then
 					if [[ -d "$found" ]]; then
 						cp -r "$found" "$test_home/.pi/extensions/$dn"
