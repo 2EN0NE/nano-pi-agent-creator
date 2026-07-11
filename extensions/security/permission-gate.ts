@@ -24,6 +24,7 @@ export default function (pi: ExtensionAPI) {
 	const dangerousPatterns = [
 		/\brm\s+(-rf?|--recursive)/i,
 		/\bsudo\b/i,
+		/\bchmod\b/i,
 		/\b(chmod|chown)\b.*777/i,
 	];
 
