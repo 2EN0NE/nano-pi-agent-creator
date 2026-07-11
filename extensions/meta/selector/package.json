@@ -1,0 +1,16 @@
+{
+  "name": "@zenone/pi-selector",
+  "version": "0.1.0",
+  "description": "Shared selection dialog for pi extensions — unified select/confirm dialogs with Tab supplement support, dialog state tracking",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./index.ts"
+    }
+  },
+  "keywords": [
+    "pi-extension",
+    "selector",
+    "dialog"
+  ]
+}

@@ -10,6 +10,7 @@ import type {
 	SessionBeforeSwitchEvent,
 	SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
+import { showConfirm, showSelect } from "@zenone/pi-selector";
 import { createLogger } from "@zenone/pi-logger";
 
 const log = createLogger("confirm-destructive");
@@ -27,7 +28,8 @@ export default function (pi: ExtensionAPI) {
 
 			if (event.reason === "new") {
 				log.info("Prompting user to confirm new session (clear)");
-				const confirmed = await ctx.ui.confirm(
+				const confirmed = await showConfirm(
+					ctx,
 					"Clear session?",
 					"This will delete all messages in the current session.",
 				);
@@ -53,7 +55,8 @@ export default function (pi: ExtensionAPI) {
 				log.info(
 					"Unsaved work detected, prompting user for switch confirmation",
 				);
-				const confirmed = await ctx.ui.confirm(
+				const confirmed = await showConfirm(
+					ctx,
 					"Switch session?",
 					"You have messages in the current session. Switch anyway?",
 				);
@@ -76,12 +79,16 @@ export default function (pi: ExtensionAPI) {
 		);
 		if (!ctx.hasUI) return;
 
-		const choice = await ctx.ui.select(
+		const choice = await showSelect(
+			ctx,
 			`Fork from entry ${event.entryId.slice(0, 8)}?`,
-			["Yes, create fork", "No, stay in current session"],
+			[
+				{ value: "yes", label: "Yes, create fork" },
+				{ value: "no", label: "No, stay in current session" },
+			],
 		);
 
-		if (choice !== "Yes, create fork") {
+		if (choice?.value !== "yes") {
 			ctx.ui.notify("Fork cancelled", "info");
 			log.info("User cancelled fork from entry %s", event.entryId.slice(0, 8));
 			return { cancel: true };

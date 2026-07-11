@@ -9,6 +9,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { showSelect } from "@zenone/pi-selector";
 import { createLogger } from "@zenone/pi-logger";
 
 const log = createLogger("dirty-repo-guard");
@@ -45,12 +46,16 @@ async function checkDirtyRepo(
 		changedFiles,
 		action,
 	);
-	const choice = await ctx.ui.select(
+	const choice = await showSelect(
+		ctx,
 		`You have ${changedFiles} uncommitted file(s). ${action} anyway?`,
-		["Yes, proceed anyway", "No, let me commit first"],
+		[
+			{ value: "proceed", label: "Yes, proceed anyway" },
+			{ value: "cancel", label: "No, let me commit first" },
+		],
 	);
 
-	if (choice !== "Yes, proceed anyway") {
+	if (choice?.value !== "proceed") {
 		ctx.ui.notify("Commit your changes first", "warning");
 		log.info(
 			"User cancelled %s due to dirty repo (%d files)",
