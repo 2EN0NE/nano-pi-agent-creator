@@ -21,7 +21,7 @@ import {
 	computeColorLevel,
 } from "./sigma.js";
 import type { ColorLevel } from "./sigma.js";
-import { MetricsTracker, type MetricsSnapshot } from "./metrics.js";
+import { MetricsTracker } from "./metrics.js";
 import {
 	appendSession,
 	loadSessions,
@@ -63,10 +63,11 @@ export default function whimsicalExtension(pi: ExtensionAPI) {
 	let sessionId: string | undefined;
 	let sessionCwd: string | undefined;
 	let loadedHistory: Record<DimensionKey, number[]> | null = null;
-	let tickTimer: ReturnType<typeof setTimeout> | null = null;
 	let shuttingDown = false;
-	/** Snapshot of metrics at last refresh — skip tick if nothing changed. */
-	let lastSnapshot: MetricsSnapshot | null = null;
+
+	// Event-driven refresh state (replaces polling tick)
+	let currentCtx: ExtensionContext | null = null;
+	let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// -------------------------------------------------------------------------
 	// Checkpoint: persist current tracker state to the live file so it
@@ -84,23 +85,25 @@ export default function whimsicalExtension(pi: ExtensionAPI) {
 	}
 
 	// -------------------------------------------------------------------------
-	// Tick mechanism: periodically refresh the working message so it updates
-	// as metrics accumulate within a single turn (e.g. as tools fire).
+	// Debounced refresh: coalesces rapid metric changes into a single TUI
+	// update, avoiding unnecessary re-renders during bursts of tool calls
+	// or thinking steps.
 	// -------------------------------------------------------------------------
-	function startTicking(ctx: ExtensionContext) {
-		stopTicking();
-		lastSnapshot = null;
-		tickTimer = setInterval(() => {
-			refreshMessage(ctx);
-		}, 5_000); // every 5 seconds
+	function cancelRefresh() {
+		if (refreshTimer !== null) {
+			clearTimeout(refreshTimer);
+			refreshTimer = null;
+		}
 	}
 
-	function stopTicking() {
-		if (tickTimer !== null) {
-			clearInterval(tickTimer);
-			tickTimer = null;
-		}
-		lastSnapshot = null;
+	function scheduleRefresh() {
+		cancelRefresh();
+		// Only schedule if we have a ctx to work with (i.e., inside an active turn)
+		if (!currentCtx) return;
+		refreshTimer = setTimeout(() => {
+			refreshTimer = null;
+			if (currentCtx) refreshMessage(currentCtx);
+		}, 300); // 300ms debounce — responsive without overwhelming TUI
 	}
 
 	// -------------------------------------------------------------------------
@@ -112,18 +115,6 @@ export default function whimsicalExtension(pi: ExtensionAPI) {
 
 		const snapshot = tracker.snapshot();
 
-		// Skip tick if no metrics changed since last refresh (e.g. during pure
-		// LLM wait after all tools finished).
-		if (
-			lastSnapshot &&
-			lastSnapshot.thinkingSteps === snapshot.thinkingSteps &&
-			lastSnapshot.avgTurnsPerQuestion === snapshot.avgTurnsPerQuestion &&
-			lastSnapshot.userQuestions === snapshot.userQuestions &&
-			lastSnapshot.toolTypesUsed === snapshot.toolTypesUsed
-		) {
-			return;
-		}
-		lastSnapshot = snapshot;
 		saveCheckpoint(); // Persist mid-session state after any metric change
 
 		// Compute sigma for each dimension
@@ -241,47 +232,52 @@ export default function whimsicalExtension(pi: ExtensionAPI) {
 	});
 
 	// 2. Track user input (questions) — only human-typed questions
-	pi.on("input", async (event, _ctx) => {
+	pi.on("input", (event, _ctx) => {
 		if (event.source !== "interactive") return;
 		tracker.incrementUserQuestions();
+		scheduleRefresh();
 	});
 
 	// 3. Track tool executions (for distinct tool types)
-	pi.on("tool_execution_start", async (event) => {
+	pi.on("tool_execution_start", (event) => {
 		tracker.recordToolType(event.toolName);
+		scheduleRefresh();
 	});
 
 	// 4. Track thinking steps via message_update events
-	pi.on("message_update", async (event) => {
+	pi.on("message_update", (event) => {
 		if (
 			event.message.role === "assistant" &&
 			event.assistantMessageEvent?.type === "thinking_start"
 		) {
 			tracker.incrementThinkingSteps();
+			scheduleRefresh();
 		}
 	});
 
-	// 5. On turn_start: set a working message and start ticking
-	pi.on("turn_start", async (_event, ctx) => {
+	// 5. On turn_start: set a working message
+	pi.on("turn_start", (_event, ctx) => {
 		log.debug("event: turn_start");
+		currentCtx = ctx;
 		refreshMessage(ctx);
-		startTicking(ctx);
 	});
 
-	// 6. On turn_end: track turns, persist checkpoint, clear message, stop ticking
-	pi.on("turn_end", async (_event, ctx) => {
+	// 6. On turn_end: track turns, persist checkpoint, clear message
+	pi.on("turn_end", (_event, ctx) => {
 		log.debug("event: turn_end");
 		tracker.incrementAgentTurns();
+		cancelRefresh();
+		currentCtx = null;
 		saveCheckpoint(); // Persist at turn boundary (safe checkpoint)
-		stopTicking();
 		ctx.ui.setWorkingMessage(); // Reset to default
 	});
 
-	// 8. On session shutdown: persist metrics
+	// 7. On session shutdown: persist metrics
 	pi.on("session_shutdown", async (_event, ctx) => {
 		log.debug("event: session_shutdown");
 		shuttingDown = true;
-		stopTicking();
+		cancelRefresh();
+		currentCtx = null;
 		ctx.ui.setWorkingMessage();
 
 		if (sessionId) {
