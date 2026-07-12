@@ -27,6 +27,7 @@ import {
 	reloadConfig,
 	getActiveConfigPath,
 	getConfigLabel,
+	setActiveProfile,
 	upsertProfile,
 } from "./config.js";
 import { getAllAdapters } from "./mechanisms/index.js";
@@ -409,6 +410,17 @@ async function openProfileTreeAndEdit(
 	if (!profileId || !config.profiles[profileId]) {
 		ctx.ui.notify("Profile not found", "warning");
 		return;
+	}
+
+	// Activate the selected profile first
+	if (profileId !== config.activeProfileId) {
+		const ok = setActiveProfile(profileId);
+		if (ok) {
+			ctx.ui.notify(
+				`已切换至 Profile: ${config.profiles[profileId].name}`,
+				"info",
+			);
+		}
 	}
 
 	// Deep clone the profile for editing
