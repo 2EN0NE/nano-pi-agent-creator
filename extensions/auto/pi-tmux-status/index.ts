@@ -12,6 +12,8 @@
  *   🟡 黄色  colour226 = 执行中（LLM 推理或工具调用）
  *   🔴 红色  colour196 = 对话框选择中（等待用户操作）
  *
+ * 同时通过 tmux set window-status-style 同步更新底部窗口页签背景色。
+ *
  * ── 事件驱动 ──
  * 此插件通过注册在 globalThis.__piOnDialogChange 上的回调监听
  * selector 扩展的对话框状态变化，实现事件驱动的联动：
@@ -25,6 +27,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
@@ -54,6 +57,9 @@ function setState(state: string): void {
 	} catch {
 		/* 静默 */
 	}
+
+	// 同步更新底部窗口页签颜色
+	updateWindowTab(state);
 }
 
 function cleanup() {
@@ -64,6 +70,28 @@ function cleanup() {
 		} catch {
 			/* 静默 */
 		}
+}
+
+/** 更新底部窗口页签背景色（window 级，只影响当前窗口） */
+function updateWindowTab(state: string): void {
+	const tabBg =
+		state === "yellow"
+			? "colour226"
+			: state === "red"
+				? "colour196"
+				: "colour82";
+	try {
+		execSync(`tmux set -w window-status-style "bg=${tabBg}"`, {
+			stdio: "ignore",
+			timeout: 300,
+		});
+		execSync(
+			`tmux set -w window-status-current-style "bg=${tabBg},fg=colour232,bold"`,
+			{ stdio: "ignore", timeout: 300 },
+		);
+	} catch {
+		/* tmux 命令失败时静默 */
+	}
 }
 
 export default function (pi: ExtensionAPI) {
