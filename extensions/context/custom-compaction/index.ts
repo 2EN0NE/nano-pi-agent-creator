@@ -6,9 +6,11 @@
  *
  * Features:
  * - Uses Pi's current model for summarization (no manual API key resolution)
- * - Profile-based configuration (model, trigger threshold, prompt, auto-continue)
+ * - Profile-based configuration (model, trigger strategy, prompt, auto-continue)
+ * - Strategy types: context_percent, fixed (absolute token count), reserve (remaining tokens)
  * - Interactive settings panel via /custom-compaction-setting command
- * - Proactive compaction trigger based on context window percentage
+ * - Proactive compaction trigger on agent_end
+ * - Manual compaction trigger via /custom-compact [profile-name]
  * - Auto-continue after compaction to resume work seamlessly
  *
  * Configuration is persisted in:
@@ -17,20 +19,120 @@
  *
  * Usage:
  *   pi --extension custom-compaction
- *   /custom-compaction-setting  (open settings panel)
+ *   /custom-compaction-setting         (open settings panel)
+ *   /custom-compact                    (trigger compaction, pick profile if multiple)
+ *   /custom-compact my-profile         (trigger compaction with a specific profile)
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-// @ts-expect-error — @zenone/pi-logger resolves api.ts at runtime
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 import { createLogger } from "@zenone/pi-logger";
+import { showSelect } from "@zenone/pi-selector";
 import { loadConfig, reloadConfig, setSessionId } from "./config.js";
-import { buildCompactionHandler } from "./compactor.js";
+import { buildCompactionHandler, setPendingSupplement } from "./compactor.js";
 import { openSettingsPanel } from "./settings-panel.js";
+import { type CompactionProfile, describeTrigger } from "./types.js";
+
+// Auto-register available compaction adapters
+import "./mechanisms/smart-compact.js";
 
 const log = createLogger("custom-compaction");
 
 /** Debounce flag: true while a compaction is in progress */
 let compactingInProgress = false;
+
+// ── Helpers ─────────────────────────────────────────────────────
+
+/**
+ * Check whether a trigger threshold has been crossed based on current context usage.
+ */
+function shouldTrigger(
+	trigger: CompactionProfile["trigger"],
+	contextUsage: { tokens: number; percent: number | null },
+	contextWindow: number | undefined,
+): boolean {
+	const { type, threshold } = trigger;
+
+	switch (type) {
+		case "context_percent":
+			if (contextUsage.percent === null) return false;
+			return contextUsage.percent >= threshold;
+
+		case "fixed":
+			return contextUsage.tokens >= threshold;
+
+		case "reserve": {
+			if (contextWindow === undefined || contextWindow <= 0) {
+				// Fallback: derive window from percent if available
+				if (contextUsage.percent === null || contextUsage.percent <= 0)
+					return false;
+				return (
+					Math.round((contextUsage.tokens / contextUsage.percent) * 100) -
+						contextUsage.tokens <=
+					threshold
+				);
+			}
+			return contextWindow - contextUsage.tokens <= threshold;
+		}
+		default:
+			return false;
+	}
+}
+
+/**
+ * Execute compaction with the active profile's settings.
+ */
+function doCompact(
+	pi: ExtensionAPI,
+	ctx: Parameters<Parameters<typeof pi.on>[1]>[1],
+	profile: CompactionProfile,
+) {
+	if (compactingInProgress) {
+		log.info("Compaction already in progress, skipping");
+		return;
+	}
+
+	compactingInProgress = true;
+	const triggerProfile = profile;
+
+	if (ctx.hasUI) {
+		ctx.ui.notify(
+			`Compaction starting (${describeTrigger(profile.trigger)})`,
+			"info",
+		);
+	}
+
+	ctx.compact({
+		onComplete: () => {
+			log.info("Compaction completed successfully");
+			compactingInProgress = false;
+
+			if (ctx.hasUI) {
+				ctx.ui.notify("Compaction completed", "info");
+			}
+
+			if (triggerProfile.autoContinue) {
+				const msg = triggerProfile.autoContinueMessage || "continue";
+				log.info("Auto-continue: sending message:", msg);
+				pi.sendUserMessage(msg, {
+					deliverAs: "followUp",
+				});
+			}
+		},
+		onError: (err) => {
+			log.error("Compaction failed:", err.message);
+			compactingInProgress = false;
+
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Compaction failed: ${err.message}`, "error");
+			}
+		},
+	});
+}
+
+// ── Extension entry ─────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
 	log.info("Extension loaded");
@@ -39,9 +141,6 @@ export default function (pi: ExtensionAPI) {
 	loadConfig();
 
 	// ── On session start/reload: set session ID, load session-specific config ──
-	// Session configs are stored as <sessionId>.json under ~/.pi/agent/extensions-data/custom-compaction/.
-	// This path is deterministic and not affected by jiti module caching, so
-	// settings survive /reload correctly.
 	pi.on("session_start", async (_event, ctx) => {
 		const sid = ctx.sessionManager.getSessionId();
 		if (sid) {
@@ -55,10 +154,79 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("custom-compaction-setting", {
 		description: "Open custom compaction settings panel",
 		handler: async (_args, ctx) => {
-			// Reload config before opening panel (ensures fresh state)
 			reloadConfig();
 			await openSettingsPanel(ctx);
 		},
+	});
+
+	// ── Register /custom-compact command ──────────────────────
+	// Usage:
+	//   /custom-compact                        — pick profile via selector (Tab to supplement)
+	//   /custom-compact <profile-name>         — compact with the named profile
+	const triggerHandler = async (
+		_args: string,
+		ctx: ExtensionCommandContext,
+	) => {
+		const config = loadConfig();
+		const entries = Object.entries(config.profiles);
+		if (entries.length === 0) {
+			if (ctx.hasUI) ctx.ui.notify("No compaction profiles available", "error");
+			return;
+		}
+
+		let chosenProfile: CompactionProfile | undefined;
+		let supplement: string | undefined;
+		const trimmedName = _args.trim();
+
+		if (trimmedName) {
+			// Arg given → try to match as profile id or name (case-insensitive)
+			const match = entries.find(
+				([id, p]) =>
+					id.toLowerCase() === trimmedName.toLowerCase() ||
+					p.name.toLowerCase() === trimmedName.toLowerCase(),
+			);
+			if (match) {
+				chosenProfile = match[1];
+			} else if (ctx.hasUI) {
+				ctx.ui.notify(`Profile "${trimmedName}" not found`, "warning");
+			}
+		}
+
+		if (!chosenProfile) {
+			// Resolve which profile to use
+			if (entries.length === 1) {
+				chosenProfile = entries[0][1];
+				// Supplement can still be provided via the selector prompt
+			} else if (ctx.hasUI) {
+				// Use the shared selector for multi-profile picker
+				const selectOptions = entries.map(([id, p]) => ({
+					value: id,
+					label: p.name,
+					description: describeTrigger(p.trigger),
+				}));
+				const result = await showSelect(
+					ctx,
+					"选择 compaction profile  (Tab 可补充说明)",
+					selectOptions,
+				);
+				if (!result) return;
+				chosenProfile = config.profiles[result.value];
+				supplement = result.supplement;
+			} else {
+				return;
+			}
+		}
+
+		// Store supplement for the compactor to pick up
+		if (supplement) setPendingSupplement(supplement);
+		doCompact(pi, ctx, chosenProfile!);
+	};
+
+	pi.registerCommand("custom-compact", {
+		description:
+			"Trigger compaction manually. Usage: /custom-compact [profile-name]. " +
+			"Without a profile name, pick one via selector (Tab for supplementary instructions).",
+		handler: triggerHandler,
 	});
 
 	// ── Proactive trigger: monitor context usage on agent_end ──
@@ -73,64 +241,43 @@ export default function (pi: ExtensionAPI) {
 		const profile = config.profiles[config.activeProfileId];
 		if (!profile) return;
 
-		// Only trigger if strategy is context_percent
-		if (profile.strategy.type !== "context_percent") return;
-
 		const contextUsage = ctx.getContextUsage();
 		if (!contextUsage) {
 			log.info("Proactive trigger: getContextUsage() returned undefined");
 			return;
 		}
-		if (contextUsage.percent === null) {
-			log.info("Proactive trigger: context percent is null");
+		if (contextUsage.tokens === null) {
+			log.info("Proactive trigger: tokens is null");
 			return;
 		}
 
+		const contextWindow = ctx.model?.contextWindow;
 		log.info(
-			"Proactive trigger check: context",
-			`${contextUsage.percent.toFixed(1)}%`,
-			"(threshold:",
-			`${profile.strategy.threshold}%)`,
-			"idle:",
-			ctx.isIdle(),
+			"Proactive trigger check:",
+			`${contextUsage.tokens.toLocaleString()} tokens`,
+			contextUsage.percent !== null
+				? `(${contextUsage.percent.toFixed(1)}%)`
+				: "",
+			"trigger type:",
+			profile.trigger.type,
+			"threshold:",
+			profile.trigger.threshold,
 		);
 
-		if (contextUsage.percent >= profile.strategy.threshold) {
-			log.info(
-				"Proactive compaction triggered at",
-				contextUsage.percent.toFixed(1),
-				"%",
-			);
-			compactingInProgress = true;
-
-			// Capture profile in closure for onComplete (it may have been updated
-			// by the time compact() finishes, but we want the trigger-time profile).
-			const triggerProfile = profile;
-
-			ctx.compact({
-				onComplete: () => {
-					log.info("Compaction completed successfully");
-					compactingInProgress = false;
-
-					// Auto-continue after compaction fully completes.
-					// We do this in onComplete rather than session_compact because
-					// session_compact fires mid-compact while the agent is disconnected
-					// (after _disconnectFromAgent), and pi.sendUserMessage() →
-					// this.prompt() is unreliable in that state. onComplete fires
-					// after compact() returns, when the agent is reconnected.
-					if (triggerProfile.autoContinue) {
-						const msg = triggerProfile.autoContinueMessage || "continue";
-						log.info("Auto-continue: sending message:", msg);
-						pi.sendUserMessage(msg, {
-							deliverAs: "followUp",
-						});
-					}
-				},
-				onError: (err) => {
-					log.error("Compaction failed:", err.message);
-					compactingInProgress = false;
-				},
+		if (
+			shouldTrigger(
+				profile.trigger,
+				contextUsage as { tokens: number; percent: number | null },
+				contextWindow,
+			)
+		) {
+			log.info("Proactive compaction triggered", {
+				type: profile.trigger.type,
+				threshold: profile.trigger.threshold,
+				tokens: contextUsage.tokens,
+				percent: contextUsage.percent,
 			});
+			doCompact(pi, ctx, profile);
 		}
 	});
 

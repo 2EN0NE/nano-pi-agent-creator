@@ -13,6 +13,13 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
 	type CompactionConfig,
 	type CompactionProfile,
+	type TriggerType,
+	type MechanismType,
+	TRIGGER_LABELS,
+	MECHANISM_LABELS,
+	describeTrigger,
+	describeMechanism,
+	validateTriggerThreshold,
 	DEFAULT_AUTO_CONTINUE_MESSAGE,
 } from "./types.js";
 import {
@@ -22,19 +29,30 @@ import {
 	getConfigLabel,
 	upsertProfile,
 } from "./config.js";
+import { getAllAdapters } from "./mechanisms/index.js";
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-function formatStrategy(p: CompactionProfile): string {
-	if (p.strategy.type === "context_percent") {
-		return `Compact at ${p.strategy.threshold}% context window`;
+/** Safely describe a profile — handles partial/incomplete profiles */
+function safeDescribe(p: CompactionProfile): string {
+	const parts: string[] = [];
+	parts.push(`Model: ${p.model === "current" ? "Current" : p.model}`);
+	if (p.trigger) {
+		parts.push(`Trigger: ${describeTrigger(p.trigger)}`);
+	} else {
+		parts.push("Trigger: (not configured — edit profile to set)");
 	}
-	return `${p.strategy.type}`;
+	if (p.mechanism) {
+		parts.push(`Mechanism: ${describeMechanism(p.mechanism)}`);
+	} else {
+		parts.push("Mechanism: (not configured — edit profile to set)");
+	}
+	parts.push(`Auto-continue: ${p.autoContinue ? "Yes" : "No"}`);
+	return parts.join(" | ");
 }
 
-function profileDescription(p: CompactionProfile): string {
-	return `Model: ${p.model === "current" ? "Current" : p.model} | ${formatStrategy(p)} | Auto-continue: ${p.autoContinue ? "Yes" : "No"}`;
-}
+/** Alias for backward compat */
+const profileDescription = safeDescribe;
 
 // ── Profile field editor (inline key-value tree) ────────────────
 
@@ -101,21 +119,143 @@ const PROFILE_FIELDS: ProfileField[] = [
 		},
 	},
 	{
-		key: "threshold",
-		label: "Trigger threshold (%)",
-		readValue: (p) => `${p.strategy.threshold}%`,
+		key: "triggerType",
+		label: "Trigger type",
+		readValue: (p) => {
+			if (!p.trigger?.type) return "(not configured)";
+			return TRIGGER_LABELS[p.trigger.type] || p.trigger.type;
+		},
 		edit: async (ctx, p) => {
+			// Ensure trigger object exists (defensive — migration should handle this)
+			if (!p.trigger) p.trigger = { type: "context_percent", threshold: 20 };
+			const options = (["context_percent", "fixed", "reserve"] as const).map(
+				(t) => {
+					const label = TRIGGER_LABELS[t];
+					const desc = describeTrigger({
+						type: t,
+						threshold:
+							t === "context_percent" ? 20 : t === "fixed" ? 200000 : 10000,
+					});
+					const checked = t === p.trigger.type ? " ✓" : "";
+					return `${label}${checked} — ${desc}`;
+				},
+			);
+			const choice = await ctx.ui.select("Select trigger type", options);
+			if (choice === undefined) return false;
+
+			for (const t of ["context_percent", "fixed", "reserve"] as const) {
+				if (choice.startsWith(TRIGGER_LABELS[t])) {
+					p.trigger.type = t;
+					if (t === "context_percent") p.trigger.threshold = 20;
+					else if (t === "fixed") p.trigger.threshold = 200000;
+					else p.trigger.threshold = 10000;
+					return true;
+				}
+			}
+			return false;
+		},
+	},
+	{
+		key: "threshold",
+		label: "Trigger threshold",
+		readValue: (p) => {
+			const t = p.trigger;
+			if (!t?.type) return "(not configured)";
+			switch (t.type) {
+				case "context_percent":
+					return `${t.threshold}%`;
+				case "fixed":
+					return `${t.threshold.toLocaleString()} tokens`;
+				case "reserve":
+					return `${t.threshold.toLocaleString()} tokens reserved`;
+			}
+		},
+		edit: async (ctx, p) => {
+			if (!p.trigger) p.trigger = { type: "context_percent", threshold: 20 };
+			const hints: Record<TriggerType, string> = {
+				context_percent: "Percentage of context window (1-99)",
+				fixed: "Absolute token count (min 1,000)",
+				reserve: "Minimum tokens to keep free (min 100)",
+			};
 			const val = await ctx.ui.input(
-				"Context window threshold (%)",
-				String(p.strategy.threshold),
+				hints[p.trigger.type],
+				String(p.trigger.threshold),
 			);
 			if (val === undefined) return false;
 			const n = parseInt(val, 10);
-			if (!isNaN(n) && n >= 1 && n <= 99) {
-				p.strategy.threshold = n;
-				return true;
+			if (isNaN(n)) {
+				ctx.ui.notify("Invalid number", "warning");
+				return false;
 			}
-			ctx.ui.notify("Invalid threshold (1-99)", "warning");
+			const err = validateTriggerThreshold(p.trigger.type, n);
+			if (err) {
+				ctx.ui.notify(err, "warning");
+				return false;
+			}
+			p.trigger.threshold = n;
+			return true;
+		},
+	},
+	{
+		key: "mechanismType",
+		label: "Compression mechanism",
+		readValue: (p) => {
+			if (!p.mechanism) return "(not configured)";
+			return describeMechanism(p.mechanism);
+		},
+		edit: async (ctx, p) => {
+			if (!p.mechanism) p.mechanism = { type: "summarize" };
+			const mechTypes: MechanismType[] = [
+				"summarize",
+				"pass_through",
+				"adapter",
+			];
+			const baseOptions = mechTypes.map((t) => {
+				const label = MECHANISM_LABELS[t];
+				const checked = t === p.mechanism.type ? " ✓" : "";
+				return `${label}${checked}`;
+			});
+			const choice = await ctx.ui.select(
+				"Select compression mechanism",
+				baseOptions,
+			);
+			if (choice === undefined) return false;
+
+			for (const t of mechTypes) {
+				if (choice.startsWith(MECHANISM_LABELS[t])) {
+					p.mechanism.type = t;
+					if (t === "adapter") {
+						const adapters = getAllAdapters();
+						if (adapters.length > 0) {
+							const adpOptions = adapters.map((a) =>
+								a.id === p.mechanism.adapterId
+									? `✓ ${a.name} — ${a.description}`
+									: `  ${a.name} — ${a.description}`,
+							);
+							const adpChoice = await ctx.ui.select(
+								"Select adapter",
+								adpOptions,
+							);
+							if (adpChoice) {
+								for (const a of adapters) {
+									if (adpChoice.includes(a.name)) {
+										p.mechanism.adapterId = a.id;
+										break;
+									}
+								}
+							}
+						} else {
+							ctx.ui.notify(
+								"No adapters registered. Install a compatible compaction extension.",
+								"warning",
+							);
+						}
+					} else {
+						p.mechanism.adapterId = undefined;
+					}
+					return true;
+				}
+			}
 			return false;
 		},
 	},
@@ -272,9 +412,13 @@ async function openProfileTreeAndEdit(
 	}
 
 	// Deep clone the profile for editing
-	const workingProfile: CompactionProfile = JSON.parse(
-		JSON.stringify(config.profiles[profileId]),
-	);
+	let workingProfile: CompactionProfile;
+	try {
+		workingProfile = JSON.parse(JSON.stringify(config.profiles[profileId]));
+	} catch {
+		ctx.ui.notify("Failed to clone profile", "error");
+		return;
+	}
 
 	// Enter field editor — changes save immediately, no explicit save step
 	await editProfileFieldsInPlace(ctx, workingProfile, profileId);

@@ -19,16 +19,9 @@
  * so session settings always survive reload.
  */
 
-import {
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	unlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-// @ts-expect-error — @zenone/pi-logger resolves api.ts at runtime; LSP misses it
 import { createLogger } from "@zenone/pi-logger";
 import {
 	type CompactionConfig,
@@ -39,8 +32,6 @@ import {
 const log = createLogger("custom-compaction:config");
 
 // ── Deterministic config directory ─────────────────────────────
-// All config files (base + session) live under this single path.
-// No dependency on import.meta.url, so it survives jiti reloads.
 
 function getConfigDir(): string {
 	return join(
@@ -76,7 +67,6 @@ export function isSessionConfig(): boolean {
 
 /**
  * Get the config label for display.
- * Returns "session级配置" when session-specific, otherwise the base profile name.
  */
 export function getConfigLabel(): string {
 	if (isSessionConfig()) return "session级配置";
@@ -90,7 +80,6 @@ export function getConfigLabel(): string {
 /**
  * Set the current session ID and re-resolve the active config.
  * If a session-specific config file exists, it becomes the active config.
- * Called from the session_start event handler.
  */
 export function setSessionId(sessionId: string): void {
 	_activeSessionId = sessionId;
@@ -101,20 +90,16 @@ export function setSessionId(sessionId: string): void {
 		reloadConfig();
 		log.info("Session config loaded:", sessionPath);
 	} else {
-		// No session config yet — active path stays as base config
-		// The in-memory cache may be stale from factory init; reload to be safe
 		reloadConfig();
 	}
 }
 
 /**
- * Load config from disk.
- * Priority: <sessionId>.json > config.json
+ * Load config from disk. Priority: <sessionId>.json > config.json
  */
 export function loadConfig(): CompactionConfig {
 	if (_cachedConfig) return _cachedConfig;
 
-	// Determine which file to read
 	const sessionPath = _activeSessionId
 		? getSessionConfigPath(_activeSessionId)
 		: null;
@@ -124,7 +109,7 @@ export function loadConfig(): CompactionConfig {
 			? sessionPath
 			: existsSync(basePath)
 				? basePath
-				: basePath; // fallback for first run
+				: basePath;
 
 	_activeConfigPath = activePath;
 
@@ -137,8 +122,7 @@ export function loadConfig(): CompactionConfig {
 				throw new Error("Invalid config: missing or invalid 'profiles'");
 			}
 			if (!parsed.activeProfileId || !parsed.profiles[parsed.activeProfileId]) {
-				const firstKey = Object.keys(parsed.profiles)[0];
-				parsed.activeProfileId = firstKey ?? "default";
+				parsed.activeProfileId = Object.keys(parsed.profiles)[0] ?? "default";
 			}
 
 			_cachedConfig = parsed;
@@ -149,7 +133,6 @@ export function loadConfig(): CompactionConfig {
 		log.warn("Failed to load config from", activePath, String(err));
 	}
 
-	// Return defaults
 	const config = createDefaultConfig();
 	_cachedConfig = config;
 	return config;
@@ -157,7 +140,6 @@ export function loadConfig(): CompactionConfig {
 
 /**
  * Save config to disk as a session-specific file (<sessionId>.json).
- * Never modifies the base config.json.
  */
 export function saveConfig(config: CompactionConfig): boolean {
 	if (!_activeSessionId) {
@@ -169,9 +151,7 @@ export function saveConfig(config: CompactionConfig): boolean {
 
 	try {
 		const dir = dirname(targetPath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
+		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
 		writeFileSync(targetPath, JSON.stringify(config, null, 2), "utf-8");
 		_cachedConfig = config;
@@ -207,9 +187,6 @@ export function getActiveConfigPath(): string {
 
 // ── Profile helpers ─────────────────────────────────────────────
 
-/**
- * Get the currently active profile.
- */
 export function getActiveProfile(): CompactionProfile {
 	const config = loadConfig();
 	const profile = config.profiles[config.activeProfileId];
@@ -225,9 +202,6 @@ export function getActiveProfile(): CompactionProfile {
 	return defaultProfile;
 }
 
-/**
- * Set the active profile by ID. Returns false if the profile doesn't exist.
- */
 export function setActiveProfile(profileId: string): boolean {
 	const config = loadConfig();
 	if (!config.profiles[profileId]) return false;
@@ -235,18 +209,12 @@ export function setActiveProfile(profileId: string): boolean {
 	return saveConfig(config);
 }
 
-/**
- * Upsert a profile (update only — no create).
- */
 export function upsertProfile(profile: CompactionProfile): boolean {
 	const config = loadConfig();
 	config.profiles[profile.id] = profile;
 	return saveConfig(config);
 }
 
-/**
- * Delete a profile by ID. Cannot delete the last remaining profile.
- */
 export function deleteProfile(profileId: string): boolean {
 	const config = loadConfig();
 	const keys = Object.keys(config.profiles);

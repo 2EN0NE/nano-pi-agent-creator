@@ -16,18 +16,32 @@ import { type Api, type Model, complete } from "@earendil-works/pi-ai";
 import {
 	convertToLlm,
 	serializeConversation,
+	type ExtensionContext,
+	type SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
-import type {
-	ExtensionContext,
-	SessionBeforeCompactEvent,
-} from "@earendil-works/pi-coding-agent";
-// @ts-expect-error — @zenone/pi-logger resolves api.ts at runtime
 import { createLogger } from "@zenone/pi-logger";
 import { getActiveProfile } from "./config.js";
 import type { CompactionProfile } from "./types.js";
 import { DEFAULT_COMPACTION_PROMPT } from "./types.js";
+import { getAdapter } from "./mechanisms/index.js";
 
 const log = createLogger("custom-compaction:compactor");
+
+// ── Pending supplement ──────────────────────────────────────────
+// Stored before compact() is called, consumed in session_before_compact.
+// Thread-safe because compactingInProgress prevents concurrent compactions.
+
+let _pendingSupplement: string | undefined;
+
+export function setPendingSupplement(s?: string): void {
+	_pendingSupplement = s;
+}
+
+export function getAndClearPendingSupplement(): string | undefined {
+	const s = _pendingSupplement;
+	_pendingSupplement = undefined;
+	return s;
+}
 
 // ── Model resolution ────────────────────────────────────────────
 
@@ -97,6 +111,50 @@ export function buildCompactionHandler() {
 		log.debug("session_before_compact fired");
 
 		const profile = getActiveProfile();
+
+		// ── Dispatch by compaction mechanism ──────────
+		switch (profile.mechanism.type) {
+			case "pass_through":
+				// Don't intercept — let Pi default or other extensions handle it.
+				log.debug(
+					'Mechanism is "pass_through" — skipping custom-compaction handler',
+				);
+				return;
+
+			case "adapter": {
+				const adapterId = profile.mechanism.adapterId;
+				if (!adapterId) {
+					log.warn(
+						'Mechanism is "adapter" but no adapterId set — falling through',
+					);
+					break;
+				}
+				const adp = getAdapter(adapterId);
+				if (!adp?.beforeCompact) {
+					log.warn(
+						`Adapter "${adapterId}" not found or has no beforeCompact — falling through`,
+					);
+					break;
+				}
+				const handled = await adp.beforeCompact(ctx, profile);
+				if (handled) {
+					log.info(`Adapter "${adapterId}" handled compaction`);
+					return;
+				}
+				// Adapter did not handle → return without intercepting.
+				// This lets other session_before_compact handlers (e.g. pi-smart-compact's)
+				// or Pi's default compression take over.
+				log.debug(
+					`Adapter "${adapterId}" did not handle — passing through to next handler`,
+				);
+				return;
+			}
+
+			case "summarize":
+				// Proceed with LLM summarization below
+				break;
+		}
+
 		const modelInfo = resolveModel(profile, ctx);
 
 		if (!modelInfo) {
@@ -148,7 +206,13 @@ export function buildCompactionHandler() {
 			: "";
 
 		// Use the profile's custom prompt, or the default
-		const promptText = profile.prompt.trim() || DEFAULT_COMPACTION_PROMPT;
+		const basePrompt = profile.prompt.trim() || DEFAULT_COMPACTION_PROMPT;
+
+		// Prepend any supplement from the manual trigger's Tab input
+		const supplement = getAndClearPendingSupplement();
+		const promptText = supplement
+			? `${supplement}\n\n---\n\n${basePrompt}`
+			: basePrompt;
 
 		const summaryMessages = [
 			{

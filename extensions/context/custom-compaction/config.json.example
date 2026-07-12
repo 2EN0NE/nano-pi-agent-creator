@@ -1,0 +1,25 @@
+<pastie>{
+  "activeProfileId": "default",
+  "profiles": {
+    "default": {
+      "id": "default",
+      "name": "Default",
+      "model": "current",
+      "trigger": { "type": "context_percent", "threshold": 20 },
+      "mechanism": { "type": "summarize" },
+      "prompt": "",
+      "autoContinue": true,
+      "autoContinueMessage": "continue"
+    },
+    "smart-compact": {
+      "id": "smart-compact",
+      "name": "EESV Smart Compact",
+      "model": "current",
+      "trigger": { "type": "context_percent", "threshold": 70 },
+      "mechanism": { "type": "adapter", "adapterId": "smart_compact" },
+      "prompt": "",
+      "autoContinue": false,
+      "autoContinueMessage": "continue"
+    }
+  }
+}</pastie>
