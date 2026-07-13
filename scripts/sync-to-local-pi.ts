@@ -75,6 +75,10 @@ interface ProfileConfig {
 	themes: string[] | "*";
 	prompts: string[] | "*";
 	exclude?: Partial<Record<ResourceType, string[]>>;
+	// Extensions listed in npmBuild are treated as npm-style packages:
+	// they get npm install + npm run build, and an index.ts bridge is
+	// created pointing to dist/index.js for Pi auto-discovery.
+	npmBuild?: string[];
 }
 
 interface SyncProfilesConfig {
@@ -348,7 +352,26 @@ function expandTargetPath(target: string, projectRoot: string): string {
 }
 
 /**
- * Recursively scan a directory for extension items (.ts files or directories with index.ts).
+ * Check if a directory is an npm-style package directory (has package.json with "pi" field).
+ */
+function isNpmPackageDir(dir: string): boolean {
+	const pkgPath = join(dir, "package.json");
+	if (!existsSync(pkgPath)) return false;
+	try {
+		const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+		return !!(
+			pkg.pi &&
+			Array.isArray(pkg.pi.extensions) &&
+			pkg.pi.extensions.length > 0
+		);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Recursively scan a directory for extension items (.ts files, directories with index.ts,
+ * or npm-package directories with package.json containing "pi" field).
  * Skips node_modules and hidden directories.
  */
 function scanExtensionsRecursively(dir: string, depth: number): string[] {
@@ -371,7 +394,7 @@ function scanExtensionsRecursively(dir: string, depth: number): string[] {
 			results.push(entry.name.slice(0, -3)); // remove .ts
 		} else if (entry.isDirectory()) {
 			// If it has an index.ts, it's an extension directory
-			if (existsSync(join(fullPath, "index.ts"))) {
+			if (existsSync(join(fullPath, "index.ts")) || isNpmPackageDir(fullPath)) {
 				results.push(entry.name);
 			} else {
 				// Otherwise recurse into it (it's a category directory like tui/, auto/, etc.)
@@ -417,13 +440,17 @@ function findExtensionByName(
 			if (
 				entry.isDirectory() &&
 				entry.name === name &&
-				existsSync(join(fullPath, "index.ts"))
+				(existsSync(join(fullPath, "index.ts")) || isNpmPackageDir(fullPath))
 			) {
 				return { relativePath: relative(extRoot, fullPath), isDirectory: true };
 			}
 			// Recurse into subdirectories, but skip directory extensions
 			// (directories with index.ts — their internals aren't separate extensions)
-			if (entry.isDirectory() && !existsSync(join(fullPath, "index.ts"))) {
+			if (
+				entry.isDirectory() &&
+				!existsSync(join(fullPath, "index.ts")) &&
+				!isNpmPackageDir(fullPath)
+			) {
 				const result = search(fullPath, depth + 1);
 				if (result) return result;
 			}
@@ -841,6 +868,8 @@ function hasDependencies(dir: string): boolean {
 		const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
 		if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0)
 			return true;
+		if (pkg.devDependencies && Object.keys(pkg.devDependencies).length > 0)
+			return true;
 		if (pkg.peerDependencies && Object.keys(pkg.peerDependencies).length > 0)
 			return true;
 		return false;
@@ -962,13 +991,19 @@ async function processProfile(
 
 	// ── Scan target for existing items (to detect stale/deletion candidates) ──
 	const targetExistingNames: Record<ResourceType, string[]> = {
-		extensions: [], skills: [], themes: [], prompts: [],
+		extensions: [],
+		skills: [],
+		themes: [],
+		prompts: [],
 	};
 	for (const t of RESOURCE_TYPES) {
 		targetExistingNames[t] = scanTargetExistingItems(t, targetDir);
 	}
 	const sourceNames: Record<ResourceType, Set<string>> = {
-		extensions: new Set(), skills: new Set(), themes: new Set(), prompts: new Set(),
+		extensions: new Set(),
+		skills: new Set(),
+		themes: new Set(),
+		prompts: new Set(),
 	};
 	for (const r of resources) {
 		sourceNames[r.type].add(r.name);
@@ -976,10 +1011,16 @@ async function processProfile(
 
 	// Sync each resource
 	const newItems: Record<ResourceType, string[]> = {
-		extensions: [], skills: [], themes: [], prompts: [],
+		extensions: [],
+		skills: [],
+		themes: [],
+		prompts: [],
 	};
 	const updatedItems: Record<ResourceType, string[]> = {
-		extensions: [], skills: [], themes: [], prompts: [],
+		extensions: [],
+		skills: [],
+		themes: [],
+		prompts: [],
 	};
 	let skipCount = 0;
 
@@ -1050,6 +1091,100 @@ async function processProfile(
 		}
 	}
 
+	// ── npm package extension: bridge creation ──
+	// Auto-detects extensions with package.json + "pi" field (npm-style packages).
+	// Falls back to profile.npmBuild for explicit opt-in.
+	let npmBuildCount = 0;
+	let npmBuildFailCount = 0;
+
+	const npmBuildNames = new Set(profile.npmBuild ?? []);
+	// Also auto-detect: directories with package.json containing "pi" field.
+	// This ensures inline mode works without explicit npmBuild config.
+	for (const resource of resources) {
+		if (resource.type !== "extensions") continue;
+		if (!resource.isDirectory) continue;
+		if (npmBuildNames.has(resource.name)) continue;
+		if (isNpmPackageDir(resource.sourcePath)) {
+			npmBuildNames.add(resource.name);
+		}
+	}
+
+	if (npmBuildNames.size > 0) {
+		for (const resource of resources) {
+			if (resource.type !== "extensions") continue;
+			if (!resource.isDirectory) continue;
+			if (!npmBuildNames.has(resource.name)) continue;
+
+			const npmDir = resource.targetPath;
+			if (!existsSync(npmDir)) {
+				if (opts.dryRun) {
+					console.log(
+						`      🌉  [npm:${resource.name}] bridge index.ts → src/index.ts (dry-run)`,
+					);
+				}
+				continue;
+			}
+
+			const bridgePath = join(npmDir, "index.ts");
+			const srcEntry = join(npmDir, "src", "index.ts");
+			const bridgeContent = `// Auto-generated by sync-to-local-pi - do not edit\nexport { default } from "./src/index.ts";\n`;
+
+			if (opts.dryRun) {
+				if (!existsSync(bridgePath)) {
+					console.log(
+						`      🌉  [npm:${resource.name}] bridge index.ts → src/index.ts (dry-run)`,
+					);
+				}
+				continue;
+			}
+
+			if (existsSync(bridgePath)) {
+				// Bridge already exists — nothing to do
+				continue;
+			}
+
+			if (!existsSync(srcEntry)) {
+				console.error(
+					`      ❌ [npm:${resource.name}] src/index.ts not found in ${npmDir}`,
+				);
+				writeLog(
+					"ERROR",
+					`Bridge failed for ${resource.name}: src/index.ts not found`,
+				);
+				npmBuildFailCount++;
+				continue;
+			}
+
+			// Ensure node_modules exists (npm install may have been skipped)
+			if (!existsSync(join(npmDir, "node_modules"))) {
+				console.log(`      ⚙️  [npm:${resource.name}] Running npm install...`);
+				const installResult = runNpmInstall(npmDir, false);
+				if (!installResult.success) {
+					console.error(
+						`         ❌ npm install failed: ${installResult.output.slice(0, 200)}`,
+					);
+					writeLog(
+						"ERROR",
+						`npm install failed for ${resource.name}: ${installResult.output.slice(0, 200)}`,
+					);
+					npmBuildFailCount++;
+					continue;
+				}
+			}
+
+			// Create bridge index.ts
+			writeFileSync(bridgePath, bridgeContent, "utf8");
+			console.log(
+				`      🌉  [npm:${resource.name}] Created bridge: index.ts → src/index.ts`,
+			);
+			writeLog(
+				"INFO",
+				`Bridge index.ts created for ${resource.name} in ${npmDir}`,
+			);
+			npmBuildCount++;
+		}
+	}
+
 	// ── Root-level local package resolution (link @zenone/* packages) ──
 	const localPackages = findLocalPackages(targetDir);
 	if (localPackages.size > 0) {
@@ -1080,7 +1215,11 @@ async function processProfile(
 
 		if (packagesAdded > 0) {
 			if (!opts.dryRun) {
-				writeFileSync(rootPkgPath, JSON.stringify(rootPkg, null, 2) + "\n", "utf8");
+				writeFileSync(
+					rootPkgPath,
+					JSON.stringify(rootPkg, null, 2) + "\n",
+					"utf8",
+				);
 			}
 			console.log(
 				`      📝 Added ${packagesAdded} local package(s) to ${relative(PROJECT_ROOT, rootPkgPath)}`,
@@ -1113,7 +1252,10 @@ async function processProfile(
 					`      ❌ npm install failed in ${relative(PROJECT_ROOT, targetDir)}`,
 				);
 				console.error(`         ${result.output.slice(0, 200)}`);
-				writeLog("ERROR", `npm install failed in ${targetDir}: ${result.output.slice(0, 200)}`);
+				writeLog(
+					"ERROR",
+					`npm install failed in ${targetDir}: ${result.output.slice(0, 200)}`,
+				);
 				npmFailCount++;
 			}
 		} else {
@@ -1142,6 +1284,9 @@ async function processProfile(
 	if (npmCount > 0) summaryParts.push(`${npmCount} npm installs`);
 	if (npmFailCount > 0)
 		summaryParts.push(`${npmFailCount} npm installs FAILED`);
+	if (npmBuildCount > 0) summaryParts.push(`${npmBuildCount} npm builds`);
+	if (npmBuildFailCount > 0)
+		summaryParts.push(`${npmBuildFailCount} npm builds FAILED`);
 
 	const summary =
 		summaryParts.length > 0 ? summaryParts.join(", ") : "no changes";

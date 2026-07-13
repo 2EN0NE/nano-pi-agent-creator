@@ -1,0 +1,50 @@
+{
+  "name": "@arvoretech/pi-catch-the-fox",
+  "version": "0.6.0",
+  "description": "PI extension: uma raposa em pixel-art que reage ao que o agente está fazendo (farejando, cavando, executando, dormindo)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "tsc --noEmit",
+    "test": "pnpm build && node --test test/*.test.mjs",
+    "preview": "pnpm build && node preview.mjs",
+    "preview:sheet": "pnpm build && node preview.mjs --sheet fox-preview.png"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "latest",
+    "@earendil-works/pi-tui": "latest",
+    "@types/node": "^20.10.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "fox",
+    "widget",
+    "pixel-art",
+    "fun"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arvoreeducacao/arvore-pi-extensions.git",
+    "directory": "packages/catch-the-fox"
+  },
+  "author": "Arvore",
+  "license": "MIT"
+}

@@ -18,8 +18,13 @@
 #   exclude:   — per-type list of names to exclude (applied after include)
 #
 # Note: For extensions, you specify just the name (e.g., "sandbox", "review").
-#       The sync script will search recursively through all category subdirectories
+#       The sync script searches recursively through all category subdirs
 #       to find the file — you don't need to know which category it's in.
+#
+# npmBuild (optional):
+#   Extensions listed here are npm-style packages (with package.json + "pi" field).
+#   After syncing, the tool runs npm install + npm run build and creates an
+#   index.ts bridge pointing to dist/index.js for Pi auto-discovery.
 
 profiles:
   # ── Project Full Sync ────────────────────────────────────────
@@ -37,6 +42,7 @@ profiles:
       skills: []
       themes: []
       prompts: []
+    npmBuild: ["widget-wrangler", "catch-the-fox"]
 
   # ── Development Test ──────────────────────────────────────────
   # Sync a minimal subset to a project-local test directory.
@@ -47,11 +53,11 @@ profiles:
 #    skills: []
 #    themes: []
 #    prompts: []
-    # exclude not needed for this small profile
+# exclude not needed for this small profile
 
-  # ── User Global Install ──────────────────────────────────────
-  # Sync everything (minus heavy/optional items) to ~/.pi/agent/
-  # so pi.dev discovers them automatically.
+# ── User Global Install ──────────────────────────────────────
+# Sync everything (minus heavy/optional items) to ~/.pi/agent/
+# so pi.dev discovers them automatically.
 #  user-install:
 #    description: "Install all resources to user's global pi agent directory"
 #    target: "~/.pi/agent"

@@ -110,12 +110,38 @@ npx tsx scripts/sync-to-local-pi.ts --profile user-install
 
 ## npm install 处理
 
-当同步的扩展目录包含 `package.json` 且有 `dependencies` 或 `peerDependencies` 时，脚本自动执行 `npm install`：
+当同步的扩展目录包含 `package.json` 且有 `dependencies`、`devDependencies` 或 `peerDependencies` 时，脚本自动执行 `npm install`：
 
 1. 资源复制到目标后，检查目标路径是否存在 `package.json`
 2. 如果有依赖声明，执行 `npm install`（2 分钟超时）
 3. 安装结果记录到日志（成功/失败）
 4. Dry-run 模式下会提示但不会实际执行
+
+## npm 包风格扩展支持
+
+`extensions/` 下的某些扩展具有完整的 npm 包结构（`package.json` + `src/` + `tsconfig.json`），称为 **npm 包风格扩展**。
+
+脚本自动检测此类扩展（目录中包含 `package.json` 且含有 `pi.extensions` 字段），并在同步后：
+
+1. 自动执行 `npm install`（安装 `devDependencies` 如 `@earendil-works/pi-tui` 等）
+2. 创建 `index.ts` 桥接文件，内容为 `export { default } from "./src/index.ts";`
+
+这个桥接文件让 Pi 的自动发现机制能正确加载扩展（Pi 要求目录形式扩展必须有 `index.ts` 入口）。
+
+### 示例
+
+```yaml
+profiles:
+  project:
+    extensions: "*"
+    # npmBuild 是可选的显式声明，仅用于文档目的。
+    # 脚本会自动检测所有 npm 包风格扩展，无需手动列出。
+    npmBuild: ["widget-wrangler", "catch-the-fox"]
+```
+
+> **注意**：桥接文件指向 `src/index.ts` 而非编译后的 `dist/index.js`，
+> 因为 Pi 使用 jiti 加载 TypeScript，不需要预编译。这避免了在目标目录
+> 运行 `tsc` 所需的环境依赖。
 
 ## 本地依赖处理
 
@@ -190,6 +216,7 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 ```
 
 操作类型：
+
 - `[NEW]` — 新增文件（目标不存在）
 - `[UPDATE]` — 更新已存在的文件
 - `[SKIP]` — 文件未变化，跳过
