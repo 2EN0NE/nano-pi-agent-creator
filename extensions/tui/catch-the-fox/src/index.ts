@@ -24,8 +24,20 @@ export default function catchTheFoxExtension(pi: ExtensionAPI): void {
 		type: "boolean",
 		default: false,
 	});
+	pi.registerFlag("fox-scale", {
+		description: "缩放狐狸的像素图 (0.5=半大小, 1=原尺寸)",
+		type: "string",
+		default: "1",
+	});
 
-	const fox = new FoxWidget(pi.getFlag("fox-reduced-motion") === true);
+	const foxScale = Math.min(
+		1,
+		Math.max(0.1, parseFloat(pi.getFlag("fox-scale") as string) || 1),
+	);
+	const fox = new FoxWidget(
+		pi.getFlag("fox-reduced-motion") === true,
+		foxScale,
+	);
 	let errorStreak = 0;
 
 	pi.on("session_start", async (_event, context) => {
@@ -69,30 +81,46 @@ export default function catchTheFoxExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("fox", {
 		description:
-			"控制狐狸: /fox <sleep|sniff|dig|run|jump|caught|error|sad|hide|show>",
+			"控制狐狸: /fox <sleep|sniff|dig|run|jump|caught|error|sad|hide|show|scale <0.1-1>>",
 		handler: async (args, context) => {
 			if (!context.hasUI) {
 				context.ui.notify("/fox 需要交互模式", "error");
 				return;
 			}
 			fox.setUI(context.ui);
-			const requestedState = (args ?? "").trim().toLowerCase();
-			if (requestedState === "hide") {
+			const parts = (args ?? "").trim().toLowerCase().split(/\s+/);
+			const subCmd = parts[0];
+
+			if (subCmd === "scale" && parts[1]) {
+				const parsed = parseFloat(parts[1]);
+				if (isNaN(parsed) || parsed < 0.1 || parsed > 1) {
+					context.ui.notify("缩放值需在 0.1 ~ 1 之间", "warning");
+					return;
+				}
+				fox.setScale(parsed);
+				context.ui.notify(
+					`狐狸缩放已调整为 ${parsed}，若要持久化请在启动时添加 --fox-scale ${parsed}`,
+					"warning",
+				);
+				return;
+			}
+
+			if (subCmd === "hide") {
 				fox.hide();
 				context.ui.notify("狐狸已隐藏 (/fox show 重新显示)", "info");
 				return;
 			}
-			if (requestedState === "show") {
+			if (subCmd === "show") {
 				fox.show();
 				context.ui.notify("狐狸回来了！", "info");
 				return;
 			}
-			if (requestedState && requestedState in ANIMS) {
-				fox.showState(requestedState as FoxState);
+			if (subCmd && subCmd in ANIMS) {
+				fox.showState(subCmd as FoxState);
 				return;
 			}
 			context.ui.notify(
-				`状态列表: ${Object.keys(ANIMS).join(", ")} · hide · show`,
+				`状态列表: ${Object.keys(ANIMS).join(", ")} · hide · show · scale <0.1-1>`,
 				"info",
 			);
 		},

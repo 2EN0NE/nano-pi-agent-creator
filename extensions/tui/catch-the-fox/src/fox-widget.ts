@@ -3,6 +3,7 @@ import {
 	ANIMS,
 	FOX_WIDTH,
 	PALETTE,
+	scaleGrid,
 	type FoxState,
 	type RGB,
 } from "./fox-art.js";
@@ -77,6 +78,8 @@ export class FoxWidget {
 	private animationTimer: ReturnType<typeof setInterval> | null = null;
 	private frameIndex = 0;
 	private hidden = false;
+	/** Horizontal offset (cols from left) preserved across state changes. */
+	private offset = 0;
 	private runMotion = new FoxRunMotion();
 	private state: FoxState = "sleep";
 	private terminalWidth = FOX_WIDTH;
@@ -85,7 +88,16 @@ export class FoxWidget {
 	private widgetRegistered = false;
 	private widgetTui: any = null;
 
-	constructor(private readonly reducedMotion: boolean) {}
+	constructor(
+		private readonly reducedMotion: boolean,
+		public scale = 1,
+	) {}
+
+	/** Update scale at runtime and trigger re-render. */
+	setScale(scale: number): void {
+		this.scale = Math.min(1, Math.max(0.1, scale));
+		this.render();
+	}
 
 	setUI(nextUI: any): void {
 		if (this.ui === nextUI) return;
@@ -96,10 +108,15 @@ export class FoxWidget {
 
 	setState(nextState: FoxState): void {
 		const enteringRun = nextState === "run" && this.state !== "run";
+		const leavingRun = this.state === "run" && nextState !== "run";
 		this.clearTimers();
+		// Preserve horizontal position when leaving run
+		if (leavingRun) this.offset = this.runMotion.currentOffset;
 		this.state = nextState;
 		this.frameIndex = 0;
-		if (enteringRun) this.runMotion = new FoxRunMotion();
+		if (enteringRun) {
+			this.runMotion = new FoxRunMotion(this.offset);
+		}
 		this.render();
 		if (this.hidden) return;
 
@@ -107,7 +124,10 @@ export class FoxWidget {
 			this.animationTimer = setInterval(() => {
 				this.frameIndex += 1;
 				if (this.state === "run") {
-					this.runMotion.advance(this.terminalWidth);
+					this.runMotion.advance(
+						this.terminalWidth,
+						Math.ceil(FOX_WIDTH * this.scale),
+					);
 				}
 				this.render();
 			}, ANIMS[this.state].intervalMs);
@@ -166,14 +186,28 @@ export class FoxWidget {
 		this.terminalWidth = Math.max(0, Math.floor(width));
 		const grids = TRIMMED_GRIDS[this.state];
 		let grid = grids[this.frameIndex % grids.length];
-		let offset = 0;
+
+		// Compute scaled fox width once; used by both run-motion bounds and offset clamping
+		const scaledFoxWidth = Math.ceil(FOX_WIDTH * this.scale);
+
 		if (this.state === "run") {
-			const placement = this.runMotion.snapshot(this.terminalWidth);
+			const placement = this.runMotion.snapshot(
+				this.terminalWidth,
+				scaledFoxWidth,
+			);
 			grid = renderRunGrid(grid, placement);
-			offset = placement.offset;
+			this.offset = placement.offset;
 		}
-		const frame = gridToAnsi(grid, this.terminalWidth - offset);
-		const padding = " ".repeat(offset);
+		// Apply pixel downscale before ANSI conversion
+		if (this.scale < 1) {
+			grid = scaleGrid(grid, this.scale);
+		}
+		// Clamp offset so fox doesn't go off-screen
+		const maxOffset = Math.max(0, this.terminalWidth - scaledFoxWidth);
+		const actualOffset = Math.min(this.offset, maxOffset);
+
+		const frame = gridToAnsi(grid, this.terminalWidth - actualOffset);
+		const padding = " ".repeat(actualOffset);
 		const label = ` ${ANIMS[this.state].label}`.slice(0, this.terminalWidth);
 		return [label, ...frame.map((line) => `${padding}${line}`)];
 	};

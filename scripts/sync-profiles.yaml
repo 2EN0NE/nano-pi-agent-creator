@@ -34,34 +34,34 @@ profiles:
     target: "~/.pi/agent"
     extensions:
       # ── 基础设施（其他扩展依赖） ──
-      - selector              # @zenone/pi-selector
-      - pi-logger             # @zenone/pi-logger  ⚠ flag: --log-level
+      - selector # @zenone/pi-selector
+      - pi-logger # @zenone/pi-logger  ⚠ flag: --log-level
       # ── 安全 / 审计 ──
-      - confirm-destructive   # 破坏性操作二次确认
-      - dirty-repo-guard      # 脏仓库阻止切换
-      - permission-gate       # 危险命令拦截
+      - confirm-destructive # 破坏性操作二次确认
+      - dirty-repo-guard # 脏仓库阻止切换
+      - permission-gate # 危险命令拦截
       # ── 更精准的工具 ──
       # ❌ multi-edit 需要 npm 包 diff（仅本项目 node_modules 有），不放 global
-      - structured-output     # terminate 工具  ⚠ tool: structured_output
-      - truncated-tool        # rg 工具          ⚠ tool: rg
+      - structured-output # terminate 工具  ⚠ tool: structured_output
+      - truncated-tool # rg 工具          ⚠ tool: rg
       # ── 自动化 ──
-      - auto-stage-on-exit    # 退出时自动 stage
-      - pi-tmux-status        # tmux 状态通知
+      - auto-stage-on-exit # 退出时自动 stage
+      - pi-tmux-status # tmux 状态通知
       # ── 验证/评估 ──
-      - review                # /review 代码审查
+      - review # /review 代码审查
       # ── TUI 交互 ──
-      - questionnaire         # 统一问答工具
-      - files                 # 文件浏览器
-      - session-breakdown     # 会话分析日历
-      - whimsical             # 工作提示词（sigma 维度）
+      - questionnaire # 统一问答工具
+      - files # 文件浏览器
+      - session-breakdown # 会话分析日历
+      - whimsical # 工作提示词（sigma 维度）
       # ── 上下文组装 ──
-      - custom-compaction     # 自定义压缩策略（配置在 ~/.pi/agent/extensions-data/）
-      - resources-tree        # 资源树面板（自适应当前项目上下文）
+      - custom-compaction # 自定义压缩策略（配置在 ~/.pi/agent/extensions-data/）
+      - resources-tree # 资源树面板（自适应当前项目上下文）
       # ── 元管理 ──
-      - preset                # preset 管理      ⚠ flag: --preset
-      - skills                # /skills 技能管理
-      - tools                 # /tools 工具管理
-      - commands              # /commands 命令列表
+      - preset # preset 管理      ⚠ flag: --preset
+      - skills # /skills 技能管理
+      - tools # /tools 工具管理
+      - commands # /commands 命令列表
     skills: []
     themes: ["*"]
     prompts: []
@@ -77,7 +77,7 @@ profiles:
     target: "./.pi"
     extensions: "*"
     skills: "*"
-    themes: "*"
+    themes: []
     prompts: ["*"]
     exclude:
       extensions:
@@ -107,5 +107,4 @@ profiles:
         - tools
         - commands
       skills: []
-      themes: []
       prompts: []

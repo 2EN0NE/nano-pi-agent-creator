@@ -20,6 +20,29 @@ export interface FoxAnimation {
 export const FOX_WIDTH = 24;
 export const FOX_HEIGHT = 20;
 
+/**
+ * Nearest-neighbor downscale a pixel grid.
+ * scale=1 → original size; scale=0.5 → half width/height.
+ */
+export function scaleGrid(grid: string[], scale: number): string[] {
+	if (scale >= 1) return grid;
+	const srcH = grid.length;
+	const srcW = Math.max(...grid.map((r) => r.length));
+	const dstH = Math.max(2, Math.ceil(srcH * scale));
+	const dstW = Math.max(2, Math.ceil(srcW * scale));
+	const step = srcH / dstH; // >1 when downscaling
+	return Array.from({ length: dstH }, (_, y) => {
+		const srcY = Math.min(Math.floor(y * step), srcH - 1);
+		const srcRow = grid[srcY];
+		let row = "";
+		for (let x = 0; x < dstW; x++) {
+			const srcX = Math.min(Math.floor(x * step), srcW - 1);
+			row += srcRow[srcX] ?? ".";
+		}
+		return row;
+	});
+}
+
 export const PALETTE: Record<string, RGB> = {
 	N: [44, 23, 38],
 	O: [255, 157, 14],
