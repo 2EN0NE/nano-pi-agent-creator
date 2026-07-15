@@ -1,0 +1,18 @@
+{
+	"leaderKey": "alt+.",
+	"labels": [
+		{
+			"key": "g",
+			"label": "GOOD",
+			"aliases": ["good", "g"],
+			"description": "回答质量好"
+		},
+		{
+			"key": "b",
+			"label": "BAD",
+			"aliases": ["bad", "b"],
+			"description": "回答质量差"
+		}
+	],
+	"timeout": 2000
+}

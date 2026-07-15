@@ -64,6 +64,7 @@ profiles:
             - commands # /commands 命令列表
             - prompt-editor # prompt 组装检查与控制
             - mode-switcher # 一键切换模型预设
+            - session-tree-label # 快捷键进行session-tree打标
         skills: []
         themes: ['*']
         prompts: []

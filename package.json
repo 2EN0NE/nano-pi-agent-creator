@@ -17,6 +17,7 @@
 	"pi": {
 		"extensions": [
 			"./extensions/meta/pi-logger",
+			"./extensions/tui/session-tree-label",
 			"./extensions",
 			"!extensions/goal.ts"
 		],
