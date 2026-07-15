@@ -1,6 +1,9 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from '@earendil-works/pi-ai';
 import { execSync } from 'node:child_process';
+import { createLogger } from '@zenone/pi-logger';
+
+const log = createLogger('ci-watch');
 
 const MAX_ATTEMPTS = 3;
 const DEFAULT_POLL_MIN_MS = 30_000;
@@ -27,6 +30,11 @@ function nextPollDelay(current: number, config: PollConfig): number {
 
 function runGh(args: string, cwd: string): string {
 	return execSync(`gh ${args}`, { cwd, encoding: 'utf-8', timeout: 30_000 }).trim();
+}
+
+/** Validate that a branch name contains only safe characters for shell interpolation. */
+function isValidBranch(branch: string): boolean {
+	return /^[a-zA-Z0-9_\-./]+$/.test(branch);
 }
 
 function getCiStatus(prNumber: string, cwd: string): CiCheckResult {
@@ -81,7 +89,22 @@ export default function (pi: ExtensionAPI) {
 		stepMs: DEFAULT_POLL_STEP_MS,
 	};
 
-	let autoMode = false;
+	let autoMode = true;
+
+	let ghChecked = false;
+
+	pi.on('session_start', async (_event, ctx) => {
+		if (ghChecked) return;
+		ghChecked = true;
+		try {
+			execSync('command -v gh', { encoding: 'utf-8', stdio: 'pipe' });
+		} catch {
+			ctx.ui.notify(
+				'⚠️ ci-watch: gh CLI not found. CI monitoring requires GitHub CLI. Install with: brew install gh / apt install gh',
+				'error',
+			);
+		}
+	});
 
 	pi.on('tool_result', async (event, ctx) => {
 		if (!autoMode) return;
@@ -93,31 +116,96 @@ export default function (pi: ExtensionAPI) {
 		const text = content
 			.map((c: { type: string; text?: string }) => (c.type === 'text' ? (c.text ?? '') : ''))
 			.join('');
-		const pushMatch = text.match(
-			/To github\.com[^\n]*\n.*?\[new branch\]|branch '([^']+)' set up to track|\*\s+(\S+)\s+->\s+(\S+)/,
-		);
-		if (!pushMatch) return;
 
-		const branchMatch = text.match(/branch '([^']+)' set up to track/);
-		if (!branchMatch) return;
+		// Detect successful push to GitHub
+		if (!/To github\.com/.test(text)) return;
+		log.debug('GitHub push detected in bash output');
 
-		const branch = branchMatch[1];
+		// Extract branch name from push output using multiple patterns
+		let branch: string | null = null;
+
+		// Pattern 1: "branch 'xxx' set up to track"
+		const trackMatch = text.match(/branch '([^']+)' set up to track/);
+		if (trackMatch) branch = trackMatch[1];
+
+		// Pattern 2: "* [new branch] xxx -> yyy"
+		if (!branch) {
+			const newBranchMatch = text.match(/\*\s+\[new branch\]\s+(\S+)\s*->\s*\S+/);
+			if (newBranchMatch) branch = newBranchMatch[1];
+		}
+
+		// Pattern 3: "abc123..def456  xxx -> yyy" (push to existing branch)
+		if (!branch) {
+			const existingMatch = text.match(/\S+\.\.\S+\s+(\S+)\s*->\s*\S+/);
+			if (existingMatch) branch = existingMatch[1];
+		}
+
+		// Fallback: get current branch directly
+		if (!branch) {
+			try {
+				branch = execSync('git branch --show-current', {
+					cwd: ctx.cwd,
+					encoding: 'utf-8',
+					timeout: 5000,
+				}).trim();
+			} catch (gitErr) {
+				log.debug('git branch --show-current fallback failed', { error: String(gitErr) });
+			}
+		}
+
+		if (!branch) {
+			log.debug('Could not determine branch from push output');
+			return;
+		}
+		log.debug('Auto-watch detected branch', { branch });
+
+		// Validate branch name to prevent shell injection in subsequent gh calls
+		if (!isValidBranch(branch)) {
+			log.warn('Branch name contains unsafe characters, skipping auto-watch', { branch });
+			return;
+		}
+
 		try {
 			const prOutput = runGh(
 				`pr list --head ${branch} --json number -q .[0].number`,
 				ctx.cwd,
 			);
 			if (prOutput) {
+				log.debug('Found PR for branch', { branch, pr: prOutput });
+
+				// Check if CI checks exist before triggering auto-watch
+				let hasChecks = false;
+				try {
+					const checksOutput = runGh(`pr checks ${prOutput} --json name`, ctx.cwd);
+					const checks = JSON.parse(checksOutput);
+					if (Array.isArray(checks) && checks.length > 0) hasChecks = true;
+				} catch (checksErr) {
+					log.warn('Failed to check CI status, skipping auto-watch', {
+						pr: prOutput,
+						error: String(checksErr),
+					});
+					return;
+				}
+
+				if (!hasChecks) {
+					log.debug('No CI checks on this PR, skipping auto-watch', { pr: prOutput });
+					return;
+				}
+
+				log.info('Triggering CI auto-watch', { pr: prOutput, branch });
 				pi.sendUserMessage(
 					`CI auto-watch triggered. Monitor the CI for PR ${prOutput}. If it fails, read the error logs, fix the code, commit, push, and retry until CI passes (max 3 attempts).`,
 					{ deliverAs: 'followUp' },
 				);
 			}
-		} catch {}
+		} catch {
+			log.debug('No PR found for branch (expected if branch has no PR yet)', { branch });
+		}
 	});
 
 	pi.registerCommand('ci-auto', {
-		description: 'Toggle automatic CI watch after every push. Usage: /ci-auto on|off',
+		description:
+			'Toggle automatic CI watch after every push (default: ON). Usage: /ci-auto on|off',
 		handler: async (args, ctx) => {
 			const arg = args?.trim().toLowerCase();
 			if (arg === 'on') {
