@@ -41,7 +41,8 @@ import {
 import { homedir } from 'node:os';
 import { join, dirname, resolve, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
+import { promisify } from 'node:util';
+import { execSync, exec } from 'node:child_process';
 import * as yaml from 'js-yaml';
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -493,6 +494,56 @@ function scanTargetExistingItems(type: ResourceType, targetDir: string): string[
 	return items.sort();
 }
 
+/**
+ * Build a name-to-path index for all extensions by scanning the tree once.
+ * Avoids O(n*m) repeated tree walks in findExtensionByName.
+ */
+function buildExtensionIndex(
+	extRoot: string,
+): Map<string, { relativePath: string; isDirectory: boolean }> {
+	const index = new Map<string, { relativePath: string; isDirectory: boolean }>();
+
+	function scan(dir: string, depth: number) {
+		if (depth > 6) return;
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+
+		for (const entry of entries) {
+			if (entry.name.startsWith('.')) continue;
+			if (entry.name === 'node_modules') continue;
+			const fullPath = join(dir, entry.name);
+
+			if (entry.isFile() && entry.name.endsWith('.ts')) {
+				const name = entry.name.slice(0, -3);
+				if (!index.has(name)) {
+					index.set(name, {
+						relativePath: relative(extRoot, fullPath),
+						isDirectory: false,
+					});
+				}
+			} else if (entry.isDirectory()) {
+				if (existsSync(join(fullPath, 'index.ts')) || isNpmPackageDir(fullPath)) {
+					if (!index.has(entry.name)) {
+						index.set(entry.name, {
+							relativePath: relative(extRoot, fullPath),
+							isDirectory: true,
+						});
+					}
+				} else {
+					scan(fullPath, depth + 1);
+				}
+			}
+		}
+	}
+
+	scan(extRoot, 0);
+	return index;
+}
+
 function resolveSourceItems(
 	type: ResourceType,
 	names: string[] | '*',
@@ -569,6 +620,7 @@ function buildResource(
 	name: string,
 	projectRoot: string,
 	targetDir: string,
+	extIndex?: Map<string, { relativePath: string; isDirectory: boolean }>,
 ): ResolvedResource {
 	const sourceDir = join(projectRoot, type);
 	const targetSubDir = join(targetDir, type);
@@ -578,19 +630,33 @@ function buildResource(
 	let isDirectory = false;
 
 	if (type === 'extensions') {
-		// Search recursively through subdirectories (tui/, auto/, etc.)
-		const found = findExtensionByName(name, sourceDir);
-		if (found) {
-			sourcePath = join(sourceDir, found.relativePath);
-			targetPath = found.isDirectory
-				? join(targetSubDir, name)
-				: join(targetSubDir, `${name}.ts`);
-			isDirectory = found.isDirectory;
+		if (extIndex) {
+			const found = extIndex.get(name);
+			if (found) {
+				sourcePath = join(sourceDir, found.relativePath);
+				targetPath = found.isDirectory
+					? join(targetSubDir, name)
+					: join(targetSubDir, `${name}.ts`);
+				isDirectory = found.isDirectory;
+			} else {
+				// Fallback
+				sourcePath = join(sourceDir, `${name}.ts`);
+				targetPath = join(targetSubDir, `${name}.ts`);
+				isDirectory = false;
+			}
 		} else {
-			// Fallback for backward compatibility (flat dir)
-			sourcePath = join(sourceDir, `${name}.ts`);
-			targetPath = join(targetSubDir, `${name}.ts`);
-			isDirectory = false;
+			const found = findExtensionByName(name, sourceDir);
+			if (found) {
+				sourcePath = join(sourceDir, found.relativePath);
+				targetPath = found.isDirectory
+					? join(targetSubDir, name)
+					: join(targetSubDir, `${name}.ts`);
+				isDirectory = found.isDirectory;
+			} else {
+				sourcePath = join(sourceDir, `${name}.ts`);
+				targetPath = join(targetSubDir, `${name}.ts`);
+				isDirectory = false;
+			}
 		}
 	} else if (type === 'skills') {
 		sourcePath = join(sourceDir, name);
@@ -627,13 +693,17 @@ function resolveResources(profile: ProfileConfig, projectRoot: string): Resolved
 	const targetDir = expandTargetPath(profile.target, projectRoot);
 	const resources: ResolvedResource[] = [];
 
+	// Build extension name-to-path index once to avoid O(n*m) tree walks
+	const extSourceDir = join(projectRoot, 'extensions');
+	const extIndex = existsSync(extSourceDir) ? buildExtensionIndex(extSourceDir) : undefined;
+
 	for (const type of RESOURCE_TYPES) {
 		const names = profile[type]; // string[] | "*"
 		const exclude = profile.exclude?.[type];
 		const selectedNames = resolveSourceItems(type, names, exclude, projectRoot);
 
 		for (const name of selectedNames) {
-			resources.push(buildResource(type, name, projectRoot, targetDir));
+			resources.push(buildResource(type, name, projectRoot, targetDir, extIndex));
 		}
 	}
 
@@ -909,18 +979,82 @@ function runNpmInstall(dir: string, dryRun: boolean): NpmInstallResult {
 	}
 }
 
+const execPromise = promisify(exec);
+
+/**
+ * Async version of npm install (for parallel execution across extensions).
+ */
+async function runNpmInstallAsync(dir: string, dryRun: boolean): Promise<NpmInstallResult> {
+	if (dryRun) {
+		return { path: dir, success: true, output: '[dry-run] npm install would run here' };
+	}
+
+	try {
+		const { stdout, stderr } = await execPromise('npm install', {
+			cwd: dir,
+			encoding: 'utf8',
+			timeout: 120_000,
+		});
+		return { path: dir, success: true, output: (stdout + stderr).trim() };
+	} catch (err: unknown) {
+		const error = err as { stdout?: string; stderr?: string; code?: number; message?: string };
+		const msg = (error.stderr || error.stdout || error.message || 'unknown error').toString();
+		return { path: dir, success: false, output: msg };
+	}
+}
+
+/**
+ * Check whether npm install can be skipped because node_modules is already up-to-date.
+ * Returns true if node_modules/ exists and is newer than package.json
+ * (and package-lock.json if present).
+ */
+function shouldSkipNpmInstall(dir: string): boolean {
+	const pkgPath = join(dir, 'package.json');
+	const nodeModulesPath = join(dir, 'node_modules');
+	if (!existsSync(nodeModulesPath)) return false;
+	if (!existsSync(pkgPath)) return true;
+	try {
+		const pkgStat = statSync(pkgPath);
+		const nmStat = statSync(nodeModulesPath);
+		const lockPath = join(dir, 'package-lock.json');
+		if (existsSync(lockPath)) {
+			const lockStat = statSync(lockPath);
+			return nmStat.mtimeMs >= Math.max(pkgStat.mtimeMs, lockStat.mtimeMs);
+		}
+		return nmStat.mtimeMs >= pkgStat.mtimeMs;
+	} catch {
+		return false;
+	}
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Profile Processing (shared by config mode and inline mode)
 // ══════════════════════════════════════════════════════════════════════════════
 
+interface ProfileSummary {
+	name: string;
+	target: string;
+	resources: number;
+	newItems: Record<ResourceType, string[]>;
+	updatedItems: Record<ResourceType, string[]>;
+	staleItems: Record<ResourceType, string[]>;
+	extensionNames: string[];
+	npmCount: number;
+	npmSkippedCount: number;
+	npmFailCount: number;
+	npmBuildCount: number;
+	npmBuildFailCount: number;
+}
+
 /**
  * Sync a single profile: resolve resources, copy files, run npm install, log results.
  */
+
 async function processProfile(
 	name: string,
 	profile: ProfileConfig,
 	opts: CLIOptions,
-): Promise<void> {
+): Promise<ProfileSummary> {
 	writeLog('INFO', `Profile "${name}" started`);
 
 	const targetDir = expandTargetPath(profile.target, PROJECT_ROOT);
@@ -929,7 +1063,20 @@ async function processProfile(
 	if (resources.length === 0) {
 		console.log(`  📦 [${name}] No resources to sync.`);
 		writeLog('INFO', `Profile "${name}" completed (0 resources)`);
-		return;
+		return {
+			name,
+			target: expandTargetPath(profile.target, PROJECT_ROOT),
+			resources: 0,
+			newItems: {} as Record<ResourceType, string[]>,
+			updatedItems: {} as Record<ResourceType, string[]>,
+			staleItems: {} as Record<ResourceType, string[]>,
+			extensionNames: [],
+			npmCount: 0,
+			npmSkippedCount: 0,
+			npmFailCount: 0,
+			npmBuildCount: 0,
+			npmBuildFailCount: 0,
+		};
 	}
 
 	console.log(`  📦 [${name}] ${profile.description || ''}`);
@@ -981,7 +1128,12 @@ async function processProfile(
 		themes: [],
 		prompts: [],
 	};
-	let skipCount = 0;
+	const skipByType: Record<ResourceType, number> = {
+		extensions: 0,
+		skills: 0,
+		themes: 0,
+		prompts: 0,
+	};
 
 	for (const resource of resources) {
 		const result = syncResource(resource, opts.dryRun, true);
@@ -1001,43 +1153,32 @@ async function processProfile(
 				updatedItems[resource.type].push(resource.name);
 				break;
 			case 'SKIP':
-				if (!opts.dryRun) {
-					console.log(`    ⏭️  [SKIP] ${label} (unchanged)`);
-				}
-				skipCount++;
+				skipByType[resource.type]++;
 				break;
 		}
 	}
 
-	// ── Per-extension npm install ──
+	// ── Per-extension npm install (parallel + cache-aware) ──
 	let npmCount = 0;
 	let npmFailCount = 0;
+	let npmSkippedCount = 0;
 
+	interface NpmInstallTask {
+		path: string;
+		name: string;
+	}
+
+	const npmInstallTasks: NpmInstallTask[] = [];
 	for (const resource of resources) {
 		const checkPath = resource.isDirectory ? resource.targetPath : dirname(resource.targetPath);
 
 		const hasDep = hasDependencies(checkPath);
 		if (hasDep && !opts.dryRun) {
-			console.log(`      ⚙️  Running npm install in ${relative(PROJECT_ROOT, checkPath)}...`);
-			writeLog('WARN', `Running npm install in ${checkPath}`);
-
-			const result = runNpmInstall(checkPath, opts.dryRun);
-			if (result.success) {
-				console.log(
-					`      ✅ npm install completed in ${relative(PROJECT_ROOT, checkPath)}`,
-				);
-				writeLog('INFO', `npm install completed successfully in ${checkPath}`);
-				npmCount++;
+			if (shouldSkipNpmInstall(checkPath)) {
+				console.log(`      ⏭️  [npm:${resource.name}] node_modules up-to-date, skipping`);
+				npmSkippedCount++;
 			} else {
-				console.error(
-					`      ❌ npm install failed in ${relative(PROJECT_ROOT, checkPath)}`,
-				);
-				console.error(`         ${result.output.slice(0, 200)}`);
-				writeLog(
-					'ERROR',
-					`npm install failed in ${checkPath}: ${result.output.slice(0, 200)}`,
-				);
-				npmFailCount++;
+				npmInstallTasks.push({ path: checkPath, name: resource.name });
 			}
 		} else if (hasDep && opts.dryRun) {
 			console.log(
@@ -1046,7 +1187,29 @@ async function processProfile(
 		}
 	}
 
-	// ── npm package extension: bridge creation ──
+	if (npmInstallTasks.length > 0) {
+		console.log(`      ⚙️  Running ${npmInstallTasks.length} npm install(s) sequentially...`);
+		writeLog('INFO', `Running ${npmInstallTasks.length} npm install(s) sequentially`);
+
+		for (const task of npmInstallTasks) {
+			const result = await runNpmInstallAsync(task.path, opts.dryRun);
+			if (result.success) {
+				console.log(`      ✅ [npm:${task.name}] completed`);
+				writeLog('INFO', `npm install completed in ${task.path}`);
+				npmCount++;
+			} else {
+				console.error(`      ❌ [npm:${task.name}] FAILED`);
+				console.error(`         ${result.output.slice(0, 200)}`);
+				writeLog(
+					'ERROR',
+					`npm install failed in ${task.path}: ${result.output.slice(0, 200)}`,
+				);
+				npmFailCount++;
+			}
+		}
+	}
+
+	// -- npm package extension: bridge creation --
 	// Auto-detects extensions with package.json + "pi" field (npm-style packages).
 	// Falls back to profile.npmBuild for explicit opt-in.
 	let npmBuildCount = 0;
@@ -1175,26 +1338,34 @@ async function processProfile(
 		}
 
 		// Run npm install in target root (creates node_modules symlinks for file: deps)
+		const rootPkgChanged = packagesAdded > 0;
 		if (!opts.dryRun) {
-			console.log(`      ⚙️  Running npm install in ${relative(PROJECT_ROOT, targetDir)}...`);
-			writeLog('INFO', `Running npm install in ${targetDir}`);
-			const result = runNpmInstall(targetDir, opts.dryRun);
-			if (result.success) {
-				console.log(
-					`      ✅ npm install completed in ${relative(PROJECT_ROOT, targetDir)}`,
-				);
-				writeLog('INFO', `npm install completed successfully in ${targetDir}`);
-				npmCount++;
+			if (!rootPkgChanged && shouldSkipNpmInstall(targetDir)) {
+				console.log(`      ⏭️  Root node_modules up-to-date, skipping`);
+				npmSkippedCount++;
 			} else {
-				console.error(
-					`      ❌ npm install failed in ${relative(PROJECT_ROOT, targetDir)}`,
+				console.log(
+					`      ⚙️  Running npm install in ${relative(PROJECT_ROOT, targetDir)}...`,
 				);
-				console.error(`         ${result.output.slice(0, 200)}`);
-				writeLog(
-					'ERROR',
-					`npm install failed in ${targetDir}: ${result.output.slice(0, 200)}`,
-				);
-				npmFailCount++;
+				writeLog('INFO', `Running npm install in ${targetDir}`);
+				const result = runNpmInstall(targetDir, opts.dryRun);
+				if (result.success) {
+					console.log(
+						`      ✅ npm install completed in ${relative(PROJECT_ROOT, targetDir)}`,
+					);
+					writeLog('INFO', `npm install completed successfully in ${targetDir}`);
+					npmCount++;
+				} else {
+					console.error(
+						`      ❌ npm install failed in ${relative(PROJECT_ROOT, targetDir)}`,
+					);
+					console.error(`         ${result.output.slice(0, 200)}`);
+					writeLog(
+						'ERROR',
+						`npm install failed in ${targetDir}: ${result.output.slice(0, 200)}`,
+					);
+					npmFailCount++;
+				}
 			}
 		} else {
 			console.log(
@@ -1206,14 +1377,22 @@ async function processProfile(
 	}
 
 	// ── Summary for this profile ──
+	const skipTotal = Object.values(skipByType).reduce((a, b) => a + b, 0);
 	const newTotal = Object.values(newItems).reduce((a, b) => a + b.length, 0);
 	const updatedTotal = Object.values(updatedItems).reduce((a, b) => a + b.length, 0);
 	const summaryParts: string[] = [];
 	if (newTotal > 0) summaryParts.push(`${newTotal} new`);
 	if (updatedTotal > 0) summaryParts.push(`${updatedTotal} updated`);
-	if (skipCount > 0 && opts.dryRun) summaryParts.push(`${skipCount} would-be-skipped`);
-	else if (skipCount > 0) summaryParts.push(`${skipCount} skipped`);
+	if (skipTotal > 0 && opts.dryRun) summaryParts.push(`${skipTotal} would-be-skipped`);
+	else if (skipTotal > 0) {
+		const byTypeStr = Object.entries(skipByType)
+			.filter(([_, c]) => c > 0)
+			.map(([t, c]) => `${c} ${t}`)
+			.join(', ');
+		summaryParts.push(`${skipTotal} skipped (${byTypeStr})`);
+	}
 	if (npmCount > 0) summaryParts.push(`${npmCount} npm installs`);
+	if (npmSkippedCount > 0) summaryParts.push(`${npmSkippedCount} npm installs cached`);
 	if (npmFailCount > 0) summaryParts.push(`${npmFailCount} npm installs FAILED`);
 	if (npmBuildCount > 0) summaryParts.push(`${npmBuildCount} npm builds`);
 	if (npmBuildFailCount > 0) summaryParts.push(`${npmBuildFailCount} npm builds FAILED`);
@@ -1221,32 +1400,34 @@ async function processProfile(
 	const summary = summaryParts.length > 0 ? summaryParts.join(', ') : 'no changes';
 	console.log(`\n  ✅ [${name}] Done — ${summary}`);
 
-	// ── Per-category breakdown (NEW / UPDATED / DELETE CANDIDATES) ──
+	// ── Per-category breakdown (NEW / UPDATED / STALE CANDIDATES) ──
 	const absTarget = expandTargetPath(profile.target, PROJECT_ROOT);
-	let hasDeletes = false;
+	let hasStale = false;
 
 	console.log(`\n  🗂️  "${name}" — per-category breakdown:\n`);
 	for (const t of RESOURCE_TYPES) {
 		const n = newItems[t].length;
 		const u = updatedItems[t].length;
+		const s = skipByType[t];
 		const candidates = targetExistingNames[t].filter((item) => !sourceNames[t].has(item));
 		const d = candidates.length;
 
 		const parts: string[] = [];
 		if (n > 0) parts.push(`${n} NEW`);
 		if (u > 0) parts.push(`${u} UPDATED`);
-		if (d > 0) parts.push(`${d} DELETE CANDIDATE${d > 1 ? 'S' : ''}`);
+		if (s > 0) parts.push(`${s} skipped`);
+		if (d > 0) parts.push(`${d} stale`);
 		const status = parts.length > 0 ? ` [${parts.join(' | ')}]` : ' [no changes]';
 
 		console.log(`    ${t}/${status}`);
 
 		if (d > 0) {
-			hasDeletes = true;
-			for (const c of candidates) {
-				// Construct the correct path with original file extension
+			hasStale = true;
+			// Show first 3 candidates as examples, then aggregate
+			const displayCandidates = candidates.slice(0, 3);
+			for (const c of displayCandidates) {
 				let fullPath: string;
 				if (t === 'extensions') {
-					// Could be a .ts file or a directory with index.ts
 					const tsPath = join(absTarget, t, c + '.ts');
 					if (existsSync(tsPath)) {
 						fullPath = tsPath;
@@ -1258,20 +1439,158 @@ async function processProfile(
 				} else {
 					fullPath = join(absTarget, t, c);
 				}
-				console.log(`      🗑️  rm -rf ${fullPath}`);
+				console.log(`      🗑️  ${fullPath}`);
+			}
+			if (candidates.length > 3) {
+				console.log(`      ... and ${candidates.length - 3} more`);
 			}
 		}
 	}
 
-	if (!hasDeletes) {
-		console.log(`      (no items outside source scope — nothing to clean up)`);
+	if (!hasStale) {
+		console.log(`      (no stale items — nothing to clean up)`);
 	}
 	console.log();
 
 	writeLog('INFO', `Profile "${name}" completed (${resources.length} resources, ${summary})`);
+
+	// Collect stale items per type
+	const staleItems: Record<ResourceType, string[]> = {} as Record<ResourceType, string[]>;
+	for (const t of RESOURCE_TYPES) {
+		staleItems[t] = targetExistingNames[t].filter((item) => !sourceNames[t].has(item));
+	}
+
+	// Collect extension names for overlap analysis
+	const extensionNames: string[] = [];
+	for (const r of resources) {
+		if (r.type === 'extensions') {
+			extensionNames.push(r.name);
+		}
+	}
+
+	return {
+		name,
+		target: expandTargetPath(profile.target, PROJECT_ROOT),
+		resources: resources.length,
+		newItems,
+		updatedItems,
+		staleItems,
+		extensionNames,
+		npmCount,
+		npmSkippedCount,
+		npmFailCount,
+		npmBuildCount,
+		npmBuildFailCount,
+	};
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+/**
+ * Print a final aggregation table across all profiles, including extension overlap analysis.
+ */
+function printFinalSummaryTable(
+	summaries: ProfileSummary[],
+	_profileDescriptors: Array<{ name: string; target: string }>,
+): void {
+	const mode =
+		process.argv.includes('--dry-run') || process.argv.includes('-n') ? ' (dry-run)' : '';
+	console.log();
+	console.log(`  ${'─'.repeat(58)}`);
+	console.log(`   Final Summary${mode}`);
+	console.log(`  ${'─'.repeat(58)}`);
+
+	// Table header
+	const sep = `  ${'─'.repeat(18)} ${'─'.repeat(9)} ${'─'.repeat(5)} ${'─'.repeat(7)} ${'─'.repeat(5)} ${'─'.repeat(5)}`;
+	console.log(
+		`  ${'Profile'.padEnd(18)} ${'Resources'.padStart(9)} ${'New'.padStart(5)} ${'Updated'.padStart(7)} ${'Stale'.padStart(5)} ${'npm'.padStart(5)}`,
+	);
+	console.log(sep);
+
+	let totalResources = 0;
+	let totalNew = 0;
+	let totalUpdated = 0;
+	let totalStale = 0;
+	let totalNpm = 0;
+
+	for (const s of summaries) {
+		const n = Object.values(s.newItems).reduce((a, b) => a + b.length, 0);
+		const u = Object.values(s.updatedItems).reduce((a, b) => a + b.length, 0);
+		const st = Object.values(s.staleItems).reduce((a, b) => a + b.length, 0);
+		const npm = s.npmCount + s.npmSkippedCount;
+
+		console.log(
+			`  ${s.name.padEnd(18)} ${String(s.resources).padStart(9)} ${String(n).padStart(5)} ${String(u).padStart(7)} ${String(st).padStart(5)} ${String(npm).padStart(5)}`,
+		);
+
+		totalResources += s.resources;
+		totalNew += n;
+		totalUpdated += u;
+		totalStale += st;
+		totalNpm += npm;
+	}
+
+	console.log(sep);
+	console.log(
+		`  ${'TOTAL'.padEnd(18)} ${String(totalResources).padStart(9)} ${String(totalNew).padStart(5)} ${String(totalUpdated).padStart(7)} ${String(totalStale).padStart(5)} ${String(totalNpm).padStart(5)}`,
+	);
+
+	// Extension overlap detection
+	const extSets = summaries.map((s) => new Set(s.extensionNames));
+	if (extSets.length >= 2) {
+		const overlap = [...extSets[0]].filter((name) => extSets.every((set) => set.has(name)));
+		console.log();
+		if (overlap.length > 0) {
+			console.log(
+				`  ⚠⃣  Extension overlap: ${overlap.length} extension(s) synced to multiple profiles`,
+			);
+			const names = overlap.sort();
+			if (names.length <= 8) {
+				console.log(`      ${names.join(', ')}`);
+			} else {
+				console.log(
+					`      ${names.slice(0, 8).join(', ')} ... and ${names.length - 8} more`,
+				);
+			}
+		} else {
+			console.log(`  ✅ No extension overlap between profiles`);
+		}
+	}
+
+	// Stale items summary
+	const allStale: Array<{ profile: string; type: string; item: string }> = [];
+	for (const s of summaries) {
+		for (const t of ['extensions', 'skills', 'themes', 'prompts'] as const) {
+			for (const item of s.staleItems[t]) {
+				allStale.push({ profile: s.name, type: t, item });
+			}
+		}
+	}
+	if (allStale.length > 0) {
+		console.log();
+		console.log('  🗑️  Stale items to consider removing:');
+		for (const { profile, type, item } of allStale.slice(0, 10)) {
+			console.log(`      ${profile}/${type}/${item}`);
+		}
+		if (allStale.length > 10) {
+			console.log(`      ... and ${allStale.length - 10} more`);
+		}
+	}
+
+	console.log();
+}
+
+/**
+ * Extract profile name+target descriptors for the summary table.
+ */
+function descriptors(
+	profiles: Array<{ name: string; profile: ProfileConfig }>,
+): Array<{ name: string; target: string }> {
+	return profiles.map((p) => ({
+		name: p.name,
+		target: expandTargetPath(p.profile.target, PROJECT_ROOT),
+	}));
+}
+
 // Main Execution
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -1332,9 +1651,13 @@ async function main(): Promise<void> {
 	}
 	console.log();
 
+	const summaries: ProfileSummary[] = [];
 	for (const { name, profile } of profiles) {
-		await processProfile(name, profile, opts);
+		const s = await processProfile(name, profile, opts);
+		summaries.push(s);
 	}
+
+	printFinalSummaryTable(summaries, descriptors(profiles));
 
 	const totalProfiles = profiles.length;
 	const mode = opts.dryRun ? ' (dry run)' : '';
