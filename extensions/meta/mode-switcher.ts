@@ -1,3 +1,16 @@
+/**
+ * Mode Switcher — 一键切换模型预设。
+ *
+ * 用法：
+ *   /mode <name>          → 切换到指定 mode
+ *   /mode                 → 打开 mode 选择面板
+ *   /mode store [name]    → 保存当前配置为 mode
+ *   Ctrl+Shift+M          → 打开 mode 管理面板（增删改）
+ *   Ctrl+Space            → 循环切换 mode
+ *
+ * Mode 配置保存在 ~/.pi/agent/modes.json（全局）或 .pi/modes.json（项目覆盖）。
+ * 编辑器顶部显示当前 mode 名称，边框颜色随 mode 变化。
+ */
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import {
 	CustomEditor,
@@ -7,10 +20,9 @@ import {
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
-import type { Dirent } from 'node:fs';
 import { createLogger } from '@zenone/pi-logger';
 
-const log = createLogger('prompt-editor');
+const log = createLogger('mode-switcher');
 
 log.debug('Extension loaded');
 
@@ -830,6 +842,23 @@ async function editModeUI(pi: ExtensionAPI, ctx: ExtensionContext, mode: string)
 			if (!selected) continue;
 			spec.provider = selected.provider;
 			spec.modelId = selected.modelId;
+
+			// If the new model does not support reasoning, reset thinkingLevel
+			// to 'off' so the mode doesn't carry an incompatible setting.
+			const newModel = ctx.modelRegistry.find(spec.provider!, spec.modelId!);
+			if (
+				newModel &&
+				!newModel.reasoning &&
+				spec.thinkingLevel &&
+				spec.thinkingLevel !== 'off'
+			) {
+				spec.thinkingLevel = 'off';
+				ctx.ui.notify(
+					`Model "${spec.modelId}" does not support reasoning — thinking level reset to off`,
+					'warning',
+				);
+			}
+
 			runtime.data.modes[modeName] = spec;
 			await persistRuntime(pi, ctx);
 			ctx.ui.notify(`Updated model for \"${modeName}\"`, 'info');
@@ -841,7 +870,18 @@ async function editModeUI(pi: ExtensionAPI, ctx: ExtensionContext, mode: string)
 		}
 
 		if (action === 'Change thinking level') {
-			const level = await pickThinkingLevelForModeUI(ctx, spec.thinkingLevel);
+			// Determine whether the currently configured model supports reasoning,
+			// so the thinking level picker only shows applicable options.
+			const modelForThinking =
+				spec.provider && spec.modelId
+					? ctx.modelRegistry.find(spec.provider, spec.modelId)
+					: undefined;
+			const supportsThinking = Boolean(modelForThinking?.reasoning);
+			const level = await pickThinkingLevelForModeUI(
+				ctx,
+				spec.thinkingLevel,
+				supportsThinking,
+			);
 			if (level === undefined) continue;
 
 			if (level === null) {
@@ -966,18 +1006,27 @@ async function pickModelForModeUI(
 async function pickThinkingLevelForModeUI(
 	ctx: ExtensionContext,
 	current: ThinkingLevel | undefined,
+	supportsThinking: boolean,
 ): Promise<ThinkingLevel | null | undefined> {
 	if (!ctx.hasUI) return undefined;
 
-	const defaultValue = current ?? 'off';
-	const options = [...ALL_THINKING_LEVELS, THINKING_UNSET_LABEL];
-	// Prefer the current selection by ordering it first.
-	const ordered = [defaultValue, ...options.filter((x) => x !== defaultValue)];
+	// If the selected model does not support reasoning/thinking,
+	// the only meaningful thinking levels are "off" and "don't change".
+	// Showing the full list would let users pick levels the model ignores.
+	const availableLevels: ThinkingLevel[] = supportsThinking ? [...ALL_THINKING_LEVELS] : ['off'];
 
-	const choice = await ctx.ui.select('Thinking level', ordered);
+	const effectiveDefault = supportsThinking ? (current ?? 'off') : 'off';
+	const options = [...availableLevels, THINKING_UNSET_LABEL];
+	// Prefer the effective default by ordering it first.
+	const ordered = [effectiveDefault, ...options.filter((x) => x !== effectiveDefault)];
+
+	const label = supportsThinking
+		? 'Thinking level'
+		: 'Thinking level (model does not support reasoning)';
+	const choice = await ctx.ui.select(label, ordered);
 	if (!choice) return undefined;
 	if (choice === THINKING_UNSET_LABEL) return null;
-	if (ALL_THINKING_LEVELS.includes(choice as ThinkingLevel)) return choice as ThinkingLevel;
+	if (availableLevels.includes(choice as ThinkingLevel)) return choice as ThinkingLevel;
 	return undefined;
 }
 
@@ -1000,16 +1049,8 @@ async function cycleMode(
 }
 
 // =============================================================================
-// Prompt history
+// Custom Editor (mode-aware)
 // =============================================================================
-
-const MAX_HISTORY_ENTRIES = 100;
-const MAX_RECENT_PROMPTS = 30;
-
-interface PromptEntry {
-	text: string;
-	timestamp: number;
-}
 
 class PromptEditor extends CustomEditor {
 	public modeLabelProvider?: () => string;
@@ -1086,157 +1127,10 @@ class PromptEditor extends CustomEditor {
 	}
 }
 
-function extractText(content: Array<{ type: string; text?: string }>): string {
-	return content
-		.filter((item) => item.type === 'text' && typeof item.text === 'string')
-		.map((item) => item.text ?? '')
-		.join('')
-		.trim();
-}
-
-function collectUserPromptsFromEntries(entries: Array<any>): PromptEntry[] {
-	const prompts: PromptEntry[] = [];
-
-	for (const entry of entries) {
-		if (entry?.type !== 'message') continue;
-		const message = entry?.message;
-		if (!message || message.role !== 'user' || !Array.isArray(message.content)) continue;
-		const text = extractText(message.content);
-		if (!text) continue;
-		const timestamp = Number(message.timestamp ?? entry.timestamp ?? Date.now());
-		prompts.push({ text, timestamp });
-	}
-
-	return prompts;
-}
-
-function getSessionDirForCwd(cwd: string): string {
-	const safePath = `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
-	return path.join(getGlobalAgentDir(), 'sessions', safePath);
-}
-
-async function readTail(filePath: string, maxBytes = 256 * 1024): Promise<string> {
-	let fileHandle: fs.FileHandle | undefined;
-	try {
-		const stats = await fs.stat(filePath);
-		const size = stats.size;
-		const start = Math.max(0, size - maxBytes);
-		const length = size - start;
-		if (length <= 0) return '';
-
-		const buffer = Buffer.alloc(length);
-		fileHandle = await fs.open(filePath, 'r');
-		const { bytesRead } = await fileHandle.read(buffer, 0, length, start);
-		if (bytesRead === 0) return '';
-		let chunk = buffer.subarray(0, bytesRead).toString('utf8');
-		if (start > 0) {
-			const firstNewline = chunk.indexOf('\n');
-			if (firstNewline !== -1) {
-				chunk = chunk.slice(firstNewline + 1);
-			}
-		}
-		return chunk;
-	} catch {
-		return '';
-	} finally {
-		await fileHandle?.close();
-	}
-}
-
-async function loadPromptHistoryForCwd(
-	cwd: string,
-	excludeSessionFile?: string,
-): Promise<PromptEntry[]> {
-	const sessionDir = getSessionDirForCwd(path.resolve(cwd));
-	const resolvedExclude = excludeSessionFile ? path.resolve(excludeSessionFile) : undefined;
-	const prompts: PromptEntry[] = [];
-
-	let entries: Dirent[] = [];
-	try {
-		entries = await fs.readdir(sessionDir, { withFileTypes: true });
-	} catch {
-		return prompts;
-	}
-
-	const files = await Promise.all(
-		entries
-			.filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
-			.map(async (entry) => {
-				const filePath = path.join(sessionDir, entry.name);
-				try {
-					const stats = await fs.stat(filePath);
-					return { filePath, mtimeMs: stats.mtimeMs };
-				} catch {
-					return undefined;
-				}
-			}),
-	);
-
-	const sortedFiles = files
-		.filter((file): file is { filePath: string; mtimeMs: number } => Boolean(file))
-		.sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-	for (const file of sortedFiles) {
-		if (resolvedExclude && path.resolve(file.filePath) === resolvedExclude) continue;
-
-		const tail = await readTail(file.filePath);
-		if (!tail) continue;
-		const lines = tail.split('\n').filter(Boolean);
-		for (const line of lines) {
-			let entry: any;
-			try {
-				entry = JSON.parse(line);
-			} catch {
-				continue;
-			}
-			if (entry?.type !== 'message') continue;
-			const message = entry?.message;
-			if (!message || message.role !== 'user' || !Array.isArray(message.content)) continue;
-			const text = extractText(message.content);
-			if (!text) continue;
-			const timestamp = Number(message.timestamp ?? entry.timestamp ?? Date.now());
-			prompts.push({ text, timestamp });
-			if (prompts.length >= MAX_RECENT_PROMPTS) break;
-		}
-		if (prompts.length >= MAX_RECENT_PROMPTS) break;
-	}
-
-	return prompts;
-}
-
-function buildHistoryList(
-	currentSession: PromptEntry[],
-	previousSessions: PromptEntry[],
-): PromptEntry[] {
-	const all = [...currentSession, ...previousSessions];
-	all.sort((a, b) => a.timestamp - b.timestamp);
-
-	const seen = new Set<string>();
-	const deduped: PromptEntry[] = [];
-	for (const prompt of all) {
-		const key = `${prompt.timestamp}:${prompt.text}`;
-		if (seen.has(key)) continue;
-		seen.add(key);
-		deduped.push(prompt);
-	}
-
-	return deduped.slice(-MAX_HISTORY_ENTRIES);
-}
-
 // Overlay mode state ("custom"). Not selectable, not cycled into.
 let customOverlay: ModeSpec | null = null;
 
-let loadCounter = 0;
-
-function historiesMatch(a: PromptEntry[], b: PromptEntry[]): boolean {
-	if (a.length !== b.length) return false;
-	for (let i = 0; i < a.length; i += 1) {
-		if (a[i]?.text !== b[i]?.text || a[i]?.timestamp !== b[i]?.timestamp) return false;
-	}
-	return true;
-}
-
-function setEditor(pi: ExtensionAPI, ctx: ExtensionContext, history: PromptEntry[]) {
+function setEditor(pi: ExtensionAPI, ctx: ExtensionContext) {
 	const uiTheme = ctx.ui.theme;
 	ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 		const editor = new PromptEditor(tui, theme, keybindings);
@@ -1254,33 +1148,13 @@ function setEditor(pi: ExtensionAPI, ctx: ExtensionContext, history: PromptEntry
 
 		editor.borderColor = borderColor;
 		editor.lockBorderColor();
-		for (const prompt of history) {
-			editor.addToHistory?.(prompt.text);
-		}
 		return editor;
 	});
 }
 
 function applyEditor(pi: ExtensionAPI, ctx: ExtensionContext) {
 	if (!ctx.hasUI) return;
-
-	const sessionFile = ctx.sessionManager.getSessionFile();
-	const currentEntries = ctx.sessionManager.getBranch();
-	const currentPrompts = collectUserPromptsFromEntries(currentEntries);
-	const immediateHistory = buildHistoryList(currentPrompts, []);
-
-	const currentLoad = ++loadCounter;
-	const initialText = ctx.ui.getEditorText();
-	setEditor(pi, ctx, immediateHistory);
-
-	void (async () => {
-		const previousPrompts = await loadPromptHistoryForCwd(ctx.cwd, sessionFile ?? undefined);
-		if (currentLoad !== loadCounter) return;
-		if (ctx.ui.getEditorText() !== initialText) return;
-		const history = buildHistoryList(currentPrompts, previousPrompts);
-		if (historiesMatch(history, immediateHistory)) return;
-		setEditor(pi, ctx, history);
-	})();
+	setEditor(pi, ctx);
 }
 
 // =============================================================================
