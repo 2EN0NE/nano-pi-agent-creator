@@ -98,15 +98,14 @@ function safeNotify(ctx: ExtensionContext, msg: string, type?: 'info' | 'warning
  * 但运行时对象是完整的 SessionManager。用显式守卫确保方法存在。
  */
 function safeAppendLabelChange(ctx: ExtensionContext, targetId: string, label: string): void {
-	const sm = ctx.sessionManager as unknown as Record<string, unknown>;
-	const fn = sm.appendLabelChange;
-	if (typeof fn !== 'function') {
+	const sm = ctx.sessionManager as Record<string, unknown>;
+	if (typeof sm.appendLabelChange !== 'function') {
 		throw new Error(
 			'sessionManager.appendLabelChange is not available — ' +
 				'this pi version may not support label entries',
 		);
 	}
-	(fn as (targetId: string, label: string | undefined) => string)(targetId, label);
+	(sm.appendLabelChange as (targetId: string, label: string | undefined) => string)(targetId, label);
 }
 
 // ── 应用标签 ──────────────────────────────────────────────────────────────
