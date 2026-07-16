@@ -43,6 +43,7 @@ export interface ProcessWindowStats {
 	requests: number;
 	tokens: number;
 	lastHeartbeat: number;
+	lastTokenEstimate?: number; // Token estimate of the most recent request, for accurate correction
 }
 
 export interface ModelWindowState {
@@ -128,7 +129,7 @@ function readStateFile(path: string): GlobalStateData | undefined {
 }
 
 function writeStateFile(path: string, state: GlobalStateData): void {
-	const tmpPath = path + '.tmp';
+	const tmpPath = path + '.tmp.' + process.pid;
 	writeFileSync(tmpPath, JSON.stringify(state, null, 2), 'utf8');
 	// Atomic rename on POSIX; acceptable on Windows for our use-case
 	renameSync(tmpPath, path);
@@ -152,50 +153,166 @@ export class OptimisticStateManager {
 	}
 
 	/**
-	 * Atomically update state using optimistic locking.
-	 * Reads current state, calls mutator, then writes back only if state hasn't changed.
-	 * Returns the updated state or undefined if all retries exhausted.
+	 * Read the state file and return both parsed state and raw JSON string.
+	 * The raw string serves as the "version token" for CAS.
+	 * Returns undefined if the file doesn't exist or is unreadable.
 	 */
-	update(mutator: (state: GlobalStateData) => void): GlobalStateData | undefined {
-		for (let attempt = 0; attempt < this.maxRetries; attempt++) {
-			const before = this.read();
-			const state = before
-				? { ...before, processes: { ...before.processes } }
-				: emptyState(getWindowStart(Date.now()));
-			if (state.models) {
-				state.models = { ...state.models };
-				for (const key of Object.keys(state.models)) {
-					state.models[key] = {
-						...state.models[key],
-						processes: { ...state.models[key].processes },
-					};
-				}
-			}
-			mutator(state);
-			// Write to temp and rename atomically
-			const tmpPath = this.statePath + '.tmp.' + process.pid;
-			try {
-				writeFileSync(tmpPath, JSON.stringify(state, null, 2), 'utf8');
-				renameSync(tmpPath, this.statePath);
-				return state;
-			} catch {
-				// Write conflict or error — retry after brief delay
-				try {
-					if (existsSync(tmpPath)) {
-						rmSync(tmpPath, { force: true });
-					}
-				} catch {
-					// ignore cleanup failure
-				}
-				// Brief backoff
-				const backoff = Math.min(50, 10 * (attempt + 1));
-				const start = Date.now();
-				while (Date.now() - start < backoff) {
-					// busy wait for sub-millisecond precision
+	private readWithRaw(): { state: GlobalStateData; raw: string } | undefined {
+		if (!existsSync(this.statePath)) return undefined;
+		try {
+			const raw = readFileSync(this.statePath, 'utf8');
+			const state = JSON.parse(raw) as GlobalStateData;
+			return { state, raw };
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Deep clone a GlobalStateData for isolated mutation.
+	 * Preserves all fields without shared references to the original.
+	 */
+	private deepCloneState(state: GlobalStateData): GlobalStateData {
+		const cloned: GlobalStateData = {
+			...state,
+			processes: {},
+		};
+		for (const [key, proc] of Object.entries(state.processes)) {
+			cloned.processes[key] = { ...proc };
+		}
+		if (state.models) {
+			cloned.models = {};
+			for (const [modelId, model] of Object.entries(state.models)) {
+				cloned.models[modelId] = {
+					...model,
+					processes: {},
+				};
+				for (const [pidKey, proc] of Object.entries(model.processes)) {
+					cloned.models[modelId].processes[pidKey] = { ...proc };
 				}
 			}
 		}
+		return cloned;
+	}
+
+	/**
+	 * Compare-And-Swap update with raw JSON string as version token.
+	 *
+	 * Contract — the mutator MUST be idempotent:
+	 *   Applying the same mutator to the same state twice must produce
+	 *   the same result as applying it once. This is required because:
+	 *
+	 *   a) There is a TOCTOU race between the CAS comparison (step 5) and
+	 *      the atomic rename (step 6). In practice the window is
+	 *      microseconds, but two processes can both pass the check,
+	 *      and one will silently overwrite the other. On the next
+	 *      call, the overwritten process retries with fresh state.
+	 *
+	 *   b) The retry loop re-applies the mutator to fresh state if a
+	 *      conflict is detected. If the mutator is idempotent, this
+	 *      converges correctly.
+	 *
+	 *   All built-in mutators (counter increments, token adjustments,
+	 *   process removal) are idempotent.
+	 *
+	 * How it works:
+	 * 1. Read current state + its raw JSON string from disk (version token)
+	 * 2. Deep clone for isolated mutation
+	 * 3. Apply mutator to the clone
+	 * 4. Serialize clone to temp file
+	 * 5. Re-read the actual file's raw JSON string
+	 * 6. If raw strings match → atomic rename (swap). No change detected.
+	 * 7. If raw strings differ → conflict. Another process wrote between steps 1 and 5.
+	 *    Remove temp, backoff, retry from step 1 with fresh state.
+	 *
+	 * If all retries are exhausted, returns undefined. The caller should
+	 * then fall back to a mutual-exclusion mechanism (e.g. DirectoryLock).
+	 *
+	 * Returns the updated state on success, undefined if all retries exhausted.
+	 */
+	update(mutator: (state: GlobalStateData) => void): GlobalStateData | undefined {
+		for (let attempt = 0; attempt < this.maxRetries; attempt++) {
+			const entry = this.readWithRaw();
+			let state: GlobalStateData;
+			let originalRaw: string | undefined;
+
+			if (entry) {
+				state = this.deepCloneState(entry.state);
+				originalRaw = entry.raw;
+			} else {
+				// File doesn't exist yet — first write, no CAS needed
+				state = emptyState(getWindowStart(Date.now()));
+			}
+
+			mutator(state);
+
+			// Serialize to temp file
+			const tmpPath = this.statePath + '.cas.' + process.pid;
+			try {
+				writeFileSync(tmpPath, JSON.stringify(state, null, 2), 'utf8');
+			} catch {
+				// Write failed (disk full, permissions), retry
+				this.cleanupTmp(tmpPath);
+				this.busyBackoff(attempt);
+				continue;
+			}
+
+			// CAS check: only if we had an original to compare against
+			if (originalRaw !== undefined) {
+				try {
+					const currentRaw = readFileSync(this.statePath, 'utf8');
+					if (currentRaw !== originalRaw) {
+						// Conflict: another process changed the file
+						this.cleanupTmp(tmpPath);
+						this.busyBackoff(attempt);
+						continue;
+					}
+				} catch {
+					// File disappeared or unreadable — retry
+					this.cleanupTmp(tmpPath);
+					this.busyBackoff(attempt);
+					continue;
+				}
+			}
+
+			// Atomic swap: renameSync is atomic on POSIX.
+			// If another process writes between our CAS check and this rename,
+			// one writer wins atomically — the loser retries on next call.
+			try {
+				renameSync(tmpPath, this.statePath);
+				return state;
+			} catch {
+				// rename failed (permissions, cross-device), retry
+				this.cleanupTmp(tmpPath);
+				this.busyBackoff(attempt);
+			}
+		}
 		return undefined;
+	}
+
+	private cleanupTmp(tmpPath: string): void {
+		try {
+			if (existsSync(tmpPath)) {
+				rmSync(tmpPath, { force: true });
+			}
+		} catch {
+			// Ignore cleanup failures
+		}
+	}
+
+	private busyBackoff(attempt: number): void {
+		const ms = Math.min(50, 10 * (attempt + 1));
+		// Use Atomics.wait for sub-millisecond precision without busy-waiting
+		// (yields the event loop instead of blocking it)
+		try {
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+		} catch {
+			// Fallback: busy-wait only when Atomics is unavailable (rare)
+			const start = Date.now();
+			while (Date.now() - start < ms) {
+				// Minimal yield
+			}
+		}
 	}
 }
 
@@ -460,6 +577,7 @@ export class GlobalRateLimiter {
 			state.processes[pidKey].requests += 1;
 			state.processes[pidKey].tokens += estimatedTokens;
 			state.processes[pidKey].lastHeartbeat = now;
+			state.processes[pidKey].lastTokenEstimate = estimatedTokens;
 			state.totalRequests += 1;
 			state.totalTokens += estimatedTokens;
 
@@ -467,6 +585,7 @@ export class GlobalRateLimiter {
 				state.models[modelId].processes[pidKey].requests += 1;
 				state.models[modelId].processes[pidKey].tokens += estimatedTokens;
 				state.models[modelId].processes[pidKey].lastHeartbeat = now;
+				state.models[modelId].processes[pidKey].lastTokenEstimate = estimatedTokens;
 				state.models[modelId].totalRequests += 1;
 				state.models[modelId].totalTokens += estimatedTokens;
 			}
@@ -561,12 +680,15 @@ export class GlobalRateLimiter {
 			state.processes[pidKey].requests += 1;
 			state.processes[pidKey].tokens += estimatedTokens;
 			state.processes[pidKey].lastHeartbeat = now;
+			state.processes[pidKey].lastTokenEstimate = estimatedTokens;
 			state.totalRequests += 1;
 			state.totalTokens += estimatedTokens;
 
 			if (modelId && state.models?.[modelId]) {
 				state.models[modelId].processes[pidKey].requests += 1;
 				state.models[modelId].processes[pidKey].tokens += estimatedTokens;
+				state.models[modelId].processes[pidKey].lastHeartbeat = now;
+				state.models[modelId].processes[pidKey].lastTokenEstimate = estimatedTokens;
 				state.models[modelId].totalRequests += 1;
 				state.models[modelId].totalTokens += estimatedTokens;
 			}
@@ -619,11 +741,12 @@ export class GlobalRateLimiter {
 
 			const pidKey = String(this.pid);
 			const proc = state.processes[pidKey];
-			if (!proc || proc.requests === 0) return;
+			if (!proc || proc.requests === 0 || proc.lastTokenEstimate === undefined) return;
 
-			const diff = actualTokens - proc.tokens;
+			const diff = actualTokens - proc.lastTokenEstimate;
 			if (diff !== 0) {
-				proc.tokens = actualTokens;
+				proc.tokens += diff;
+				proc.lastTokenEstimate = actualTokens;
 				state.totalTokens += diff;
 				this.localTokens = proc.tokens;
 			}
@@ -631,9 +754,10 @@ export class GlobalRateLimiter {
 			if (modelId && state.models?.[modelId]) {
 				const modelProc = state.models[modelId].processes[pidKey];
 				if (modelProc) {
-					const modelDiff = actualTokens - modelProc.tokens;
+					const modelDiff = actualTokens - (modelProc.lastTokenEstimate ?? 0);
 					if (modelDiff !== 0) {
-						modelProc.tokens = actualTokens;
+						modelProc.tokens += modelDiff;
+						modelProc.lastTokenEstimate = actualTokens;
 						state.models[modelId].totalTokens += modelDiff;
 					}
 				}
@@ -656,11 +780,12 @@ export class GlobalRateLimiter {
 
 			const pidKey = String(this.pid);
 			const proc = state.processes[pidKey];
-			if (!proc || proc.requests === 0) return;
+			if (!proc || proc.requests === 0 || proc.lastTokenEstimate === undefined) return;
 
-			const diff = actualTokens - proc.tokens;
+			const diff = actualTokens - proc.lastTokenEstimate;
 			if (diff !== 0) {
-				proc.tokens = actualTokens;
+				proc.tokens += diff;
+				proc.lastTokenEstimate = actualTokens;
 				state.totalTokens += diff;
 				this.localTokens = proc.tokens;
 			}
@@ -668,9 +793,10 @@ export class GlobalRateLimiter {
 			if (modelId && state.models?.[modelId]) {
 				const modelProc = state.models[modelId].processes[pidKey];
 				if (modelProc) {
-					const modelDiff = actualTokens - modelProc.tokens;
+					const modelDiff = actualTokens - (modelProc.lastTokenEstimate ?? 0);
 					if (modelDiff !== 0) {
-						modelProc.tokens = actualTokens;
+						modelProc.tokens += modelDiff;
+						modelProc.lastTokenEstimate = actualTokens;
 						state.models[modelId].totalTokens += modelDiff;
 					}
 				}

@@ -64,6 +64,8 @@ export interface ModelProfile {
 	throttleThresholdPercent?: number;
 }
 
+export type AdaptiveMode = 'off' | 'bayesian' | 'ucb' | 'both';
+
 export interface RateLimitConfig {
 	maxRequestsPerMinute: number;
 	maxTokensPerMinute: number;
@@ -75,7 +77,7 @@ export interface RateLimitConfig {
 	lockTimeoutMs: number;
 	staleProcessTimeoutMs: number;
 	modelProfiles: ModelProfile[];
-	adaptiveRateLimit: boolean;
+	adaptiveRateLimit: AdaptiveMode;
 }
 
 export const DEFAULT_CONFIG: RateLimitConfig = {
@@ -89,7 +91,7 @@ export const DEFAULT_CONFIG: RateLimitConfig = {
 	lockTimeoutMs: 5000,
 	staleProcessTimeoutMs: 30000,
 	modelProfiles: [],
-	adaptiveRateLimit: false,
+	adaptiveRateLimit: 'off',
 };
 
 export interface RequestLogEntry {
@@ -187,8 +189,13 @@ export function loadYamlConfig(cwd: string, extensionDir: string): Partial<RateL
 				if ('lockTimeoutMs' in parsed) picked.lockTimeoutMs = Number(parsed.lockTimeoutMs);
 				if ('staleProcessTimeoutMs' in parsed)
 					picked.staleProcessTimeoutMs = Number(parsed.staleProcessTimeoutMs);
-				if ('adaptiveRateLimit' in parsed)
-					picked.adaptiveRateLimit = Boolean(parsed.adaptiveRateLimit);
+				if ('adaptiveRateLimit' in parsed) {
+					const raw = parsed.adaptiveRateLimit;
+					if (raw === true || raw === 'true' || raw === 'both') picked.adaptiveRateLimit = 'both';
+					else if (raw === false || raw === 'off' || raw === 'false') picked.adaptiveRateLimit = 'off';
+					else if (raw === 'bayesian') picked.adaptiveRateLimit = 'bayesian';
+					else if (raw === 'ucb') picked.adaptiveRateLimit = 'ucb';
+				}
 				if ('modelProfiles' in parsed) {
 					try {
 						const mp = JSON.parse(String(parsed.modelProfiles));
@@ -253,11 +260,6 @@ export function estimateTokensFromPayload(payload: unknown, ratio: number): numb
 					if (typeof text === 'string') chars += text.length;
 				}
 			}
-		}
-
-		// Anthropic top-level system prompt inside payload
-		if (m.role === 'system' && typeof content === 'string') {
-			chars += content.length;
 		}
 	}
 

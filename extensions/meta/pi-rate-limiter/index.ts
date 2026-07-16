@@ -6,9 +6,32 @@
  * 2. Showing real-time RPM / TPM usage in the footer (via setStatus, stacked below default footer)
  * 3. Auto-resuming on 432 errors after the window resets
  *
+ * == 自适应限流算法 ==
+ *
+ * adaptiveRateLimit 支持四种模式（通过 /rate-limit 面板或 YAML 配置）：
+ *
+ *   off       — 关闭自适应限流，仅使用用户配置的固定阈值
+ *   bayesian  — Gamma-Poisson 贝叶斯模型，防御型下限调整
+ *   ucb       — UCB + AIMD 上限探索，进取型天花板发现
+ *   both      — 两者同时启用（推荐）
+ *
+ * 算法对比:
+ *
+ *               贝叶斯 (bayesian)              |  UCB + AIMD (ucb)
+ *  ────────────────────────────────────────────┼────────────────────────────
+ *  方向       向下调整——找到安全下限           |  向上探索——发现真实上限
+ *  对 432     降低有效限流值，更保守           |  退到 85% 后减小步长，续试探
+ *  对成功     增加置信度（更稳定）             |  提高天花板，加速上升
+ *  上限       硬封顶 2× 配置值                 |  无封顶，API 说多少就是多少
+ *  成本       无额外成本（被动观察）           |  偶发 432（探索的代价）
+ *  本质       防御型：避免频繁 432             |  进取型：找到 API 真实容量
+ *
+ * 两者同时启用时：贝叶斯保证安全下限不踩线，UCB 负责向上探索真实容量。
+ * 当 UCB 探索到新高度后，贝叶斯也因更多成功样本而变得更自信——两者协同。
+ *
  * Usage:
- *   pi -e ./.pi/extensions/rate-limiter
- * Or copy to ~/.pi/agent/extensions/rate-limiter/ for global use.
+ *   pi -e ~/.pi/agent/extensions/pi-rate-limiter
+ * Or add to models.json extensions list for auto-load.
  */
 
 import type { AssistantMessage } from '@earendil-works/pi-ai';
@@ -21,6 +44,7 @@ import { getSettingsListTheme } from '@earendil-works/pi-coding-agent';
 import { Container, type SettingItem, SettingsList } from '@earendil-works/pi-tui';
 import { AdaptiveLearner } from './adaptive-learner.js';
 import { GlobalRateLimiter } from './global-state.js';
+import { estimateTokensAccurate } from './token-counter.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -39,6 +63,7 @@ import {
 	setLogLevel,
 	sleep,
 	STATUS_KEY,
+	type AdaptiveMode,
 	type PersistedState,
 	type RateLimitConfig,
 	type RequestLogEntry,
@@ -67,7 +92,16 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 	let adaptiveLearner: AdaptiveLearner | undefined;
 	let lastModelId: string | undefined;
 	let lastRequestWasProbe = false;
+	let lastRequestUpperBoundLimit: number | undefined; // TPM attempted for UCB tracking
+	let outcomeClassified = false; // Prevents duplicate classifyAndRecordOutcome calls per turn
 	const extensionDir = getExtensionDir();
+
+	// Helper: is UCB mode active? (ucb or both)
+	const isUcbMode = () => config.adaptiveRateLimit === 'ucb' || config.adaptiveRateLimit === 'both';
+	// Helper: is Bayesian mode active? (bayesian or both)
+	const isBayesianMode = () => config.adaptiveRateLimit === 'bayesian' || config.adaptiveRateLimit === 'both';
+	// Helper: is adaptive mode on at all?
+	const isAdaptiveOn = () => config.adaptiveRateLimit !== 'off';
 
 	// -------------------------------------------------------------------------
 	// Config management
@@ -119,7 +153,15 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 				config.modelProfiles = latest.config.modelProfiles;
 			}
 			if (latest.config.adaptiveRateLimit !== undefined) {
-				config.adaptiveRateLimit = latest.config.adaptiveRateLimit;
+				const raw = latest.config.adaptiveRateLimit;
+				// Migrate old boolean values (false→'off', true→'both')
+				if (raw === true) {
+					config.adaptiveRateLimit = 'both';
+				} else if (raw === false) {
+					config.adaptiveRateLimit = 'off';
+				} else {
+					config.adaptiveRateLimit = raw as AdaptiveMode;
+				}
 			}
 		}
 	}
@@ -220,7 +262,9 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 	}
 
 	function classifyAndRecordOutcome(outcome: 'success' | 'rejected'): void {
-		if (!config.adaptiveRateLimit || !adaptiveLearner || !lastModelId) return;
+		if (outcomeClassified) return; // Only classify once per turn
+		outcomeClassified = true;
+		if (!isAdaptiveOn() || !adaptiveLearner || !lastModelId) return;
 		const modelId = lastModelId;
 		const currentRate = getCurrentModelRate(modelId);
 		const { maxReq } = getEffectiveLimits(config, modelId);
@@ -231,27 +275,48 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 			currentRate,
 			effectiveLimit,
 			wasProbe: lastRequestWasProbe,
+			mode: config.adaptiveRateLimit,
 		});
 
-		if (outcome === 'rejected') {
-			adaptiveLearner.recordOutcome(modelId, 'rejected', currentRate);
-			return;
+		// Record upper bound outcome (ucb/both modes)
+		if (isUcbMode() && lastRequestUpperBoundLimit !== undefined) {
+			const configuredTok = getEffectiveLimits(config, modelId).maxTok;
+			adaptiveLearner.recordUpperBoundOutcome(
+				modelId,
+				lastRequestUpperBoundLimit,
+				outcome === 'success',
+				configuredTok > 0 ? configuredTok : config.maxTokensPerMinute,
+			);
 		}
 
-		// Success outcome classification
-		if (lastRequestWasProbe) {
-			adaptiveLearner.recordOutcome(modelId, 'probe', currentRate);
-		} else if (currentRate >= effectiveLimit * 0.9) {
-			adaptiveLearner.recordOutcome(modelId, 'near', currentRate);
-		} else {
-			adaptiveLearner.recordOutcome(modelId, 'safe', currentRate);
+		// Record Bayesian outcome (bayesian/both modes)
+		if (isBayesianMode()) {
+			if (outcome === 'rejected') {
+				adaptiveLearner.recordOutcome(modelId, 'rejected', currentRate);
+			} else if (lastRequestWasProbe) {
+				adaptiveLearner.recordOutcome(modelId, 'probe', currentRate);
+			} else if (currentRate >= effectiveLimit * 0.9) {
+				adaptiveLearner.recordOutcome(modelId, 'near', currentRate);
+			} else {
+				adaptiveLearner.recordOutcome(modelId, 'safe', currentRate);
+			}
 		}
 	}
 
-	async function throttleIfNeeded(payload: unknown): Promise<void> {
-		const estimatedTokens = estimateTokensFromPayload(payload, config.tokenEstimateRatio);
+	async function throttleIfNeeded(payload: unknown, retryCount = 0): Promise<void> {
 		const modelId = detectModelFromPayload(payload);
 		lastModelId = modelId;
+
+		// Try accurate (model-aware) token counting, fall back to character estimation
+		let estimatedTokens: number;
+		try {
+			const accurate = await estimateTokensAccurate(payload, modelId);
+			estimatedTokens =
+				accurate ?? estimateTokensFromPayload(payload, config.tokenEstimateRatio);
+		} catch {
+			estimatedTokens = estimateTokensFromPayload(payload, config.tokenEstimateRatio);
+		}
+
 		let { maxReq, maxTok, thresholdPercent } = getEffectiveLimits(config, modelId);
 		logger.debug('throttleIfNeeded: start', {
 			modelId,
@@ -263,19 +328,50 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 
 		// Adaptive learning override
 		let isExploring = false;
-		if (config.adaptiveRateLimit && adaptiveLearner && modelId) {
-			isExploring = adaptiveLearner.shouldExplore(modelId);
-			if (isExploring) {
-				maxReq = adaptiveLearner.getExplorationLimit(modelId, maxReq);
-				maxTok = adaptiveLearner.getExplorationLimit(modelId, maxTok);
+		lastRequestUpperBoundLimit = undefined;
+		if (isAdaptiveOn() && adaptiveLearner && modelId) {
+			// Base configured limit for UCB exploration ratio calculation
+			// Use a large baseline (1,000,000 TPM) so UCB exploration is not artificially
+			// capped by the current effective limit — the algorithm discovers the real ceiling.
+			const configuredTok = 1000000;
+
+			if (isUcbMode()) {
+				// UCB mode: systematic upward exploration, no ε-greedy
+				// The UCB bonus naturally shrinks as confidence grows
+				const ubTok = adaptiveLearner.getUpperBoundExplorationLimit(modelId, configuredTok);
+				const ratio = configuredTok > 0 ? ubTok / configuredTok : 1;
+				maxTok = Math.max(maxTok, ubTok);
+				maxReq = Math.max(maxReq, Math.ceil(maxReq * ratio));
+				lastRequestUpperBoundLimit = ubTok;
+				if (isBayesianMode()) {
+					// Both mode: also apply Bayesian effective limit as floor
+					const bayesReq = adaptiveLearner.getEffectiveLimit(modelId, maxReq);
+					const bayesTok = adaptiveLearner.getEffectiveLimit(modelId, maxTok);
+					maxReq = Math.min(maxReq, bayesReq);
+					maxTok = Math.min(maxTok, bayesTok);
+				}
+				logger.debug('throttleIfNeeded: UCB target', {
+					modelId,
+					baseTok: configuredTok,
+					targetTok: ubTok,
+				});
 			} else {
-				maxReq = adaptiveLearner.getEffectiveLimit(modelId, maxReq);
-				maxTok = adaptiveLearner.getEffectiveLimit(modelId, maxTok);
+				// Bayesian-only mode: ε-greedy exploration
+				isExploring = adaptiveLearner.shouldExplore(modelId);
+				if (isExploring) {
+					maxReq = adaptiveLearner.getExplorationLimit(modelId, maxReq);
+					maxTok = adaptiveLearner.getExplorationLimit(modelId, maxTok);
+				} else {
+					maxReq = adaptiveLearner.getEffectiveLimit(modelId, maxReq);
+					maxTok = adaptiveLearner.getEffectiveLimit(modelId, maxTok);
+				}
 			}
 			logger.debug('throttleIfNeeded: adaptive override', {
+				modelId,
 				isExploring,
 				effectiveMaxReq: maxReq,
 				effectiveMaxTok: maxTok,
+				mode: config.adaptiveRateLimit,
 			});
 		}
 		lastRequestWasProbe = isExploring;
@@ -304,14 +400,21 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 			const tokLimitHit = maxTok > 0 && tokens + estimatedTokens >= tokThreshold;
 
 			if (reqLimitHit || tokLimitHit) {
-				const delay = 60000 - (now % 60000) + 100;
-				isWaitingForWindow = true;
-				refreshStatus();
-				await sleep(delay);
-				isWaitingForWindow = false;
-				refreshStatus();
-				await throttleIfNeeded(payload);
-				return;
+				if (retryCount >= 3) {
+					// Max retries reached — allow the request through anyway to avoid deadlock
+					logger.warn('throttleIfNeeded: max retries reached, allowing request', {
+						retryCount,
+					});
+				} else {
+					const delay = 60000 - (now % 60000) + 100;
+					isWaitingForWindow = true;
+					refreshStatus();
+					await sleep(delay);
+					isWaitingForWindow = false;
+					refreshStatus();
+					await throttleIfNeeded(payload, retryCount + 1);
+					return;
+				}
 			}
 		}
 
@@ -410,6 +513,19 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 						})(),
 					);
 
+					const LABELS: Record<string, string> = {
+						off: '关闭',
+						bayesian: '贝叶斯',
+						ucb: 'UCB',
+						both: '两者',
+					};
+					const MODE_MAP: Record<string, AdaptiveMode> = {
+						'关闭': 'off',
+						'贝叶斯': 'bayesian',
+						'UCB': 'ucb',
+						'两者': 'both',
+					};
+
 					function buildItems(): SettingItem[] {
 						logger.debug('rate-limit: building settings items', {
 							profileCount: config.modelProfiles.length,
@@ -460,10 +576,11 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 							},
 							{
 								id: 'adaptiveRateLimit',
-								label: '自适应限流学习',
-								description: '根据历史请求成功率自动调整限流阈值。',
-								currentValue: config.adaptiveRateLimit ? '开启' : '关闭',
-								values: ['开启', '关闭'],
+								label: '自适应限流算法',
+								description:
+									'关闭 — 仅使用固定阈值 | 贝叶斯 — 防御型下限调整 | UCB — 进取型上限探索 | 两者 — 协同工作（推荐）',
+								currentValue: LABELS[config.adaptiveRateLimit],
+								values: ['关闭', '贝叶斯', 'UCB', '两者'],
 							},
 							...config.modelProfiles.map((p, idx) => ({
 								id: `modelProfile-${idx}`,
@@ -513,7 +630,8 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 								}
 
 								if (id === 'adaptiveRateLimit') {
-									config.adaptiveRateLimit = newValue === '开启';
+									const mode = MODE_MAP[newValue] ?? 'off';
+									config.adaptiveRateLimit = mode;
 									persistState();
 									settingsList.updateValue(id, newValue);
 									tui.requestRender();
@@ -537,7 +655,7 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 										.then((pattern) => {
 											if (!pattern) return;
 											ctx.ui
-												.input('每分钟最大请求数', '10')
+												.input('每分钟最大请求数', String(config.maxRequestsPerMinute))
 												.then((rpmStr) => {
 													if (!rpmStr) return;
 													const rpm = Number(rpmStr);
@@ -546,7 +664,7 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 														return;
 													}
 													ctx.ui
-														.input('每分钟最大输入 Token', '8000')
+														.input('每分钟最大输入 Token', String(config.maxTokensPerMinute))
 														.then((tpmStr) => {
 															if (!tpmStr) return;
 															const tpm = Number(tpmStr);
@@ -764,7 +882,7 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 			});
 			globalRateLimiter.init();
 		}
-		if (config.adaptiveRateLimit) {
+		if (isAdaptiveOn()) {
 			logger.info('session_start: initializing adaptive learner');
 			adaptiveLearner = new AdaptiveLearner();
 		}
@@ -801,6 +919,7 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 
 	pi.on('before_provider_request', async (event) => {
 		try {
+			outcomeClassified = false; // Reset outcome dedup for this provider request
 			await throttleIfNeeded(event.payload);
 		} catch (err) {
 			logger.error('before_provider_request: throttle error', err);
@@ -830,14 +949,25 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 				refreshStatus();
 			}
 
-			// 2. Detect 432-like errors
-			if (assistant.stopReason === 'error' && is432LikeError(assistant.errorMessage)) {
-				logger.warn('message_end: detected 432 error', {
-					errorMessage: assistant.errorMessage,
-				});
-				maybeHandle432(assistant.errorMessage, ctx);
-				classifyAndRecordOutcome('rejected');
-			} else if (assistant.stopReason !== 'error') {
+			// 2. Detect 432-like errors and record outcome
+			if (assistant.stopReason === 'error') {
+				if (is432LikeError(assistant.errorMessage)) {
+					logger.warn('message_end: detected 432 error', {
+						errorMessage: assistant.errorMessage,
+					});
+					maybeHandle432(assistant.errorMessage, ctx);
+					classifyAndRecordOutcome('rejected');
+				} else {
+					// Non-432 errors (timeout, auth failure, model not found, etc.)
+					// still reflect API availability — record as rejected so the
+					// adaptive learner can adjust.
+					logger.warn('message_end: non-432 error, recording as rejected', {
+						stopReason: assistant.stopReason,
+						errorMessage: assistant.errorMessage,
+					});
+					classifyAndRecordOutcome('rejected');
+				}
+			} else {
 				classifyAndRecordOutcome('success');
 			}
 		} catch (err) {
@@ -852,9 +982,6 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 					status: event.status,
 				});
 				maybeHandle432('432 rate limit', ctx);
-				classifyAndRecordOutcome('rejected');
-			} else {
-				classifyAndRecordOutcome('success');
 			}
 		} catch (err) {
 			logger.error('after_provider_response: unexpected error', err);
@@ -865,7 +992,6 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 		try {
 			// Fallback: if the last assistant message in this turn is a 432 error
 			const messages = event.messages;
-			let found432 = false;
 			for (let i = messages.length - 1; i >= 0; i--) {
 				const m = messages[i];
 				if (m.role === 'assistant') {
@@ -875,12 +1001,10 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 						is432LikeError(assistant.errorMessage)
 					) {
 						maybeHandle432(assistant.errorMessage, ctx);
-						found432 = true;
 					}
 					break;
 				}
 			}
-			classifyAndRecordOutcome(found432 ? 'rejected' : 'success');
 		} catch (err) {
 			logger.error('agent_end: unexpected error', err);
 		}

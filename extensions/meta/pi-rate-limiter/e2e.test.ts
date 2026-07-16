@@ -55,7 +55,7 @@ function runRequestPipeline(
 	let { maxReq, maxTok, thresholdPercent } = getEffectiveLimits(config, modelId);
 
 	// Adaptive override
-	if (config.adaptiveRateLimit && learner) {
+	if (config.adaptiveRateLimit !== 'off' && learner) {
 		const isExploring = learner.shouldExplore(modelId);
 		if (isExploring) {
 			maxReq = learner.getExplorationLimit(modelId, maxReq);
@@ -131,7 +131,7 @@ describe('E2E: Model-aware pipeline', () => {
 				{ modelPattern: 'claude-*', maxRequestsPerMinute: 3, maxTokensPerMinute: 3000 },
 				{ modelPattern: 'gpt-4*', maxRequestsPerMinute: 5, maxTokensPerMinute: 5000 },
 			],
-			adaptiveRateLimit: false,
+			adaptiveRateLimit: 'off',
 		};
 
 		// Send 3 claude requests (at threshold for claude profile: 80% of 3 = 2.4)
@@ -244,7 +244,7 @@ describe('E2E: Adaptive learning pipeline', () => {
 			lockTimeoutMs: 5000,
 			staleProcessTimeoutMs: 30000,
 			modelProfiles: [],
-			adaptiveRateLimit: true,
+			adaptiveRateLimit: 'both',
 		};
 
 		// After rejections, the effective limit is lower. Let's see how many requests get through.
@@ -397,8 +397,8 @@ describe('E2E: Token estimation', () => {
 			],
 		};
 		const openaiTokens = estimateTokensFromPayload(openaiPayload, ratio);
-		// System content is counted twice (once as content, once for role===system)
-		const expectedChars = 'You are helpful.'.length * 2 + 'Hello world!'.length;
+		// System content is counted once (no more double-counting)
+		const expectedChars = 'You are helpful.'.length + 'Hello world!'.length;
 		assert.strictEqual(openaiTokens, Math.ceil(expectedChars / ratio));
 
 		const anthropicPayload = {
@@ -455,7 +455,7 @@ describe('E2E: Full session simulation', () => {
 			modelProfiles: [
 				{ modelPattern: 'claude-*', maxRequestsPerMinute: 5, maxTokensPerMinute: 2000 },
 			],
-			adaptiveRateLimit: true,
+			adaptiveRateLimit: 'both',
 		};
 
 		const session: SimulatedRequest[] = [

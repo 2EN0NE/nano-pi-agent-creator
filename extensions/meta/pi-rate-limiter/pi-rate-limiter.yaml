@@ -5,7 +5,8 @@
 maxRequestsPerMinute: 10
 
 # 每分钟最大输入 Token 数（0 表示不限）
-maxTokensPerMinute: 10000
+# 默认 256000（gpt-4o / claude 等主流模型 60s 窗口通常 > 1M tokens）
+maxTokensPerMinute: 256000
 
 # 遇到 432 错误时是否自动继续
 autoResumeOn432: true
@@ -15,3 +16,10 @@ tokenEstimateRatio: 4
 
 # 限流触发阈值百分比：达到上限的百分之多少时开始主动限流
 throttleThresholdPercent: 80
+
+# 自适应限流算法
+# off      — 关闭
+# bayesian — Gamma-Poisson 贝叶斯（防御型，向下调整安全下限）
+# ucb      — UCB+AIMD 上限探索（进取型，发现 API 真实上限）
+# both     — 两者同时启用（推荐）
+adaptiveRateLimit: 'both'
