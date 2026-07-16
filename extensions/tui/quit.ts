@@ -240,10 +240,40 @@ function getColorFn(theme: ExtensionContext['ui']['theme'] | undefined) {
 	};
 }
 
-/** 移除 ANSI 转义码后获取可见字符长度 */
-function visibleLen(s: string): number {
-	return s.replace(/\x1b\[[0-9;]*m/g, '').length;
+/** 移除 ANSI 转义码后获取终端显示宽度（正确处理 CJK 全角字符） */
+function displayWidth(s: string): number {
+	const cleaned = s.replace(/\x1b\[[0-9;]*m/g, '');
+	let width = 0;
+	for (const ch of cleaned) {
+		const code = ch.charCodeAt(0);
+		if (
+			code >= 0x1100 &&
+			(code <= 0x115f || // Hangul Jamo
+				code === 0x2329 ||
+				code === 0x232a ||
+				(code >= 0x2e80 && code <= 0x303e) || // CJK Radicals + Symbols
+				(code >= 0x3040 && code <= 0x33ff) || // Hiragana / Katakana / Enclosed CJK
+				(code >= 0x3400 && code <= 0x4dbf) || // CJK Extension A
+				(code >= 0x4e00 && code <= 0x9fff) || // CJK Unified
+				(code >= 0xa000 && code <= 0xa4cf) || // Yi
+				(code >= 0xac00 && code <= 0xd7af) || // Hangul Syllables
+				(code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility
+				(code >= 0xfe10 && code <= 0xfe19) ||
+				(code >= 0xfe30 && code <= 0xfe6f) || // CJK Compatibility Forms
+				(code >= 0xff01 && code <= 0xff60) || // Fullwidth Forms
+				(code >= 0xffe0 && code <= 0xffe6) || // Fullwidth Signs
+				(code >= 0x1f000 && code <= 0x1ffff)) // Emoji / Supplementary
+		) {
+			width += 2;
+		} else {
+			width += 1;
+		}
+	}
+	return width;
 }
+
+/** @deprecated 使用 displayWidth */
+const visibleLen = displayWidth;
 
 /** 获取终端宽度（默认 80） */
 function termWidth(): number {
@@ -303,7 +333,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 	lines.push(indent + borderColor(`├${'─'.repeat(W - 2)}┤`));
 
 	// ── 交互摘要 ──
-	const sectionLabel = '📊 交互摘要 Interaction';
+	const sectionLabel = '交互摘要 Interaction';
 	lines.push(
 		indent +
 			borderColor('│') +
@@ -319,7 +349,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 		indent +
 			borderColor('│') +
 			`    ${mutedColor('会话 ID')}: ${fg('text', sid)}` +
-			' '.repeat(Math.max(0, W - 4 - 10 - 2 - sid.length)) +
+			' '.repeat(Math.max(0, W - 2 - displayWidth('    会话 ID: ') - sid.length)) +
 			borderColor('│'),
 	);
 
@@ -331,7 +361,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 		indent +
 			borderColor('│') +
 			toolLine +
-			' '.repeat(Math.max(0, W - 4 - visibleLen(toolLine))) +
+			' '.repeat(Math.max(0, W - 2 - displayWidth(toolLine))) +
 			borderColor('│'),
 	);
 
@@ -341,7 +371,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 		indent +
 			borderColor('│') +
 			treeLine +
-			' '.repeat(Math.max(0, W - 4 - visibleLen(treeLine))) +
+			' '.repeat(Math.max(0, W - 2 - displayWidth(treeLine))) +
 			borderColor('│'),
 	);
 
@@ -351,7 +381,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 			indent +
 				borderColor('│') +
 				labelLine +
-				' '.repeat(Math.max(0, W - 4 - visibleLen(labelLine))) +
+				' '.repeat(Math.max(0, W - 2 - displayWidth(labelLine))) +
 				borderColor('│'),
 		);
 	}
@@ -360,7 +390,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 	lines.push(indent + borderColor(`├${'─'.repeat(W - 2)}┤`));
 
 	// ── 性能 ──
-	const perfLabel = '⚡ 性能 Performance';
+	const perfLabel = '性能 Performance';
 	lines.push(
 		indent +
 			borderColor('│') +
@@ -375,7 +405,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 		indent +
 			borderColor('│') +
 			`    ${mutedColor('总耗时')}: ${fg('text', dur)}` +
-			' '.repeat(Math.max(0, W - 4 - 8 - 2 - dur.length)) +
+			' '.repeat(Math.max(0, W - 2 - displayWidth('    总耗时: ') - dur.length)) +
 			borderColor('│'),
 	);
 
@@ -384,7 +414,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 		indent +
 			borderColor('│') +
 			`    ${mutedColor('智能体活跃')}: ${fg('text', agent)}` +
-			' '.repeat(Math.max(0, W - 4 - 12 - 2 - agent.length)) +
+			' '.repeat(Math.max(0, W - 2 - displayWidth('    智能体活跃: ') - agent.length)) +
 			borderColor('│'),
 	);
 
@@ -393,7 +423,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 		indent +
 			borderColor('│') +
 			`    ${mutedColor('API 调用')}: ${fg('text', api)}` +
-			' '.repeat(Math.max(0, W - 4 - 10 - 2 - api.length)) +
+			' '.repeat(Math.max(0, W - 2 - displayWidth('    API 调用: ') - api.length)) +
 			borderColor('│'),
 	);
 
@@ -402,7 +432,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 		indent +
 			borderColor('│') +
 			`    ${mutedColor('工具执行')}: ${fg('text', toolExec)}` +
-			' '.repeat(Math.max(0, W - 4 - 10 - 2 - toolExec.length)) +
+			' '.repeat(Math.max(0, W - 2 - displayWidth('    工具执行: ') - toolExec.length)) +
 			borderColor('│'),
 	);
 
@@ -410,7 +440,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 	lines.push(indent + borderColor(`├${'─'.repeat(W - 2)}┤`));
 
 	// ── 模型使用 ──
-	const modelLabel = '🤖 模型使用 Model Usage';
+	const modelLabel = '模型使用 Model Usage';
 	lines.push(
 		indent +
 			borderColor('│') +
@@ -426,7 +456,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 			indent +
 				borderColor('│') +
 				`    ${mutedColor(emptyLabel)}` +
-				' '.repeat(Math.max(0, W - 4 - 4 - visibleLen(emptyLabel))) +
+				' '.repeat(Math.max(0, W - 2 - 4 - displayWidth(emptyLabel))) +
 				borderColor('│'),
 		);
 	} else {
@@ -440,7 +470,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 			indent +
 				borderColor('│') +
 				headerLine +
-				' '.repeat(Math.max(0, W - 4 - visibleLen(headerLine))) +
+				' '.repeat(Math.max(0, W - 2 - displayWidth(headerLine))) +
 				borderColor('│'),
 		);
 
@@ -451,8 +481,7 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 			const inStr = formatTokens(mu.inputTokens);
 			const outStr = formatTokens(mu.outputTokens);
 			const row = `    ${fg('text', displayName)}${' '.repeat(Math.max(1, 30 - displayName.length))}${fg('text', reqStr)}  ${fg('text', inStr)}  ${fg('text', outStr)}`;
-			const visibleText = row.replace(/\x1b\[[0-9;]*m/g, '');
-			const padding = Math.max(0, W - 4 - visibleText.length);
+			const padding = Math.max(0, W - 2 - displayWidth(row));
 			lines.push(indent + borderColor('│') + row + ' '.repeat(padding) + borderColor('│'));
 		}
 	}
