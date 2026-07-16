@@ -113,6 +113,7 @@ profiles:
                 - prompt-editor
                 - mode-switcher
                 - quit
+                - session-tree-label
                 # 以下插件为不常用
                 - control # 外部进程通过unix socket控制pi
                 - prompt-customizer # 演示性质
