@@ -1137,6 +1137,12 @@ async function processProfile(
 		themes: 0,
 		prompts: 0,
 	};
+	const staleDeleted: Record<ResourceType, string[]> = {
+		extensions: [],
+		skills: [],
+		themes: [],
+		prompts: [],
+	};
 
 	for (const resource of resources) {
 		const result = syncResource(resource, opts.dryRun, true);
@@ -1419,33 +1425,48 @@ async function processProfile(
 		if (n > 0) parts.push(`${n} NEW`);
 		if (u > 0) parts.push(`${u} UPDATED`);
 		if (s > 0) parts.push(`${s} skipped`);
-		if (d > 0) parts.push(`${d} stale`);
+		if (d > 0) parts.push(`${d} deleted`);
 		const status = parts.length > 0 ? ` [${parts.join(' | ')}]` : ' [no changes]';
 
 		console.log(`    ${t}/${status}`);
 
 		if (d > 0) {
 			hasStale = true;
-			// Show first 3 candidates as examples, then aggregate
-			const displayCandidates = candidates.slice(0, 3);
-			for (const c of displayCandidates) {
-				let fullPath: string;
+			for (const c of candidates) {
+				let delPath: string;
 				if (t === 'extensions') {
 					const tsPath = join(absTarget, t, c + '.ts');
 					if (existsSync(tsPath)) {
-						fullPath = tsPath;
+						delPath = tsPath;
 					} else {
-						fullPath = join(absTarget, t, c);
+						delPath = join(absTarget, t, c);
 					}
 				} else if (t === 'themes') {
-					fullPath = join(absTarget, t, c + '.json');
+					delPath = join(absTarget, t, c + '.json');
 				} else {
-					fullPath = join(absTarget, t, c);
+					delPath = join(absTarget, t, c);
 				}
-				console.log(`      🗑️  ${fullPath}`);
-			}
-			if (candidates.length > 3) {
-				console.log(`      ... and ${candidates.length - 3} more`);
+
+				if (opts.dryRun) {
+					console.log(`      ⚰️  [would delete] ${delPath}`);
+					staleDeleted[t].push(c);
+				} else {
+					try {
+						if (existsSync(delPath)) {
+							const isDir = statSync(delPath).isDirectory();
+							if (isDir) {
+								rmSync(delPath, { recursive: true, force: true });
+							} else {
+								rmSync(delPath, { force: true });
+							}
+							staleDeleted[t].push(c);
+							writeLog('INFO', `[DELETE] ${t}:${c} → ${delPath}`);
+						}
+					} catch (err) {
+						console.error(`      ❌ Failed to delete ${delPath}: ${err}`);
+						writeLog('ERROR', `Failed to delete ${delPath}: ${err}`);
+					}
+				}
 			}
 		}
 	}
@@ -1457,10 +1478,10 @@ async function processProfile(
 
 	writeLog('INFO', `Profile "${name}" completed (${resources.length} resources, ${summary})`);
 
-	// Collect stale items per type
+	// Collect stale items per type (actually deleted in non-dry-run mode; would-be-deleted in dry-run mode)
 	const staleItems: Record<ResourceType, string[]> = {} as Record<ResourceType, string[]>;
 	for (const t of RESOURCE_TYPES) {
-		staleItems[t] = targetExistingNames[t].filter((item) => !sourceNames[t].has(item));
+		staleItems[t] = staleDeleted[t];
 	}
 
 	// Collect extension names for overlap analysis
@@ -1503,9 +1524,9 @@ function printFinalSummaryTable(
 	console.log(`  ${'─'.repeat(58)}`);
 
 	// Table header
-	const sep = `  ${'─'.repeat(18)} ${'─'.repeat(9)} ${'─'.repeat(5)} ${'─'.repeat(7)} ${'─'.repeat(5)} ${'─'.repeat(5)}`;
+	const sep = `  ${'─'.repeat(18)} ${'─'.repeat(9)} ${'─'.repeat(5)} ${'─'.repeat(7)} ${'─'.repeat(7)} ${'─'.repeat(5)}`;
 	console.log(
-		`  ${'Profile'.padEnd(18)} ${'Resources'.padStart(9)} ${'New'.padStart(5)} ${'Updated'.padStart(7)} ${'Stale'.padStart(5)} ${'npm'.padStart(5)}`,
+		`  ${'Profile'.padEnd(18)} ${'Resources'.padStart(9)} ${'New'.padStart(5)} ${'Updated'.padStart(7)} ${'Deleted'.padStart(7)} ${'npm'.padStart(5)}`,
 	);
 	console.log(sep);
 
@@ -1522,7 +1543,7 @@ function printFinalSummaryTable(
 		const npm = s.npmCount + s.npmSkippedCount;
 
 		console.log(
-			`  ${s.name.padEnd(18)} ${String(s.resources).padStart(9)} ${String(n).padStart(5)} ${String(u).padStart(7)} ${String(st).padStart(5)} ${String(npm).padStart(5)}`,
+			`  ${s.name.padEnd(18)} ${String(s.resources).padStart(9)} ${String(n).padStart(5)} ${String(u).padStart(7)} ${String(st).padStart(7)} ${String(npm).padStart(5)}`,
 		);
 
 		totalResources += s.resources;
@@ -1534,7 +1555,7 @@ function printFinalSummaryTable(
 
 	console.log(sep);
 	console.log(
-		`  ${'TOTAL'.padEnd(18)} ${String(totalResources).padStart(9)} ${String(totalNew).padStart(5)} ${String(totalUpdated).padStart(7)} ${String(totalStale).padStart(5)} ${String(totalNpm).padStart(5)}`,
+		`  ${'TOTAL'.padEnd(18)} ${String(totalResources).padStart(9)} ${String(totalNew).padStart(5)} ${String(totalUpdated).padStart(7)} ${String(totalStale).padStart(7)} ${String(totalNpm).padStart(5)}`,
 	);
 
 	// Extension overlap detection
@@ -1570,7 +1591,7 @@ function printFinalSummaryTable(
 	}
 	if (allStale.length > 0) {
 		console.log();
-		console.log('  🗑️  Stale items to consider removing:');
+		console.log('  🗑️  Stale items removed:');
 		for (const { profile, type, item } of allStale.slice(0, 10)) {
 			console.log(`      ${profile}/${type}/${item}`);
 		}

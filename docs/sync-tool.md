@@ -205,6 +205,19 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 | `@zenone/pi-logger`   | `extensions/meta/pi-logger/` | 统一日志系统，所有扩展必须接入                           |
 | `@zenone/pi-selector` | `extensions/meta/selector/`  | 共享选择器，confir m-destructive、permission-gate 等使用 |
 
+## 自动删除排除项（stale cleanup）
+
+当 Profile 的 `exclude` 列表排除了某些资源，或 Profile 的 include 列表不再包含之前同步过的资源时，同步脚本会**自动删除**目标目录中对应的旧文件/目录，而非仅提示。
+
+删除逻辑：
+
+1. 扫描目标目录下每个资源类型的所有现有项目
+2. 与当前 Profile 要同步的资源列表对比
+3. 不在要同步列表中的项目视为 **stale**，直接删除
+4. Dry-run 模式下仅显示 `[would delete]`，不实际删除
+
+此行为适用于所有资源类型：extensions、skills、themes、prompts。
+
 ## 日志
 
 每次同步操作追加到 `scripts/sync-to-local-pi.log`：
@@ -212,6 +225,7 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 ```
 [2026-07-09T14:30:00+08:00] [INFO] Profile "user-install" started
 [2026-07-09T14:30:00+08:00] [NEW] extensions:sandbox → /home/user/.pi/agent/extensions/sandbox
+[2026-07-09T14:30:01+08:00] [DELETE] extensions:sandbox → /home/user/.pi/agent/extensions/sandbox
 [2026-07-09T14:30:01+08:00] [WARN] Running npm install in /home/user/.pi/agent/extensions/sandbox
 [2026-07-09T14:30:05+08:00] [INFO] Profile "user-install" completed (1 resources, 1 new)
 ```
@@ -220,6 +234,7 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 
 - `[NEW]` — 新增文件（目标不存在）
 - `[UPDATE]` — 更新已存在的文件
+- `[DELETE]` — 因 exclude 或 include 列表变更而删除的老文件
 - `[SKIP]` — 文件未变化，跳过
 
 ## 目标目录
