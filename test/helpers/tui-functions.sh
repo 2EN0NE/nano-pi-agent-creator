@@ -5,15 +5,43 @@
 # 使用方式：source 本文件后调用其中的函数
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ── 平台检测 ──
+IS_LINUX=false
+case "$(uname -s)" in
+Linux*) IS_LINUX=true ;;
+esac
+
+# ── 跨平台 timeout 封装 ──
+# macOS 没有 timeout 命令；Linux 有
+run_with_timeout() {
+	local seconds="$1"
+	shift
+	if $IS_LINUX; then
+		timeout "$seconds" "$@"
+	else
+		perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+	fi
+}
+
 # ANSI 清理函数：剥离终端转义序列，保留纯文本
 # 支持标准 SGR (m) 转义 + OSC 转义 (0-9;...) + 其他控制序列
+# 以及 macOS Terminal 特定的 CSI 序列（? > = 等前导字符）
 strip_ansi() {
 	sed '
-		s/\x1b\[[0-9;]*[a-zA-Z]//g
-		s/\x1b\][0-9;]*[^\x07]*\x07//g
+		# CSI sequences: \x1b[ ... letter
+		s/\x1b\[[0-9;?]*[a-zA-Z]//g
+		# CSI sequences with >, =, < modifiers
+		s/\x1b\[[>][0-9;]*[a-zA-Z~]//g
+		s/\x1b\[[=][0-9;]*[a-zA-Z~]//g
+		s/\x1b\[[<][0-9;]*[a-zA-Z~]//g
+		s/\x1b\[[?][0-9;]*[a-zA-Z~]//g
+		# OSC sequences: \x1b]...\x07 or \x1b]...\x1b\\
+		s/\x1b\][0-9;]*[^\x07\x1b]*\(\x07\|\x1b\\\)//g
+		# DEC private sequences
 		s/\x1b[[\]][^a-zA-Z]*[a-zA-Z]//g
-		s/\x1b[^a-zA-Z]*[a-zA-Z]//g
+		s/\x1b[^a-zA-Z\[\]]*[a-zA-Z]//g
 		s/\x1b[PX^_]//g
+		# Carriage return
 		s/\r//g
 	'
 }
@@ -28,14 +56,14 @@ extract_visible_text() {
 	# 2. 剥离所有 ANSI 转义
 	# 3. 去除空行两侧的空白
 	# 4. 只保留有实质内容的行（≥2 个可见字符，且不是纯空格/control）
-	strip_ansi < "$file" \
-		| grep -v '^Script started' \
-		| grep -v '^Script done' \
-		| sed 's/[[:space:]]*$//' \
-		| sed 's/^[[:space:]]*//' \
-		| grep -v '^$' \
-		| grep -v '^[[:space:]]*$' \
-		| cat
+	strip_ansi <"$file" |
+		grep -v '^Script started' |
+		grep -v '^Script done' |
+		sed 's/[[:space:]]*$//' |
+		sed 's/^[[:space:]]*//' |
+		grep -v '^$' |
+		grep -v '^[[:space:]]*$' |
+		cat
 }
 
 # 从 script 输出中提取 "视口快照"：过滤掉 TUI 渲染过程中的中间帧
@@ -52,12 +80,12 @@ extract_viewport_snapshots() {
 	# 但 script 输出是流式的，更稳妥的是在整个输出中找特定 markers
 
 	# 简化：对整个输出 strip-ansi 后提取有意义的行
-	strip_ansi < "$file" \
-		| tr -d '\000-\010\016-\037' \
-		| sed 's/[[:space:]]*$//' \
-		| grep -v '^$' \
-		| grep -v '^[[:space:]]*$' \
-		| awk '!seen[$0]++'  # 去重（TUI 差量渲染会产生重复）
+	strip_ansi <"$file" |
+		tr -d '\000-\010\016-\037' |
+		sed 's/[[:space:]]*$//' |
+		grep -v '^$' |
+		grep -v '^[[:space:]]*$' |
+		awk '!seen[$0]++' # 去重（TUI 差量渲染会产生重复）
 }
 
 # 在 TUI 视口输出中搜索关键字
@@ -103,10 +131,18 @@ tui_run_pi_test() {
 	local input_script="$2"
 	local timeout_seconds="${3:-15}"
 
+	# CI 模式检测：CI=true 时自动注入 mock-llm
+	local PI_CI_MODE=${CI:-false}
+
 	local slug="tui-test-$$"
 	local test_home="$ROOT_DIR/.pi/tmp/$slug"
 	mkdir -p "$test_home"
 	local output_file="$test_home/output.log"
+
+	# CI 模式：自动注入 mock-llm，无需真实 API Key
+	if [[ "$PI_CI_MODE" == true ]] && [[ "$extensions" != *"mock-llm"* ]]; then
+		extensions="mock-llm,$extensions"
+	fi
 
 	# 拷贝依赖扩展到 .pi/extensions/ 下（pi 自动发现的位置）
 	if [[ -n "$extensions" ]]; then
@@ -120,11 +156,18 @@ tui_run_pi_test() {
 			dn=$(echo "$dep" | xargs)
 			[[ -z "$dn" ]] && continue
 
-			# 与 run_pi_and_check 相同的查找逻辑
+			# 与 run_pi_and_check 相同的查找逻辑：
+			# 1) extensions/ 下的目录扩展或单文件扩展
+			# 2) test/helpers/ 下的测试辅助扩展（如 mock-llm）
+			# 3) 递归搜索 extensions/ 子目录
 			if [[ -d "$ROOT_DIR/extensions/$dn" ]]; then
 				cp -r "$ROOT_DIR/extensions/$dn" "$ext_dir/$dn"
 			elif [[ -f "$ROOT_DIR/extensions/$dn.ts" ]]; then
 				cp "$ROOT_DIR/extensions/$dn.ts" "$ext_dir/$dn.ts"
+			elif [[ -f "$ROOT_DIR/test/helpers/$dn.ts" ]]; then
+				# test/helpers/ 扩展：拷贝为目录扩展
+				mkdir -p "$ext_dir/$dn"
+				cp "$ROOT_DIR/test/helpers/$dn.ts" "$ext_dir/$dn/index.ts"
 			else
 				local found=""
 				while IFS= read -r -d '' match; do
@@ -138,7 +181,7 @@ tui_run_pi_test() {
 						cp "$found" "$ext_dir/$dn.ts"
 					fi
 				else
-					echo "WARNING: dependency '$dn' not found in extensions/"
+					echo "WARNING: dependency '$dn' not found in extensions/ (including subdirectories) or test/helpers/"
 				fi
 			fi
 		done
@@ -196,14 +239,57 @@ tui_run_pi_test() {
 		git -C "$test_home" init --initial-branch main &>/dev/null || true
 	fi
 
+	# CI 模式：创建 mock-llm 模型配置，覆盖用户配置
+	if [[ "$PI_CI_MODE" == true ]]; then
+		cat >"$HOME/.pi/agent/models-store.json" <<-CIEOF
+			{
+			  "mock-llm": {
+			    "models": [
+			      {
+			        "id": "mock-model-1",
+			        "name": "Mock Model (CI)",
+			        "api": "openai-completions",
+			        "provider": "mock-llm",
+			        "apiKey": "ci-noop-key",
+			        "baseUrl": "http://localhost:0"
+			      }
+			    ],
+			    "default": "mock-model-1"
+			  }
+			}
+		CIEOF
+	fi
+
 	# 使用 script 在 PTY 中运行 pi
 	# 通过 HEREDOC 一次性输入所有命令
 	cd "$test_home"
 	set +e
-	# 注意：script 的 -q 安静模式，-e 将 exit code 传给父进程
-	# 但 time out 的场景下 exit code 是 124
-	script -q -e -c "timeout $timeout_seconds pi -a" "$output_file" <<< "$input_script" >/dev/null 2>&1
-	local pi_exit=$?
+	# 注意：Linux/macOS 的 script 语法不同：
+	#   Linux: script -q -e -c "command" output_file
+	#   macOS: script -q output_file command (no -c flag)
+	# 使用 perl 实现跨平台 timeout（macOS 没有 timeout 命令）
+	local pi_exit=0
+	if $IS_LINUX; then
+		script -q -e -c "timeout $timeout_seconds pi -a" "$output_file" <<<"$input_script" >/dev/null 2>&1
+		pi_exit=$?
+	else
+		# macOS: script 不传递子进程 exit code，用 wrapper 写入文件
+		local ec_file="$test_home/exitcode"
+		echo -n >"$ec_file"
+		local wrapper="$test_home/wrapper.sh"
+		# 注意：heredoc 里 $$ 会被展开，用 \$ 或直接写字符串
+		cat >"$wrapper" <<-WRAPPER
+			#!/usr/bin/env bash
+			perl -e 'alarm shift; exec @ARGV' "\$1" pi -a
+			echo "\$?" > "$ec_file"
+		WRAPPER
+		chmod +x "$wrapper"
+		# macOS script 语法：script -q output_file command args
+		script -q "$output_file" "$wrapper" "$timeout_seconds" <<<"$input_script" >/dev/null 2>&1
+		pi_exit=$(cat "$ec_file" 2>/dev/null || echo 0)
+		# timeout 映射：perl alarm 退出码 14（SIGALRM）
+		[[ "$pi_exit" == "14" ]] && pi_exit=124
+	fi
 	set -e
 	cd "$ROOT_DIR"
 
@@ -226,7 +312,7 @@ tui_run_pi_test() {
 	TUI_TEST_HOME="$test_home"
 
 	# 输出摘要信息
-	echo "TUI test completed: exit=$pi_exit, output=$(wc -c < "$output_file") bytes"
+	echo "TUI test completed: exit=$pi_exit, output=$(wc -c <"$output_file") bytes"
 }
 
 # TUI 测试结果判定

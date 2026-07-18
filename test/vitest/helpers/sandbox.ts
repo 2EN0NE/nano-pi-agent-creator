@@ -46,7 +46,7 @@ let _piBin: string | null = null;
 /**
  * 解析全局 pi 二进制路径，避免本地 node_modules/.bin/pi 旧版本
  */
-function resolvePiBin(): string {
+export function resolvePiBin(): string {
 	if (_piBin) return _piBin;
 
 	const candidates: string[] = [];
