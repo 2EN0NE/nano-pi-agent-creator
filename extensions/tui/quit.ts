@@ -11,6 +11,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
+import { getModel } from '@earendil-works/pi-ai';
 
 const log = createLogger('quit');
 
@@ -28,6 +29,13 @@ interface ModelUsageRecord {
 	requests: number;
 	inputTokens: number;
 	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	inputCost: number;
+	outputCost: number;
+	cacheReadCost: number;
+	cacheWriteCost: number;
+	totalCost: number;
 }
 
 interface BranchLabelInfo {
@@ -46,6 +54,7 @@ interface SessionCardData {
 	apiCallMs: number;
 	toolExecMs: number;
 	modelUsage: ModelUsageRecord[];
+	totalCost: number;
 }
 
 // ─── 追踪器 ─────────────────────────────────────────────────────────────────
@@ -141,6 +150,13 @@ function computeSessionCardData(ctx: ExtensionContext, tracker: QuitTracker): Se
 						requests: 0,
 						inputTokens: 0,
 						outputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						inputCost: 0,
+						outputCost: 0,
+						cacheReadCost: 0,
+						cacheWriteCost: 0,
+						totalCost: 0,
 					});
 				}
 				const rec = modelMap.get(key)!;
@@ -148,6 +164,8 @@ function computeSessionCardData(ctx: ExtensionContext, tracker: QuitTracker): Se
 				if (usage) {
 					rec.inputTokens += (usage.input as number) ?? 0;
 					rec.outputTokens += (usage.output as number) ?? 0;
+					rec.cacheReadTokens += (usage.cacheRead as number) ?? 0;
+					rec.cacheWriteTokens += (usage.cacheWrite as number) ?? 0;
 				}
 			}
 		}
@@ -161,6 +179,32 @@ function computeSessionCardData(ctx: ExtensionContext, tracker: QuitTracker): Se
 	const sessionId = ctx.sessionManager.getSessionId() ?? 'unknown';
 	const sessionFile = ctx.sessionManager.getSessionFile() ?? '';
 
+	// 计算各模型费用
+	let totalCost = 0;
+	const modelUsage: ModelUsageRecord[] = [];
+	for (const rec of modelMap.values()) {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const modelDef = (getModel as any)(rec.provider, rec.model);
+		if (modelDef) {
+			const inputCost = (modelDef.cost.input / 1_000_000) * rec.inputTokens;
+			const outputCost = (modelDef.cost.output / 1_000_000) * rec.outputTokens;
+			const cacheReadCost = (modelDef.cost.cacheRead / 1_000_000) * rec.cacheReadTokens;
+			const cacheWriteCost = (modelDef.cost.cacheWrite / 1_000_000) * rec.cacheWriteTokens;
+			rec.inputCost = inputCost;
+			rec.outputCost = outputCost;
+			rec.cacheReadCost = cacheReadCost;
+			rec.cacheWriteCost = cacheWriteCost;
+			rec.totalCost = inputCost + outputCost + cacheReadCost + cacheWriteCost;
+		} else {
+			log.debug('模型定价未找到，费用将显示为 0', {
+				provider: rec.provider,
+				model: rec.model,
+			});
+		}
+		totalCost += rec.totalCost;
+		modelUsage.push(rec);
+	}
+
 	return {
 		sessionId,
 		sessionFile,
@@ -170,7 +214,8 @@ function computeSessionCardData(ctx: ExtensionContext, tracker: QuitTracker): Se
 		agentActiveMs: tracker.agentActiveMs,
 		apiCallMs: tracker.apiCallMs,
 		toolExecMs: tracker.toolExecMs,
-		modelUsage: [...modelMap.values()],
+		modelUsage,
+		totalCost,
 	};
 }
 
@@ -296,6 +341,12 @@ function formatTokens(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
 	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
 	return String(n);
+}
+
+function formatCost(n: number): string {
+	if (n === 0) return '$0';
+	if (n < 0.01) return '<$0.01';
+	return `$${n.toFixed(2)}`;
 }
 
 function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme']): string[] {
@@ -465,7 +516,8 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 		const hReq = mutedColor('请求');
 		const hIn = mutedColor('输入');
 		const hOut = mutedColor('输出');
-		const headerLine = `    ${hModel}${' '.repeat(Math.max(1, 28 - 4))}${hReq}  ${hIn}  ${hOut}`;
+		const hCost = mutedColor('费用');
+		const headerLine = `    ${hModel}${' '.repeat(Math.max(1, 24 - 4))}${hReq}  ${hIn}  ${hOut}  ${hCost}`;
 		lines.push(
 			indent +
 				borderColor('│') +
@@ -476,14 +528,24 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 
 		for (const mu of data.modelUsage) {
 			const name = `${mu.provider}/${mu.model}`;
-			const displayName = name.length > 28 ? '…' + name.slice(-27) : name;
+			const displayName = name.length > 24 ? '…' + name.slice(-23) : name;
 			const reqStr = String(mu.requests);
 			const inStr = formatTokens(mu.inputTokens);
 			const outStr = formatTokens(mu.outputTokens);
-			const row = `    ${fg('text', displayName)}${' '.repeat(Math.max(1, 30 - displayName.length))}${fg('text', reqStr)}  ${fg('text', inStr)}  ${fg('text', outStr)}`;
+			const costStr = formatCost(mu.totalCost);
+			const row = `    ${fg('text', displayName)}${' '.repeat(Math.max(1, 26 - displayName.length))}${fg('text', reqStr)}  ${fg('text', inStr)}  ${fg('text', outStr)}  ${fg('text', costStr)}`;
 			const padding = Math.max(0, W - 2 - displayWidth(row));
 			lines.push(indent + borderColor('│') + row + ' '.repeat(padding) + borderColor('│'));
 		}
+
+		// 总费用
+		const totalCostLabel = mutedColor('总计费用');
+		const totalCostStr = successColor(formatCost(data.totalCost));
+		const totalLine = `    ${totalCostLabel}:  ${totalCostStr}`;
+		const totalPadding = Math.max(0, W - 2 - displayWidth(totalLine));
+		lines.push(
+			indent + borderColor('│') + totalLine + ' '.repeat(totalPadding) + borderColor('│'),
+		);
 	}
 
 	// ── 底部边框 ──
