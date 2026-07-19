@@ -20,6 +20,9 @@ export let widgetHidden = false;
 export function setActiveWorktree(name: string | null): void {
 	activeWorktree = name;
 }
+export function getActiveWorktree(): string | null {
+	return activeWorktree;
+}
 export function setWorktreeMode(mode: boolean): void {
 	worktreeMode = mode;
 }
@@ -47,7 +50,9 @@ const STATE_DIR = '.pi/worktree-sessions';
 
 function getStatePath(cwd: string, sessionId: string): string | null {
 	const root = findHubRoot(cwd);
-	return root ? join(root, STATE_DIR, `${sessionId}.json`) : null;
+	if (!root) return null;
+	const fileName = sessionId ? `${sessionId}.json` : '_default.json';
+	return join(root, STATE_DIR, fileName);
 }
 
 export function saveState(cwd: string, sessionId: string): void {

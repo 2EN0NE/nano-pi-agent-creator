@@ -173,7 +173,7 @@ export function createSandbox(options: SandboxOptions = {}): string {
 
 	const ciMode = process.env.CI === 'true';
 	const useMock = options.useMockLLM ?? ciMode;
-	if (useMock && !extList.includes('mock-llm')) {
+	if (useMock && !extList.some((e) => e.startsWith('mock-llm'))) {
 		extList.unshift('mock-llm');
 	}
 

@@ -3,10 +3,22 @@
  */
 import { createLogger } from '@zenone/pi-logger';
 import { basename } from 'node:path';
-import { activeWorktree, activeWorktreePaths, widgetHidden, worktreeMode } from '../state.js';
+import {
+	activeWorktree,
+	activeWorktreePaths,
+	getActiveWorktree,
+	widgetHidden,
+	worktreeMode,
+} from '../state.js';
 import type { WorktreeInfo } from '../types.js';
 
 const log = createLogger('pi-worktree');
+
+/**
+ * 存储 _tui 引用，供外部在 activeWorktree 变更后强制请求重绘。
+ * 由 registerWidget 在工厂首次被 pi-tui 调用时设置。
+ */
+export let tuiRef: { requestRender(): void } | null = null;
 
 // ── 注册状态栏 Widget（单行，输入框下方）──
 
@@ -27,21 +39,27 @@ export function registerWidget(ctx: any, widgetRegistered: { v: boolean }): void
 	ctx.ui.setWidget('pi-worktree', undefined);
 	ctx.ui.setWidget(
 		'pi-worktree',
-		(_tui: any, theme: any) => ({
-			render(_width: number): string[] {
-				const label = activeWorktree
-					? theme.fg('accent', activeWorktree)
-					: theme.fg('dim', '(none)');
-				return [` ${theme.fg('accent', '\u2442')} worktree: ${label}`];
-			},
-			invalidate(): void {
-				widgetRegistered.v = false;
-			},
-		}),
+		(_tui: any, theme: any) => {
+			tuiRef = _tui;
+			return {
+				render(_width: number): string[] {
+					const label = getActiveWorktree()
+						? theme.fg('accent', getActiveWorktree()!)
+						: theme.fg('dim', '(none)');
+					log.debug('widget render called', { active: getActiveWorktree() || '(none)' });
+					return [` ${theme.fg('accent', '\u2442')} worktree: ${label}`];
+				},
+				invalidate(): void {
+					widgetRegistered.v = false;
+				},
+			};
+		},
 		{ placement: 'belowEditor' },
 	);
 	widgetRegistered.v = true;
 	log.debug('widget set', { active: activeWorktree || '(none)' });
+	// 强制请求重绘，确保 widget 立即显示最新的 activeWorktree
+	if (tuiRef) tuiRef.requestRender();
 }
 
 // ── 边框辅助 ──
@@ -299,28 +317,38 @@ export async function pickWorktree(ctx: any, worktrees: WorktreeInfo[]): Promise
 	const picked = await (ctx.ui.custom as <T>(...args: any[]) => Promise<T>)<string | null>(
 		(_tui: any, theme: any, _keybindings: any, done: (v: string | null) => void) => {
 			let cursor = 0;
-			const items = worktrees.filter((w) => w.name !== activeWorktree);
-			if (items.length === 0) {
-				// No other worktrees available to merge
-				ctx.ui.notify('No other worktrees available to merge', 'warning');
+			const items = worktrees.filter((w) => w.name !== getActiveWorktree());
+			// 构建选项列表：最前面加"回到主仓库"
+			const options: Array<{ label: string; value: string | null }> = [];
+			if (getActiveWorktree()) {
+				options.push({ label: 'Main (normal repos)', value: '__main__' });
+			}
+			for (const wt of items) {
+				options.push({ label: wt.name + '  ' + wt.branch, value: wt.name });
+			}
+			if (options.length === 0) {
+				// No other worktrees available
+				ctx.ui.notify('No other worktrees available', 'warning');
 				done(null);
 				return { render: () => [], handleInput: () => {}, invalidate: () => {} };
 			}
 			return {
 				render(_w: number): string[] {
 					const lines: string[] = [];
-					lines.push(theme.bold(' Switch to worktree:'));
+					lines.push(theme.bold(' Switch to:'));
 					lines.push('');
-					for (let i = 0; i < items.length; i++) {
+					for (let i = 0; i < options.length; i++) {
 						const arrow = i === cursor ? theme.fg('accent', '\u276F ') : '  ';
-						const name =
-							i === cursor ? theme.fg('accent', items[i].name) : items[i].name;
-						lines.push(
-							`${arrow}${name}  ${theme.fg('dim', '\u2192 ' + items[i].branch)}`,
-						);
+						const label =
+							i === cursor ? theme.fg('accent', options[i].label) : options[i].label;
+						lines.push(`${arrow}${label}`);
 					}
 					lines.push('');
-					lines.push(theme.fg('dim', ' [Enter] switch  [esc] cancel'));
+					if (getActiveWorktree()) {
+						lines.push(theme.fg('dim', ' [Enter] switch  [esc] cancel'));
+					} else {
+						lines.push(theme.fg('dim', ' [Enter] select  [esc] cancel'));
+					}
 					return lines;
 				},
 				handleInput(data: string): void {
@@ -328,10 +356,10 @@ export async function pickWorktree(ctx: any, worktrees: WorktreeInfo[]): Promise
 						cursor = Math.max(0, cursor - 1);
 						_tui.requestRender();
 					} else if (data === '\x1B[B') {
-						cursor = Math.min(items.length - 1, cursor + 1);
+						cursor = Math.min(options.length - 1, cursor + 1);
 						_tui.requestRender();
 					} else if (data === '\r' || data === '\n') {
-						done(items[cursor]?.name || null);
+						done(options[cursor]?.value ?? null);
 					} else if (data === '\x1B' || data === '\x03') {
 						done(null);
 					}

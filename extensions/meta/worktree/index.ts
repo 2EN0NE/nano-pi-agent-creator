@@ -460,7 +460,11 @@ export default function worktreeExtension(pi: ExtensionAPI): void {
 					case 'use': {
 						if (allWorktrees.length === 0) break;
 						const _picked1 = await pickWorktree(ctx, allWorktrees);
-						if (_picked1) handleUse(repos, { _positional: _picked1 }, ctx, sessionId);
+						if (_picked1 === '__main__') {
+							handleStop(ctx, sessionId);
+						} else if (_picked1) {
+							handleUse(repos, { _positional: _picked1 }, ctx, sessionId);
+						}
 						break;
 					}
 					case 'delete': {

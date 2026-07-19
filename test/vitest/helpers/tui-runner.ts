@@ -36,6 +36,8 @@ export interface TuiRunnerOptions {
 	commandDelay?: number;
 	/** 启动超时 ms（默认 10000） */
 	startTimeout?: number;
+	/** 使用 Mock LLM（自动包含 mock-llm 扩展，适用于需要触发 agent_start 的测试） */
+	useMockLLM?: boolean;
 }
 
 interface Snapshot {
@@ -60,7 +62,8 @@ export class TuiRunner {
 			rows: opts.rows ?? 24,
 			commandDelay: opts.commandDelay ?? 500,
 			startTimeout: opts.startTimeout ?? 10000,
-		};
+			useMockLLM: opts.useMockLLM,
+		} as Required<TuiRunnerOptions>;
 	}
 
 	/**
@@ -75,6 +78,7 @@ export class TuiRunner {
 						.map((s) => s.trim())
 						.filter(Boolean)
 				: [],
+			useMockLLM: this.options.useMockLLM,
 		});
 
 		// 2. 设置 PI_TUI_WRITE_LOG 路径
@@ -239,6 +243,30 @@ export class TuiRunner {
 	}
 
 	/**
+	 * 等待 PTY 原始输出中出现指定关键字（widget 内容等不在 write-log 的文本）
+	 */
+	async waitForPtyOutput(keyword: string, timeoutMs = 6000): Promise<string> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			const text = stripAnsi(this.rawOutput);
+			if (text.includes(keyword)) return text;
+			await this.sleep(200);
+		}
+		const text = stripAnsi(this.rawOutput);
+		throw new Error(
+			`Timed out waiting for PTY output: "${keyword}"\n` +
+				`Actual (last 800 chars): "${text.slice(-800)}"`,
+		);
+	}
+
+	/**
+	 * 断言 PTY 原始输出中的纯文本包含指定关键字（带等待，最多 6s）
+	 */
+	async assertPtyContains(keyword: string): Promise<void> {
+		await this.waitForPtyOutput(keyword);
+	}
+
+	/**
 	 * 断言 write-log 中的纯文本匹配正则（带等待，最多 6s）
 	 */
 	async assertMatches(pattern: RegExp): Promise<void> {
@@ -268,6 +296,13 @@ export class TuiRunner {
 	 */
 	getRaw(): string {
 		return this.readWriteLog();
+	}
+
+	/**
+	 * 获取沙箱根目录路径（用于读取日志文件等）
+	 */
+	getSandboxPath(): string {
+		return this.sandbox;
 	}
 
 	/**

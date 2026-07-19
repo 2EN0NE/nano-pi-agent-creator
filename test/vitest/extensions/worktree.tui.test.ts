@@ -123,6 +123,49 @@ describe('worktree extension (TUI mode via node-pty)', () => {
 	});
 
 	// ──────────────────────────────────────────────
+	// widget 同步（切换后 widget 正确显示 worktree 名）
+	// ──────────────────────────────────────────────
+	it('widget syncs after switching worktree — PTY output contains worktree name', async () => {
+		await withTui({ extensions: 'pi-logger,worktree' }, async (tui) => {
+			await tui.send('/worktree mode on');
+			// 创建第一个 worktree
+			await tui.send('/worktree create --repos test-repo --name e2e-widget-sync');
+			await tui.waitForOutput('e2e-widget-sync', 20000);
+			// 停止并重新激活
+			await tui.send('/worktree use e2e-widget-sync');
+			await tui.waitForOutput('Activated', 10000);
+			// 等待 widget 渲染（pi-tui 渲染帧）
+			await new Promise((r) => setTimeout(r, 1500));
+			// 检查 PTY 原始输出中是否包含 widget 渲染内容
+			await tui.assertPtyContains('e2e-widget-sync');
+		});
+	});
+
+	// ──────────────────────────────────────────────
+	// 综合行为测试
+	// ──────────────────────────────────────────────
+
+	// ──────────────────────────────────────────────
+	// widget 同步
+	// ──────────────────────────────────────────────
+
+	it('widget syncs after switching worktree — PTY output contains worktree name', async () => {
+		await withTui({ extensions: 'pi-logger,worktree' }, async (tui) => {
+			await tui.send('/worktree mode on');
+			// 创建第一个 worktree
+			await tui.send('/worktree create --repos test-repo --name e2e-widget-sync');
+			await tui.waitForOutput('e2e-widget-sync', 20000);
+			// 停止并重新激活
+			await tui.send('/worktree use e2e-widget-sync');
+			await tui.waitForOutput('Activated', 10000);
+			// 等待 widget 渲染（pi-tui 渲染帧）
+			await new Promise((r) => setTimeout(r, 1500));
+			// 检查 PTY 原始输出中是否包含 widget 渲染内容
+			await tui.assertPtyContains('e2e-widget-sync');
+		});
+	});
+
+	// ──────────────────────────────────────────────
 	// merge 命令
 	// ──────────────────────────────────────────────
 	it('/worktree merge shows usage when no worktrees', async () => {
