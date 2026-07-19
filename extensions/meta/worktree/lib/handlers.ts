@@ -3,7 +3,7 @@
  */
 import { createLogger } from '@zenone/pi-logger';
 import { basename, join } from 'node:path';
-import { spawnSync, spawn } from 'node:child_process';
+import { spawnSync, spawn, execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { getDefaultBranch, getCurrentBranch, bumpPackageVersion } from './git.js';
 import {
@@ -43,7 +43,6 @@ import {
 
 function checkDirty(repo: string): string[] {
 	try {
-		const { execSync } = require('node:child_process');
 		const out = execSync('git status --porcelain', {
 			cwd: repo,
 			encoding: 'utf-8',
@@ -168,7 +167,7 @@ export async function handleCreate(
 			ctx.ui.notify('Cancelled', 'warning');
 			return;
 		}
-		name = input;
+		if (input !== '') name = input;
 	}
 	if (!name) name = pickAvailableName(targetRepos[0]);
 
@@ -585,4 +584,218 @@ export async function handleClean(
 	}
 	results.push(`\u2713 Opened PR: ${(pr.stdout || '').trim()}`);
 	ctx.ui.notify(results.join('\n'), 'info');
+}
+
+// ═══════════════════════════════════════════
+// merge — 合并 worktree 分支到目标分支
+// ═══════════════════════════════════════════
+
+/**
+ * 执行 git merge：在 repo 的 target 分支上合并 source 分支
+ */
+function execMerge(
+	repo: string,
+	sourceBranch: string,
+	targetBranch: string,
+): { ok: boolean; message: string; conflicts: Array<{ file: string; lines: string }> } {
+	const git = (args: string[], cwd?: string) =>
+		spawnSync('git', args, {
+			cwd: cwd || repo,
+			encoding: 'utf-8',
+			maxBuffer: 16 * 1024 * 1024,
+		});
+
+	// 1. 保存原始分支
+	const origBranch = getCurrentBranch(repo);
+
+	// 2. 暂存当前分支的更改
+	const dirty = (git(['status', '--porcelain']).stdout || '').trim();
+	if (dirty) {
+		const stash = git(['stash', 'push', '-m', 'worktree-merge-auto-' + Date.now()]);
+		if (stash.status !== 0) {
+			return {
+				ok: false,
+				message: 'Cannot stash changes: ' + (stash.stderr || '').trim(),
+				conflicts: [],
+			};
+		}
+	}
+
+	// 3. 切到 target 分支
+	const checkout = git(['checkout', targetBranch]);
+	if (checkout.status !== 0) {
+		if (dirty) git(['stash', 'pop']);
+		return {
+			ok: false,
+			message: "Cannot checkout '" + targetBranch + "': " + (checkout.stderr || '').trim(),
+			conflicts: [],
+		};
+	}
+
+	// 4. pull 最新（仅当 origin remote 存在。本地仓库无 remote 时可跳过）
+	const hasRemote = git(['remote', 'get-url', 'origin']).status === 0;
+	if (hasRemote) {
+		const pull = git(['pull', 'origin', targetBranch, '--ff-only']);
+		if (pull.status !== 0) {
+			git(['checkout', origBranch]);
+			if (dirty) git(['stash', 'pop']);
+			return {
+				ok: false,
+				message: "Cannot pull '" + targetBranch + "': " + (pull.stderr || '').trim(),
+				conflicts: [],
+			};
+		}
+	}
+
+	// 5. merge source 分支
+	const merge = git(['merge', sourceBranch, '--no-ff', '--log']);
+	const output = (merge.stdout || '') + (merge.stderr || '');
+
+	if (merge.status === 0) {
+		// 成功 — 切回原始分支
+		git(['checkout', origBranch]);
+		if (dirty) {
+			const pop = git(['stash', 'pop']);
+			if (pop.status !== 0) {
+				log.warn('stash pop after successful merge failed; stash remains at stash@{0}', {
+					stderr: (pop.stderr || '').trim(),
+				});
+			}
+		}
+		return {
+			ok: true,
+			message: "Merged '" + sourceBranch + "' -> '" + targetBranch + "'",
+			conflicts: [],
+		};
+	}
+
+	// 6. 有冲突 — 切回原始分支、恢复 stash，再返回冲突信息
+	// 注意：merge 冲突状态保留在目标分支上，切换回来不会丢失
+	git(['checkout', origBranch]);
+	if (dirty) {
+		const pop = git(['stash', 'pop']);
+		if (pop.status !== 0) {
+			log.warn('stash pop after merge conflict failed; stash remains at stash@{0}', {
+				stderr: (pop.stderr || '').trim(),
+			});
+		}
+	}
+	const unmerged = (git(['diff', '--name-only', '--diff-filter=U']).stdout || '').trim();
+	const conflictFiles = unmerged
+		.split('\n')
+		.filter(Boolean)
+		.map((f) => {
+			const lines = (git(['diff', '--', f.trim()]).stdout || '')
+				.split('\n')
+				.filter((l) => l.startsWith('@@'))
+				.slice(0, 3)
+				.join('; ');
+			return { file: f.trim(), lines };
+		});
+
+	return {
+		ok: false,
+		message:
+			'Merge failed. Conflicts in ' + conflictFiles.length + ' file(s).\n' + output.trim(),
+		conflicts: conflictFiles,
+	};
+}
+
+export async function handleMerge(
+	repos: string[],
+	flags: Record<string, string>,
+	ctx: any,
+	sessionId: string,
+): Promise<void> {
+	const repo = repos[0];
+	if (!repo) {
+		ctx.ui.notify('No repos found', 'error');
+		return;
+	}
+
+	const allWorktrees = getExistingWorktrees(repo);
+	if (allWorktrees.length === 0 && !activeWorktree) {
+		ctx.ui.notify('No worktrees to merge. Create one first with /worktree create.', 'warning');
+		return;
+	}
+
+	// 确定源 worktree（flags 优先 -> 当前活跃 -> TUI 选择）
+	let sourceWorktree: string | undefined = flags.source;
+	if (!sourceWorktree) {
+		if (activeWorktree) {
+			sourceWorktree = activeWorktree;
+		} else if (ctx.hasUI) {
+			const { pickMergeSource } = await import('./ui.js');
+			const picked = await pickMergeSource(ctx, allWorktrees);
+			if (!picked) {
+				ctx.ui.notify('Cancelled', 'warning');
+				return;
+			}
+			sourceWorktree = picked;
+		} else {
+			ctx.ui.notify(
+				'Usage: /worktree merge --source <worktree-name> [--target main]',
+				'warning',
+			);
+			return;
+		}
+	}
+
+	const sourceBranch = 'wt/' + sourceWorktree;
+	const targetBranch = flags.target || 'main';
+
+	// TUI 确认对话框
+	if (ctx.hasUI) {
+		const { confirmMerge } = await import('./ui.js');
+		const confirmed = await confirmMerge(ctx, sourceWorktree, sourceBranch, targetBranch);
+		if (!confirmed) {
+			ctx.ui.notify('Merge cancelled', 'info');
+			return;
+		}
+	}
+
+	log.info('merging', { repo: basename(repo), source: sourceBranch, target: targetBranch });
+	ctx.ui.notify("Merging '" + sourceBranch + "' -> '" + targetBranch + "'...", 'info');
+
+	const result = execMerge(repo, sourceBranch, targetBranch);
+
+	if (result.ok) {
+		log.info('merge succeeded', { source: sourceBranch, target: targetBranch });
+		ctx.ui.notify(result.message, 'success');
+		// 自动重新激活源 worktree
+		if (sourceWorktree !== activeWorktree) {
+			for (const r of repos) {
+				const wtPath = join(r, '.worktrees', sourceWorktree);
+				if (existsSync(wtPath) && existsSync(join(wtPath, '.git'))) {
+					addWorktreePath(basename(r), wtPath);
+				}
+			}
+			if (activeWorktreePaths.size > 0) {
+				setActiveWorktree(sourceWorktree);
+				registerWidget(ctx, { v: false });
+				saveState(ctx.cwd, sessionId);
+			}
+		}
+	} else if (result.conflicts.length > 0) {
+		log.warn('merge conflicts', {
+			source: sourceBranch,
+			target: targetBranch,
+			files: result.conflicts.length,
+		});
+		const summary = result.conflicts.map((c) => '  - ' + c.file + ': ' + c.lines).join('\n');
+		ctx.ui.notify(
+			'Merge conflict in ' +
+				result.conflicts.length +
+				' file(s). Switch to the target branch, resolve then commit.\n' +
+				summary,
+			'error',
+		);
+	} else {
+		log.warn('merge failed', {
+			source: sourceBranch,
+			target: targetBranch,
+			message: result.message,
+		});
+		ctx.ui.notify('Merge failed: ' + result.message, 'error');
+	}
 }

@@ -123,6 +123,31 @@ describe('worktree extension (TUI mode via node-pty)', () => {
 	});
 
 	// ──────────────────────────────────────────────
+	// merge 命令
+	// ──────────────────────────────────────────────
+	it('/worktree merge shows usage when no worktrees', async () => {
+		await withTui({ extensions: 'pi-logger,worktree' }, async (tui) => {
+			// No worktrees created yet in this sandbox
+			await tui.send('/worktree merge');
+			await tui.assertContains('No worktrees to merge');
+		});
+	});
+
+	it('/worktree merge with source flag merges worktree branch to main', async () => {
+		await withTui({ extensions: 'pi-logger,worktree' }, async (tui) => {
+			await tui.send('/worktree mode on');
+			// Create a worktree first
+			await tui.send('/worktree create --repos test-repo --name e2e-merge-src');
+			await tui.waitForOutput('e2e-merge-src', 20000);
+			// Merge it — wait for confirm dialog, then confirm
+			await tui.send('/worktree merge --source e2e-merge-src --target main');
+			await tui.waitForOutput('Yes, merge', 8000);
+			await tui.send('y');
+			await tui.waitForOutput('Merged', 15000);
+		});
+	});
+
+	// ──────────────────────────────────────────────
 	// border 盒子结构测试（允许 CJK 宽度偏差）
 	// ──────────────────────────────────────────────
 	it('/worktree TUI panel renders structured box', async () => {

@@ -132,7 +132,9 @@ export function diagnoseWorktreeEnv(cwd: string): string {
 				const content = readFileSync(gitPath, 'utf-8').trim();
 				if (content.startsWith('gitdir:'))
 					return '当前在 git worktree 内，可以在主仓库运行 pi 然后使用 /worktree use 激活。';
-			} catch { /* ignore */ }
+			} catch {
+				/* ignore */
+			}
 		}
 		return `当前目录不是 git 仓库。\n  请 cd 到 git 仓库目录（如 nano-pi-stuff/）后重试。\n  提示：运行 git init 初始化当前目录，或 cd 到已有仓库。`;
 	}

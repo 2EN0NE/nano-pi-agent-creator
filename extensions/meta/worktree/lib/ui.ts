@@ -2,6 +2,7 @@
  * pi-worktree — TUI 组件
  */
 import { createLogger } from '@zenone/pi-logger';
+import { basename } from 'node:path';
 import { activeWorktree, activeWorktreePaths, widgetHidden, worktreeMode } from '../state.js';
 import type { WorktreeInfo } from '../types.js';
 
@@ -18,16 +19,20 @@ export function registerWidget(ctx: any, widgetRegistered: { v: boolean }): void
 		}
 		return;
 	}
+	// WORKAROUND: pi-tui may cache the factory result for a widget name and not
+	// re-invoke it when only the factory reference changes (the old render closure
+	// would keep reading stale activeWorktree). Remove-then-re-add forces re-creation.
+	// TODO: revisit after pi-tui fixes factory caching (or if setWidget already
+	//       re-invokes the factory — test can be removed).
+	ctx.ui.setWidget('pi-worktree', undefined);
 	ctx.ui.setWidget(
 		'pi-worktree',
 		(_tui: any, theme: any) => ({
-			render(width: number): string[] {
-				const trunc = (s: string) =>
-					s.length > width ? s.slice(0, width - 1) + '\u2026' : s;
+			render(_width: number): string[] {
 				const label = activeWorktree
 					? theme.fg('accent', activeWorktree)
 					: theme.fg('dim', '(none)');
-				return [trunc(` ${theme.fg('accent', '\u2442')} worktree: ${label}`)];
+				return [` ${theme.fg('accent', '\u2442')} worktree: ${label}`];
 			},
 			invalidate(): void {
 				widgetRegistered.v = false;
@@ -159,6 +164,13 @@ export async function showWorktreeTui(
 					label: `Widget: ${widgetHidden ? 'HIDE' : 'SHOW'}`,
 					desc: widgetHidden ? '显示状态 widget' : '隐藏状态 widget',
 				});
+				if (worktrees.length > 0 || activeWorktree) {
+					actions.push({
+						key: 'merge',
+						label: 'Merge',
+						desc: '合并 worktree 分支到 main',
+					});
+				}
 				actions.push({ key: 'delete', label: 'Delete', desc: '删除 worktree' });
 				actions.push({ key: 'help', label: 'Help', desc: '查看完整用法' });
 				actions.push({ key: 'quit', label: 'Quit', desc: '退出' });
@@ -289,6 +301,8 @@ export async function pickWorktree(ctx: any, worktrees: WorktreeInfo[]): Promise
 			let cursor = 0;
 			const items = worktrees.filter((w) => w.name !== activeWorktree);
 			if (items.length === 0) {
+				// No other worktrees available to merge
+				ctx.ui.notify('No other worktrees available to merge', 'warning');
 				done(null);
 				return { render: () => [], handleInput: () => {}, invalidate: () => {} };
 			}
@@ -412,7 +426,8 @@ export async function confirmDelete(ctx: any, name: string): Promise<boolean> {
 		);
 		return confirmed ?? true;
 	} catch {
-		return true;
+		log.error('confirmMerge TUI overlay failed; defaulting to cancel');
+		return false;
 	}
 }
 
@@ -501,7 +516,8 @@ export async function promptWorktreeName(ctx: any): Promise<string | null> {
 					},
 					handleInput(data: string): void {
 						if (data === '\r' || data === '\n') {
-							done(input.trim() || null);
+							// 空输入 → 返回 '' 表示自动生成；有输入 → 返回名称
+							done(input.trim());
 							return;
 						}
 						if (data === '\x1B' || data === '\x03') {
@@ -592,8 +608,119 @@ export async function confirmDirtyStart(
 		);
 		return confirmed ?? false;
 	} catch {
-		return true;
+		log.error('confirmMerge TUI overlay failed; defaulting to cancel');
+		return false;
 	}
 }
 
-import { basename } from 'node:path';
+// ── Merge 源 worktree 选择器 ──
+
+export async function pickMergeSource(ctx: any, worktrees: WorktreeInfo[]): Promise<string | null> {
+	if (!ctx.hasUI || worktrees.length === 0) return null;
+	const picked = await (ctx.ui.custom as <T>(...args: any[]) => Promise<T>)<string | null>(
+		(_tui: any, theme: any, _keybindings: any, done: (v: string | null) => void) => {
+			let cursor = 0;
+			const items = worktrees.filter((w) => w.name !== activeWorktree);
+			if (items.length === 0) {
+				// No other worktrees available to merge
+				ctx.ui.notify('No other worktrees available to merge', 'warning');
+				done(null);
+				return { render: () => [], handleInput: () => {}, invalidate: () => {} };
+			}
+			return {
+				render(_w: number): string[] {
+					const lines: string[] = [];
+					lines.push(theme.bold(' Select source worktree to merge:'));
+					lines.push('');
+					for (let i = 0; i < items.length; i++) {
+						const arrow = i === cursor ? theme.fg('accent', '\u276F ') : '  ';
+						const name =
+							i === cursor ? theme.fg('accent', items[i].name) : items[i].name;
+						lines.push(
+							arrow + name + '  ' + theme.fg('dim', '\u2192 ' + items[i].branch),
+						);
+					}
+					lines.push('');
+					lines.push(theme.fg('dim', ' [Enter] confirm  [esc] cancel'));
+					return lines;
+				},
+				handleInput(data: string): void {
+					if (data === '\x1B[A') {
+						cursor = Math.max(0, cursor - 1);
+						_tui.requestRender();
+					} else if (data === '\x1B[B') {
+						cursor = Math.min(items.length - 1, cursor + 1);
+						_tui.requestRender();
+					} else if (data === '\r' || data === '\n') {
+						done(items[cursor]?.name || null);
+					} else if (data === '\x1B' || data === '\x03') {
+						done(null);
+					}
+				},
+				invalidate(): void {},
+			};
+		},
+		{ overlay: true, overlayOptions: { anchor: 'center', width: '70%', maxHeight: '80%' } },
+	);
+	return picked;
+}
+
+// ── Merge 确认对话框 ──
+
+export async function confirmMerge(
+	ctx: any,
+	worktreeName: string,
+	sourceBranch: string,
+	targetBranch: string,
+): Promise<boolean> {
+	if (!ctx.hasUI) return true;
+	try {
+		const confirmed = await (ctx.ui.custom as <T>(...args: any[]) => Promise<T>)<boolean>(
+			(_tui: any, theme: any, _keybindings: any, done: (v: boolean) => void) => ({
+				render(_w: number): string[] {
+					const lines: string[] = [];
+					lines.push(theme.bold(' Merge worktree branch:'));
+					lines.push('');
+					lines.push(
+						'  ' +
+							theme.fg('accent', '\u25CF') +
+							' Source: ' +
+							theme.fg('accent', sourceBranch) +
+							'  ' +
+							theme.fg('dim', '(' + worktreeName + ')'),
+					);
+					lines.push('  ' + theme.fg('dim', '\u2514\u2192 Target: ') + targetBranch);
+					lines.push('');
+					lines.push(
+						'  ' +
+							theme.fg('accent', '\u25CF') +
+							' Yes, merge ' +
+							theme.fg('dim', '(y)'),
+					);
+					lines.push('  \u25CB Cancel ' + theme.fg('dim', '(n/esc)'));
+					lines.push('');
+					lines.push(
+						theme.fg('dim', ' The merge will be performed in the repo directory.'),
+					);
+					return renderBox(theme, lines, _w, 0);
+				},
+				handleInput(data: string): void {
+					if (data === 'y' || data === 'Y' || data === '\r') {
+						done(true);
+						return;
+					}
+					if (data === 'n' || data === 'N' || data === '\x1B' || data === '\x03') {
+						done(false);
+						return;
+					}
+				},
+				invalidate(): void {},
+			}),
+			{ overlay: true, overlayOptions: { anchor: 'center', width: '60%' } },
+		);
+		return confirmed ?? true;
+	} catch {
+		log.error('confirmMerge TUI overlay failed; defaulting to cancel');
+		return false;
+	}
+}

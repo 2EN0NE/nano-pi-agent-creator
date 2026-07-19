@@ -43,6 +43,7 @@ import { WORKTREES_DIR } from './lib/setup.js';
 import {
 	activeWorktree,
 	activeWorktreePaths,
+	worktreeMode,
 	setActiveWorktree,
 	clearActiveWorktree,
 	addWorktreePath,
@@ -59,6 +60,7 @@ import {
 	handleShell,
 	handleDelete,
 	handleClean,
+	handleMerge,
 } from './lib/handlers.js';
 import { diagnoseWorktreeEnv } from './lib/git.js';
 
@@ -85,6 +87,26 @@ export default function worktreeExtension(pi: ExtensionAPI): void {
 		sessionId = getSessionId(ctx);
 		loadState(ctx.cwd, sessionId);
 		if (activeWorktree) registerWidget(ctx, widgetTracker);
+
+		// 启动提醒：有 worktree 但未激活
+		if (worktreeMode && !activeWorktree) {
+			try {
+				const repos = discoverRepos(ctx.cwd);
+				let total = 0;
+				for (const repo of repos) {
+					total += getExistingWorktrees(repo).length;
+				}
+				if (total > 0) {
+					log.info('startup: worktree reminder', { existingWorktrees: total });
+					ctx.ui.notify(
+						`\u{1F30C} 发现 ${total} 个 worktree。使用 /worktree use <name> 选择工作分支。`,
+						'info',
+					);
+				}
+			} catch (err) {
+				log.debug('worktree startup notify skipped', { error: String(err) });
+			}
+		}
 	});
 
 	pi.on('session_shutdown', async (_e, ctx) => {
@@ -459,6 +481,9 @@ export default function worktreeExtension(pi: ExtensionAPI): void {
 					case 'widget':
 						handleWidget(ctx, sessionId, {});
 						break;
+					case 'merge':
+						await handleMerge(repos, {}, ctx, sessionId);
+						break;
 					case 'help':
 						ctx.ui.notify(formatHelp(), 'info');
 						break;
@@ -502,6 +527,9 @@ export default function worktreeExtension(pi: ExtensionAPI): void {
 				case 'clean':
 					await handleClean(repos, flags, ctx);
 					break;
+				case 'merge':
+					await handleMerge(repos, flags, ctx, sessionId);
+					break;
 				default:
 					ctx.ui.notify(formatHelp(), 'info');
 			}
@@ -538,6 +566,7 @@ function formatHelp(): string {
 		'  list   [--repos repo1,repo2]',
 		'  delete <name> [--repos repo1,repo2] [--remote <name>]',
 		'  clean  [--repos ...] [--bump patch|minor|major] [--dry-run] [--no-pr]',
+		'  merge  [--source <name>] [--target <branch>]  merge worktree branch into target (default: main)',
 		'',
 		'Names are auto-assigned from a zodiac+star pool (e.g. Aries-Hamal).',
 		'If omitted, --repos shows interactive picker (TUI).',
