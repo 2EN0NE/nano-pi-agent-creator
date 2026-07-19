@@ -225,6 +225,16 @@ function checkThreshold(
 	}
 
 	// 全部超过阈值
+	log.info(
+		'Dynamic policy: all thresholds exceeded for "%s" (cmd:%d/%d, tool:%d/%d, folder:%d/%d)',
+		command.slice(0, 80),
+		cmdCount,
+		thresholds.sameCommand,
+		toolCount,
+		thresholds.sameTool,
+		folderCount,
+		thresholds.sameFolder,
+	);
 	return { pass: false, dimension: null };
 }
 
@@ -308,8 +318,12 @@ async function handleToolCall(
 				event.input.command = `echo "✓ Auto-approved (${thresholdResult.dimension})"\n${command}`;
 				return undefined;
 			}
+			// 在 scope 内但阈值全超 → 仍需确认
+			log.info(
+				'Dynamic policy: in scope but thresholds exceeded — falling through to confirm',
+			);
 		} else {
-			log.debug('Not in scope, falling through to confirm');
+			log.info('Dynamic policy: not in scope — falling through to confirm (scope=%s)', scope);
 		}
 	}
 
@@ -370,13 +384,74 @@ async function handlePermissionGateCommand(
 			`    Same Command: ${_config.dynamicPolicy.thresholds.sameCommand}`,
 			`    Same Tool: ${_config.dynamicPolicy.thresholds.sameTool}`,
 			`    Same Folder: ${_config.dynamicPolicy.thresholds.sameFolder}`,
-			`  Approval Counts: ${Object.keys(_config.approvalCounts).length} entries`,
+			`  Approval Counts: ${summarizeApprovalCounts()}`,
 		];
 		ctx.ui.notify(lines.join('\n'), 'info');
 		return;
 	}
 
 	await showMainMenu(ctx);
+}
+
+/**
+ * 按动态策略维度汇总 approvalCounts，返回可读字符串。
+ * 如 "Cmd:5 · Tool:3 · Dir:7 — 15 entries"
+ */
+function summarizeApprovalCounts(): string {
+	let cmd = 0;
+	let tool = 0;
+	let dir = 0;
+	for (const key of Object.keys(_config.approvalCounts)) {
+		if (key.startsWith('cmd:')) cmd++;
+		else if (key.startsWith('tool:')) tool++;
+		else if (key.startsWith('dir:')) dir++;
+	}
+	const total = cmd + tool + dir;
+	if (total === 0) return '0 entries';
+	return `Cmd:${cmd} · Tool:${tool} · Dir:${dir} — ${total} entries`;
+}
+
+
+/**
+ * 计算各维度尚未达阈值的最高计数，并拼接为进度字符串。
+ * 如 "[cmd:2/2,tool:1/3,folder:2/4]"
+ * 各维度遍历计数中未超过阈值的最高值展示；
+ * 若无任何记录则显示 0/threshold。
+ */
+function calcDynamicProgress(): string {
+	if (!_config.dynamicPolicyEnabled) return '';
+
+	const counts = _config.approvalCounts;
+	const th = _config.dynamicPolicy.thresholds;
+
+	// 命令维度：找未达阈值的最高 cmd 计数
+	let bestCmd = 0;
+	for (const key of Object.keys(counts)) {
+		if (key.startsWith('cmd:')) {
+			const c = counts[key];
+			if (c < th.sameCommand && c > bestCmd) bestCmd = c;
+		}
+	}
+
+	// 工具维度
+	let bestTool = 0;
+	for (const key of Object.keys(counts)) {
+		if (key.startsWith('tool:')) {
+			const c = counts[key];
+			if (c < th.sameTool && c > bestTool) bestTool = c;
+		}
+	}
+
+	// 文件夹维度
+	let bestFolder = 0;
+	for (const key of Object.keys(counts)) {
+		if (key.startsWith('dir:')) {
+			const c = counts[key];
+			if (c < th.sameFolder && c > bestFolder) bestFolder = c;
+		}
+	}
+
+	return `[cmd:${bestCmd}/${th.sameCommand},tool:${bestTool}/${th.sameTool},folder:${bestFolder}/${th.sameFolder}]`;
 }
 
 async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
@@ -420,7 +495,7 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 		items.push({
 			value: '__reset_counts',
 			label: '🔄  Reset Approval Counts',
-			description: `${Object.keys(_config.approvalCounts).length} entries`,
+			description: summarizeApprovalCounts(),
 		});
 
 		const selected = await makeCustomSelection(
@@ -450,7 +525,7 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 						'permission-gate',
 						ctx.ui.theme.fg(
 							_config.enabled ? 'accent' : 'dim',
-							`${_config.enabled ? '🛡' : '◻'} gate:${_config.enabled ? 'on' : 'off'}`,
+							`${_config.enabled ? '🛡' : '◻'} gate:${_config.enabled ? 'on' : 'off'}${calcDynamicProgress()}`,
 						),
 					);
 				}
@@ -469,6 +544,16 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 					`Dynamic Policy ${_config.dynamicPolicyEnabled ? 'enabled' : 'disabled'}`,
 					'info',
 				);
+				// 实时更新 TUI 进度
+				if (ctx.hasUI) {
+					ctx.ui.setStatus(
+						'permission-gate',
+						ctx.ui.theme.fg(
+							_config.enabled ? 'accent' : 'dim',
+							`${_config.enabled ? '🛡' : '◻'} gate:${_config.enabled ? 'on' : 'off'}${calcDynamicProgress()}`,
+						),
+					);
+				}
 				break;
 			}
 
@@ -500,7 +585,7 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 				const confirmed = await showConfirmDestructive(
 					ctx,
 					'Reset Approval Counts?',
-					`This will clear ${Object.keys(_config.approvalCounts).length} approval count entries.`,
+					`This will clear ${summarizeApprovalCounts().toLowerCase()}.`,
 				);
 				if (confirmed) {
 					_config.approvalCounts = {};
@@ -719,7 +804,7 @@ export default function permissionGateExtension(pi: ExtensionAPI) {
 				'permission-gate',
 				ctx.ui.theme.fg(
 					_config.enabled ? 'accent' : 'dim',
-					`${statusIcon} gate:${_config.enabled ? 'on' : 'off'}`,
+					`${statusIcon} gate:${_config.enabled ? 'on' : 'off'}${calcDynamicProgress()}`,
 				),
 			);
 		}
