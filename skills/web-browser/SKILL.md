@@ -8,15 +8,18 @@ license: Stolen from Mario
 
 用于协作站点探索的最小化 CDP 工具集。
 
-## 启动 Chrome
+## 启动 Chrome（推荐 Headless 模式）
 
 ```bash
-./scripts/start.js                  # 隔离的可复用配置文件（默认）
-./scripts/start.js --profile        # 将你的配置文件复制到隔离缓存
-./scripts/start.js --reset-profile  # 启动前清除选中的缓存配置文件
+./scripts/start.js --headless             # 推荐：隔离的可复用配置文件，headless
+./scripts/start.js --headless --profile   # Headless 模式，复制你的配置文件到隔离缓存
+./scripts/start.js                        # 可见浏览器窗口（需要人为交互时使用）
+./scripts/start.js --headless --reset-profile  # 启动前清除选中的缓存配置文件
 ```
 
-以远程调试模式启动 Chrome（默认端口 `:9222`）。
+以远程调试模式启动 Chrome（默认端口 `:9222`）。**Agent 应默认使用 `--headless`**，因为它干扰小，支持导航、执行 JS、截图、模拟和日志功能。只有在需要人为查看或操作浏览器时才使用有头模式（如 `pick.js`、手动认证或调试 headless 特有的问题）。
+
+启动脚本仅在配置文件和启动模式匹配时复用已有浏览器进程。在切换 headless 和有头模式前，请先关闭正在运行的技能浏览器。
 
 配置文件行为：
 
@@ -28,13 +31,13 @@ license: Stolen from Mario
 如果 Chrome 安装在非标准位置，请设置：
 
 ```bash
-BROWSER_BIN=/path/to/chrome ./scripts/start.js
+BROWSER_BIN=/path/to/chrome ./scripts/start.js --headless
 ```
 
 可选的调试端点覆盖：
 
 ```bash
-BROWSER_DEBUG_PORT=9333 ./scripts/start.js
+BROWSER_DEBUG_PORT=9333 ./scripts/start.js --headless
 ```
 
 ## 导航
