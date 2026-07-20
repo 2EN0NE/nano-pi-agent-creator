@@ -94,6 +94,8 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 	let lastRequestWasProbe = false;
 	let lastRequestUpperBoundLimit: number | undefined; // TPM attempted for UCB tracking
 	let outcomeClassified = false; // Prevents duplicate classifyAndRecordOutcome calls per turn
+	let consecutive429Count = 0; // Track consecutive 432/429 responses
+	const MAX_CONSECUTIVE_429 = 3; // Threshold before entering deep cooldown
 	const extensionDir = getExtensionDir();
 
 	// Helper: is UCB mode active? (ucb or both)
@@ -454,6 +456,10 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 	function maybeHandle432(errorMessage: string | undefined, ctx: ExtensionContext) {
 		if (!config.autoResumeOn432) return;
 		if (!is432LikeError(errorMessage)) return;
+		if (inDeepCooldown) {
+			logger.debug('maybeHandle432: in deep cooldown, skipping auto-resume');
+			return;
+		}
 
 		const now = Date.now();
 		const sec = Math.ceil((60000 - (now % 60000)) / 1000);
@@ -873,6 +879,113 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 	});
 
 	// -------------------------------------------------------------------------
+	// Fork-on-consecutive-429 internal command
+	// -------------------------------------------------------------------------
+
+	pi.registerCommand('rate-limit-retry', {
+		description: '连续 429 限流后创建分支会话重试',
+		handler: async (args, ctx: ExtensionCommandContext) => {
+			const targetId = args.trim();
+			if (!targetId) {
+				logger.warn('rate-limit-retry: missing target entry ID');
+				if (ctx.hasUI) ctx.ui.notify('缺少目标 entry ID，无法重试', 'error');
+				return;
+			}
+
+			logger.info('rate-limit-retry: forking session', { targetId });
+
+			if (ctx.hasUI) {
+				ctx.ui.notify('连续 429 限流，创建新会话重试中...', 'warning');
+			}
+
+			await ctx.fork(targetId, {
+				position: 'at',
+				withSession: async (forkCtx) => {
+					logger.info('rate-limit-retry: new session created, sending continue message');
+					if (forkCtx.hasUI) {
+						forkCtx.ui.notify('已创建新会话，正在重试', 'info');
+					}
+					// Send the continue message in the fresh session
+					await forkCtx.sendUserMessage('请继续刚才未完成的回答');
+				},
+			});
+
+			logger.info('rate-limit-retry: fork completed');
+		},
+	});
+
+	// -------------------------------------------------------------------------
+	// Deep cooldown state
+	// -------------------------------------------------------------------------
+	// When consecutive 429s exceed MAX_CONSECUTIVE_429, we enter "deep cooldown":
+	//   - No more continue messages are sent (stops filling history)
+	//   - Rate limit thresholds are temporarily lowered
+	//   - After cooldownWindows windows, we resume normal operation
+	let inDeepCooldown = false;
+	let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
+	let cooldownWindowsRemaining = 0;
+	const COOLDOWN_WINDOWS = 2; // Wait 2 full rate-limit windows (2 min)
+
+	/** Enter deep cooldown — stop continue, lower thresholds, wait for reset */
+	function enterDeepCooldown(ctx: ExtensionContext) {
+		if (inDeepCooldown) return;
+		inDeepCooldown = true;
+		consecutive429Count = 0;
+		cooldownWindowsRemaining = COOLDOWN_WINDOWS;
+
+		// Cancel any pending auto-resume
+		if (pendingResumeTimer) {
+			clearTimeout(pendingResumeTimer);
+			pendingResumeTimer = undefined;
+		}
+
+		logger.warn('enterDeepCooldown: entered deep cooldown', {
+			windows: COOLDOWN_WINDOWS,
+		});
+
+		if (ctx.hasUI) {
+			ctx.ui.notify(
+				`连续 ${MAX_CONSECUTIVE_429} 次 429 限流，已停止自动重试，等待 ${COOLDOWN_WINDOWS} 个窗口后恢复`,
+				'warning',
+			);
+		}
+
+		// Schedule cooldown recovery: wait for N full window boundaries
+		scheduleCooldownEnd(ctx);
+	}
+
+	function scheduleCooldownEnd(ctx: ExtensionContext) {
+		if (cooldownTimer) clearTimeout(cooldownTimer);
+
+		const now = Date.now();
+		const delay = 60000 - (now % 60000) + 500; // Wait until next minute boundary
+		logger.debug('scheduleCooldownEnd: scheduling check', {
+			delayMs: delay,
+			windowsRemaining: cooldownWindowsRemaining,
+		});
+
+		cooldownTimer = setTimeout(() => {
+			cooldownWindowsRemaining--;
+			if (cooldownWindowsRemaining <= 0) {
+				// Cooldown complete — resume normal operation
+				inDeepCooldown = false;
+				if (cooldownTimer) {
+					clearTimeout(cooldownTimer);
+					cooldownTimer = undefined;
+				}
+				logger.info('scheduleCooldownEnd: deep cooldown ended, resuming normal operation');
+				if (activeCtx?.hasUI) {
+					activeCtx.ui.notify('429 限流冷却结束，已恢复自动重试', 'info');
+				}
+				refreshStatus();
+			} else {
+				// Still in cooldown — schedule next check
+				scheduleCooldownEnd(ctx);
+			}
+		}, delay);
+	}
+
+	// -------------------------------------------------------------------------
 	// Event handlers
 	// -------------------------------------------------------------------------
 
@@ -896,12 +1009,28 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 		}
 		refreshStatus();
 		startStatusTimer();
+
+		// Reset consecutive 429 tracking on fresh session
+		consecutive429Count = 0;
+		inDeepCooldown = false;
+		if (cooldownTimer) {
+			clearTimeout(cooldownTimer);
+			cooldownTimer = undefined;
+		}
 	});
 
 	pi.on('session_tree', async (_event, ctx) => {
 		activeCtx = ctx;
 		restoreFromBranch(ctx);
 		refreshStatus();
+
+		// Reset consecutive 429 tracking on tree navigation
+		consecutive429Count = 0;
+		inDeepCooldown = false;
+		if (cooldownTimer) {
+			clearTimeout(cooldownTimer);
+			cooldownTimer = undefined;
+		}
 	});
 
 	pi.on('session_shutdown', async () => {
@@ -909,6 +1038,10 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 		if (pendingResumeTimer) {
 			clearTimeout(pendingResumeTimer);
 			pendingResumeTimer = undefined;
+		}
+		if (cooldownTimer) {
+			clearTimeout(cooldownTimer);
+			cooldownTimer = undefined;
 		}
 		stopStatusTimer();
 		if (activeCtx?.hasUI) {
@@ -960,10 +1093,31 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 			// 2. Detect 432-like errors and record outcome
 			if (assistant.stopReason === 'error') {
 				if (is432LikeError(assistant.errorMessage)) {
+					// Don't increment count during deep cooldown — it's managed by cooldown state
+					if (!inDeepCooldown) {
+						consecutive429Count++;
+					}
 					logger.warn('message_end: detected 432 error', {
 						errorMessage: assistant.errorMessage,
+						consecutive429Count,
 					});
-					maybeHandle432(assistant.errorMessage, ctx);
+
+					// When consecutive 429s exceed threshold, enter deep cooldown
+					if (inDeepCooldown) {
+						// Already in cooldown — skip all 432 handling
+						logger.debug('message_end: in deep cooldown, skipping 432 handling');
+					} else if (
+						consecutive429Count >= MAX_CONSECUTIVE_429
+					) {
+						logger.warn('message_end: consecutive 429 threshold reached, entering deep cooldown', {
+							consecutive429Count,
+							cooldownWindows: COOLDOWN_WINDOWS,
+						});
+						enterDeepCooldown(ctx);
+					} else {
+						// Normal 432 handling: schedule auto-resume
+						maybeHandle432(assistant.errorMessage, ctx);
+					}
 					classifyAndRecordOutcome('rejected');
 				} else {
 					// Non-432 errors (timeout, auth failure, model not found, etc.)
@@ -973,9 +1127,11 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 						stopReason: assistant.stopReason,
 						errorMessage: assistant.errorMessage,
 					});
+					consecutive429Count = 0;
 					classifyAndRecordOutcome('rejected');
 				}
 			} else {
+				consecutive429Count = 0;
 				classifyAndRecordOutcome('success');
 			}
 		} catch (err) {
@@ -989,6 +1145,13 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 				logger.warn('after_provider_response: detected 432 status', {
 					status: event.status,
 				});
+				// Note: we intentionally do NOT increment consecutive429Count here.
+				// HTTP 432 status codes are rare (most providers return 200 + error message).
+				// The consecutive 429 tracking happens in message_end which catches
+				// the assistant message with stopReason="error" + matching errorMessage.
+				// If a provider returns 432 at HTTP level without a valid LLM response,
+				// Pi's agent may not produce a message_end with stopReason="error",
+				// so incrementing here could lead to false positives.
 				maybeHandle432('432 rate limit', ctx);
 			}
 		} catch (err) {

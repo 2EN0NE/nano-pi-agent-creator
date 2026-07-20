@@ -56,6 +56,11 @@ setup_sandbox() {
 			cp "$ROOT_DIR/test/extensions/pi-rate-limiter/helpers/mock-llm.ts" \
 				"$test_home/.pi/extensions/mock-llm/index.ts"
 			;;
+		mock-llm-429)
+			mkdir -p "$test_home/.pi/extensions/mock-llm-429"
+			cp "$ROOT_DIR/test/extensions/pi-rate-limiter/helpers/mock-llm-429.ts" \
+				"$test_home/.pi/extensions/mock-llm-429/index.ts"
+			;;
 		esac
 	done
 
@@ -79,7 +84,7 @@ setup_sandbox() {
 }
 
 # ====================================================================
-# Helper: 在隔离沙箱中运行 pi
+# Helper: 在隔离沙箱中运行 pi（无会话模式）
 # ====================================================================
 run_pi() {
 	local test_home="$1"
@@ -90,9 +95,30 @@ run_pi() {
 	cd "$test_home"
 	set +e
 	# HOME 隔离：沙箱内的 $HOME 是 test_home/home/
-	# 这样 pi 不会加载 ~/.pi/agent/extensions/ 下的全局扩展，
-	# 只加载 .pi/extensions/（项目级别）下的扩展
 	HOME="$test_home/home" pi -a --no-session -p "$prompt" \
+		>"$stdout_file" 2>&1
+	local ec=$?
+	set -e
+	cd "$ROOT_DIR"
+
+	echo "=== pi exit code: $ec ==="
+	return $ec
+}
+
+# ====================================================================
+# Helper: 在隔离沙箱中运行 pi（会话模式 — 允许 fork）
+# TODO: 用于后续 fork 场景测试（当前 deep cooldown 场景使用 --no-session）
+# ====================================================================
+run_pi_with_session() {
+	local test_home="$1"
+	local prompt="${2:-hi}"
+	local session_name="${3:-test-session}"
+
+	local stdout_file="$test_home/pi-stdout.log"
+
+	cd "$test_home"
+	set +e
+	HOME="$test_home/home" pi -a --name "$session_name" -p "$prompt" \
 		>"$stdout_file" 2>&1
 	local ec=$?
 	set -e
@@ -180,4 +206,42 @@ test_it "pi-rate-limiter: lifecycle event handlers bind and fire [REVIEW]" <<'TE
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
 
   mark_for_review "Verify rate limiter event bindings:"$'\n'"1. Exit code is 0 (no crash in rate limiter startup)"$'\n'"2. Lifecycle log shows: session_start → agent → msg → turn → agent_end → session_shutdown"$'\n'"3. pi-rate-limiter's custom extension.log shows factory invoked + session_start + loadConfig + session_shutdown"$'\n'"4. loadConfig shows correct defaults (maxReq=10, maxTok=256000, adaptiveRateLimit='off')"$'\n'"   ('off' because no YAML config file was provided to test sandbox)"$'\n'"5. No error-level logs"
+TEST
+
+# ====================================================================
+# 场景 3：连续 429 — 验证 deep cooldown 机制 [REVIEW]
+# ====================================================================
+test_it "pi-rate-limiter: consecutive 429s trigger deep cooldown [REVIEW]" <<'TEST'
+  local slug="e2e-rl-s3-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  setup_sandbox "$test_home" pi-rate-limiter mock-llm-429
+
+  # 启用 autoResumeOn432（默认关闭，需要显式开启）
+  local config_dir="$test_home/home/.pi/agent/extensions-data/pi-rate-limiter"
+  mkdir -p "$config_dir"
+  cat > "$config_dir/pi-rate-limiter.yaml" <<'YAML'
+autoResumeOn432: true
+maxRequestsPerMinute: 100
+maxTokensPerMinute: 1000000
+YAML
+
+  run_pi "$test_home" "hi"
+  local ec=$?
+
+  echo "=== pi exit code: $ec ==="
+
+  dump_logs "$test_home"
+
+  # 检查 pi-rate-limiter 日志中有 deep cooldown 证据
+  local rl_log="$test_home/home/.pi/agent/rate-limiter/extension.log"
+  if [[ -f "$rl_log" ]]; then
+	echo "=== RATE-LIMITER LOG (relevant lines) ==="
+	grep -i "consecutive429Count\|deep cooldown\|enterDeepCooldown\|cooldown\|fork" "$rl_log" || echo "(no matching lines)"
+  else
+	echo "(no rate-limiter log)"
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+
+  mark_for_review "Verify consecutive 429 deep cooldown behavior:"$'\n'"1. pi-rate-limiter log shows consecutive429Count incrementing (1, 2, 3)"$'\n'"2. Log shows 'enterDeepCooldown' after 3rd consecutive 429"$'\n'"3. Log shows 'in deep cooldown, skipping 432 handling' for any subsequent 429"$'\n'"4. The auto-resume timer is cancelled (no more 'sending auto-resume message' after cooldown)"$'\n'"5. Exit code 0 (no crash)"
 TEST
