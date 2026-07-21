@@ -41,6 +41,11 @@ for file in $CHANGED_FILES; do
           ;;
       esac
       ;;
+    # 技能在分类子目录中：skills/category/name/SKILL.md
+    skills/*/*/SKILL.md)
+      name=$(basename "$(dirname "$file")")
+      SKILLS="$SKILLS $name"
+      ;;
     skills/*/SKILL.md)
       name=$(basename "$(dirname "$file")")
       SKILLS="$SKILLS $name"

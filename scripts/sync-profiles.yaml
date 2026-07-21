@@ -9,6 +9,8 @@
 #                 (supports recursive search in subdirectories: tui/, context/,
 #                  security/, auto/, accuracy/, verification/, meta/)
 #   skills/     — directories with SKILL.md
+#               (supports recursive search in subdirectories:
+#                development/, research/, communication/, analyze/, tooling/)
 #   themes/     — .json files
 #   prompts/    — command scripts (source dir: prompts/)
 #
@@ -17,12 +19,14 @@
 #   ["name"]   — specific resources by name (without extension)
 #   exclude:   — per-type list of names to exclude (applied after include)
 #
-# Note: For extensions, you specify just the name (e.g., "sandbox", "review").
-#       The sync script searches recursively through all category subdirs
-#       to find the file — you don't need to know which category it's in.
+# Note: For extensions and skills, you specify just the name
+#       (e.g., "sandbox", "commit"). The sync script searches recursively
+#       through all category subdirs to find the resource — you don't
+#       need to know which category it's in.
 #
 # npmBuild (optional):
-#   Extensions listed here are npm-style packages (with package.json + "pi" field).
+#   Extensions listed here are npm-style packages
+#   (with package.json + "pi" field).
 #   After syncing, the tool runs npm install + npm run build and creates an
 #   index.ts bridge pointing to dist/index.js for Pi auto-discovery.
 
@@ -67,7 +71,21 @@ profiles:
             - prompt-editor # prompt 组装检查与控制
             - mode-switcher # 一键切换模型预设
             - session-tree-label # 快捷键进行session-tree打标
-        skills: []
+        # ── 全局通用技能（research/ 和分析类 analyze/） ──
+        skills:
+            # research/ — 信息获取与研究
+            - native-web-search
+            - research
+            - web-browser
+            - librarian
+            # analyze/ — 分析与规划
+            - frontend-design
+            - grill-me
+            - grill-with-docs
+            - grilling
+            - analyze-sessions
+            - extract-pi-knowledge
+            - summarize
         themes: ['*']
         prompts: []
 
@@ -77,11 +95,35 @@ profiles:
     # 以及日常不用或本项目独有的插件。
     # 剩余的是：未达全局成熟度的插件（protected-paths、input-transform-streaming 等）
     #          和需要项目 node_modules 的插件（multi-edit）。
+    #
+    # 技能按分类同步：
+    #   - development/ + tooling/ → project profile（开发流程 + 工具链）
+    #   - research/ + analyze/   → user-install profile（信息获取 + 分析规划）
+    #   - communication/         → 两个 profile 都不含（沟通文档类按需使用）
     project:
         description: 'Project-specific extensions for nano-pi-stuff'
         target: './.pi'
         extensions: '*'
-        skills: '*'
+        # 白名单：development/（开发流程）+ tooling/（工具链）
+        skills:
+            # development/ — 编码与开发流程
+            - commit
+            - implement
+            - prototype
+            - tdd
+            - code-review
+            - codebase-design
+            - diagnosing-bugs
+            - domain-modeling
+            - github
+            - sentry
+            - to-tickets
+            - update-changelog
+            # tooling/ — 工具链与基础设施
+            - tmux
+            - uv
+            - pi-logger
+            - e2e-test
         themes: []
         prompts: ['*']
         exclude:

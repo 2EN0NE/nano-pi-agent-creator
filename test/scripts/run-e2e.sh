@@ -682,4 +682,9 @@ done
 [[ $RESTORE_COUNT -gt 0 ]] && echo "  Restored $RESTORE_COUNT config backup(s)"
 echo ""
 
-exit $TOTAL_REVIEW
+# REVIEW 用例是 advisory（待 AI 衡量），只有 FAIL 才表示真的失败
+if [[ $TOTAL_FAIL -gt 0 ]]; then
+	exit 1
+else
+	exit 0
+fi

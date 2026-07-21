@@ -395,6 +395,38 @@ function scanExtensionsRecursively(dir: string, depth: number): string[] {
 }
 
 /**
+ * Recursively scan the skills directory tree for skill directories (dirs with SKILL.md).
+ * Supports category subdirectories (development/, research/, etc.) — similar to
+ * scanExtensionsRecursively but for directory-based skills.
+ */
+function scanSkillsRecursively(dir: string, depth: number): string[] {
+	if (depth > 6) return [];
+	const results: string[] = [];
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	for (const entry of entries) {
+		if (entry.name.startsWith('.')) continue;
+		if (entry.name === 'node_modules') continue;
+
+		const fullPath = join(dir, entry.name);
+		if (!entry.isDirectory()) continue;
+
+		// If it has SKILL.md, it's a skill directory
+		if (existsSync(join(fullPath, 'SKILL.md'))) {
+			results.push(entry.name);
+		} else {
+			// Otherwise recurse into it (it's a category directory like development/, research/, etc.)
+			results.push(...scanSkillsRecursively(fullPath, depth + 1));
+		}
+	}
+	return results;
+}
+
+/**
  * Recursively find an extension by name in the extensions directory tree.
  * Returns { relativePath, isDirectory } or null if not found.
  */
@@ -544,6 +576,47 @@ function buildExtensionIndex(
 	return index;
 }
 
+/**
+ * Build a name-to-path index for all skills by scanning the tree once.
+ * Avoids O(n*m) repeated tree walks in buildResource.
+ */
+function buildSkillIndex(
+	skillRoot: string,
+): Map<string, { relativePath: string; isDirectory: boolean }> {
+	const index = new Map<string, { relativePath: string; isDirectory: boolean }>();
+
+	function scan(dir: string, depth: number) {
+		if (depth > 6) return;
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+
+		for (const entry of entries) {
+			if (entry.name.startsWith('.')) continue;
+			if (entry.name === 'node_modules') continue;
+			const fullPath = join(dir, entry.name);
+			if (!entry.isDirectory()) continue;
+
+			if (existsSync(join(fullPath, 'SKILL.md'))) {
+				if (!index.has(entry.name)) {
+					index.set(entry.name, {
+						relativePath: relative(skillRoot, fullPath),
+						isDirectory: true,
+					});
+				}
+			} else {
+				scan(fullPath, depth + 1);
+			}
+		}
+	}
+
+	scan(skillRoot, 0);
+	return index;
+}
+
 function resolveSourceItems(
 	type: ResourceType,
 	names: string[] | '*',
@@ -561,17 +634,16 @@ function resolveSourceItems(
 	if (type === 'extensions') {
 		// Recursively scan all subdirectories (tui/, auto/, etc.)
 		available.push(...scanExtensionsRecursively(sourceDir, 0));
+	} else if (type === 'skills') {
+		// Recursively scan category subdirectories (development/, research/, etc.)
+		available.push(...scanSkillsRecursively(sourceDir, 0));
 	} else {
 		const entries = readdirSync(sourceDir, { withFileTypes: true });
 
 		for (const entry of entries) {
 			const name = entry.name;
 
-			if (type === 'skills') {
-				if (entry.isDirectory() && existsSync(join(sourceDir, name, 'SKILL.md'))) {
-					available.push(name);
-				}
-			} else if (type === 'themes') {
+			if (type === 'themes') {
 				if (entry.isFile() && name.endsWith('.json')) {
 					available.push(name.slice(0, -5)); // remove .json
 				}
@@ -621,6 +693,7 @@ function buildResource(
 	projectRoot: string,
 	targetDir: string,
 	extIndex?: Map<string, { relativePath: string; isDirectory: boolean }>,
+	skillIndex?: Map<string, { relativePath: string; isDirectory: boolean }>,
 ): ResolvedResource {
 	const sourceDir = join(projectRoot, type);
 	const targetSubDir = join(targetDir, type);
@@ -659,9 +732,23 @@ function buildResource(
 			}
 		}
 	} else if (type === 'skills') {
-		sourcePath = join(sourceDir, name);
-		targetPath = join(targetSubDir, name);
-		isDirectory = true;
+		if (skillIndex) {
+			const found = skillIndex.get(name);
+			if (found) {
+				sourcePath = join(sourceDir, found.relativePath);
+				targetPath = join(targetSubDir, name);
+				isDirectory = true;
+			} else {
+				// Fallback: flat directory
+				sourcePath = join(sourceDir, name);
+				targetPath = join(targetSubDir, name);
+				isDirectory = true;
+			}
+		} else {
+			sourcePath = join(sourceDir, name);
+			targetPath = join(targetSubDir, name);
+			isDirectory = true;
+		}
 	} else if (type === 'themes') {
 		sourcePath = join(sourceDir, `${name}.json`);
 		targetPath = join(targetSubDir, `${name}.json`);
@@ -693,9 +780,11 @@ function resolveResources(profile: ProfileConfig, projectRoot: string): Resolved
 	const targetDir = expandTargetPath(profile.target, projectRoot);
 	const resources: ResolvedResource[] = [];
 
-	// Build extension name-to-path index once to avoid O(n*m) tree walks
+	// Build index once for O(n*m) tree walks
 	const extSourceDir = join(projectRoot, 'extensions');
 	const extIndex = existsSync(extSourceDir) ? buildExtensionIndex(extSourceDir) : undefined;
+	const skillSourceDir = join(projectRoot, 'skills');
+	const skillIndex = existsSync(skillSourceDir) ? buildSkillIndex(skillSourceDir) : undefined;
 
 	for (const type of RESOURCE_TYPES) {
 		const names = profile[type]; // string[] | "*"
@@ -703,7 +792,7 @@ function resolveResources(profile: ProfileConfig, projectRoot: string): Resolved
 		const selectedNames = resolveSourceItems(type, names, exclude, projectRoot);
 
 		for (const name of selectedNames) {
-			resources.push(buildResource(type, name, projectRoot, targetDir, extIndex));
+			resources.push(buildResource(type, name, projectRoot, targetDir, extIndex, skillIndex));
 		}
 	}
 

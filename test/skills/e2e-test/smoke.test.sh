@@ -7,10 +7,10 @@ test_describe "e2e-test skill"
 
 # ── 用例 1：技能目录结构正确 ──
 test_it "skill directory has SKILL.md" <<'TEST'
-  if [[ -f "$ROOT_DIR/skills/e2e-test/SKILL.md" ]]; then
+  if find "$ROOT_DIR/skills" -name 'SKILL.md' -path '*/e2e-test/SKILL.md' | grep -q .; then
     exit 0
   else
-    echo "SKILL.md not found at skills/e2e-test/SKILL.md"
+    echo "SKILL.md not found for e2e-test skill (looked in skills/*/e2e-test/)"
     exit 1
   fi
 TEST
