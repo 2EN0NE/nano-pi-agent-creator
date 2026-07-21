@@ -89,7 +89,7 @@ done
 if [ "$ALL_PASS" = false ]; then
   echo "⚠️  Some e2e tests flagged review-required or had failures."
   echo "   Check test/results/$(ls -1t test/results/ | head -1)/ for details."
-  echo "   (This is advisory — push continues.)"
+  exit 1
 fi
 
 exit 0

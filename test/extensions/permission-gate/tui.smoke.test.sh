@@ -28,7 +28,7 @@ test_it "loads extension in TUI mode without crash" <<'TEST'
   tui_cleanup
 TEST
 
-test_it "shows widget in status bar after session_start [REVIEW]" <<'TEST'
+test_it "shows widget in status bar after session_start" <<'TEST'
   tui_run_pi_test "permission-gate" "/permission-gate" 15
 
   # widget 在视口快照的第二帧中出现（after LLM response）
@@ -36,7 +36,6 @@ test_it "shows widget in status bar after session_start [REVIEW]" <<'TEST'
   tui_assert_contains "gate:on" "Status widget shows gate:on (dynamic off)"
 
   tui_cleanup
-  mark_for_review "手动检查状态栏 widget 是否正常显示 gate:on，以及 dynamic 开启后是否显示完整进度"
 TEST
 
 test_it "shows TUI welcome and extension list" <<'TEST'

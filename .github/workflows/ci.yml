@@ -79,9 +79,8 @@ jobs:
 
     # ── E2E Tests (with mock LLM, no API key required) ──
     # 故意设为 continue-on-error: true（非阻塞参考测试），原因：
-    # 1. ci-watch 等模块含 REVIEW 用例需人工衡量，CI 无法自动化判定
-    # 2. run-e2e.sh 以 REVIEW 用例数退出（非纯 FAIL），基准状态不稳定
-    # 3. 测试结果通过 artifact 上传，合并前供人工审阅
+    # 1. permission-gate TUI 日志测试仍含 1 个 [REVIEW] 用例需人工衡量
+    # 2. 其他模块可能仍有 REVIEW 用例
     # 若需改为阻塞模式，需先让所有模块的 REVIEW 用例归零
     e2e:
         name: E2E Tests

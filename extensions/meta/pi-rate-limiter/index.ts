@@ -1106,13 +1106,14 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 					if (inDeepCooldown) {
 						// Already in cooldown — skip all 432 handling
 						logger.debug('message_end: in deep cooldown, skipping 432 handling');
-					} else if (
-						consecutive429Count >= MAX_CONSECUTIVE_429
-					) {
-						logger.warn('message_end: consecutive 429 threshold reached, entering deep cooldown', {
-							consecutive429Count,
-							cooldownWindows: COOLDOWN_WINDOWS,
-						});
+					} else if (consecutive429Count >= MAX_CONSECUTIVE_429) {
+						logger.warn(
+							'message_end: consecutive 429 threshold reached, entering deep cooldown',
+							{
+								consecutive429Count,
+								cooldownWindows: COOLDOWN_WINDOWS,
+							},
+						);
 						enterDeepCooldown(ctx);
 					} else {
 						// Normal 432 handling: schedule auto-resume

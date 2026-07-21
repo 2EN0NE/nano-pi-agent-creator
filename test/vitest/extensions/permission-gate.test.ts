@@ -22,7 +22,18 @@ import {
 	getStrategySummary,
 	calcWidgetContentText,
 	splitCompoundCommand,
+	normalizeDim,
+	countNonBlockedEntries,
 } from '../../../extensions/security/permission-gate/records';
+import type { ApprovalEntry } from '../../../extensions/security/permission-gate/records';
+import {
+	pathInScope,
+	extractTargetPaths,
+	extractToolName,
+	extractTargetDir,
+	checkThreshold,
+	hasGraduatedStrategy,
+} from '../../../extensions/security/permission-gate/index';
 import { buildStrategyItems } from '../../../extensions/security/permission-gate/two-tab-panel';
 
 // ============================================================================
@@ -228,6 +239,35 @@ describe('deepMerge', () => {
 		};
 		const merged = deepMerge(base, {});
 		expect(merged.enabled).toBe(true);
+	});
+
+	it('merges widget fields — overrides show to false while keeping detailLevel', () => {
+		const base = getDefaultConfig();
+		expect(base.widget).toEqual({ show: true, detailLevel: 'full' });
+
+		const merged = deepMerge(base, {
+			widget: { show: false, detailLevel: 'full' },
+		});
+		expect(merged.widget.show).toBe(false);
+		expect(merged.widget.detailLevel).toBe('full');
+	});
+
+	it('merges widget fields — overrides detailLevel to gate while keeping show', () => {
+		const base = getDefaultConfig();
+		const merged = deepMerge(base, {
+			widget: { show: true, detailLevel: 'gate' },
+		});
+		expect(merged.widget.show).toBe(true);
+		expect(merged.widget.detailLevel).toBe('gate');
+	});
+
+	it('merges widget fields — overrides both show and detailLevel', () => {
+		const base = getDefaultConfig();
+		const merged = deepMerge(base, {
+			widget: { show: false, detailLevel: 'gate' },
+		});
+		expect(merged.widget.show).toBe(false);
+		expect(merged.widget.detailLevel).toBe('gate');
 	});
 });
 
@@ -490,5 +530,346 @@ describe('calcWidgetContentText', () => {
 		};
 		const text = calcWidgetContentText(true, true, counts, thresholds, 2);
 		expect(text).toBe('dynamic-gate(2[2]):on[tool(2[2]):0/3]');
+	});
+});
+
+// ============================================================================
+// hasGraduatedStrategy
+// ============================================================================
+describe('hasGraduatedStrategy', () => {
+	it('count < threshold returns false', () => {
+		const cmd = 'rm -rf /tmp';
+		const counts: Record<string, number> = {};
+		counts[makeCommandKey(cmd)] = 1;
+		const result = hasGraduatedStrategy(cmd, counts, { sameCommand: 3 });
+		expect(result).toBe(false);
+	});
+
+	it('count === threshold returns true', () => {
+		const cmd = 'rm -rf /tmp';
+		const counts: Record<string, number> = {};
+		counts[makeCommandKey(cmd)] = 2;
+		const result = hasGraduatedStrategy(cmd, counts, { sameCommand: 2 });
+		expect(result).toBe(true);
+	});
+
+	it('count > threshold returns true', () => {
+		const cmd = 'rm -rf /tmp';
+		const counts: Record<string, number> = {};
+		counts[makeCommandKey(cmd)] = 5;
+		const result = hasGraduatedStrategy(cmd, counts, { sameCommand: 2 });
+		expect(result).toBe(true);
+	});
+
+	it('threshold = 0 returns false (never auto-approve)', () => {
+		const cmd = 'rm -rf /tmp';
+		const counts: Record<string, number> = {};
+		counts[makeCommandKey(cmd)] = 100;
+		const result = hasGraduatedStrategy(cmd, counts, { sameCommand: 0 });
+		expect(result).toBe(false);
+	});
+
+	it('no matching cmd key returns false', () => {
+		const result = hasGraduatedStrategy('rm -rf /tmp', {}, { sameCommand: 2 });
+		expect(result).toBe(false);
+	});
+});
+
+// ============================================================================
+// checkThreshold
+// ============================================================================
+describe('checkThreshold', () => {
+	const baseConfig = {
+		dynamicPolicy: {
+			thresholds: {
+				sameCommand: 5,
+				sameTool: 5,
+				sameFolder: 5,
+			},
+		},
+	} as unknown as PermissionGateConfig;
+
+	it('all three dimensions pass when counts are under thresholds', () => {
+		const result = checkThreshold('rm -rf /tmp', 'rm', '/tmp', baseConfig, {});
+		expect(result.pass).toBe(true);
+		expect(result.dimensions).toEqual(['sameCommand', 'sameTool', 'sameFolder']);
+	});
+
+	it('only sameCommand passes when tool and folder exceed thresholds', () => {
+		const config = {
+			dynamicPolicy: {
+				thresholds: { sameCommand: 5, sameTool: 1, sameFolder: 1 },
+			},
+		} as unknown as PermissionGateConfig;
+		const toolName = 'rm';
+		const counts: Record<string, number> = {};
+		counts[makeCommandKey('rm -rf /tmp')] = 1; // 1 < 5 => pass
+		counts[makeToolKey(toolName)] = 2; // 2 >= 1 => fail
+		counts[makeFolderKey('/tmp')] = 2; // 2 >= 1 => fail
+		const result = checkThreshold('rm -rf /tmp', toolName, '/tmp', config, counts);
+		expect(result.pass).toBe(true);
+		expect(result.dimensions).toEqual(['sameCommand']);
+	});
+
+	it('only sameTool passes when command and folder exceed thresholds', () => {
+		const config = {
+			dynamicPolicy: {
+				thresholds: { sameCommand: 1, sameTool: 5, sameFolder: 1 },
+			},
+		} as unknown as PermissionGateConfig;
+		const toolName = 'rm';
+		const counts: Record<string, number> = {};
+		counts[makeCommandKey('rm -rf /tmp')] = 2; // 2 >= 1 => fail
+		counts[makeToolKey(toolName)] = 1; // 1 < 5 => pass
+		counts[makeFolderKey('/tmp')] = 3; // 3 >= 1 => fail
+		const result = checkThreshold('rm -rf /tmp', toolName, '/tmp', config, counts);
+		expect(result.pass).toBe(true);
+		expect(result.dimensions).toEqual(['sameTool']);
+	});
+
+	it('only sameFolder passes when command and tool exceed thresholds', () => {
+		const config = {
+			dynamicPolicy: {
+				thresholds: { sameCommand: 1, sameTool: 1, sameFolder: 5 },
+			},
+		} as unknown as PermissionGateConfig;
+		const toolName = 'rm';
+		const counts: Record<string, number> = {};
+		counts[makeCommandKey('rm -rf /tmp')] = 3; // 3 >= 1 => fail
+		counts[makeToolKey(toolName)] = 2; // 2 >= 1 => fail
+		counts[makeFolderKey('/tmp')] = 1; // 1 < 5 => pass
+		const result = checkThreshold('rm -rf /tmp', toolName, '/tmp', config, counts);
+		expect(result.pass).toBe(true);
+		expect(result.dimensions).toEqual(['sameFolder']);
+	});
+
+	it('all dimensions exceed thresholds — pass=false, empty dimensions', () => {
+		const config = {
+			dynamicPolicy: {
+				thresholds: { sameCommand: 1, sameTool: 1, sameFolder: 1 },
+			},
+		} as unknown as PermissionGateConfig;
+		const toolName = 'rm';
+		const counts: Record<string, number> = {};
+		counts[makeCommandKey('rm -rf /tmp')] = 5; // 5 >= 1 => fail
+		counts[makeToolKey(toolName)] = 5; // 5 >= 1 => fail
+		counts[makeFolderKey('/tmp')] = 5; // 5 >= 1 => fail
+		const result = checkThreshold('rm -rf /tmp', toolName, '/tmp', config, counts);
+		expect(result.pass).toBe(false);
+		expect(result.dimensions).toEqual([]);
+	});
+});
+
+// ============================================================================
+// pathInScope
+// ============================================================================
+describe('pathInScope', () => {
+	it('target path inside scope', () => {
+		expect(pathInScope('/a/b/c/d', '/a/b')).toBe(true);
+	});
+
+	it('target path outside scope', () => {
+		expect(pathInScope('/x/y/z', '/a/b')).toBe(false);
+	});
+
+	it('target path equals scope', () => {
+		expect(pathInScope('/a/b', '/a/b')).toBe(true);
+	});
+});
+
+// ============================================================================
+// extractTargetPaths
+// ============================================================================
+describe('extractTargetPaths', () => {
+	it('extracts absolute paths', () => {
+		const paths = extractTargetPaths('rm -rf /tmp/test /var/log');
+		expect(paths).toContain('/tmp/test');
+		expect(paths).toContain('/var/log');
+		expect(paths).toHaveLength(2);
+	});
+
+	it('extracts relative paths (./, ../)', () => {
+		const paths = extractTargetPaths('cp ./src/file ./dst/file');
+		expect(paths).toContain('./src/file');
+		expect(paths).toContain('./dst/file');
+		expect(paths).toHaveLength(2);
+	});
+
+	it('extracts multiple path parameters', () => {
+		const paths = extractTargetPaths('rm -f /a/b /c/d /e/f');
+		expect(paths).toEqual(['/a/b', '/c/d', '/e/f']);
+	});
+
+	it('ignores arguments starting with -', () => {
+		const paths = extractTargetPaths('ls -la --color /tmp');
+		expect(paths).toEqual(['/tmp']);
+	});
+
+	it('ignores redirection symbol >', () => {
+		const paths = extractTargetPaths('echo hello > /tmp/output');
+		expect(paths).toContain('/tmp/output');
+		expect(paths).not.toContain('>');
+	});
+});
+
+// ============================================================================
+// extractToolName
+// ============================================================================
+describe('extractToolName', () => {
+	it('simple command returns the tool name', () => {
+		expect(extractToolName('rm -rf /tmp')).toBe('rm');
+	});
+
+	it('skips sudo prefix', () => {
+		expect(extractToolName('sudo rm -rf /')).toBe('rm');
+	});
+
+	it('skips npx prefix', () => {
+		expect(extractToolName('npx jest --coverage')).toBe('jest');
+	});
+
+	it('handles docker exec specially — skips docker+exec, returns next token', () => {
+		expect(extractToolName('docker exec mycontainer rm -rf /tmp')).toBe('mycontainer');
+	});
+
+	it('extracts tool name from path', () => {
+		expect(extractToolName('/usr/bin/git status')).toBe('git');
+	});
+});
+
+// ============================================================================
+// extractTargetDir
+// ============================================================================
+describe('extractTargetDir', () => {
+	it('absolute path returns parent directory', () => {
+		expect(extractTargetDir('rm -rf /a/b/c', '/home/user')).toBe('/a/b');
+	});
+
+	it('relative path resolves and returns parent directory', () => {
+		expect(extractTargetDir('rm -rf ./dir/file', '/home/user')).toBe('/home/user/dir');
+	});
+
+	it('no path parameters returns cwd', () => {
+		expect(extractTargetDir('ls -la', '/home/user')).toBe('/home/user');
+	});
+});
+
+// ============================================================================
+// normalizeDim
+// ============================================================================
+describe('normalizeDim', () => {
+	it('string[] input dedupes and returns', () => {
+		expect(normalizeDim(['a', 'b', 'a'])).toEqual(['a', 'b']);
+	});
+
+	it('single string wraps in array', () => {
+		expect(normalizeDim('foo')).toEqual(['foo']);
+	});
+
+	it('null returns null', () => {
+		expect(normalizeDim(null)).toBeNull();
+	});
+
+	it('undefined returns null', () => {
+		expect(normalizeDim(undefined)).toBeNull();
+	});
+
+	it('empty array returns null', () => {
+		expect(normalizeDim([])).toBeNull();
+	});
+});
+
+// ============================================================================
+// countNonBlockedEntries
+// ============================================================================
+describe('countNonBlockedEntries', () => {
+	it('counts only non-blocked entries in mixed list', () => {
+		const entries = [
+			{
+				action: 'auto',
+				ts: '1',
+				cmd: 'rm',
+				tool: 'rm',
+				dir: '/tmp',
+				dim: null,
+			} as ApprovalEntry,
+			{
+				action: 'confirmed',
+				ts: '2',
+				cmd: 'rm',
+				tool: 'rm',
+				dir: '/tmp',
+				dim: null,
+			} as ApprovalEntry,
+			{
+				action: 'blocked',
+				ts: '3',
+				cmd: 'mv',
+				tool: 'mv',
+				dir: '/tmp',
+				dim: null,
+			} as ApprovalEntry,
+			{
+				action: 'auto',
+				ts: '4',
+				cmd: 'chmod',
+				tool: 'chmod',
+				dir: '/tmp',
+				dim: null,
+			} as ApprovalEntry,
+		];
+		expect(countNonBlockedEntries(entries)).toBe(3);
+	});
+
+	it('all blocked returns 0', () => {
+		const entries = [
+			{
+				action: 'blocked',
+				ts: '1',
+				cmd: 'rm',
+				tool: 'rm',
+				dir: '/tmp',
+				dim: null,
+			} as ApprovalEntry,
+			{
+				action: 'blocked',
+				ts: '2',
+				cmd: 'mv',
+				tool: 'mv',
+				dir: '/tmp',
+				dim: null,
+			} as ApprovalEntry,
+		];
+		expect(countNonBlockedEntries(entries)).toBe(0);
+	});
+
+	it('all auto returns full count', () => {
+		const entries = [
+			{
+				action: 'auto',
+				ts: '1',
+				cmd: 'rm',
+				tool: 'rm',
+				dir: '/tmp',
+				dim: null,
+			} as ApprovalEntry,
+			{
+				action: 'auto',
+				ts: '2',
+				cmd: 'mv',
+				tool: 'mv',
+				dir: '/tmp',
+				dim: null,
+			} as ApprovalEntry,
+			{
+				action: 'auto',
+				ts: '3',
+				cmd: 'chmod',
+				tool: 'chmod',
+				dir: '/tmp',
+				dim: null,
+			} as ApprovalEntry,
+		];
+		expect(countNonBlockedEntries(entries)).toBe(3);
 	});
 });

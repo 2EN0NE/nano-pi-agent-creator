@@ -490,3 +490,80 @@ test_it "dynamic policy skips when not in scope" <<'TEST'
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
   exit 0
 TEST
+
+# ── 场景 7：复合命令 auto-approve ──
+test_it "compound command auto-approve records originalCommand and subCommands" <<'TEST'
+  local slug="e2e-pg-dp7-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  mkdir -p "$test_home"
+  setup_sandbox "$test_home" auto_approve
+
+  # 修改沙箱中的 mock-llm/index.ts，将单命令替换为复合命令
+  # 使用相对路径 ./compound-test 确保在 scope 内
+  sed -i "s|rm -rf ./permission-gate-test-target|rm -rf ./compound-test \&\& echo done|g" \
+    "$test_home/.pi/extensions/mock-llm/index.ts"
+
+  # 确认替换成功
+  if grep -q "rm -rf ./compound-test && echo done" "$test_home/.pi/extensions/mock-llm/index.ts" 2>/dev/null; then
+    echo "PASS: mock-llm updated with compound command"
+  else
+    echo "FAIL: mock-llm NOT updated"
+    exit 1
+  fi
+
+  run_pi "$test_home" "clean up the temp directory" || true
+
+  dump_perm_logs "$test_home"
+
+  # 验证 approvals.json
+  local approvals_file="$test_home/home/.pi/agent/extensions-data/permission-gate/approvals.json"
+  if [[ ! -f "$approvals_file" ]]; then
+    echo "FAIL: approvals.json NOT created"
+    exit 1
+  fi
+
+  python3 -c "
+import json
+
+d = json.load(open('$approvals_file'))
+entries = list(d['projects'].values())[0]['entries']
+
+# 1. 验证只有 1 条 auto 记录（echo done 不危险）
+auto_entries = [e for e in entries if e['action'] == 'auto']
+assert len(auto_entries) == 1, f'expected 1 auto entry, got {len(auto_entries)}'
+e = auto_entries[0]
+
+print(f'Auto entry action={e[\"action\"]}')
+
+# 2. originalCommand 存在且等于完整复合命令
+assert 'originalCommand' in e, 'missing originalCommand'
+expected_orig = 'rm -rf ./compound-test && echo done'
+assert e['originalCommand'] == expected_orig, \
+    f'originalCommand mismatch: {e[\"originalCommand\"]!r} != {expected_orig!r}'
+print(f'PASS: originalCommand = {e[\"originalCommand\"]!r}')
+
+# 3. subCommands 存在且是数组
+assert 'subCommands' in e, 'missing subCommands'
+assert isinstance(e['subCommands'], list), f'subCommands should be list, got {type(e[\"subCommands\"]).__name__}'
+expected_subs = ['rm -rf ./compound-test', 'echo done']
+assert e['subCommands'] == expected_subs, \
+    f'subCommands mismatch: {e[\"subCommands\"]} != {expected_subs}'
+print(f'PASS: subCommands = {e[\"subCommands\"]}')
+
+# 4. dim 字段是数组格式而非单字符串
+dim = e.get('dim')
+assert dim is not None, 'missing dim'
+assert isinstance(dim, list), f'expected dim to be list, got {type(dim).__name__}: {dim!r}'
+assert len(dim) > 0, 'dim array should not be empty'
+print(f'PASS: dim is array = {dim}')
+
+print('PASS: all compound command checks passed')
+" 2>/dev/null || {
+    echo "FAIL: Python validation failed"
+    python3 -c "import json; print(json.dumps(json.load(open('$approvals_file')), indent=2))" 2>/dev/null || true
+    exit 1
+  }
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST

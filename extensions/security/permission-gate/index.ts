@@ -70,7 +70,7 @@ function summarizeCommand(command: string): string {
  * 检查路径是否在 scope 范围内。
  * 将路径解析为绝对路径后检查前缀匹配。
  */
-function pathInScope(targetPath: string, scopePath: string): boolean {
+export function pathInScope(targetPath: string, scopePath: string): boolean {
 	const absTarget = resolve(targetPath);
 	const absScope = resolve(scopePath);
 	return absTarget === absScope || absTarget.startsWith(absScope + sep);
@@ -80,7 +80,7 @@ function pathInScope(targetPath: string, scopePath: string): boolean {
  * 从 bash 命令中提取所有看起来像文件/目录路径的参数。
  * 跳过以 - 开头的选项、重定向符号等。
  */
-function extractTargetPaths(command: string): string[] {
+export function extractTargetPaths(command: string): string[] {
 	// 按空格分割，处理引号
 	const tokens: string[] = [];
 	let current = '';
@@ -157,7 +157,7 @@ function isInScope(command: string, cwd: string, scope: string): boolean {
  * 从命令中提取工具名称（如 rm, sudo, chmod 等）。
  * 跳过 sudo/time/nohup/env/nice/npx/docker exec 等前缀。
  */
-function extractToolName(command: string): string {
+export function extractToolName(command: string): string {
 	const tokens = command.trim().split(/\s+/);
 	let i = 0;
 	// 跳过常见前缀
@@ -186,7 +186,7 @@ function extractToolName(command: string): string {
  *
  * 例如：rm -rf a/b/c 和 rm -rf a/b/d 都产生 dir:<abs>/a/b。
  */
-function extractTargetDir(command: string, cwd: string): string {
+export function extractTargetDir(command: string, cwd: string): string {
 	const paths = extractTargetPaths(command);
 	if (paths.length === 0) return cwd;
 
@@ -204,7 +204,7 @@ function extractTargetDir(command: string, cwd: string): string {
  * 返回 { pass: boolean, dimensions: string[] }
  * pass=true 表示至少一个维度可以放行，dimensions 为所有通过维度的数组。
  */
-function checkThreshold(
+export function checkThreshold(
 	command: string,
 	toolName: string,
 	targetDir: string,
@@ -266,7 +266,7 @@ function checkThreshold(
  * 当命令的 cmd:hash 在 _counts 中计数 >= sameCommand 阈值时，
  * 表示该命令已积累了足够次数，可以自动放行。
  */
-function hasGraduatedStrategy(
+export function hasGraduatedStrategy(
 	command: string,
 	counts: Record<string, number>,
 	thresholds: { sameCommand: number },
