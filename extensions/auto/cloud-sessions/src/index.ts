@@ -12,6 +12,14 @@ import {
 	type CloudSessionsConfig,
 } from './config.js';
 import { Sync, type SyncResult } from './sync.js';
+import {
+	needsCwdFix,
+	fixCwdMismatch,
+	formatCwdDiff,
+	detectCwdMismatch,
+	readSessionCwd,
+	type FixCwdResult,
+} from './cwd-bridge.js';
 
 const STATUS_KEY = 'cloud-sessions';
 
@@ -195,6 +203,97 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 			(k, t) => ctx.ui.setStatus(k, t),
 			(text, level) => ctx.ui.notify(text, level),
 		).catch(() => {});
+	});
+
+	// ── CWD bridge: cross-machine cwd mismatch ──
+	// Intercept session resume BEFORE Pi's assertSessionCwdExists check.
+	// When a session's original cwd doesn't exist locally, offer to fix it.
+	// Fix strategy (best-effort):
+	//   1. Symlink (originalCwd → currentCwd) — works when parent dir writable
+	//   2. Rewrite session JSONL cwd field — universal fallback
+	// After fixing, Pi's cwd check passes and /tree file references resolve
+	// to the current working directory.
+	//
+	// This covers both /resume in TUI and pi -r (TUI mode session selection).
+	pi.on('session_before_switch', async (event, ctx) => {
+		if (event.reason !== 'resume' || !event.targetSessionFile) return;
+		if (!ctx.hasUI) return;
+
+		if (!needsCwdFix(event.targetSessionFile, ctx.cwd)) return;
+
+		const originalCwd = readSessionCwd(event.targetSessionFile);
+		if (!originalCwd) return;
+
+		const diff = formatCwdDiff(originalCwd, ctx.cwd);
+		const choice = await ctx.ui.select(diff, ['是 - 修复 cwd 并切换', '否 - 取消切换']);
+
+		if (choice === '是 - 修复 cwd 并切换') {
+			const result: FixCwdResult = fixCwdMismatch(
+				originalCwd,
+				ctx.cwd,
+				event.targetSessionFile,
+			);
+			if (result.success) {
+				if (result.symlinkAttempted && !result.symlinkSucceeded) {
+					ctx.ui.notify(
+						'软连接创建失败（父目录不可写），已自动改用内容覆盖修复',
+						'warning',
+					);
+				}
+				ctx.ui.notify('已修复 cwd，可正常切换与使用 /tree', 'info');
+				// Don't cancel — Pi's assertSessionCwdExists will find the
+				// correct path and proceed with the resume.
+				return;
+			}
+			ctx.ui.notify('修复 cwd 失败，请手动处理', 'error');
+			return { cancel: true };
+		}
+
+		// User chose not to fix — cancel the switch.
+		ctx.ui.notify('已取消切换', 'info');
+		return { cancel: true };
+	});
+
+	// ── Post-hoc cwd mismatch detection (session_start fallback) ──
+	// Handles two cases:
+	//   1. reason="resume" — fallback when session_before_switch wasn't
+	//      triggered (e.g., edge cases in the /resume flow)
+	//   2. reason="startup" — pi -r starts without session_before_switch;
+	//      main.js's promptForMissingSessionCwd() shows an English prompt
+	//      but does NOT fix the session file on disk. We detect the
+	//      mismatch here and offer to fix the file so future sessions
+	//      work without any prompt.
+	// The session is already loaded but /tree and file resolution may be
+	// broken because the original cwd doesn't exist. Offer to fix it now.
+	pi.on('session_start', async (event, ctx) => {
+		if (event.reason !== 'resume' && event.reason !== 'startup') return;
+		if (!ctx.hasUI) return;
+
+		const sessionFile = ctx.sessionManager.getSessionFile();
+		const mismatch = detectCwdMismatch(sessionFile, ctx.cwd);
+		if (!mismatch) return;
+
+		const diff = formatCwdDiff(mismatch.originalCwd, ctx.cwd);
+		const choice = await ctx.ui.select(`如需使用 /tree 和文件引用功能，请修复 cwd\n\n${diff}`, [
+			'是 - 修复 cwd',
+			'否 - 忽略',
+		]);
+
+		if (choice === '是 - 修复 cwd') {
+			const result: FixCwdResult = fixCwdMismatch(
+				mismatch.originalCwd,
+				ctx.cwd,
+				sessionFile!,
+			);
+			if (result.success) {
+				if (result.symlinkAttempted && !result.symlinkSucceeded) {
+					ctx.ui.notify('软连接创建失败，已自动改用 cwd 覆盖修复', 'warning');
+				}
+				ctx.ui.notify('已修复 cwd，后续 /tree 可正常使用', 'info');
+			} else {
+				ctx.ui.notify('修复 cwd 失败', 'error');
+			}
+		}
 	});
 
 	pi.on('turn_end', async (_event, ctx) => {
