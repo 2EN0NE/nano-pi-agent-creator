@@ -157,16 +157,18 @@ export function setupLifecycleCapture(pi: ExtensionAPI, _ctx: ExtensionContext):
 				role?: string;
 				stopReason?: string;
 				usage?: unknown;
-				content?: { type?: string }[];
+				content?: string | { type?: string }[];
 			};
 		}) => {
 			const role = event.message?.role ?? 'unknown';
 			const usage = event.message?.usage;
 			const stopReason = event.message?.stopReason;
-			const contentTypes = event.message?.content
-				?.map((c) => c.type)
-				.filter(Boolean)
-				.join(',');
+			const contentTypes = Array.isArray(event.message?.content)
+				? event.message.content
+						.map((c) => c.type)
+						.filter(Boolean)
+						.join(',')
+				: undefined;
 			emit(pi, 'info', `[msg] ← ${role}`, {
 				role,
 				stopReason: stopReason ?? undefined,
