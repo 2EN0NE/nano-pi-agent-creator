@@ -223,7 +223,7 @@ assert 'dim' in e, 'missing dim'
 assert 'action' in e, 'missing action'
 assert e['action'] == 'auto', f'expected auto, got {e[\"action\"]}'
 assert 'rm' in e['tool'], f'expected rm tool, got {e[\"tool\"]}'
-print('PASS: entry fields complete, action=' + e['action'] + ', tool=' + e['tool'] + ', dim=' + e['dim'])
+print('PASS: entry fields complete, action=' + e['action'] + ', tool=' + e['tool'] + ', dim=' + str(e['dim']))
 " 2>/dev/null || {
       echo "FAIL: entry fields incomplete"
       exit 1

@@ -18,7 +18,11 @@ import {
 	resolveConfigPath,
 } from '../../../extensions/security/permission-gate/config';
 import type { PermissionGateConfig } from '../../../extensions/security/permission-gate/config';
-import { getStrategySummary } from '../../../extensions/security/permission-gate/records';
+import {
+	getStrategySummary,
+	calcWidgetContentText,
+	splitCompoundCommand,
+} from '../../../extensions/security/permission-gate/records';
 import { buildStrategyItems } from '../../../extensions/security/permission-gate/two-tab-panel';
 
 // ============================================================================
@@ -42,6 +46,118 @@ describe('makeCommandKey', () => {
 		const k1 = makeCommandKey('rm -rf /tmp/a');
 		const k2 = makeCommandKey('rm -rf /tmp/b');
 		expect(k1).not.toBe(k2);
+	});
+});
+
+// ============================================================================
+// 集成测试：两个相同命令 → 2/2 → 沉淀
+// ============================================================================
+describe('Integration: same command twice graduates at threshold', () => {
+	const thresholds = { sameCommand: 2, sameTool: 3, sameFolder: 4 };
+
+	it('simulates appendRecord flow for identical commands', () => {
+		const counts: Record<string, number> = {};
+		const command = 'rm -rf /tmp/test';
+		const toolName = 'rm';
+		const targetDir = '/tmp';
+
+		// 第1次
+		const cmdKey1 = makeCommandKey(command);
+		counts[cmdKey1] = (counts[cmdKey1] ?? 0) + 1;
+		counts[makeToolKey(toolName)] = (counts[makeToolKey(toolName)] ?? 0) + 1;
+		counts[makeFolderKey(targetDir)] = (counts[makeFolderKey(targetDir)] ?? 0) + 1;
+
+		let s = getStrategySummary(counts, thresholds);
+		expect(s.cmd).toEqual({ total: 1, active: 1 }); // 1 < 2 => active
+		expect(calcWidgetContentText(true, true, counts, thresholds, 1)).toMatch(
+			/cmd\(1\[\d+\]\):1\/2/,
+		);
+
+		// 第2次：同一命令
+		counts[cmdKey1] = (counts[cmdKey1] ?? 0) + 1;
+		counts[makeToolKey(toolName)] = (counts[makeToolKey(toolName)] ?? 0) + 1;
+		counts[makeFolderKey(targetDir)] = (counts[makeFolderKey(targetDir)] ?? 0) + 1;
+
+		s = getStrategySummary(counts, thresholds);
+		expect(s.cmd).toEqual({ total: 1, active: 0 }); // 2 >= 2 => 沉淀
+		expect(calcWidgetContentText(true, true, counts, thresholds, 2)).toMatch(
+			/cmd\(1\[\d+\]\):0\/2/,
+		); // 已沉淀，无活跃策略可显示，0/2
+
+		// 第3次：同一命令，所有维度都超
+		counts[cmdKey1] = (counts[cmdKey1] ?? 0) + 1;
+		counts[makeToolKey(toolName)] = (counts[makeToolKey(toolName)] ?? 0) + 1;
+		counts[makeFolderKey(targetDir)] = (counts[makeFolderKey(targetDir)] ?? 0) + 1;
+
+		s = getStrategySummary(counts, thresholds);
+		expect(s.tool).toEqual({ total: 1, active: 0 }); // tool: 3 >= 3 => 也沉淀
+		expect(s.cmd).toEqual({ total: 1, active: 0 });
+	});
+});
+
+// ============================================================================
+// splitCompoundCommand
+// ============================================================================
+describe('splitCompoundCommand', () => {
+	it('simple command stays as one', () => {
+		expect(splitCompoundCommand('rm -rf /tmp')).toEqual(['rm -rf /tmp']);
+	});
+
+	it('splits on &&', () => {
+		expect(splitCompoundCommand('rm -rf /tmp && echo done')).toEqual([
+			'rm -rf /tmp',
+			'echo done',
+		]);
+	});
+
+	it('splits on ||', () => {
+		expect(splitCompoundCommand('cd /tmp || exit 1')).toEqual(['cd /tmp', 'exit 1']);
+	});
+
+	it('splits on ;', () => {
+		expect(splitCompoundCommand('cd /tmp; ls')).toEqual(['cd /tmp', 'ls']);
+	});
+
+	it('splits on | (pipe)', () => {
+		expect(splitCompoundCommand('cat file | grep foo')).toEqual(['cat file', 'grep foo']);
+	});
+
+	it('handles multiple operators', () => {
+		expect(splitCompoundCommand('rm -rf /tmp && cd /tmp || echo fail')).toEqual([
+			'rm -rf /tmp',
+			'cd /tmp',
+			'echo fail',
+		]);
+	});
+
+	it('preserves && inside single quotes', () => {
+		const result = splitCompoundCommand("echo 'a && b' && echo c");
+		expect(result).toEqual(["echo 'a && b'", 'echo c']);
+	});
+
+	it('preserves && inside double quotes', () => {
+		const result = splitCompoundCommand('echo "a && b" && echo c');
+		expect(result).toEqual(['echo "a && b"', 'echo c']);
+	});
+
+	it('preserves | inside $() subshell', () => {
+		const result = splitCompoundCommand('rm -rf $(cat /tmp/list | head -1) && echo done');
+		expect(result).toEqual(['rm -rf $(cat /tmp/list | head -1)', 'echo done']);
+	});
+
+	it('preserves | inside backtick command substitution', () => {
+		const result = splitCompoundCommand('rm `find /tmp -name "*.log" | head -5` && echo done');
+		expect(result).toEqual(['rm `find /tmp -name "*.log" | head -5`', 'echo done']);
+	});
+
+	it('handles empty/whitespace input', () => {
+		expect(splitCompoundCommand('')).toEqual(['']);
+		// 纯空白保留原始值（调用方会用 .trim()）
+		expect(splitCompoundCommand('   ')).toEqual(['   ']);
+	});
+
+	it('no split if only trailing separator', () => {
+		expect(splitCompoundCommand('ls;')).toEqual(['ls']);
 	});
 });
 
@@ -75,7 +191,6 @@ describe('makeFolderKey', () => {
 describe('deepMerge', () => {
 	it('merges dynamic policy thresholds', () => {
 		const base = getDefaultConfig();
-		// 注意：deepMerge 对 dynamicPolicy.thresholds 使用 ??，仅覆盖显式提供的字段
 		const overrides = {
 			dynamicPolicyEnabled: true,
 			dynamicPolicy: {
@@ -89,7 +204,6 @@ describe('deepMerge', () => {
 		expect(merged.dynamicPolicyEnabled).toBe(true);
 		expect(merged.dynamicPolicy.scope).toBe('/custom');
 		expect(merged.dynamicPolicy.thresholds.sameCommand).toBe(5);
-		// 未覆盖的阈值保持默认
 		expect(merged.dynamicPolicy.thresholds.sameTool).toBe(
 			base.dynamicPolicy.thresholds.sameTool,
 		);
@@ -177,8 +291,8 @@ describe('getStrategySummary', () => {
 
 	it('counts cmd keys correctly (2 total, 1 active)', () => {
 		const counts = {
-			'cmd:abc123': 1, // 1 < 2 → active
-			'cmd:def456': 2, // 2 >= 2 → not active
+			'cmd:abc123': 1,
+			'cmd:def456': 2,
 		};
 		const s = getStrategySummary(counts, thresholds);
 		expect(s.cmd).toEqual({ total: 2, active: 1 });
@@ -188,9 +302,9 @@ describe('getStrategySummary', () => {
 
 	it('counts tool keys correctly', () => {
 		const counts = {
-			'tool:rm': 1, // 1 < 3 → active
-			'tool:sudo': 3, // 3 >= 3 → not active
-			'tool:chmod': 5, // 5 >= 3 → not active
+			'tool:rm': 1,
+			'tool:sudo': 3,
+			'tool:chmod': 5,
 		};
 		const s = getStrategySummary(counts, thresholds);
 		expect(s.tool).toEqual({ total: 3, active: 1 });
@@ -198,8 +312,8 @@ describe('getStrategySummary', () => {
 
 	it('counts dir keys correctly', () => {
 		const counts = {
-			'dir:/tmp': 2, // 2 < 4 → active
-			'dir:/home': 4, // 4 >= 4 → not active
+			'dir:/tmp': 2,
+			'dir:/home': 4,
 		};
 		const s = getStrategySummary(counts, thresholds);
 		expect(s.dir).toEqual({ total: 2, active: 1 });
@@ -213,9 +327,9 @@ describe('getStrategySummary', () => {
 			'dir:/tmp': 3,
 		};
 		const s = getStrategySummary(counts, thresholds);
-		expect(s.cmd).toEqual({ total: 2, active: 2 }); // 0<2, 1<2
-		expect(s.tool).toEqual({ total: 1, active: 1 }); // 2<3
-		expect(s.dir).toEqual({ total: 1, active: 1 }); // 3<4
+		expect(s.cmd).toEqual({ total: 2, active: 2 });
+		expect(s.tool).toEqual({ total: 1, active: 1 });
+		expect(s.dir).toEqual({ total: 1, active: 1 });
 	});
 });
 
@@ -246,6 +360,8 @@ describe('buildStrategyItems', () => {
 			count: 1,
 			threshold: 2,
 			isActive: true,
+			createdAt: expect.any(String),
+			subCommand: expect.any(String),
 		});
 		expect(items[1]).toMatchObject({
 			dimension: 'tool',
@@ -254,6 +370,8 @@ describe('buildStrategyItems', () => {
 			count: 2,
 			threshold: 3,
 			isActive: true,
+			createdAt: expect.any(String),
+			subCommand: expect.any(String),
 		});
 		expect(items[2]).toMatchObject({
 			dimension: 'dir',
@@ -262,12 +380,14 @@ describe('buildStrategyItems', () => {
 			count: 3,
 			threshold: 4,
 			isActive: true,
+			createdAt: expect.any(String),
+			subCommand: expect.any(String),
 		});
 	});
 
 	it('marks items at threshold as inactive', () => {
 		const counts = {
-			'cmd:full': 2, // exactly at threshold → NOT active
+			'cmd:full': 2,
 		};
 		const items = buildStrategyItems(counts, thresholds);
 		expect(items[0]).toMatchObject({
@@ -275,5 +395,100 @@ describe('buildStrategyItems', () => {
 			count: 2,
 			threshold: 2,
 		});
+	});
+});
+
+// ============================================================================
+// calcWidgetContentText（纯函数，无 ANSI 颜色）
+// ============================================================================
+describe('calcWidgetContentText', () => {
+	const thresholds = { sameCommand: 2, sameTool: 3, sameFolder: 4 };
+
+	it('renders gate off', () => {
+		expect(calcWidgetContentText(false, false, {}, thresholds, 0)).toBe('[-] gate:off');
+		expect(calcWidgetContentText(false, true, {}, thresholds, 0)).toBe('[-] gate:off');
+	});
+
+	it('renders gate on + dynamic off with empty counts', () => {
+		expect(calcWidgetContentText(true, false, {}, thresholds, 0)).toBe('gate:on');
+	});
+
+	it('renders gate on + dynamic off with counts', () => {
+		const counts = {
+			'cmd:aaa': 1,
+			'cmd:bbb': 2,
+			'tool:rm': 1,
+			'dir:/tmp': 3,
+		};
+		// totalRecords=4, cmd(2),tool(1),folder(1)
+		const text = calcWidgetContentText(true, false, counts, thresholds, 4);
+		expect(text).toBe('gate(4):on[cmd(2),tool(1),folder(1)]');
+	});
+
+	it('renders gate on + dynamic off with single dimension', () => {
+		const counts = { 'cmd:aaa': 1 };
+		const text = calcWidgetContentText(true, false, counts, thresholds, 1);
+		expect(text).toBe('gate(1):on[cmd(1)]');
+	});
+
+	it('renders dynamic on with empty counts', () => {
+		expect(calcWidgetContentText(true, true, {}, thresholds, 0)).toBe('dynamic-gate:on');
+	});
+
+	it('renders dynamic on with one active cmd strategy (1/2)', () => {
+		const counts = { 'cmd:abc': 1 };
+		const text = calcWidgetContentText(true, true, counts, thresholds, 1);
+		expect(text).toBe('dynamic-gate(1[0]):on[cmd(1[0]):1/2]');
+	});
+
+	it('renders dynamic on with cmd at threshold (2/2) — graduated', () => {
+		const counts = { 'cmd:abc': 2 };
+		const text = calcWidgetContentText(true, true, counts, thresholds, 1);
+		expect(text).toBe('dynamic-gate(1[1]):on[cmd(1[1]):0/2]');
+	});
+
+	it('renders dynamic on: two identical cmds reach 2/2 then graduate', () => {
+		const counts = { 'cmd:same': 2 };
+		const text = calcWidgetContentText(true, true, counts, thresholds, 1);
+		expect(text).toBe('dynamic-gate(1[1]):on[cmd(1[1]):0/2]');
+	});
+
+	it('renders dynamic on: mix of active and graduated per dimension', () => {
+		const counts = {
+			'cmd:aaa': 1,
+			'cmd:bbb': 2,
+			'tool:rm': 2,
+			'tool:sudo': 3,
+		};
+		const text = calcWidgetContentText(true, true, counts, thresholds, 4);
+		// cmd: total=2, active=1, auto=1, best=1
+		// tool: total=2, active=1, auto=1, best=2
+		expect(text).toBe('dynamic-gate(4[2]):on[cmd(2[1]):1/2,tool(2[1]):2/3]');
+	});
+
+	it('renders dynamic on with threshold=0 (no strategies can graduate)', () => {
+		const zeroThresholds = { sameCommand: 0, sameTool: 0, sameFolder: 0 };
+		const counts = { 'cmd:aaa': 5 };
+		const text = calcWidgetContentText(true, true, counts, zeroThresholds, 1);
+		expect(text).toBe('dynamic-gate(1[0]):on[cmd(1[0]):0/0]');
+	});
+
+	it('renders all three dimensions on dynamic on', () => {
+		const counts = {
+			'cmd:abc': 1,
+			'tool:rm': 2,
+			'dir:/tmp': 3,
+		};
+		const text = calcWidgetContentText(true, true, counts, thresholds, 3);
+		expect(text).toBe('dynamic-gate(3[0]):on[cmd(1[0]):1/2,tool(1[0]):2/3,folder(1[0]):3/4]');
+	});
+
+	it('renders graduated tool: all tool strategies at threshold', () => {
+		const counts = {
+			'tool:rm': 3,
+			'tool:sudo': 4,
+		};
+		const text = calcWidgetContentText(true, true, counts, thresholds, 2);
+		expect(text).toBe('dynamic-gate(2[2]):on[tool(2[2]):0/3]');
 	});
 });

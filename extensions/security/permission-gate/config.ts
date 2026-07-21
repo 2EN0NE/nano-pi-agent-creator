@@ -35,6 +35,13 @@ export interface DynamicPolicyConfig {
 	};
 }
 
+export interface WidgetOptions {
+	/** 是否在状态栏显示 widget */
+	show: boolean;
+	/** 展示细节：'gate' 仅 gate 级别 | 'full' 含 cmd/tool/folder 详情 */
+	detailLevel: 'gate' | 'full';
+}
+
 export interface PermissionGateConfig {
 	/** 是否启用权限门控 */
 	enabled: boolean;
@@ -44,6 +51,8 @@ export interface PermissionGateConfig {
 	patterns: string[];
 	/** 动态策略配置 */
 	dynamicPolicy: DynamicPolicyConfig;
+	/** Widget 显示选项 */
+	widget: WidgetOptions;
 }
 
 // ============================================================================
@@ -75,6 +84,10 @@ const DEFAULT_CONFIG: PermissionGateConfig = {
 			sameTool: 3,
 			sameFolder: 4,
 		},
+	},
+	widget: {
+		show: true,
+		detailLevel: 'full',
 	},
 };
 
@@ -166,6 +179,7 @@ export function deepMerge(
 					base.dynamicPolicy.thresholds.sameFolder,
 			},
 		},
+		widget: overrides.widget ?? base.widget,
 	};
 
 	return result;
@@ -233,6 +247,7 @@ export function saveConfig(
 		dynamicPolicyEnabled: config.dynamicPolicyEnabled,
 		patterns: config.patterns,
 		dynamicPolicy: config.dynamicPolicy,
+		widget: config.widget,
 	};
 
 	writeFileSync(filePath, JSON.stringify(output, null, 2) + '\n', 'utf-8');

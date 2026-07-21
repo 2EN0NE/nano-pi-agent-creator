@@ -7,7 +7,8 @@
 import { getKeybindings, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
-import { loadRecords, deleteStrategy, type ApprovalEntry } from './records.js';
+import { createHash } from 'node:crypto';
+import { loadRecords, deleteStrategy, normalizeDim, type ApprovalEntry } from './records.js';
 
 const log = createLogger('permission-gate:two-tab');
 
@@ -23,6 +24,10 @@ export interface StrategyDisplayItem {
 	count: number;
 	threshold: number;
 	isActive: boolean;
+	/** 该策略首次出现的时间（从历史记录反查） */
+	createdAt: string;
+	/** 子命令原文（仅 cmd 维度有，从历史记录反查） */
+	subCommand: string;
 }
 
 /** 历史展示项 */
@@ -38,15 +43,46 @@ export interface HistoryDisplayItem {
 
 /**
  * 从 _counts 和 thresholds 构建策略展示列表。
+ * entries 用于反查策略的首次创建时间和子命令原文。
  */
 export function buildStrategyItems(
 	counts: Record<string, number>,
 	thresholds: { sameCommand: number; sameTool: number; sameFolder: number },
+	entries?: ApprovalEntry[],
 ): StrategyDisplayItem[] {
 	const items: StrategyDisplayItem[] = [];
 
+	// 预计算每组 key 的 stats（基于历史记录）
+	const keyStats: Record<string, { earliestTs: string; subCmd: string }> = {};
+	if (entries) {
+		for (const e of entries) {
+			if (e.action === 'blocked') continue;
+			// cmd key
+			const normalized = e.cmd.trim().replace(/\s+/g, ' ');
+			const cmdHash = createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+			const cmdKey = `cmd:${cmdHash}`;
+			if (!keyStats[cmdKey] || e.ts < keyStats[cmdKey].earliestTs) {
+				keyStats[cmdKey] = { earliestTs: e.ts, subCmd: e.cmd };
+			}
+			// tool key
+			const toolKey = `tool:${e.tool}`;
+			if (!keyStats[toolKey] || e.ts < keyStats[toolKey].earliestTs) {
+				keyStats[toolKey] = { earliestTs: e.ts, subCmd: '' };
+			}
+			// dir key
+			const dirKey = `dir:${e.dir}`;
+			if (!keyStats[dirKey] || e.ts < keyStats[dirKey].earliestTs) {
+				keyStats[dirKey] = { earliestTs: e.ts, subCmd: '' };
+			}
+		}
+	}
+
 	for (const key of Object.keys(counts)) {
 		const count = counts[key] ?? 0;
+		const stats = keyStats[key];
+		const ts = stats?.earliestTs ?? '';
+		const subCmd = stats?.subCmd ?? '';
+
 		if (key.startsWith('cmd:')) {
 			items.push({
 				dimension: 'cmd',
@@ -55,6 +91,8 @@ export function buildStrategyItems(
 				count,
 				threshold: thresholds.sameCommand,
 				isActive: count < thresholds.sameCommand,
+				createdAt: ts,
+				subCommand: subCmd,
 			});
 		} else if (key.startsWith('tool:')) {
 			items.push({
@@ -64,6 +102,8 @@ export function buildStrategyItems(
 				count,
 				threshold: thresholds.sameTool,
 				isActive: count < thresholds.sameTool,
+				createdAt: ts,
+				subCommand: '',
 			});
 		} else if (key.startsWith('dir:')) {
 			items.push({
@@ -73,6 +113,8 @@ export function buildStrategyItems(
 				count,
 				threshold: thresholds.sameFolder,
 				isActive: count < thresholds.sameFolder,
+				createdAt: ts,
+				subCommand: '',
 			});
 		}
 	}
@@ -158,8 +200,20 @@ export class TwoTabPanel {
 	}
 
 	private refreshData(): void {
-		this.strategies = buildStrategyItems(this.counts, this.thresholds);
-		this.history = loadHistoryItems(this.cwd);
+		const historyResult = loadRecords(this.cwd);
+		this.history = historyResult.entries
+			.slice()
+			.reverse()
+			.map((entry) => {
+				const cmdSummary =
+					entry.cmd.length > 80 ? entry.cmd.slice(0, 77) + '...' : entry.cmd;
+				return {
+					entry,
+					isPassed: entry.action !== 'blocked',
+					summary: cmdSummary,
+				};
+			});
+		this.strategies = buildStrategyItems(this.counts, this.thresholds, historyResult.entries);
 	}
 
 	private get filteredStrategies(): StrategyDisplayItem[] {
@@ -433,6 +487,16 @@ export class TwoTabPanel {
 		// 底部边框
 		lines.push(truncateToWidth(th.fg('accent', '└' + '─'.repeat(width - 2) + '┘'), width));
 
+		// 填充到最小高度，防止 overlay 高度变化导致溢出渲染到屏幕顶部。
+		// Pi TUI overlay 在首次渲染后不会动态调整高度，
+		// 切换 tab (Strategies ↔ History) 时列表行数变化可能超出分配空间。
+		// 填充至至少容纳 header(5) + maxVisible(12) + scroll(1) + footer(3) = 21 行
+		const MIN_TOTAL_LINES = 5 + 12 + 1 + 3; // 21
+		const padCount = Math.max(0, MIN_TOTAL_LINES - lines.length);
+		for (let i = 0; i < padCount; i++) {
+			lines.push(''); // 透明填充行，不显示边框
+		}
+
 		this.cachedWidth = width;
 		this.cachedLines = lines;
 		return lines;
@@ -449,7 +513,24 @@ export class TwoTabPanel {
 		const dimLabel =
 			item.dimension === 'cmd' ? '[cmd]' : item.dimension === 'tool' ? '[tool]' : '[dir]';
 		const progress = `${item.count}/${item.threshold}`;
-		const mainText = `${dimLabel} ${item.displayKey}  >  ${progress}`;
+		const ts = item.createdAt ? item.createdAt.slice(0, 10) : '';
+		const cmdHash = item.key.slice(4, 12);
+
+		// cmd: hash[8] + 时间 + 子命令原文
+		// tool/folder: 名称 + 时间
+		let detail: string;
+		if (item.dimension === 'cmd') {
+			const cmdText = item.subCommand
+				? item.subCommand.length > 50
+					? item.subCommand.slice(0, 47) + '...'
+					: item.subCommand
+				: cmdHash;
+			detail = `${cmdHash}  ${ts ? ts + '  ' : ''}${cmdText}`;
+		} else {
+			detail = `${item.displayKey}  ${ts}`;
+		}
+
+		const mainText = `${dimLabel} ${detail}  >  ${progress}`;
 
 		if (isSel) {
 			const selLine = '│ ' + prefix + th.fg('accent', mainText);
@@ -478,7 +559,8 @@ export class TwoTabPanel {
 		const statusMark = item.isPassed ? 'OK' : 'BLOCK';
 		const action = item.entry.action;
 		const ts = item.entry.ts.slice(0, 19).replace('T', ' ');
-		const lineText = `${statusMark} ${action.padEnd(9)} | ${item.summary} | ${ts}`;
+		const dimStr = normalizeDim(item.entry.dim)?.join(',') ?? '-';
+		const lineText = `${statusMark} ${action.padEnd(9)} | ${item.summary} | ${dimStr} | ${ts}`;
 
 		const availWidth = width - 4 - visibleWidth(prefix);
 		let display: string;
@@ -533,16 +615,22 @@ export class TwoTabPanel {
 			const h = item as HistoryDisplayItem;
 			const e = h.entry;
 			lines.push(truncateToWidth(pad + th.fg('accent', `Action: ${e.action}`), width));
-			lines.push(truncateToWidth(pad + th.fg('text', `Dimension: ${e.dim}`), width));
+			lines.push(
+				truncateToWidth(
+					pad + th.fg('text', `Dimension: ${normalizeDim(e.dim)?.join(', ') ?? 'N/A'}`),
+					width,
+				),
+			);
 			lines.push(truncateToWidth(pad + th.fg('text', `Tool: ${e.tool}`), width));
 			lines.push(truncateToWidth(pad + th.fg('text', `Directory: ${e.dir}`), width));
 			lines.push(truncateToWidth(pad + th.fg('dim', `Time: ${e.ts}`), width));
+
+			// 子命令（当前条目的 cmd）
 			const cmdLabel = pad + th.fg('text', 'Command: ');
 			const cmdAvail = width - visibleWidth(cmdLabel);
 			if (visibleWidth(e.cmd) <= cmdAvail) {
 				lines.push(truncateToWidth(cmdLabel + e.cmd, width));
 			} else {
-				// 用 visibleWidth 逐个字符截断
 				let truncated = '';
 				let tw = 0;
 				for (const ch of e.cmd) {
@@ -552,6 +640,31 @@ export class TwoTabPanel {
 					tw += cw;
 				}
 				lines.push(truncateToWidth(cmdLabel + truncated + '…', width));
+			}
+
+			// 原始复合命令（如有）
+			if (e.originalCommand && e.originalCommand !== e.cmd) {
+				const origLabel = pad + th.fg('text', 'Original: ');
+				const origAvail = width - visibleWidth(origLabel);
+				if (visibleWidth(e.originalCommand) <= origAvail) {
+					lines.push(truncateToWidth(origLabel + e.originalCommand, width));
+				} else {
+					let truncated = '';
+					let tw = 0;
+					for (const ch of e.originalCommand) {
+						const cw = visibleWidth(ch);
+						if (tw + cw >= origAvail - 1) break;
+						truncated += ch;
+						tw += cw;
+					}
+					lines.push(truncateToWidth(origLabel + truncated + '…', width));
+				}
+			}
+
+			// 拆解后的命令列表（如有）
+			if (e.subCommands && e.subCommands.length > 1) {
+				const subsLabel = pad + th.fg('dim', `Sub-commands: ${e.subCommands.join(' | ')}`);
+				lines.push(truncateToWidth(subsLabel, width));
 			}
 		}
 

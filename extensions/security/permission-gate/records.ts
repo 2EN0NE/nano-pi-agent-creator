@@ -37,16 +37,23 @@ const log = createLogger('permission-gate:records');
 export interface ApprovalEntry {
 	/** ISO 时间戳 */
 	ts: string;
-	/** 完整命令 */
+	/** 完整命令（子命令） */
 	cmd: string;
 	/** 工具名（如 rm, sudo） */
 	tool: string;
 	/** 目标目录绝对路径 */
 	dir: string;
-	/** 触发维度（blocked 记录为 null） */
-	dim: 'sameCommand' | 'sameTool' | 'sameFolder' | null;
+	/** 触发维度。
+	 *  新版（after-v2-migration）：string[] | null，记录所有经由并行检查通过的维度。
+	 *  旧版（before migration）：单维度字符串 'sameCommand' | 'sameTool' | 'sameFolder' | null。
+	 *  读取时统一标准化。 */
+	dim: string[] | string | null;
 	/** 放行方式 */
 	action: 'auto' | 'confirmed' | 'blocked';
+	/** 原始复合命令（如 "rm -rf /tmp && echo done"） */
+	originalCommand?: string;
+	/** 拆分后的子命令列表 */
+	subCommands?: string[];
 }
 
 /** 策略维度汇总 */
@@ -54,6 +61,16 @@ export interface StrategySummary {
 	cmd: { total: number; active: number };
 	tool: { total: number; active: number };
 	dir: { total: number; active: number };
+}
+
+/**
+ * 标准化 dim 字段：兼容新版（string[]）和旧版（单字符串）格式。
+ */
+export function normalizeDim(dim: string[] | string | null | undefined): string[] | null {
+	if (!dim) return null;
+	if (Array.isArray(dim)) return dim.length > 0 ? [...new Set(dim)] : null;
+	// 旧版单字符串格式
+	return [dim];
 }
 
 export interface ProjectRecords {
@@ -136,6 +153,13 @@ function writeApprovalsFile(data: ApprovalsFile): void {
 // ============================================================================
 // 公共 API
 // ============================================================================
+
+/**
+ * 计算当前项目非 blocked 记录总数（用于 widget gate() 显示）。
+ */
+export function countNonBlockedEntries(entries: ApprovalEntry[]): number {
+	return entries.filter((e) => e.action !== 'blocked').length;
+}
 
 /**
  * 从记录中重建 counts（用于阈值检查）。
@@ -379,6 +403,77 @@ export function getStrategySummary(
 	};
 }
 
+/**
+ * 计算 widget 纯文本（无 ANSI 颜色），供 updateWidgetStatus 和单元测试使用。
+ *
+ * Gate OFF:              "[-] gate:off"
+ * Gate ON + Dynamic OFF: "gate(100):on[cmd(42),tool(1),folder(1)]"
+ *                         (100 = 总记录数; 括号内为各维度历史策略数)
+ * Gate ON + Dynamic ON:  "dynamic-gate(100[8]):on[cmd(40[0]):1/2,tool(1[0]):0/3,folder(1[0]):0/4]"
+ *                         (100 = 总记录数, [8] = 已沉淀策略总数)
+ *
+ * 注意：当某维度阈值 <= 0 时，该维度的已沉淀数强制为 0（阈值 0 表示不自动放行）。
+ */
+export function calcWidgetContentText(
+	enabled: boolean,
+	dynamicEnabled: boolean,
+	counts: Record<string, number>,
+	thresholds: { sameCommand: number; sameTool: number; sameFolder: number },
+	totalRecords: number,
+): string {
+	if (!enabled) return '[-] gate:off';
+
+	const summary = getStrategySummary(counts, thresholds);
+	const cmdTotal = summary.cmd.total;
+	const toolTotal = summary.tool.total;
+	const dirTotal = summary.dir.total;
+	const totalStrategies = cmdTotal + toolTotal + dirTotal;
+
+	if (!dynamicEnabled) {
+		// Dynamic OFF: 显示记录总数 + 策略数
+		const parts: string[] = [];
+		if (cmdTotal > 0) parts.push(`cmd(${cmdTotal})`);
+		if (toolTotal > 0) parts.push(`tool(${toolTotal})`);
+		if (dirTotal > 0) parts.push(`folder(${dirTotal})`);
+
+		const suffix = parts.length > 0 ? `(${totalRecords}):on[${parts.join(',')}]` : ':on';
+		return `gate${suffix}`;
+	}
+
+	// Dynamic ON: 已沉淀数（阈值<=0 时强制为 0）
+	const cmdAuto = thresholds.sameCommand > 0 ? cmdTotal - summary.cmd.active : 0;
+	const toolAuto = thresholds.sameTool > 0 ? toolTotal - summary.tool.active : 0;
+	const dirAuto = thresholds.sameFolder > 0 ? dirTotal - summary.dir.active : 0;
+	const totalAuto = cmdAuto + toolAuto + dirAuto;
+
+	// 找最优进度（仅限未达阈值的活跃策略，确保沉淀后切换到下一个最近目标）
+	let bestCmd = 0,
+		bestTool = 0,
+		bestFolder = 0;
+	for (const key of Object.keys(counts)) {
+		const c = counts[key] ?? 0;
+		if (key.startsWith('cmd:') && c < thresholds.sameCommand && c > bestCmd) bestCmd = c;
+		else if (key.startsWith('tool:') && c < thresholds.sameTool && c > bestTool) bestTool = c;
+		else if (key.startsWith('dir:') && c < thresholds.sameFolder && c > bestFolder)
+			bestFolder = c;
+	}
+
+	const parts: string[] = [];
+	if (cmdTotal > 0) {
+		parts.push(`cmd(${cmdTotal}[${cmdAuto}]):${bestCmd}/${thresholds.sameCommand}`);
+	}
+	if (toolTotal > 0) {
+		parts.push(`tool(${toolTotal}[${toolAuto}]):${bestTool}/${thresholds.sameTool}`);
+	}
+	if (dirTotal > 0) {
+		parts.push(`folder(${dirTotal}[${dirAuto}]):${bestFolder}/${thresholds.sameFolder}`);
+	}
+
+	const suffix =
+		parts.length > 0 ? `(${totalRecords}[${totalAuto}]):on[${parts.join(',')}]` : ':on';
+	return `dynamic-gate${suffix}`;
+}
+
 // ============================================================================
 // 迁移：旧版 approvalCounts → 新版记录格式
 // ============================================================================
@@ -405,7 +500,7 @@ function migrateFromLegacy(
 		cmd: `(migrated: ${cmdKeys.length} cmd keys, ${toolKeys.length} tool keys, ${dirKeys.length} dir keys)`,
 		tool: '(migrated)',
 		dir: absPath,
-		dim: 'sameCommand',
+		dim: ['sameCommand'],
 		action: 'confirmed',
 	};
 
@@ -431,4 +526,91 @@ function migrateFromLegacy(
 	// ⚠ 直接返回原始计数，不再重新哈希
 	// 旧数据的 cmd:hash 已经是合法 key，makeCommandKey 与 deriveCounts 的 SHA256 算法一致
 	return { entries: [entry], counts: { ...legacyCounts } };
+}
+
+// ============================================================================
+// 命令拆分
+// ============================================================================
+
+/**
+ * 拆分组合命令（按 &&、||、;、| 分隔），保留引号和子 shell 内的分隔符。
+ * 返回各条子命令的 trimmed 字符串数组。
+ */
+export function splitCompoundCommand(command: string): string[] {
+	const parts: string[] = [];
+	let current = '';
+	let inSingle = false;
+	let inDouble = false;
+	let inBacktick = false;
+	let subShellDepth = 0;
+
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		const next = command[i + 1];
+
+		if (ch === "'" && !inDouble && !inBacktick) {
+			inSingle = !inSingle;
+			current += ch;
+			continue;
+		}
+		if (ch === '"' && !inSingle && !inBacktick) {
+			inDouble = !inDouble;
+			current += ch;
+			continue;
+		}
+		// 反引号命令替换 `...`，内容不拆分
+		if (ch === '`' && !inSingle && !inDouble) {
+			inBacktick = !inBacktick;
+			current += ch;
+			continue;
+		}
+
+		if (!inSingle && !inDouble && !inBacktick) {
+			if (ch === '$' && next === '(') {
+				subShellDepth++;
+				current += ch + next;
+				i++;
+				continue;
+			}
+			if (ch === ')' && subShellDepth > 0) {
+				subShellDepth--;
+				current += ch;
+				continue;
+			}
+		}
+
+		if (subShellDepth === 0 && !inSingle && !inDouble && !inBacktick) {
+			if (ch === '&' && next === '&') {
+				if (current.trim()) parts.push(current.trim());
+				current = '';
+				i++;
+				continue;
+			}
+			if (ch === '|' && next === '|') {
+				if (current.trim()) parts.push(current.trim());
+				current = '';
+				i++;
+				continue;
+			}
+			if (ch === '|' && next !== '|') {
+				// |& (合并 stderr 管道) — 跳过 &
+				if (next === '&') i++;
+				if (current.trim()) {
+					parts.push(current.trim());
+					current = '';
+				}
+				continue;
+			}
+			if (ch === ';' && next !== ';' && current.trim()) {
+				parts.push(current.trim());
+				current = '';
+				continue;
+			}
+		}
+
+		current += ch;
+	}
+
+	if (current.trim()) parts.push(current.trim());
+	return parts.length > 0 ? parts : [command];
 }

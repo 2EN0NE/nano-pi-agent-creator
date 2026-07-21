@@ -31,7 +31,15 @@ import {
 	makeToolKey,
 	saveConfig,
 } from './config.js';
-import { loadRecords, appendRecord, appendBlockedRecord, getStrategySummary } from './records.js';
+import {
+	loadRecords,
+	appendRecord,
+	appendBlockedRecord,
+	getStrategySummary,
+	calcWidgetContentText,
+	splitCompoundCommand,
+	countNonBlockedEntries,
+} from './records.js';
 import { showTwoTabPanel } from './two-tab-panel.js';
 
 // ============================================================================
@@ -41,6 +49,8 @@ import { showTwoTabPanel } from './two-tab-panel.js';
 const log = createLogger('permission-gate');
 let _config: PermissionGateConfig = getDefaultConfig();
 let _counts: Record<string, number> = {};
+// biome-ignore lint/style/noConst: must be reassigned on appendRecord
+let _totalRecords = 0;
 
 // ============================================================================
 // Helpers
@@ -190,9 +200,9 @@ function extractTargetDir(command: string, cwd: string): string {
 }
 
 /**
- * 检查是否在阈值内自动放行。
- * 返回 { pass: boolean, dimension: string | null }
- * pass=true 表示可以自动放行，dimension 指明命中的维度。
+ * 检查是否在阈值内自动放行（并行检查：三个维度独立判断）。
+ * 返回 { pass: boolean, dimensions: string[] }
+ * pass=true 表示至少一个维度可以放行，dimensions 为所有通过维度的数组。
  */
 function checkThreshold(
 	command: string,
@@ -200,45 +210,72 @@ function checkThreshold(
 	targetDir: string,
 	config: PermissionGateConfig,
 	counts: Record<string, number>,
-): { pass: boolean; dimension: string | null } {
+): { pass: boolean; dimensions: string[] } {
 	const thresholds = config.dynamicPolicy.thresholds;
+	const passing: string[] = [];
 
-	// 1. sameCommand 检查
+	// 并行检查三个维度
 	const cmdKey = makeCommandKey(command);
 	const cmdCount = counts[cmdKey] ?? 0;
 	if (cmdCount < thresholds.sameCommand) {
-		log.debug('Threshold check: sameCommand pass (%d < %d)', cmdCount, thresholds.sameCommand);
-		return { pass: true, dimension: 'sameCommand' };
+		passing.push('sameCommand');
 	}
 
-	// 2. sameTool 检查
 	const toolKey = makeToolKey(toolName);
 	const toolCount = counts[toolKey] ?? 0;
 	if (toolCount < thresholds.sameTool) {
-		log.debug('Threshold check: sameTool pass (%d < %d)', toolCount, thresholds.sameTool);
-		return { pass: true, dimension: 'sameTool' };
+		passing.push('sameTool');
 	}
 
-	// 3. sameFolder 检查
 	const folderKey = makeFolderKey(targetDir);
 	const folderCount = counts[folderKey] ?? 0;
 	if (folderCount < thresholds.sameFolder) {
-		log.debug('Threshold check: sameFolder pass (%d < %d)', folderCount, thresholds.sameFolder);
-		return { pass: true, dimension: 'sameFolder' };
+		passing.push('sameFolder');
 	}
 
-	// 全部超过阈值
-	log.info(
-		'Dynamic policy: all thresholds exceeded for "%s" (cmd:%d/%d, tool:%d/%d, folder:%d/%d)',
-		command.slice(0, 80),
-		cmdCount,
-		thresholds.sameCommand,
-		toolCount,
-		thresholds.sameTool,
-		folderCount,
-		thresholds.sameFolder,
-	);
-	return { pass: false, dimension: null };
+	const pass = passing.length > 0;
+	if (pass) {
+		log.debug(
+			'Threshold check: parallel pass — dims=%j (cmd:%d/%d, tool:%d/%d, folder:%d/%d)',
+			passing,
+			cmdCount,
+			thresholds.sameCommand,
+			toolCount,
+			thresholds.sameTool,
+			folderCount,
+			thresholds.sameFolder,
+		);
+	} else {
+		log.info(
+			'Dynamic policy: all thresholds exceeded for "%s" (cmd:%d/%d, tool:%d/%d, folder:%d/%d)',
+			command.slice(0, 80),
+			cmdCount,
+			thresholds.sameCommand,
+			toolCount,
+			thresholds.sameTool,
+			folderCount,
+			thresholds.sameFolder,
+		);
+	}
+
+	return { pass, dimensions: passing };
+}
+
+/**
+ * 检查某条子命令是否已沉淀（存在 graduated 策略）。
+ * 当命令的 cmd:hash 在 _counts 中计数 >= sameCommand 阈值时，
+ * 表示该命令已积累了足够次数，可以自动放行。
+ */
+function hasGraduatedStrategy(
+	command: string,
+	counts: Record<string, number>,
+	thresholds: { sameCommand: number },
+): boolean {
+	// 阈值为 0 意味着"永不自动放行"，无沉淀策略
+	if (thresholds.sameCommand <= 0) return false;
+	const cmdKey = makeCommandKey(command);
+	const count = counts[cmdKey] ?? 0;
+	return count >= thresholds.sameCommand;
 }
 
 // ============================================================================
@@ -253,128 +290,202 @@ async function handleToolCall(
 		return undefined;
 	}
 
-	const command = event.input.command as string;
+	const fullCommand = event.input.command as string;
 
 	// 1. Gate 关闭 → 直接放行
 	if (!_config.enabled) {
-		log.debug('Gate disabled, passing through: %s', command.slice(0, 80));
+		log.debug('Gate disabled, passing through: %s', fullCommand.slice(0, 80));
 		return undefined;
 	}
 
-	// 2. 检查是否命中危险模式
-	const isDangerous = _config.patterns.some((p) => {
-		try {
-			return new RegExp(p, 'i').test(command);
-		} catch {
-			log.warn('Invalid pattern: %s', p);
-			return false;
+	// 2. 拆分组合命令，逐条检查
+	const subCommands = splitCompoundCommand(fullCommand);
+
+	// 每条子命令的判断结果
+	const results: Array<{
+		cmd: string;
+		dangerous: boolean;
+		pass: boolean;
+		dim: string | string[] | null;
+	}> = [];
+
+	let anyDangerous = false;
+
+	for (const sub of subCommands) {
+		const isDangerous = _config.patterns.some((p) => {
+			try {
+				return new RegExp(p, 'i').test(sub);
+			} catch {
+				log.warn('Invalid pattern: %s', p);
+				return false;
+			}
+		});
+
+		if (!isDangerous) {
+			results.push({ cmd: sub, dangerous: false, pass: true, dim: null });
+			continue;
 		}
-	});
 
-	if (!isDangerous) {
-		log.debug('Not dangerous: %s', command.slice(0, 80));
+		anyDangerous = true;
+
+		// 动态策略开启时，先查已沉淀策略，再查阈值
+		if (_config.dynamicPolicyEnabled) {
+			// 查已沉淀策略：cmd 已毕业 → 自动放行
+			if (hasGraduatedStrategy(sub, _counts, _config.dynamicPolicy.thresholds)) {
+				log.debug('Graduated strategy match: %s', sub.slice(0, 80));
+				results.push({ cmd: sub, dangerous: true, pass: true, dim: 'graduated' });
+				continue;
+			}
+
+			// 阈值检查（并行）
+			const subTool = extractToolName(sub);
+			const subDir = extractTargetDir(sub, ctx.cwd);
+
+			if (isInScope(sub, ctx.cwd, _config.dynamicPolicy.scope)) {
+				const thResult = checkThreshold(sub, subTool, subDir, _config, _counts);
+				if (thResult.pass) {
+					results.push({
+						cmd: sub,
+						dangerous: true,
+						pass: true,
+						dim: thResult.dimensions,
+					});
+					continue;
+				}
+				// 在 scope 内但阈值全超
+				log.info(
+					'Dynamic policy: in scope but thresholds exceeded — falling through to confirm',
+				);
+			} else {
+				log.info(
+					'Dynamic policy: not in scope — falling through to confirm (scope=%s)',
+					_config.dynamicPolicy.scope,
+				);
+			}
+		}
+
+		// 需确认
+		results.push({ cmd: sub, dangerous: true, pass: false, dim: null });
+	}
+
+	// 无危险子命令 → 直接放行
+	if (!anyDangerous) {
+		log.debug('No dangerous sub-commands in: %s', fullCommand.slice(0, 80));
 		return undefined;
 	}
 
-	log.debug('Dangerous command detected: %s', command.slice(0, 80));
+	// 收集需确认的条目
+	const needsConfirm = results.filter((r) => r.dangerous && !r.pass);
 
-	const toolName = extractToolName(command);
-	const targetDir = extractTargetDir(command, ctx.cwd);
+	// 有需确认的条目
+	if (needsConfirm.length > 0) {
+		// No-UI 模式 → 全部 block
+		if (!ctx.hasUI) {
+			log.warn('Dangerous command blocked (no UI): %s', fullCommand.slice(0, 80));
+			for (const r of results) {
+				if (r.dangerous) {
+					appendBlockedRecord(ctx.cwd, {
+						ts: new Date().toISOString(),
+						cmd: r.cmd,
+						tool: extractToolName(r.cmd),
+						dir: extractTargetDir(r.cmd, ctx.cwd),
+						dim: null,
+						action: 'blocked',
+					});
+				}
+			}
+			return {
+				block: true,
+				reason: `Blocked -- no UI to confirm dangerous command.\n\`${summarizeCommand(fullCommand)}\``,
+			};
+		}
 
-	// 3. 动态策略检查
-	if (_config.dynamicPolicyEnabled) {
-		const scope = _config.dynamicPolicy.scope;
+		// 显示确认对话框 — 展示原始命令 + 拆解后的子命令
+		const subCmdList = results.map((r) => `  ${r.dangerous ? '⚠ ' : '  '}${r.cmd}`).join('\n');
+		const confirmMessage = `${fullCommand}\n\nSub-commands:\n${subCmdList}`;
+		const allowed = await showConfirmDestructive(ctx, '⚠  Dangerous Command', confirmMessage);
 
-		// 范围检查：cwd + 目标路径都在 scope 内
-		if (isInScope(command, ctx.cwd, scope)) {
-			const thresholdResult = checkThreshold(command, toolName, targetDir, _config, _counts);
+		if (allowed) {
+			log.info('User allowed: %s', fullCommand.slice(0, 80));
 
-			if (thresholdResult.pass) {
-				// Append approval record & update counts
+			// 逐条记录 confirmed（dim=null 表示用户手动确认，非阈值自动放行）
+			for (const r of results) {
+				if (!r.dangerous) continue;
 				appendRecord(
 					ctx.cwd,
 					{
 						ts: new Date().toISOString(),
-						cmd: command,
-						tool: toolName,
-						dir: targetDir,
-						dim: thresholdResult.dimension as 'sameCommand' | 'sameTool' | 'sameFolder',
-						action: 'auto',
+						cmd: r.cmd,
+						tool: extractToolName(r.cmd),
+						dir: extractTargetDir(r.cmd, ctx.cwd),
+						dim: null,
+						action: 'confirmed',
+						originalCommand: fullCommand,
+						subCommands,
 					},
 					_counts,
 				);
-
-				log.info('Auto-approved (%s): %s', thresholdResult.dimension, command.slice(0, 80));
-				// 添加提示到 command
-				event.input.command = `echo "✓ Auto-approved (${thresholdResult.dimension})"\n${command}`;
-				return undefined;
+				_totalRecords++;
 			}
-			// 在 scope 内但阈值全超 → 仍需确认
-			log.info(
-				'Dynamic policy: in scope but thresholds exceeded — falling through to confirm',
-			);
-		} else {
-			log.info('Dynamic policy: not in scope — falling through to confirm (scope=%s)', scope);
-		}
-	}
 
-	// 4. No-UI 模式
-	if (!ctx.hasUI) {
-		log.warn('Dangerous command blocked (no UI): %s', command.slice(0, 80));
-		// 记录 blocked
-		appendBlockedRecord(ctx.cwd, {
-			ts: new Date().toISOString(),
-			cmd: command,
-			tool: toolName,
-			dir: targetDir,
-			dim: null,
-			action: 'blocked',
-		});
+			event.input.command = `echo "✓ User approved"\n${fullCommand}`;
+			updateWidgetStatus(ctx);
+			return undefined;
+		}
+
+		// 用户拒绝
+		log.info('User blocked: %s', fullCommand.slice(0, 80));
+		for (const r of results) {
+			if (r.dangerous) {
+				appendBlockedRecord(ctx.cwd, {
+					ts: new Date().toISOString(),
+					cmd: r.cmd,
+					tool: extractToolName(r.cmd),
+					dir: extractTargetDir(r.cmd, ctx.cwd),
+					dim: null,
+					action: 'blocked',
+				});
+			}
+		}
 		return {
 			block: true,
-			reason: `Blocked -- no UI to confirm dangerous command.\n\`${summarizeCommand(command)}\``,
+			reason: `User declined dangerous command.\n\`${summarizeCommand(fullCommand)}\``,
 		};
 	}
 
-	// 5. 确认对话框
-	const summary = summarizeCommand(command);
-	const allowed = await showConfirmDestructive(ctx, '⚠️  Dangerous Command', command);
+	// 全部自动放行 → 逐条记录 auto
+	const autoDims = new Set<string>();
+	for (const r of results) {
+		if (!r.dangerous) continue;
 
-	if (allowed) {
-		log.info('User allowed: %s', command.slice(0, 80));
+		// graduated → dim=['sameCommand']; parallel check → dim 直接是数组
+		const recordDim: string[] | null =
+			r.dim === 'graduated' ? ['sameCommand'] : Array.isArray(r.dim) ? r.dim : null;
 
-		// Append approval record & update counts
 		appendRecord(
 			ctx.cwd,
 			{
 				ts: new Date().toISOString(),
-				cmd: command,
-				tool: toolName,
-				dir: targetDir,
-				dim: 'sameCommand',
-				action: 'confirmed',
+				cmd: r.cmd,
+				tool: extractToolName(r.cmd),
+				dir: extractTargetDir(r.cmd, ctx.cwd),
+				dim: recordDim,
+				action: 'auto',
+				originalCommand: fullCommand,
+				subCommands,
 			},
 			_counts,
 		);
-
-		event.input.command = `echo "✓ User approved: ${summary.replace(/"/g, '\\"')}"\n${command}`;
-		return undefined;
+		_totalRecords++;
+		if (r.dim && typeof r.dim === 'string') autoDims.add(r.dim);
+		else if (Array.isArray(r.dim)) r.dim.forEach((d) => autoDims.add(d));
 	}
 
-	log.info('User blocked: %s', command.slice(0, 80));
-	// 记录 blocked
-	appendBlockedRecord(ctx.cwd, {
-		ts: new Date().toISOString(),
-		cmd: command,
-		tool: toolName,
-		dir: targetDir,
-		dim: null,
-		action: 'blocked',
-	});
-	return {
-		block: true,
-		reason: `User declined dangerous command.\n\`${summary}\``,
-	};
+	const dimSummary = [...autoDims].join(',');
+	log.info('Auto-approved (%s): %s', dimSummary || 'graduated', fullCommand.slice(0, 80));
+	event.input.command = `echo "✓ Auto-approved (${dimSummary || 'graduated'})"\n${fullCommand}`;
+	updateWidgetStatus(ctx);
+	return undefined;
 }
 
 // ============================================================================
@@ -408,8 +519,7 @@ async function handlePermissionGateCommand(
 }
 
 /**
- * 使用 getStrategySummary 统一计算各维度策略总数。
- * 格式: "Cmd:5 - Tool:3 - Dir:7"
+ * 计算各维度策略总数的摘要字符串（用于 print 模式展示）。
  */
 function summarizeApprovalCounts(): string {
 	const summary = getStrategySummary(_counts, _config.dynamicPolicy.thresholds);
@@ -421,44 +531,70 @@ function summarizeApprovalCounts(): string {
 }
 
 /**
- * 计算各维度的策略总数和最佳进度，拼接为 widget 字符串。
- * 格式: "[cmd(n):1/2,tool(m):2/3,folder(l):3/4]"
- * n/m/l = 该维度 distinct 策略总数（来自 _counts）
- * 1/2 = 未达阈值的最佳计数 / 阈值
+ * 更新 status widget，使用 calcWidgetContentText 计算纯文本 + ANSI 着色。
+ *
+ * Dynamic ON 时，对最优进度（仅限活跃策略，不包含已沉淀的）着色。
  */
-function calcDynamicProgress(): string {
-	if (!_config.dynamicPolicyEnabled) return '';
+function updateWidgetStatus(ctx: ExtensionContext | ExtensionCommandContext): void {
+	if (!ctx.hasUI) return;
+	if (!_config.widget.show) {
+		ctx.ui.setStatus('permission-gate', '');
+		return;
+	}
 
-	const summary = getStrategySummary(_counts, _config.dynamicPolicy.thresholds);
-	const th = _config.dynamicPolicy.thresholds;
+	const th = ctx.ui.theme;
+	const text = calcWidgetContentText(
+		_config.enabled,
+		_config.dynamicPolicyEnabled,
+		_counts,
+		_config.dynamicPolicy.thresholds,
+		_totalRecords,
+	);
 
-	// 单次遍历：同时找 bestCmd/bestTool/bestFolder
-	let bestCmd = 0;
-	let bestTool = 0;
-	let bestFolder = 0;
-	for (const key of Object.keys(_counts)) {
-		const c = _counts[key] ?? 0;
-		if (key.startsWith('cmd:') && c < th.sameCommand && c > bestCmd) {
-			bestCmd = c;
-		} else if (key.startsWith('tool:') && c < th.sameTool && c > bestTool) {
-			bestTool = c;
-		} else if (key.startsWith('dir:') && c < th.sameFolder && c > bestFolder) {
-			bestFolder = c;
+	if (_config.widget.detailLevel === 'gate') {
+		// 仅显示 gate 级别（取第一个括号段）
+		const gateMatch = text.match(/^.*?\(\d+\[\d+\]\)/);
+		if (gateMatch) {
+			ctx.ui.setStatus('permission-gate', th.fg('accent', gateMatch[0]));
+			return;
 		}
 	}
 
-	const parts: string[] = [];
-	if (summary.cmd.total > 0) {
-		parts.push(`cmd(${summary.cmd.total}):${bestCmd}/${th.sameCommand}`);
-	}
-	if (summary.tool.total > 0) {
-		parts.push(`tool(${summary.tool.total}):${bestTool}/${th.sameTool}`);
-	}
-	if (summary.dir.total > 0) {
-		parts.push(`folder(${summary.dir.total}):${bestFolder}/${th.sameFolder}`);
+	// Gate OFF: 简洁着色
+	if (!_config.enabled) {
+		ctx.ui.setStatus('permission-gate', th.fg('dim', text));
+		return;
 	}
 
-	return parts.length > 0 ? `[${parts.join(',')}]` : '';
+	// Dynamic OFF: 整体着色
+	if (!_config.dynamicPolicyEnabled) {
+		ctx.ui.setStatus('permission-gate', th.fg('accent', text));
+		return;
+	}
+
+	// Dynamic ON: 对已达阈值的进度部分高亮
+	let colored = text;
+	const dims: { prefix: string }[] = [
+		{ prefix: 'cmd' },
+		{ prefix: 'tool' },
+		{ prefix: 'folder' },
+	];
+	for (const { prefix } of dims) {
+		const re = new RegExp(`${prefix}\\(\\d+\\[\\d+\\]\\):(\\d+)/(\\d+)`);
+		const m = text.match(re);
+		if (!m) continue;
+		const capped = parseInt(m[1], 10);
+		const threshold = parseInt(m[2], 10);
+		const atTh = capped >= threshold;
+		const fullMatch = m[0];
+		const coloredFull = fullMatch.replace(
+			`:${capped}/${threshold}`,
+			`:${th.fg(atTh ? 'warning' : 'accent', `${capped}/${threshold}`)}`,
+		);
+		colored = colored.replace(fullMatch, coloredFull);
+	}
+
+	ctx.ui.setStatus('permission-gate', th.fg('accent', colored));
 }
 
 async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
@@ -466,19 +602,19 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 		const items: SelectItem[] = [
 			{
 				value: '__toggle_gate',
-				label: `${_config.enabled ? '✅' : '❌'}  Permission Gate`,
+				label: `[${_config.enabled ? 'X' : ' '}]  Permission Gate`,
 				description: _config.enabled
 					? 'Enabled — commands are intercepted'
 					: 'Disabled — all commands pass through',
 			},
 			{
 				value: '__edit_patterns',
-				label: `📋  Intercepted Commands`,
+				label: '[Patterns]  Intercepted Commands',
 				description: `${_config.patterns.length} patterns configured`,
 			},
 			{
 				value: '__toggle_dynamic',
-				label: `${_config.dynamicPolicyEnabled ? '✅' : '❌'}  Dynamic Policy`,
+				label: `[${_config.dynamicPolicyEnabled ? 'X' : ' '}]  Dynamic Policy`,
 				description: _config.dynamicPolicyEnabled
 					? 'Enabled — auto-approve within thresholds'
 					: 'Disabled — always ask',
@@ -489,27 +625,42 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 		if (_config.dynamicPolicyEnabled) {
 			items.push({
 				value: '__edit_scope',
-				label: '📁  Scope',
+				label: '[Scope]',
 				description: `Folder: ${_config.dynamicPolicy.scope}`,
 			});
 			items.push({
 				value: '__edit_thresholds',
-				label: '📊  Thresholds',
+				label: '[Thresholds]',
 				description: `Cmd:${_config.dynamicPolicy.thresholds.sameCommand}  Tool:${_config.dynamicPolicy.thresholds.sameTool}  Folder:${_config.dynamicPolicy.thresholds.sameFolder}`,
 			});
 		}
 
 		items.push({
 			value: '__view_strategies',
-			label: `📊  Current Allowed  ${summarizeApprovalCounts()}`,
+			label: `[Strategies]  Current Allowed  ${summarizeApprovalCounts()}`,
 			description: 'View and manage strategies & history',
+		});
+
+		// Widget 控制选项
+		items.push({
+			value: '__toggle_widget_show',
+			label: `[Widget]  ${_config.widget.show ? 'Shown' : 'Hidden'}`,
+			description: 'Toggle widget display in status bar',
+		});
+		items.push({
+			value: '__toggle_widget_detail',
+			label: `[Widget Detail]  ${_config.widget.detailLevel === 'full' ? 'Full' : 'Gate Only'}`,
+			description:
+				_config.widget.detailLevel === 'full'
+					? 'Show gate + cmd/tool/folder details'
+					: 'Show gate summary only',
 		});
 
 		const selected = await makeCustomSelection(
 			ctx,
-			'⚙  Permission Gate Control Panel',
+			'Permission Gate Control Panel',
 			items,
-			'↑↓ navigate • enter select • esc close',
+			'up/down navigate  enter select  esc close',
 		);
 
 		if (!selected) {
@@ -526,16 +677,7 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 					`Permission Gate ${_config.enabled ? 'enabled' : 'disabled'}`,
 					_config.enabled ? 'info' : 'warning',
 				);
-				// 实时更新 TUI 状态图标
-				if (ctx.hasUI) {
-					ctx.ui.setStatus(
-						'permission-gate',
-						ctx.ui.theme.fg(
-							_config.enabled ? 'accent' : 'dim',
-							`[${_config.enabled ? '+' : '-'}] gate:${_config.enabled ? 'on' : 'off'}${calcDynamicProgress()}`,
-						),
-					);
-				}
+				updateWidgetStatus(ctx);
 				break;
 			}
 
@@ -551,16 +693,7 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 					`Dynamic Policy ${_config.dynamicPolicyEnabled ? 'enabled' : 'disabled'}`,
 					'info',
 				);
-				// 实时更新 TUI 进度
-				if (ctx.hasUI) {
-					ctx.ui.setStatus(
-						'permission-gate',
-						ctx.ui.theme.fg(
-							_config.enabled ? 'accent' : 'dim',
-							`[${_config.enabled ? '+' : '-'}] gate:${_config.enabled ? 'on' : 'off'}${calcDynamicProgress()}`,
-						),
-					);
-				}
+				updateWidgetStatus(ctx);
 				break;
 			}
 
@@ -571,7 +704,6 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 				);
 				if (newScopeVal === undefined || !newScopeVal.trim()) break;
 				const trimmedScope = newScopeVal.trim();
-				// 验证路径存在
 				const absScopePath = resolve(ctx.cwd, trimmedScope);
 				if (!existsSync(absScopePath)) {
 					ctx.ui.notify(`Path does not exist: ${trimmedScope}`, 'error');
@@ -595,23 +727,33 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 					_config.dynamicPolicy.thresholds,
 					(newCounts) => {
 						_counts = newCounts;
-						// 同步更新 widget
-						if (ctx.hasUI) {
-							ctx.ui.setStatus(
-								'permission-gate',
-								ctx.ui.theme.fg(
-									_config.enabled ? 'accent' : 'dim',
-									`[${_config.enabled ? '+' : '-'}] gate:${_config.enabled ? 'on' : 'off'}${calcDynamicProgress()}`,
-								),
-							);
-						}
+						updateWidgetStatus(ctx);
 					},
 				);
 				break;
 			}
 
+			case '__toggle_widget_show': {
+				_config.widget.show = !_config.widget.show;
+				saveConfig(ctx.cwd, _config, 'project');
+				ctx.ui.notify(`Widget ${_config.widget.show ? 'shown' : 'hidden'}`, 'info');
+				updateWidgetStatus(ctx);
+				break;
+			}
+
+			case '__toggle_widget_detail': {
+				_config.widget.detailLevel =
+					_config.widget.detailLevel === 'full' ? 'gate' : 'full';
+				saveConfig(ctx.cwd, _config, 'project');
+				ctx.ui.notify(
+					`Widget detail: ${_config.widget.detailLevel === 'full' ? 'Full' : 'Gate Only'}`,
+					'info',
+				);
+				updateWidgetStatus(ctx);
+				break;
+			}
+
 			default:
-				// 未知选项，忽略
 				break;
 		}
 	}
@@ -668,14 +810,14 @@ async function editPatternsMenu(ctx: ExtensionCommandContext): Promise<void> {
 		}));
 
 		// 添加操作选项
-		items.push({ value: '__add_pattern', label: '➕ Add custom pattern' });
-		items.push({ value: '__back', label: '↩ Back to main menu' });
+		items.push({ value: '__add_pattern', label: '[Add] Add custom pattern' });
+		items.push({ value: '__back', label: '[Back] Back to main menu' });
 
 		const selected = await makeCustomSelection(
 			ctx,
-			'📋 Intercepted Commands',
+			'Intercepted Commands',
 			items,
-			'↑↓ navigate • enter to remove • esc back',
+			'up/down navigate  enter to remove  esc back',
 		);
 
 		if (!selected || selected === '__back') return;
@@ -727,31 +869,31 @@ async function editThresholdsMenu(ctx: ExtensionCommandContext): Promise<void> {
 		const items: SelectItem[] = [
 			{
 				value: '__threshold_sameCommand',
-				label: `📝  Same Command Threshold`,
+				label: `[sameCommand]  Same Command Threshold`,
 				description: `Current: ${_config.dynamicPolicy.thresholds.sameCommand}`,
 			},
 			{
 				value: '__threshold_sameTool',
-				label: `🔧  Same Tool Threshold`,
+				label: `[sameTool]  Same Tool Threshold`,
 				description: `Current: ${_config.dynamicPolicy.thresholds.sameTool}`,
 			},
 			{
 				value: '__threshold_sameFolder',
-				label: `📁  Same Folder Threshold`,
+				label: `[sameFolder]  Same Folder Threshold`,
 				description: `Current: ${_config.dynamicPolicy.thresholds.sameFolder}`,
 			},
 			{
 				value: '__back',
-				label: '↩ Back',
+				label: '[Back] Back',
 				description: 'Return to main menu',
 			},
 		];
 
 		const selected = await makeCustomSelection(
 			ctx,
-			'📊 Threshold Configuration',
+			'Threshold Configuration',
 			items,
-			'↑↓ navigate • enter select • esc back',
+			'up/down navigate  enter select  esc back',
 		);
 
 		if (!selected || selected === '__back') return;
@@ -798,6 +940,7 @@ export default function permissionGateExtension(pi: ExtensionAPI) {
 		if (flagDisabled) {
 			log.info('Permission gate disabled via --no-permission-gate flag');
 			_config = { ...getDefaultConfig(), enabled: false };
+			updateWidgetStatus(ctx);
 			if (ctx.hasUI) {
 				ctx.ui.notify('Permission Gate disabled via --no-permission-gate', 'warning');
 			}
@@ -815,17 +958,9 @@ export default function permissionGateExtension(pi: ExtensionAPI) {
 		// Load approval records & migrate legacy counts (if any)
 		const result = loadRecords(ctx.cwd);
 		_counts = result.counts;
+		_totalRecords = countNonBlockedEntries(result.entries);
 
-		// Set status widget
-		if (ctx.hasUI) {
-			ctx.ui.setStatus(
-				'permission-gate',
-				ctx.ui.theme.fg(
-					_config.enabled ? 'accent' : 'dim',
-					`[${_config.enabled ? '+' : '-'}] gate:${_config.enabled ? 'on' : 'off'}${calcDynamicProgress()}`,
-				),
-			);
-		}
+		updateWidgetStatus(ctx);
 	});
 
 	// 3. Register /permission-gate command
