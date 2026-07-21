@@ -49,6 +49,7 @@ profiles:
             - pi-tmux-status # tmux 状态通知
             # ── 验证/评估 ──
             - review # /review 代码审查
+            - test-analysis # /test-analysis 测试覆盖分析
             # ── TUI 交互 ──
             - questionnaire # 统一问答工具
             - files # 文件浏览器
@@ -100,6 +101,7 @@ profiles:
                 - auto-stage-on-exit
                 - pi-tmux-status
                 - review
+                - test-analysis
                 - questionnaire
                 - files
                 - session-breakdown
@@ -122,6 +124,7 @@ profiles:
                 - catch-the-fox # 演示性质、趣味
                 - split-fork # 目前仅支持Ghostty，按需介入
                 - smart-context # 智能模型路由，单一模型时不需要
+                - worktree # 存在问题，待观察
 
             skills: []
             prompts: []
