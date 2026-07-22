@@ -1,667 +1,598 @@
 /**
- * pi-worktree — 命令处理器（/worktree create / delete / clean / use / list 等）
+ * pi-worktree — 命令处理器
  */
 import { createLogger } from '@zenone/pi-logger';
-import { basename, join } from 'node:path';
+import { basename } from 'node:path';
 import { spawnSync, spawn, execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { getDefaultBranch, getCurrentBranch, bumpPackageVersion } from './git.js';
+import { getCurrentBranch } from './git.js';
 import {
 	createWorktree,
 	removeWorktree,
 	deleteWorktreeBranch,
-	getExistingWorktrees,
-	findMergedWorktrees,
 	pickAvailableName,
+	findMergedWorktrees,
 } from './worktree.js';
-import { WORKTREES_DIR } from './setup.js';
 import {
-	registerWidget,
+	getManagedWorktrees,
+	getWorktreePath,
+	getRepoRoot,
+	isWorktreeCwd,
+	getNameFromCwd,
+} from './paths.js';
+import {
+	showWorktreeTui,
+	askSessionStrategy,
+	askNodeModulesStrategy,
+	promptWorktreeName,
 	confirmDelete,
 	confirmForceDelete,
-	promptWorktreeName,
-	confirmDirtyStart,
+	askBranchDelete,
 } from './ui.js';
+import {
+	switchToSession,
+	findExistingSession,
+	createSession,
+	cloneSession,
+	hasClonedSession,
+	findClonedSessionFile,
+} from './session.js';
+import { getLastNodeModulesStrategy } from '../state.js';
 
 const log = createLogger('pi-worktree');
-import {
-	activeWorktree,
-	activeWorktreePaths,
-	setActiveWorktree,
-	clearActiveWorktree,
-	addWorktreePath,
-	setWorktreeMode,
-	setWidgetHidden,
-	worktreeMode,
-	widgetHidden,
-	saveState,
-	invalidateRepoCache,
-} from '../state.js';
 
 // ═══════════════════════════════════════════
-// create
+// 入参解析
+// ═══════════════════════════════════════════
 
-function checkDirty(repo: string): string[] {
-	try {
-		const out = execSync('git status --porcelain', {
-			cwd: repo,
-			encoding: 'utf-8',
-			maxBuffer: 64 * 1024,
-		});
-		return out.trim().split('\n').filter(Boolean);
-	} catch {
-		return [];
+function parseArgs(input: string): { command: string; flags: Record<string, string> } {
+	const parts = input.trim().split(/\s+/);
+	const command = parts[0] || 'help';
+	const flags: Record<string, string> = {};
+	const extraPositional: string[] = [];
+	for (let i = 1; i < parts.length; i++) {
+		if (parts[i].startsWith('--')) {
+			const key = parts[i].slice(2);
+			flags[key] = parts[i + 1] && !parts[i + 1].startsWith('--') ? parts[++i] : '';
+		} else if (!flags._positional) {
+			flags._positional = parts[i];
+		} else {
+			extraPositional.push(parts[i]);
+		}
 	}
+	if (extraPositional.length > 0) {
+		flags._extraPositional = extraPositional.join(',');
+	}
+	return { command, flags };
 }
 
-export async function handleCreate(
-	repos: string[],
-	flags: Record<string, string>,
-	ctx: any,
-	sessionId: string,
-): Promise<void> {
-	let targetRepos: string[] = [];
-	if (flags.repos) {
-		const selected = new Set(flags.repos.split(',').map((r) => r.trim()));
-		targetRepos = repos.filter((r) => selected.has(basename(r)));
-	} else if (ctx.hasUI) {
-		const repoNames = repos.map((r) => basename(r));
-		const picked = await (ctx.ui.custom as <T>(...args: any[]) => Promise<T>)<string[]>(
-			(tui: any, theme: any, _keybindings: any, done: (v: any[]) => void) => {
-				const selected = new Set<number>();
-				let cursor = 0;
-				let filter = '';
-				const getFiltered = () =>
-					!filter
-						? repoNames.map((_, i) => i)
-						: repoNames.reduce<number[]>((acc, n, i) => {
-								if (n.toLowerCase().includes(filter.toLowerCase())) acc.push(i);
-								return acc;
-							}, []);
-				return {
-					render(_w: number): string[] {
-						const lines: string[] = [];
-						lines.push(
-							theme.bold(
-								' Select repos (space=toggle, enter=confirm, esc=cancel, type to filter)',
-							),
-						);
-						lines.push(
-							` ${theme.fg('accent', '\u276F')} ${filter || theme.fg('dim', 'type to filter...')}`,
-						);
-						lines.push('');
-						const visible = getFiltered();
-						for (let vi = 0; vi < visible.length; vi++) {
-							const i = visible[vi];
-							lines.push(
-								`${vi === cursor ? theme.fg('accent', '\u276F ') : '  '}${selected.has(i) ? theme.fg('accent', '\u25CF') : '\u25CB'} ${repoNames[i]}`,
-							);
-						}
-						lines.push('', theme.fg('dim', ` ${selected.size} selected`));
-						return lines;
-					},
-					handleInput(data: string): void {
-						const visible = getFiltered();
-						if (data === '\x1B[A') cursor = Math.max(0, cursor - 1);
-						else if (data === '\x1B[B')
-							cursor = Math.min(visible.length - 1, cursor + 1);
-						else if (data === ' ') {
-							const i = visible[cursor];
-							if (i !== undefined) {
-								selected.has(i) ? selected.delete(i) : selected.add(i);
-							}
-						} else if (data === '\r' || data === '\n') {
-							done([...selected].map((i) => repos[i]));
-							return;
-						} else if (data === '\x1B' || data === '\x03') {
-							done([]);
-							return;
-						} else if (data === '\x7F' || data === '\b') {
-							filter = filter.slice(0, -1);
-							cursor = 0;
-						} else if (data.length === 1 && data >= ' ') {
-							filter += data;
-							cursor = 0;
-						}
-						tui.requestRender();
-					},
-					invalidate(): void {},
-				};
-			},
-			{
-				overlay: true,
-				overlayOptions: { anchor: 'bottom-center', width: '100%', maxHeight: '85%' },
-			},
-		);
-		if (!picked || picked.length === 0) {
-			ctx.ui.notify('Cancelled', 'warning');
-			return;
-		}
-		targetRepos = picked;
-	} else {
-		targetRepos = repos;
-	}
+// ═══════════════════════════════════════════
+// 命令配置
+// ═══════════════════════════════════════════
 
-	if (targetRepos.length === 0) {
-		ctx.ui.notify('No repos selected', 'warning');
+export const COMMANDS = [
+	'create [--name <n>] [--branch <b>]',
+	'use <name>  or  main',
+	'list',
+	'delete <name>',
+	'merge [--source <n>] [--target <b>]',
+	'clean [--dry-run]',
+	'shell',
+];
+
+export function formatHelp(): string {
+	return [
+		'Usage: /worktree <command> [options]',
+		'',
+		'Commands:',
+		...COMMANDS.map((c) => `  ${c}`),
+		'',
+		'  (no args)  open interactive switcher panel',
+		'',
+		'Names are auto-assigned from zodiac+star pool (e.g. Aries-Hamal).',
+		'Worktrees created outside the repo in <repo>-worktrees/ directory.',
+	].join('\n');
+}
+
+// ═══════════════════════════════════════════
+// 获取当前身份
+// ═══════════════════════════════════════════
+
+export interface RepoContext {
+	repoRoot: string;
+	currentName: string | null; // null = main, string = worktree name
+	isWorktree: boolean;
+	errorMsg: string;
+}
+
+export function getRepoContext(cwd: string): RepoContext {
+	const repoRoot = getRepoRoot(cwd);
+	if (!repoRoot) {
+		return {
+			repoRoot: '',
+			currentName: null,
+			isWorktree: false,
+			errorMsg: 'Not inside a git repository.',
+		};
+	}
+	if (isWorktreeCwd(cwd, repoRoot)) {
+		const name = getNameFromCwd(cwd, repoRoot);
+		return {
+			repoRoot,
+			currentName: name,
+			isWorktree: true,
+			errorMsg: '',
+		};
+	}
+	return {
+		repoRoot,
+		currentName: null,
+		isWorktree: false,
+		errorMsg: '',
+	};
+}
+
+// ═══════════════════════════════════════════
+// 主调度
+// ═══════════════════════════════════════════
+
+export async function handleWorktreeCommand(
+	args: string,
+	ctx: any,
+	_sessionId?: string,
+): Promise<void> {
+	const { command, flags } = parseArgs(args);
+	const repoRoot = getRepoRoot(ctx.cwd);
+
+	if (!repoRoot) {
+		ctx.ui.notify('Not inside a git repository.', 'error');
 		return;
 	}
 
-	// dirty 检查：有未提交更改则确认
-	for (const repo of targetRepos) {
-		const dirty = checkDirty(repo);
-		if (dirty.length > 0) {
-			const ok = await confirmDirtyStart(ctx, basename(repo), dirty);
-			if (!ok) {
-				ctx.ui.notify('Cancelled — commit or stash changes first', 'warning');
-				return;
-			}
+	// 无参数：显示切换器面板
+	if (command === 'help' || command === '') {
+		if (!ctx.hasUI) {
+			ctx.ui.notify(formatHelp(), 'info');
+			return;
 		}
+		await handlePanel(repoRoot, ctx);
+		return;
 	}
 
-	// 名字：优先 flags.name，其次 TUI 交互，取不到用自动生成
-	let name: string | undefined = flags.name;
+	switch (command) {
+		case 'create':
+			await handleCreate(repoRoot, flags, ctx);
+			break;
+		case 'use':
+			await handleUse(repoRoot, flags, ctx);
+			break;
+		case 'list':
+			handleList(repoRoot, ctx);
+			break;
+		case 'delete':
+			await handleDelete(repoRoot, flags, ctx);
+			break;
+		case 'merge':
+			await handleMerge(repoRoot, flags, ctx);
+			break;
+		case 'clean':
+			await handleClean(repoRoot, flags, ctx);
+			break;
+		case 'shell':
+			handleShell(repoRoot, ctx);
+			break;
+		default:
+			ctx.ui.notify(formatHelp(), 'info');
+	}
+
+	// 多余位置参数警告
+	if (flags._extraPositional) {
+		ctx.ui.notify(
+			`Warning: unexpected extra arguments: ${flags._extraPositional}. Only one positional argument is supported.`,
+			'warning',
+		);
+	}
+}
+
+// ═══════════════════════════════════════════
+// 工具函数
+
+function _getCurrentName(repoRoot: string, cwd: string): string | null {
+	if (isWorktreeCwd(cwd, repoRoot)) return getNameFromCwd(cwd, repoRoot);
+	return null;
+}
+
+/**
+ * 脏文件预览文本（用于 force 删除弹窗）。
+ * 在目标 worktree 目录运行 git status，显示真实脏文件。
+ */
+function _dirtyPreview(worktreePath: string): string {
+	try {
+		const out = execSync('git status --porcelain', {
+			cwd: worktreePath,
+			encoding: 'utf-8',
+		});
+		return out.trim() || 'clean';
+	} catch {
+		return '(unknown)';
+	}
+}
+
+/**
+ * 对主仓库运行 git status（备用，当 worktree 目录不可访问时使用）。
+ */
+// 面板
+// ═══════════════════════════════════════════
+
+async function handlePanel(repoRoot: string, ctx: any): Promise<void> {
+	const currentName = _getCurrentName(repoRoot, ctx.cwd);
+	const worktrees = getManagedWorktrees(repoRoot);
+	const result = await showWorktreeTui(ctx, worktrees, currentName, '', repoRoot);
+
+	switch (result.action) {
+		case 'switch':
+			if (result.target) {
+				await handleUse(repoRoot, { _positional: result.target }, ctx);
+			}
+			break;
+		case 'fork':
+			await handleFork(repoRoot, result.target || 'main', ctx);
+			break;
+		case 'create':
+			await handleCreate(repoRoot, {}, ctx);
+			break;
+		case 'delete':
+			if (result.target) {
+				await handleDelete(repoRoot, { _positional: result.target }, ctx);
+			}
+			break;
+		case 'merge':
+			await handleMerge(repoRoot, {}, ctx);
+			break;
+		case 'shell':
+			handleShell(repoRoot, ctx);
+			break;
+		case 'quit':
+			break;
+	}
+}
+
+// ═══════════════════════════════════════════
+// create
+// ═══════════════════════════════════════════
+
+async function handleCreate(
+	repoRoot: string,
+	flags: Record<string, string>,
+	ctx: any,
+): Promise<void> {
+	// 1. 名称
+	let name: string | undefined = flags.name || flags._positional;
 	if (!name && ctx.hasUI) {
 		const input = await promptWorktreeName(ctx);
 		if (input === null) {
 			ctx.ui.notify('Cancelled', 'warning');
 			return;
 		}
-		if (input !== '') name = input;
+		if (input) name = input;
 	}
-	if (!name) name = pickAvailableName(targetRepos[0]);
+	if (!name) name = pickAvailableName(repoRoot);
 
-	log.info('creating worktree', { name, repos: targetRepos.map((b) => basename(b)) });
-	const results: string[] = [];
-	clearActiveWorktree();
-
-	for (const repo of targetRepos) {
-		const result = createWorktree(repo, name, flags.branch);
-		results.push(result.ok ? `\u2713 ${result.message}` : `\u2717 ${result.message}`);
-		if (result.ok)
-			addWorktreePath(basename(repo), result.path || join(repo, WORKTREES_DIR, name));
+	// 2. node_modules 策略
+	const lastStrat = getLastNodeModulesStrategy();
+	const nodeModulesStrategy = await askNodeModulesStrategy(ctx, lastStrat);
+	if (nodeModulesStrategy === null) {
+		ctx.ui.notify('Cancelled', 'warning');
+		return;
 	}
 
-	if (activeWorktreePaths.size > 0) {
-		setActiveWorktree(name);
-		registerWidget(ctx, { v: false });
-		saveState(ctx.cwd, sessionId);
-		invalidateRepoCache();
+	log.info('creating worktree', { name, nodeModulesStrategy });
+
+	// 3. 创建
+	const result = createWorktree(repoRoot, name, flags.branch, nodeModulesStrategy);
+	if (!result.ok) {
+		ctx.ui.notify(result.message, 'error');
+		return;
 	}
-	ctx.ui.notify(results.join('\n'), 'info');
+
+	ctx.ui.notify(result.message, 'info');
+
+	// 4. 自动切换
+	const targetDir = result.path!;
+	_switchWithCreate(repoRoot, name, targetDir, ctx);
+}
+
+async function _switchWithCreate(
+	repoRoot: string,
+	name: string,
+	targetDir: string,
+	ctx: any,
+): Promise<void> {
+	// 切换到新 worktree — 询问策略
+	const wtDir = targetDir;
+	const sessionFile = findExistingSession(wtDir, repoRoot, name);
+	const hasHistory = !!sessionFile;
+	const strategy = await askSessionStrategy(ctx, name, hasHistory);
+
+	if (strategy === 'cancel') return;
+
+	if (strategy === 'resume' && sessionFile) {
+		await switchToSession(ctx, wtDir, sessionFile);
+	} else {
+		// 新开会话
+		const newSessionFile = createSession(wtDir, repoRoot, name);
+		await switchToSession(ctx, wtDir, newSessionFile);
+	}
+}
+
+// ═══════════════════════════════════════════
+// use（切换）
+// ═══════════════════════════════════════════
+
+async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: any): Promise<void> {
+	const target = flags._positional || flags.name;
+	if (!target) {
+		ctx.ui.notify('Usage: /worktree use <name> or use main', 'warning');
+		return;
+	}
+
+	const isMain = target === 'main';
+	const targetCwd = isMain ? repoRoot : getWorktreePath(repoRoot, target);
+
+	if (!existsSync(targetCwd)) {
+		ctx.ui.notify(
+			isMain ? 'Main repo root not found.' : `Worktree '${target}' not found at ${targetCwd}`,
+			'error',
+		);
+		return;
+	}
+
+	// 验证 git 有效性
+	const repoOfTarget = getRepoRoot(targetCwd);
+	if (!repoOfTarget) {
+		ctx.ui.notify(
+			`${isMain ? 'Main repo' : `Worktree '${target}'`} is not a valid git repository.`,
+			'error',
+		);
+		return;
+	}
+
+	// 询问操作策略
+	const sessionFile = findExistingSession(targetCwd, repoRoot, target);
+	const hasHistory = !!sessionFile;
+	const strategy = await askSessionStrategy(ctx, target, hasHistory);
+
+	if (strategy === 'cancel') return;
+
+	// 策略1：仅 checkout 分支，不切换 session
+	// 仅对 main 目标有效——worktree 分支已被对应目录占用，git 禁止重复 checkout
+	if (strategy === 'checkout') {
+		const currentBranch = getCurrentBranch(repoRoot);
+		if (currentBranch === 'main') {
+			ctx.ui.notify('Already on branch main', 'info');
+			return;
+		}
+		try {
+			execSync('git checkout main', { cwd: repoRoot, encoding: 'utf-8' });
+			ctx.ui.notify("Switched to branch 'main'", 'success');
+		} catch (err: any) {
+			ctx.ui.notify(`Checkout failed: ${err.stderr?.trim() || err.message}`, 'error');
+		}
+		return;
+	}
+
+	// 策略2-4：切换 session
+	let fileToUse: string;
+	if (strategy === 'resume' && sessionFile) {
+		fileToUse = sessionFile;
+	} else if (strategy === 'clone') {
+		// clone 当前会话到 worktree 目录
+		const sourceFile: string | undefined = ctx.sessionManager?.getSessionFile?.();
+		if (!sourceFile || !existsSync(sourceFile)) {
+			ctx.ui.notify('No active session file to clone from.', 'error');
+			return;
+		}
+		// 检查是否已有 clone 版本
+		const existingClone = hasClonedSession(targetCwd, repoRoot);
+		if (existingClone) {
+			// 已有 clone, 询问是否覆盖
+			try {
+				const overwrite = await ctx.ui.confirm?.(
+					`Worktree '${target}' already has a cloned session from this project.\n` +
+						'Overwrite with current session? [Y] Yes [N] Keep existing [Esc] Cancel',
+				);
+				if (overwrite === false) {
+					// 保留现有 clone 会话
+					const existingFile = findClonedSessionFile(targetCwd, repoRoot);
+					if (existingFile) {
+						await switchToSession(ctx, targetCwd, existingFile);
+					} else {
+						ctx.ui.notify(
+							'Found clone meta but no session file. Creating new session.',
+							'warning',
+						);
+						fileToUse = createSession(targetCwd, repoRoot, target);
+						await switchToSession(ctx, targetCwd, fileToUse);
+					}
+					return;
+				}
+				if (overwrite === undefined) return; // 取消
+			} catch {
+				/* ui.confirm 不支持 */
+			}
+		}
+		fileToUse = cloneSession(sourceFile, targetCwd);
+	} else {
+		fileToUse = createSession(targetCwd, repoRoot, target);
+	}
+
+	log.info('switching', { target, cwd: targetCwd, sessionFile: fileToUse });
+	await switchToSession(ctx, targetCwd, fileToUse);
+}
+
+// ═══════════════════════════════════════════
+// fork（携带上下文切换）
+// ═══════════════════════════════════════════
+
+async function handleFork(repoRoot: string, target: string, ctx: any): Promise<void> {
+	const isMain = target === 'main';
+	const targetCwd = isMain ? repoRoot : getWorktreePath(repoRoot, target);
+
+	if (!existsSync(targetCwd)) {
+		ctx.ui.notify(
+			isMain ? 'Main repo root not found.' : `Worktree '${target}' not found.`,
+			'error',
+		);
+		return;
+	}
+
+	log.info('fork switching', { target, cwd: targetCwd });
+
+	// 克隆当前会话到目标 worktree
+	const sourceFile: string | undefined = ctx.sessionManager?.getSessionFile?.();
+	if (!sourceFile || !existsSync(sourceFile)) {
+		ctx.ui.notify('No active session to clone from. Creating new session.', 'warning');
+		const sessionFile = createSession(targetCwd, repoRoot, target);
+		await switchToSession(ctx, targetCwd, sessionFile);
+		return;
+	}
+
+	const sessionFile = cloneSession(sourceFile, targetCwd);
+	await switchToSession(ctx, targetCwd, sessionFile);
 }
 
 // ═══════════════════════════════════════════
 // list
 // ═══════════════════════════════════════════
-export function handleList(repos: string[], flags: Record<string, string>, ctx: any): void {
-	const selectedRepos = flags.repos
-		? repos.filter((r) => new Set(flags.repos.split(',').map((s) => s.trim())).has(basename(r)))
-		: repos;
-	const lines: string[] = [];
-	for (const repo of selectedRepos) {
-		const worktrees = getExistingWorktrees(repo);
-		if (worktrees.length === 0) continue;
-		lines.push(`${basename(repo)}:`);
-		for (const wt of worktrees) lines.push(`  ${wt.name} \u2192 ${wt.branch}`);
-	}
-	ctx.ui.notify(lines.length > 0 ? lines.join('\n') : 'No worktrees found', 'info');
-}
 
-// ═══════════════════════════════════════════
-// use
-// ═══════════════════════════════════════════
-export function handleUse(
-	repos: string[],
-	flags: Record<string, string>,
-	ctx: any,
-	sessionId: string,
-): void {
-	const name = flags._positional || flags.name;
-	if (!name) {
-		ctx.ui.notify('Usage: /worktree use <name>', 'warning');
+function handleList(repoRoot: string, ctx: any): void {
+	const wts = getManagedWorktrees(repoRoot);
+	if (wts.length === 0) {
+		ctx.ui.notify('No managed worktrees.', 'info');
 		return;
 	}
-
-	const selectedRepos = flags.repos
-		? repos.filter((r) => new Set(flags.repos.split(',').map((s) => s.trim())).has(basename(r)))
-		: repos;
-	clearActiveWorktree();
-
-	for (const repo of selectedRepos) {
-		const wtPath = join(repo, WORKTREES_DIR, name);
-		if (existsSync(wtPath) && existsSync(join(wtPath, '.git')))
-			addWorktreePath(basename(repo), wtPath);
-	}
-
-	if (activeWorktreePaths.size === 0) {
-		ctx.ui.notify(`Worktree '${name}' not found in any repo`, 'warning');
-		return;
-	}
-	setActiveWorktree(name);
-	log.info('switched worktree', { name });
-	registerWidget(ctx, { v: false });
-	saveState(ctx.cwd, sessionId);
-	ctx.ui.notify(`Activated worktree '${name}' (${activeWorktreePaths.size} repos)`, 'info');
-}
-
-// ═══════════════════════════════════════════
-// stop
-// ═══════════════════════════════════════════
-export function handleStop(ctx: any, sessionId: string): void {
-	if (!activeWorktree) {
-		ctx.ui.notify('No active worktree', 'warning');
-		return;
-	}
-	const prev = activeWorktree;
-	clearActiveWorktree();
-	log.info('stopped worktree', { prev: activeWorktree });
-	registerWidget(ctx, { v: false });
-	saveState(ctx.cwd, sessionId);
-	ctx.ui.notify(`Deactivated worktree '${prev}'`, 'info');
-}
-
-// ═══════════════════════════════════════════
-// mode / widget
-// ═══════════════════════════════════════════
-export function handleMode(ctx: any, sessionId: string, flags: Record<string, string>): void {
-	const value = flags._positional?.toLowerCase();
-	if (value === 'on') setWorktreeMode(true);
-	else if (value === 'off') {
-		setWorktreeMode(false);
-		clearActiveWorktree();
-		registerWidget(ctx, { v: false });
-	} else setWorktreeMode(!worktreeMode);
-	ctx.ui.notify(`Worktree mode: ${worktreeMode ? 'ON' : 'OFF'}`, 'info');
-	saveState(ctx.cwd, sessionId);
-}
-
-export function handleWidget(ctx: any, sessionId: string, flags: Record<string, string>): void {
-	const value = flags._positional?.toLowerCase();
-	if (value === 'on' || value === 'show') setWidgetHidden(false);
-	else if (value === 'off' || value === 'hide') setWidgetHidden(true);
-	else setWidgetHidden(!widgetHidden);
-	registerWidget(ctx, { v: false });
-	saveState(ctx.cwd, sessionId);
-	ctx.ui.notify(`Worktree widget: ${widgetHidden ? 'hidden' : 'visible'}`, 'info');
-}
-
-// ═══════════════════════════════════════════
-// shell
-// ═══════════════════════════════════════════
-export function handleShell(ctx: any): void {
-	if (!activeWorktree || activeWorktreePaths.size === 0) {
-		ctx.ui.notify('No active worktree. Use /worktree use <name> first.', 'warning');
-		return;
-	}
-
-	const inHerdr = !!process.env.HERDR_ENV || !!process.env.HERDR_PANE_ID;
-	const inTmux = !!process.env.TMUX;
-	const inWarp =
-		process.env.TERM_PROGRAM === 'WarpTerminal' || !!process.env.WARP_IS_LOCAL_SHELL_SESSION;
-
-	if (!inHerdr && !inTmux && !inWarp) {
-		ctx.ui.notify('shell requires Herdr, tmux, or Warp Terminal.', 'error');
-		return;
-	}
-
-	const paths = [...activeWorktreePaths.values()];
-
-	if (inHerdr) {
-		let sourcePane = process.env.HERDR_PANE_ID;
-		for (let i = 0; i < paths.length; i++) {
-			const args = [
-				'pane',
-				'split',
-				'--direction',
-				i === 0 ? 'right' : 'down',
-				'--cwd',
-				paths[i],
-				'--no-focus',
-			];
-			if (sourcePane) args.splice(2, 0, sourcePane);
-			const result = spawnSync('herdr', args, { encoding: 'utf-8' });
-			if (result.status !== 0) {
-				ctx.ui.notify(
-					`herdr pane split failed: ${result.stderr?.trim() || result.error?.message || 'unknown error'}`,
-					'error',
-				);
-				return;
-			}
-			if (i > 0) {
-				try {
-					const parsed = JSON.parse(result.stdout || '');
-					const np = parsed?.result?.pane?.pane_id;
-					if (np) sourcePane = np;
-				} catch {
-					/* ignore */
-				}
-			}
-		}
-	} else if (inTmux) {
-		paths.forEach((p, i) =>
-			spawn(
-				'tmux',
-				i === 0 ? ['split-window', '-h', '-c', p] : ['split-window', '-v', '-c', p],
-				{ stdio: 'ignore' },
-			),
-		);
-	} else {
-		const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
-		paths.forEach((p) =>
-			spawn(opener, [`warp://action/new_tab?path=${encodeURIComponent(p)}`], {
-				detached: true,
-				stdio: 'ignore',
-			}).unref(),
-		);
-	}
-
-	ctx.ui.notify(
-		`Opened shell in: ${[...activeWorktreePaths.keys()].slice(0, paths.length).join(', ')}`,
-		'info',
-	);
+	const lines = wts.map((wt) => `  ${wt.name} -> ${wt.branch}`);
+	ctx.ui.notify(`Worktrees:\n${lines.join('\n')}`, 'info');
 }
 
 // ═══════════════════════════════════════════
 // delete
 // ═══════════════════════════════════════════
-export async function handleDelete(
-	repos: string[],
+
+async function handleDelete(
+	repoRoot: string,
 	flags: Record<string, string>,
 	ctx: any,
-	sessionId: string,
 ): Promise<void> {
 	const name = flags._positional || flags.name;
 	if (!name) {
-		ctx.ui.notify('Usage: /worktree delete <name> [--repos repo1,repo2]', 'warning');
+		ctx.ui.notify('Usage: /worktree delete <name>', 'warning');
 		return;
 	}
 
+	const currentName = _getCurrentName(repoRoot, ctx.cwd);
+	const isCurrent = currentName === name;
+
+	// 先确认
 	const confirmed = await confirmDelete(ctx, name);
 	if (!confirmed) {
-		ctx.ui.notify('Delete cancelled', 'info');
+		ctx.ui.notify('Cancelled', 'info');
 		return;
 	}
 
-	const selectedRepos = flags.repos
-		? repos.filter((r) => new Set(flags.repos.split(',').map((s) => s.trim())).has(basename(r)))
-		: repos;
-	const results: string[] = [];
-	const deleteRemote = flags.remote || 'origin';
+	// 如果是当前 worktree，先切回 main
+	if (isCurrent) {
+		ctx.ui.notify(`Currently in worktree "${name}". Switching to main first...`, 'info');
+		const mainSessionFile = createSession(repoRoot, repoRoot, 'main');
+		await switchToSession(ctx, repoRoot, mainSessionFile);
+	}
 
-	for (const repo of selectedRepos) {
-		if (!existsSync(join(repo, WORKTREES_DIR, name))) continue;
+	// 尝试安全删除
+	let result = removeWorktree(repoRoot, name);
 
-		// 先尝试安全删除
-		let result = removeWorktree(repo, name);
-		let forceUsed = false;
-
-		// 检测到脏文件——弹窗询问是否强制删除
-		if (
-			!result.ok &&
-			(result.message.includes('modified') ||
-				result.message.includes('untracked') ||
-				result.message.includes('contains'))
-		) {
-			const forceOk = await confirmForceDelete(ctx, name, repo);
-			if (forceOk) {
-				result = removeWorktree(repo, name, true);
-				forceUsed = true;
-			}
-		}
-
-		results.push(
-			result.ok
-				? `\u2713 ${result.message}${forceUsed ? ' (--force)' : ''}`
-				: `\u2717 ${result.message}`,
-		);
-		if (result.ok) {
-			const branchMsgs = deleteWorktreeBranch(repo, name, deleteRemote);
-			results.push(...branchMsgs.map((m) => `  ${m}`));
+	// 脏文件？
+	if (
+		!result.ok &&
+		(result.message.includes('modified') ||
+			result.message.includes('untracked') ||
+			result.message.includes('contains'))
+	) {
+		const preview = _dirtyPreview(getWorktreePath(repoRoot, name));
+		const forceOk = await confirmForceDelete(ctx, name, preview);
+		if (forceOk) {
+			result = removeWorktree(repoRoot, name, true);
+		} else {
+			ctx.ui.notify(result.message, 'error');
+			return;
 		}
 	}
 
-	if (results.length === 0) {
-		ctx.ui.notify(`Worktree '${name}' not found in any repo`, 'warning');
+	if (!result.ok) {
+		ctx.ui.notify(result.message, 'error');
 		return;
 	}
 
-	// 删除成功（任意 repo）后，清理活跃状态 + 自动切回主分支
-	if (activeWorktree === name) {
-		clearActiveWorktree();
-		registerWidget(ctx, { v: false });
-		saveState(ctx.cwd, sessionId);
+	// 分支处理：检查是否已合并
+	const branch = `wt/${name}`;
+	const mergedCheck = spawnSync('git', ['merge-base', '--is-ancestor', branch, 'HEAD'], {
+		cwd: repoRoot,
+		encoding: 'utf-8',
+	});
+	const unmerged = mergedCheck.status !== 0;
+	const branchDecision = await askBranchDelete(ctx, name, unmerged);
+	if (branchDecision === 'delete') {
+		const branchMsgs = deleteWorktreeBranch(repoRoot, name, true);
+		result.message += '\n' + branchMsgs.join('\n');
+	} else if (branchDecision === 'keep') {
+		result.message += '\n(branch kept)';
 	}
-	invalidateRepoCache();
-	ctx.ui.notify(results.join('\n'), 'info');
+
+	ctx.ui.notify(result.message, 'info');
 }
 
 // ═══════════════════════════════════════════
-// clean
-// ═══════════════════════════════════════════
-export async function handleClean(
-	repos: string[],
-	flags: Record<string, string>,
-	ctx: any,
-): Promise<void> {
-	const selectedRepos = flags.repos
-		? repos.filter((r) => new Set(flags.repos.split(',').map((s) => s.trim())).has(basename(r)))
-		: repos;
-	const exclude = new Set<string>(activeWorktree ? [activeWorktree] : []);
-	const dryRun = flags.dry !== undefined || flags['dry-run'] !== undefined;
-	const bumpKind = (['major', 'minor', 'patch'].includes(flags.bump) ? flags.bump : 'patch') as
-		'major' | 'minor' | 'patch';
-	const skipPr = flags['no-pr'] !== undefined;
-
-	ctx.ui.notify('Scanning for merged worktrees\u2026', 'info');
-
-	const removedByRepo: Array<{ repo: string; name: string; branch: string }> = [];
-	for (const repo of selectedRepos) {
-		for (const wt of findMergedWorktrees(repo, exclude)) {
-			removedByRepo.push({ repo, name: wt.name, branch: wt.branch });
-		}
-	}
-
-	if (removedByRepo.length === 0) {
-		ctx.ui.notify('No merged worktrees to clean.', 'info');
-		return;
-	}
-	if (dryRun) {
-		ctx.ui.notify(
-			`Would remove ${removedByRepo.length} merged worktree(s):\n${removedByRepo.map((r) => `  ${basename(r.repo)}/${r.name} (${r.branch})`).join('\n')}`,
-			'info',
-		);
-		return;
-	}
-
-	const results: string[] = [];
-	for (const { repo, name } of removedByRepo) {
-		const result = removeWorktree(repo, name);
-		results.push(result.ok ? `\u2713 ${result.message}` : `\u2717 ${result.message}`);
-		if (result.ok) {
-			const branchMsgs = deleteWorktreeBranch(repo, name);
-			results.push(...branchMsgs.map((m) => `  ${m}`));
-		}
-	}
-
-	// bump & PR (仅限于 arvore-pi-extensions 仓库)
-	//
-	// ⚠ 自动 commit + push + gh pr create 是高危操作。
-	// 推送前让用户审查变更内容。
-	const confirmMsg =
-		`即将执行以下操作：\n` +
-		`1. 清理 ${removedByRepo.length} 个已合并 worktree\n` +
-		`2. 版本号 bump (${bumpKind})\n` +
-		`3. git commit + git push\n` +
-		`4. 创建 PR\n\n` +
-		`确认继续？`;
-	if (!(await ctx.ui.confirm('Clean worktrees', confirmMsg))) {
-		ctx.ui.notify('Clean cancelled', 'info');
-		return;
-	}
-
-	const piRepo = repos.find((r) => basename(r) === 'arvore-pi-extensions');
-	if (!piRepo) {
-		ctx.ui.notify(
-			results.join('\n') +
-				'\n\narvore-pi-extensions repo not found \u2014 skipped version bump/PR.',
-			'warning',
-		);
-		return;
-	}
-
-	const pkgPath = join(piRepo, 'packages', 'worktree', 'package.json');
-	const bumped = bumpPackageVersion(pkgPath, bumpKind);
-	if (!bumped) {
-		ctx.ui.notify(
-			results.join('\n') + `\n\nCould not read ${pkgPath} \u2014 skipped version bump/PR.`,
-			'warning',
-		);
-		return;
-	}
-	results.push(`\u2713 Bumped @arvoretech/pi-worktree ${bumped.from} \u2192 ${bumped.to}`);
-
-	if (skipPr) {
-		ctx.ui.notify(
-			results.join('\n') + '\n\n--no-pr set: version bumped locally, no commit/PR created.',
-			'info',
-		);
-		return;
-	}
-
-	const branchName = `worktree-clean/bump-${bumped.to}`;
-	const removedList = removedByRepo
-		.map((r) => `- ${basename(r.repo)}/${r.name} (${r.branch})`)
-		.join('\n');
-	const prTitle = `chore(worktree): clean merged worktrees, bump to ${bumped.to}`;
-	const prBody = `## Summary\n\nRemoved merged worktrees and bumped \`@arvoretech/pi-worktree\` to \`${bumped.to}\`.\n\n### Removed worktrees\n${removedList}\n\n_Automated by \`/worktree clean\`._`;
-
-	const git = (args: string[]) => spawnSync('git', args, { cwd: piRepo, encoding: 'utf-8' });
-	const dirty = (git(['status', '--porcelain']).stdout || '').trim();
-	if (!dirty.split('\n').every((l) => l === '' || l.endsWith('packages/worktree/package.json'))) {
-		ctx.ui.notify(
-			results.join('\n') +
-				'\n\narvore-pi-extensions has uncommitted changes \u2014 version bumped locally, but skipped commit/PR.',
-			'warning',
-		);
-		return;
-	}
-
-	const baseBranch = getDefaultBranch(piRepo) || getCurrentBranch(piRepo);
-	git(['checkout', '-b', branchName]);
-	git(['add', pkgPath]);
-	if (git(['commit', '-m', prTitle]).status !== 0) {
-		ctx.ui.notify(results.join('\n') + '\n\nCommit failed.', 'error');
-		return;
-	}
-	if (git(['push', '-u', 'origin', branchName]).status !== 0) {
-		ctx.ui.notify(results.join('\n') + '\n\nPush failed.', 'error');
-		return;
-	}
-
-	const pr = spawnSync(
-		'gh',
-		[
-			'pr',
-			'create',
-			'--title',
-			prTitle,
-			'--body',
-			prBody,
-			'--base',
-			baseBranch,
-			'--head',
-			branchName,
-		],
-		{ cwd: piRepo, encoding: 'utf-8' },
-	);
-	if (pr.status !== 0) {
-		ctx.ui.notify(
-			results.join('\n') + `\n\nBranch pushed, but PR creation failed: ${pr.stderr?.trim()}`,
-			'warning',
-		);
-		return;
-	}
-	results.push(`\u2713 Opened PR: ${(pr.stdout || '').trim()}`);
-	ctx.ui.notify(results.join('\n'), 'info');
-}
-
-// ═══════════════════════════════════════════
-// merge — 合并 worktree 分支到目标分支
+// merge
 // ═══════════════════════════════════════════
 
-/**
- * 执行 git merge：在 repo 的 target 分支上合并 source 分支
- */
-function execMerge(
+export function execMerge(
 	repo: string,
 	sourceBranch: string,
 	targetBranch: string,
 ): { ok: boolean; message: string; conflicts: Array<{ file: string; lines: string }> } {
-	const git = (args: string[], cwd?: string) =>
-		spawnSync('git', args, {
-			cwd: cwd || repo,
-			encoding: 'utf-8',
-			maxBuffer: 16 * 1024 * 1024,
-		});
+	const git = (args: string[]) =>
+		spawnSync('git', args, { cwd: repo, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 });
 
-	// 1. 保存原始分支
 	const origBranch = getCurrentBranch(repo);
+	let dirty = '';
+	try {
+		dirty = execSync('git status --porcelain', { cwd: repo, encoding: 'utf-8' }).trim();
+	} catch {
+		/* may not be a git repo in merge context */
+	}
 
-	// 2. 暂存当前分支的更改
-	const dirty = (git(['status', '--porcelain']).stdout || '').trim();
 	if (dirty) {
 		const stash = git(['stash', 'push', '-m', 'worktree-merge-auto-' + Date.now()]);
 		if (stash.status !== 0) {
-			return {
-				ok: false,
-				message: 'Cannot stash changes: ' + (stash.stderr || '').trim(),
-				conflicts: [],
-			};
+			return { ok: false, message: 'Cannot stash changes', conflicts: [] };
 		}
 	}
 
-	// 3. 切到 target 分支
 	const checkout = git(['checkout', targetBranch]);
 	if (checkout.status !== 0) {
 		if (dirty) git(['stash', 'pop']);
-		return {
-			ok: false,
-			message: "Cannot checkout '" + targetBranch + "': " + (checkout.stderr || '').trim(),
-			conflicts: [],
-		};
+		return { ok: false, message: "Cannot checkout '" + targetBranch + "'", conflicts: [] };
 	}
 
-	// 4. pull 最新（仅当 origin remote 存在。本地仓库无 remote 时可跳过）
 	const hasRemote = git(['remote', 'get-url', 'origin']).status === 0;
 	if (hasRemote) {
-		const pull = git(['pull', 'origin', targetBranch, '--ff-only']);
-		if (pull.status !== 0) {
-			git(['checkout', origBranch]);
-			if (dirty) git(['stash', 'pop']);
-			return {
-				ok: false,
-				message: "Cannot pull '" + targetBranch + "': " + (pull.stderr || '').trim(),
-				conflicts: [],
-			};
-		}
+		git(['pull', 'origin', targetBranch, '--ff-only']);
 	}
 
-	// 5. merge source 分支
 	const merge = git(['merge', sourceBranch, '--no-ff', '--log']);
-	const output = (merge.stdout || '') + (merge.stderr || '');
 
 	if (merge.status === 0) {
-		// 成功 — 切回原始分支
 		git(['checkout', origBranch]);
-		if (dirty) {
-			const pop = git(['stash', 'pop']);
-			if (pop.status !== 0) {
-				log.warn('stash pop after successful merge failed; stash remains at stash@{0}', {
-					stderr: (pop.stderr || '').trim(),
-				});
-			}
-		}
+		if (dirty) git(['stash', 'pop']);
 		return {
 			ok: true,
 			message: "Merged '" + sourceBranch + "' -> '" + targetBranch + "'",
@@ -669,133 +600,154 @@ function execMerge(
 		};
 	}
 
-	// 6. 有冲突 — 切回原始分支、恢复 stash，再返回冲突信息
-	// 注意：merge 冲突状态保留在目标分支上，切换回来不会丢失
 	git(['checkout', origBranch]);
-	if (dirty) {
-		const pop = git(['stash', 'pop']);
-		if (pop.status !== 0) {
-			log.warn('stash pop after merge conflict failed; stash remains at stash@{0}', {
-				stderr: (pop.stderr || '').trim(),
-			});
-		}
-	}
+	if (dirty) git(['stash', 'pop']);
+
 	const unmerged = (git(['diff', '--name-only', '--diff-filter=U']).stdout || '').trim();
 	const conflictFiles = unmerged
 		.split('\n')
 		.filter(Boolean)
-		.map((f) => {
-			const lines = (git(['diff', '--', f.trim()]).stdout || '')
+		.map((f) => ({
+			file: f,
+			lines: (git(['diff', '--', f]).stdout || '')
 				.split('\n')
 				.filter((l) => l.startsWith('@@'))
 				.slice(0, 3)
-				.join('; ');
-			return { file: f.trim(), lines };
-		});
+				.join('; '),
+		}));
 
 	return {
 		ok: false,
-		message:
-			'Merge failed. Conflicts in ' + conflictFiles.length + ' file(s).\n' + output.trim(),
+		message: 'Merge failed. ' + conflictFiles.length + ' file(s) conflict.',
 		conflicts: conflictFiles,
 	};
 }
 
-export async function handleMerge(
-	repos: string[],
+async function handleMerge(
+	repoRoot: string,
 	flags: Record<string, string>,
 	ctx: any,
-	sessionId: string,
 ): Promise<void> {
-	const repo = repos[0];
-	if (!repo) {
-		ctx.ui.notify('No repos found', 'error');
-		return;
-	}
+	const allWorktrees = getManagedWorktrees(repoRoot);
+	const currentName = _getCurrentName(repoRoot, ctx.cwd);
 
-	const allWorktrees = getExistingWorktrees(repo);
-	if (allWorktrees.length === 0 && !activeWorktree) {
-		ctx.ui.notify('No worktrees to merge. Create one first with /worktree create.', 'warning');
-		return;
-	}
-
-	// 确定源 worktree（flags 优先 -> 当前活跃 -> TUI 选择）
-	let sourceWorktree: string | undefined = flags.source;
-	if (!sourceWorktree) {
-		if (activeWorktree) {
-			sourceWorktree = activeWorktree;
-		} else if (ctx.hasUI) {
-			const { pickMergeSource } = await import('./ui.js');
-			const picked = await pickMergeSource(ctx, allWorktrees);
-			if (!picked) {
-				ctx.ui.notify('Cancelled', 'warning');
-				return;
-			}
-			sourceWorktree = picked;
-		} else {
-			ctx.ui.notify(
-				'Usage: /worktree merge --source <worktree-name> [--target main]',
-				'warning',
-			);
+	let sourceWorktree = flags.source || currentName || '';
+	if (!sourceWorktree && allWorktrees.length > 0 && ctx.hasUI) {
+		// Pick source from TUI
+		const result = await showWorktreeTui(
+			ctx,
+			allWorktrees,
+			currentName,
+			'Select source to merge:',
+			repoRoot,
+		);
+		if (result.action !== 'switch' && result.action !== 'fork') {
+			ctx.ui.notify('Cancelled', 'info');
 			return;
 		}
+		sourceWorktree = result.target || '';
+	}
+
+	if (!sourceWorktree || sourceWorktree === 'main') {
+		ctx.ui.notify('Please specify --source <worktree-name>', 'warning');
+		return;
 	}
 
 	const sourceBranch = 'wt/' + sourceWorktree;
 	const targetBranch = flags.target || 'main';
 
-	// TUI 确认对话框
-	if (ctx.hasUI) {
-		const { confirmMerge } = await import('./ui.js');
-		const confirmed = await confirmMerge(ctx, sourceWorktree, sourceBranch, targetBranch);
-		if (!confirmed) {
-			ctx.ui.notify('Merge cancelled', 'info');
-			return;
-		}
-	}
-
-	log.info('merging', { repo: basename(repo), source: sourceBranch, target: targetBranch });
+	log.info('merging', { source: sourceBranch, target: targetBranch, repo: basename(repoRoot) });
 	ctx.ui.notify("Merging '" + sourceBranch + "' -> '" + targetBranch + "'...", 'info');
 
-	const result = execMerge(repo, sourceBranch, targetBranch);
+	const result = execMerge(repoRoot, sourceBranch, targetBranch);
 
 	if (result.ok) {
-		log.info('merge succeeded', { source: sourceBranch, target: targetBranch });
 		ctx.ui.notify(result.message, 'success');
-		// 自动重新激活源 worktree
-		if (sourceWorktree !== activeWorktree) {
-			for (const r of repos) {
-				const wtPath = join(r, '.worktrees', sourceWorktree);
-				if (existsSync(wtPath) && existsSync(join(wtPath, '.git'))) {
-					addWorktreePath(basename(r), wtPath);
-				}
-			}
-			if (activeWorktreePaths.size > 0) {
-				setActiveWorktree(sourceWorktree);
-				registerWidget(ctx, { v: false });
-				saveState(ctx.cwd, sessionId);
-			}
-		}
 	} else if (result.conflicts.length > 0) {
-		log.warn('merge conflicts', {
-			source: sourceBranch,
-			target: targetBranch,
-			files: result.conflicts.length,
-		});
-		const summary = result.conflicts.map((c) => '  - ' + c.file + ': ' + c.lines).join('\n');
+		const summary = result.conflicts.map((c) => '  - ' + c.file).join('\n');
 		ctx.ui.notify(
-			'Merge conflict in ' +
-				result.conflicts.length +
-				' file(s). Switch to the target branch, resolve then commit.\n' +
-				summary,
+			'Merge conflict in ' + result.conflicts.length + ' file(s):\n' + summary,
 			'error',
 		);
 	} else {
-		log.warn('merge failed', {
-			source: sourceBranch,
-			target: targetBranch,
-			message: result.message,
-		});
 		ctx.ui.notify('Merge failed: ' + result.message, 'error');
+	}
+}
+
+// ═══════════════════════════════════════════
+// clean
+// ═══════════════════════════════════════════
+
+async function handleClean(
+	repoRoot: string,
+	flags: Record<string, string>,
+	ctx: any,
+): Promise<void> {
+	const currentName = _getCurrentName(repoRoot, ctx.cwd);
+	const exclude = new Set(currentName ? [currentName] : []);
+	const dryRun = flags.dry !== undefined || flags['dry-run'] !== undefined;
+
+	const merged = findMergedWorktrees(repoRoot, exclude);
+	if (merged.length === 0) {
+		ctx.ui.notify('No merged worktrees to clean.', 'info');
+		return;
+	}
+	if (dryRun) {
+		ctx.ui.notify(
+			`Would remove:\n${merged.map((m) => `  ${m.name} (${m.branch})`).join('\n')}`,
+			'info',
+		);
+		return;
+	}
+
+	const results: string[] = [];
+	for (const wt of merged) {
+		const r = removeWorktree(repoRoot, wt.name);
+		results.push(r.ok ? 'Removed ' + wt.name : r.message);
+		if (r.ok) {
+			results.push(...deleteWorktreeBranch(repoRoot, wt.name, true));
+		}
+	}
+	ctx.ui.notify(results.join('\n'), 'info');
+}
+
+// ═══════════════════════════════════════════
+// shell
+// ═══════════════════════════════════════════
+
+function handleShell(repoRoot: string, ctx: any): void {
+	const currentName = _getCurrentName(repoRoot, ctx.cwd);
+	if (!currentName) {
+		ctx.ui.notify('No active worktree. Switch to one first.', 'warning');
+		return;
+	}
+
+	const targetDir = getWorktreePath(repoRoot, currentName);
+	if (!existsSync(targetDir)) {
+		ctx.ui.notify(`Worktree directory not found: ${targetDir}`, 'error');
+		return;
+	}
+
+	const inTmux = !!process.env.TMUX;
+	const inWarp =
+		process.env.TERM_PROGRAM === 'WarpTerminal' || !!process.env.WARP_IS_LOCAL_SHELL_SESSION;
+	const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+
+	if (inTmux) {
+		spawn('tmux', ['split-window', '-h', '-c', targetDir], { stdio: 'ignore' }).unref();
+		ctx.ui.notify(`Opened shell in worktree "${currentName}"`, 'info');
+	} else if (inWarp) {
+		spawn(opener, [`warp://action/new_tab?path=${encodeURIComponent(targetDir)}`], {
+			detached: true,
+			stdio: 'ignore',
+		}).unref();
+		ctx.ui.notify(`Opened Warp tab for worktree "${currentName}"`, 'info');
+	} else if (process.platform === 'darwin') {
+		ctx.ui.notify(
+			`Worktree path:\n  ${targetDir}\nUse 'cd "${targetDir}"' or open a new terminal.`,
+			'info',
+		);
+	} else {
+		ctx.ui.notify(`cd "${targetDir}"`, 'info');
 	}
 }

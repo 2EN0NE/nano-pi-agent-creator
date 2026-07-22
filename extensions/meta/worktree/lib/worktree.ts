@@ -1,41 +1,40 @@
 /**
- * pi-worktree — 核心 worktree 操作（创建/删除/查询/命名）
+ * pi-worktree — Core worktree 操作（创建/删除/查询/命名）
+ *
+ * 所有 worktree 存放在主仓库外：<parentDir>/<repoName>-worktrees/<name>/
  */
-import { existsSync, readdirSync, statSync } from 'node:fs';
-import { join, basename } from 'node:path';
-import { execSync, spawnSync } from 'node:child_process';
-import type { OpResult, WorktreeInfo } from '../types';
+import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { createLogger } from '@zenone/pi-logger';
+import type { OpResult } from '../types.js';
 import {
-	getDefaultBranch,
-	fetchBase,
-	getCurrentBranch,
-	ensureGitignore,
-	isBranchMergedIntoBase,
-} from './git';
-import { runRepoSetup } from './setup.js';
-import { getNamePool, constellationOf } from '../stars';
+	getWorktreesDir,
+	getWorktreePath,
+	assertPathInWorktrees,
+	getManagedWorktrees,
+} from './paths.js';
+import { getDefaultBranch, getCurrentBranch } from './git.js';
+import { runWorktreeSetup } from './setup.js';
+import type { NodeModulesStrategy } from '../types.js';
+import { getNamePool, constellationOf } from '../stars.js';
 
-export { WORKTREES_DIR } from './setup.js';
+const log = createLogger('pi-worktree');
 
 // ── 名称分配 ──
 
-export function getExistingNames(repoPath: string): Set<string> {
+export function getExistingNames(repoRoot: string): Set<string> {
 	const existing = new Set<string>();
-	const dir = join(repoPath, '.worktrees');
-	if (existsSync(dir)) {
-		for (const entry of readdirSync(dir)) {
-			if (statSync(join(dir, entry)).isDirectory()) existing.add(entry);
-		}
-	}
+	const wts = getManagedWorktrees(repoRoot);
+	for (const wt of wts) existing.add(wt.name);
 	return existing;
 }
 
-export function pickAvailableName(repoPath: string): string {
-	const existing = getExistingNames(repoPath);
+export function pickAvailableName(repoRoot: string): string {
+	const existing = getExistingNames(repoRoot);
 	const pool = getNamePool();
 	const available = pool.filter((n) => !existing.has(n));
 	if (available.length > 0) return available[Math.floor(Math.random() * available.length)];
-	// 池用尽：{最后用过的星座}-minor~N 后备
+	// 池用尽：星座-minor~N 后备
 	const lastCons = [...existing].map((n) => constellationOf(n)).filter(Boolean) as string[];
 	const cons = lastCons.length > 0 ? lastCons[lastCons.length - 1] : 'Zodiac';
 	return `${cons}-minor~${existing.size + 1}`;
@@ -43,122 +42,156 @@ export function pickAvailableName(repoPath: string): string {
 
 // ── 创建 worktree ──
 
-export function createWorktree(repoPath: string, name: string, branch?: string): OpResult {
-	const targetDir = join(repoPath, '.worktrees', name);
-	if (existsSync(targetDir))
-		return { ok: false, message: `Worktree '${name}' already exists in ${basename(repoPath)}` };
+export function createWorktree(
+	repoRoot: string,
+	name: string,
+	branch?: string,
+	nodeModulesStrat?: NodeModulesStrategy,
+): OpResult {
+	const targetDir = getWorktreePath(repoRoot, name);
 
-	ensureGitignore(repoPath, '.worktrees');
+	if (existsSync(targetDir))
+		return { ok: false, message: `Worktree '${name}' already exists at ${targetDir}` };
 
 	const newBranch = branch || `wt/${name}`;
-	const defaultBranch = getDefaultBranch(repoPath);
-	const startPoint =
-		defaultBranch && fetchBase(repoPath, defaultBranch) ? `origin/${defaultBranch}` : null;
-	const addArgs = startPoint
-		? ['worktree', 'add', '-b', newBranch, targetDir, startPoint]
+	const defaultBranch = getDefaultBranch(repoRoot);
+	const addArgs = defaultBranch
+		? ['worktree', 'add', '-b', newBranch, targetDir, `origin/${defaultBranch}`]
 		: ['worktree', 'add', '-b', newBranch, targetDir];
-	const result = spawnSync('git', addArgs, { cwd: repoPath, encoding: 'utf-8' });
+
+	const result = spawnSync('git', addArgs, { cwd: repoRoot, encoding: 'utf-8' });
 
 	if (result.status !== 0) {
 		const err = result.stderr?.trim() || 'Unknown error';
+		// 分支已存在→尝试用当前分支
 		if (err.includes('already exists')) {
 			const r2 = spawnSync(
 				'git',
-				['worktree', 'add', targetDir, branch || getCurrentBranch(repoPath)],
-				{ cwd: repoPath, encoding: 'utf-8' },
+				['worktree', 'add', targetDir, branch || getCurrentBranch(repoRoot)],
+				{ cwd: repoRoot, encoding: 'utf-8' },
 			);
 			if (r2.status !== 0) return { ok: false, message: `Failed: ${r2.stderr?.trim()}` };
+			const setupNotes = runWorktreeSetup(repoRoot, targetDir, nodeModulesStrat || 'none');
 			return {
 				ok: true,
-				message: `Created worktree '${name}' in ${basename(repoPath)} (existing branch)\n  ${runRepoSetup(repoPath, targetDir)}`,
+				message: `Created '${name}' (existing branch)\n  ${setupNotes.join('\n  ')}`,
 				path: targetDir,
 			};
 		}
 		return { ok: false, message: `Failed: ${err}` };
 	}
 
-	const setup = runRepoSetup(repoPath, targetDir);
+	const setupNotes = runWorktreeSetup(repoRoot, targetDir, nodeModulesStrat || 'none');
 	return {
 		ok: true,
-		message: `Created worktree '${name}' in ${basename(repoPath)} → branch ${newBranch}${startPoint ? ` (from ${startPoint})` : ''}\n  ${setup}`,
+		message: `Created '${name}' → ${newBranch}${defaultBranch ? ` (from origin/${defaultBranch})` : ''}\n  ${setupNotes.join('\n  ')}`,
 		path: targetDir,
 	};
 }
 
 // ── 删除 worktree ──
 
-export function removeWorktree(repoPath: string, name: string, force?: boolean): OpResult {
-	const targetDir = join(repoPath, '.worktrees', name);
-	if (!existsSync(targetDir))
-		return { ok: false, message: `Worktree '${name}' not found in ${basename(repoPath)}` };
+export function removeWorktree(repoRoot: string, name: string, force?: boolean): OpResult {
+	const worktreesDir = getWorktreesDir(repoRoot);
+	const targetDir = getWorktreePath(repoRoot, name);
 
-	// 先尝试安全删除（无 --force），避免绕过 git 安全检查
+	// 安全守卫：防止误删 main checkout
+	assertPathInWorktrees(worktreesDir, targetDir);
+
+	if (!existsSync(targetDir))
+		return { ok: false, message: `Worktree '${name}' not found at ${targetDir}` };
+
 	const args = force
 		? ['worktree', 'remove', targetDir, '--force']
 		: ['worktree', 'remove', targetDir];
-	const result = spawnSync('git', args, {
-		cwd: repoPath,
-		encoding: 'utf-8',
-	});
+	const result = spawnSync('git', args, { cwd: repoRoot, encoding: 'utf-8' });
+
 	if (result.status !== 0) {
 		const msg = result.stderr?.trim() || 'unknown error';
 		return { ok: false, message: `Failed: ${msg}` };
 	}
-	return { ok: true, message: `Removed worktree '${name}' from ${basename(repoPath)}` };
+
+	log.info('removed worktree', { name, targetDir, force });
+	return { ok: true, message: `Removed '${name}'${force ? ' (force)' : ''}` };
 }
 
-export function deleteWorktreeBranch(
-	repoPath: string,
-	name: string,
-	remoteRemote?: string,
-): string[] {
+export function deleteWorktreeBranch(repoRoot: string, name: string, force?: boolean): string[] {
 	const msgs: string[] = [];
 	const branch = `wt/${name}`;
-	const localDel = spawnSync('git', ['branch', '-D', branch], {
-		cwd: repoPath,
-		encoding: 'utf-8',
-	});
-	if (localDel.status === 0) msgs.push(`Deleted local branch '${branch}'`);
-	if (remoteRemote) {
-		const remoteDel = spawnSync('git', ['push', remoteRemote, '--delete', branch], {
-			cwd: repoPath,
+
+	// 检查是否已合并，未合并且不是 force 时跳过
+	if (!force) {
+		const merged = spawnSync('git', ['merge-base', '--is-ancestor', branch, 'HEAD'], {
+			cwd: repoRoot,
 			encoding: 'utf-8',
 		});
-		if (remoteDel.status === 0) msgs.push(`Deleted remote branch '${remoteRemote}/${branch}'`);
+		if (merged.status !== 0) {
+			msgs.push(`Branch '${branch}' has unpushed/merged commits`);
+			return msgs;
+		}
 	}
+
+	const localDel = spawnSync('git', ['branch', '-D', branch], {
+		cwd: repoRoot,
+		encoding: 'utf-8',
+	});
+	if (localDel.status === 0) {
+		msgs.push(`Deleted local branch '${branch}'`);
+		// 尝试删除远程分支（非 blocking：远程可能没有或已删除）
+		const remoteDel = spawnSync('git', ['push', 'origin', '--delete', branch], {
+			cwd: repoRoot,
+			encoding: 'utf-8',
+		});
+		if (remoteDel.status === 0) {
+			msgs.push(`Deleted remote branch 'origin/${branch}'`);
+		}
+	}
+
 	return msgs;
 }
 
 // ── 查询 worktree ──
 
-export function getExistingWorktrees(repoPath: string): WorktreeInfo[] {
-	const dir = join(repoPath, '.worktrees');
-	if (!existsSync(dir)) return [];
+/**
+ * 获取所有 managed worktree（别名：从 paths.ts 暴露）。
+ */
+export { getManagedWorktrees as getExistingWorktrees } from './paths.js';
 
-	const entries: WorktreeInfo[] = [];
-	for (const entry of readdirSync(dir)) {
-		const full = join(dir, entry);
-		if (!statSync(full).isDirectory() || !existsSync(join(full, '.git'))) continue;
-		let branch = 'unknown';
-		try {
-			branch = execSync('git rev-parse --abbrev-ref HEAD', {
-				cwd: full,
-				encoding: 'utf-8',
-			}).trim();
-		} catch {
-			/* ignore */
-		}
-		entries.push({ name: entry, branch, path: full });
-	}
-	return entries;
-}
-
+/**
+ * 查找已合并的 worktree（用于 clean 命令）。
+ *
+ * 先尝试 `git fetch origin <branch>` 同步远程状态，
+ * 然后检查分支是否已合并到本地 HEAD 或 origin/<branch>。
+ * 两者任一已合并则视为可清理。
+ */
 export function findMergedWorktrees(
-	repoPath: string,
-	exclude: Set<string>,
+	repoRoot: string,
+	exclude?: Set<string>,
 ): Array<{ name: string; branch: string }> {
-	return getExistingWorktrees(repoPath)
-		.filter((wt) => !exclude.has(wt.name) && wt.branch !== 'unknown')
-		.filter((wt) => isBranchMergedIntoBase(repoPath, wt.branch))
+	const ex = exclude || new Set();
+	return getManagedWorktrees(repoRoot)
+		.filter((wt) => !ex.has(wt.name) && wt.branch !== 'detached')
+		.filter((wt) => {
+			// 先尝试同步远程（非 blocking：离线时静默跳过）
+			spawnSync('git', ['fetch', 'origin', wt.branch, '--quiet'], {
+				cwd: repoRoot,
+				encoding: 'utf-8',
+			});
+
+			// 检查是否已合并到本地 HEAD
+			const local = spawnSync('git', ['merge-base', '--is-ancestor', wt.branch, 'HEAD'], {
+				cwd: repoRoot,
+				encoding: 'utf-8',
+			});
+			if (local.status === 0) return true;
+
+			// 检查是否已合并到 origin/<branch>
+			const remote = spawnSync(
+				'git',
+				['merge-base', '--is-ancestor', `origin/${wt.branch}`, 'HEAD'],
+				{ cwd: repoRoot, encoding: 'utf-8' },
+			);
+			return remote.status === 0;
+		})
 		.map((wt) => ({ name: wt.name, branch: wt.branch }));
 }

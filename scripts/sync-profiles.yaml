@@ -168,7 +168,6 @@ profiles:
                 - catch-the-fox # 演示性质、趣味
                 - split-fork # 目前仅支持Ghostty，按需介入
                 - smart-context # 智能模型路由，单一模型时不需要
-                - worktree # 存在问题，待观察
 
             skills: []
             prompts: []

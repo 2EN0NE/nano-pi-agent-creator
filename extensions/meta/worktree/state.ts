@@ -1,128 +1,70 @@
 /**
- * pi-worktree — 全局状态 + 持久化
+ * pi-worktree — 用户偏好配置（使用 @zenone/pi-config）
+ *
+ * 不再存储活跃 worktree 状态——活跃状态从 ctx.cwd 推导。
+ * 只存偏好：上次 node_modules 策略。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
-import type { WorktreeState } from './types';
-import { findHubRoot } from './lib/git.js';
+import { createConfigStore } from '@zenone/pi-config';
+import type { ConfigStore } from '@zenone/pi-config';
+import type { NodeModulesStrategy } from './types.js';
 
 const log = createLogger('pi-worktree');
 
-// ═══════════════════════════════════════════
-// 全局状态
-// ═══════════════════════════════════════════
-export let activeWorktree: string | null = null;
-export let activeWorktreePaths: Map<string, string> = new Map();
-export let worktreeMode = true;
-export let widgetHidden = false;
-
-export function setActiveWorktree(name: string | null): void {
-	activeWorktree = name;
-}
-export function getActiveWorktree(): string | null {
-	return activeWorktree;
-}
-export function setWorktreeMode(mode: boolean): void {
-	worktreeMode = mode;
-}
-export function setWidgetHidden(hidden: boolean): void {
-	widgetHidden = hidden;
+interface WorktreePrefs {
+	lastNodeModulesStrategy: NodeModulesStrategy;
 }
 
-export function clearActiveWorktree(): void {
-	activeWorktree = null;
-	activeWorktreePaths.clear();
+const DEFAULT_PREFS: WorktreePrefs = {
+	lastNodeModulesStrategy: 'symlink',
+};
+
+let store: ConfigStore<WorktreePrefs> | null = null;
+let cached: WorktreePrefs = { ...DEFAULT_PREFS };
+
+function getStore(): ConfigStore<WorktreePrefs> {
+	if (!store) {
+		store = createConfigStore<WorktreePrefs>({
+			pluginName: 'pi-worktree',
+			defaults: DEFAULT_PREFS,
+		});
+		initCache();
+	}
+	return store;
 }
 
-export function addWorktreePath(repo: string, path: string): void {
-	activeWorktreePaths.set(repo, path);
-}
-
-export function removeWorktreePath(repo: string): void {
-	activeWorktreePaths.delete(repo);
-}
-
-// ═══════════════════════════════════════════
-// 状态持久化
-// ═══════════════════════════════════════════
-const STATE_DIR = '.pi/worktree-sessions';
-
-function getStatePath(cwd: string, sessionId: string): string | null {
-	const root = findHubRoot(cwd);
-	if (!root) return null;
-	const fileName = sessionId ? `${sessionId}.json` : '_default.json';
-	return join(root, STATE_DIR, fileName);
-}
-
-export function saveState(cwd: string, sessionId: string): void {
-	const path = getStatePath(cwd, sessionId);
-	if (!path) return;
-	mkdirSync(join(path, '..'), { recursive: true });
-	writeFileSync(
-		path,
-		JSON.stringify(
-			{
-				mode: worktreeMode,
-				active: activeWorktree,
-				paths: Object.fromEntries(activeWorktreePaths),
-				widgetHidden,
-			} satisfies WorktreeState,
-			null,
-			2,
-		),
-	);
-}
-
-export function loadState(cwd: string, sessionId: string): void {
-	const path = getStatePath(cwd, sessionId);
-	if (!path || !existsSync(path)) return;
+function initCache(): void {
 	try {
-		const state: WorktreeState = JSON.parse(readFileSync(path, 'utf-8'));
-		worktreeMode = state.mode;
-		activeWorktree = state.active;
-		activeWorktreePaths = new Map(Object.entries(state.paths || {}));
-		widgetHidden = state.widgetHidden ?? false;
+		cached = { ...DEFAULT_PREFS, ...getStore().get() };
 	} catch (err) {
-		log.error('Failed to load worktree state.json', { error: String(err) });
+		log.warn('failed to load prefs, using defaults', {
+			error: String(err),
+		});
 	}
 }
 
-// ═══════════════════════════════════════════
-// Worktree 上下文（供 agent 工具查询）
-// ═══════════════════════════════════════════
-export function buildWorktreeContext(): string {
-	if (!worktreeMode && !activeWorktree)
-		return 'Worktree mode: OFF. No active worktree. Work in normal repo directories.';
-	if (worktreeMode && !activeWorktree)
-		return 'Worktree mode: ON. No active worktree yet — create one before editing files.';
-	const mappings = [...activeWorktreePaths.entries()].map(([r, p]) => `  ${r} → ${p}`).join('\n');
-	return `Worktree mode: ON. Active worktree: "${activeWorktree}"\nRepo paths:\n${mappings}`;
+// ── 读取 ──
+
+export function getLastNodeModulesStrategy(): NodeModulesStrategy {
+	return cached.lastNodeModulesStrategy;
 }
 
-// ═══════════════════════════════════════════
-// 仓库发现缓存
-// ═══════════════════════════════════════════
-let _cachedHubRoot: string | null = null;
-let _cachedRepos: string[] | null = null;
+// ── 写入 ──
 
-export function invalidateRepoCache(): void {
-	_cachedHubRoot = null;
-	_cachedRepos = null;
+export function setLastNodeModulesStrategy(strategy: NodeModulesStrategy): void {
+	cached.lastNodeModulesStrategy = strategy;
+	try {
+		getStore().save(cached, 'user');
+	} catch (err) {
+		log.warn('failed to save lastNodeModulesStrategy pref', {
+			error: String(err),
+		});
+	}
 }
 
-export function getCachedHubRoot(): string | null {
-	return _cachedHubRoot;
-}
+// ── 初始加载 ──
 
-export function setCachedHubRoot(root: string | null): void {
-	_cachedHubRoot = root;
-}
-
-export function getCachedRepos(): string[] | null {
-	return _cachedRepos;
-}
-
-export function setCachedRepos(repos: string[]): void {
-	_cachedRepos = repos;
+/** 在 session_start 调用，初始化偏好缓存 */
+export function initPrefs(): void {
+	getStore();
 }

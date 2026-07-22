@@ -1,103 +1,138 @@
 /**
- * pi-worktree — Worktree 设置（symlink、setup 脚本、自动安装）
+ * pi-worktree — 环境创建时设置（symlink、node_modules、setup 脚本）
  */
-import { existsSync, readFileSync, readdirSync, symlinkSync, openSync, closeSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, symlinkSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 import { createLogger } from '@zenone/pi-logger';
-import type { SetupConfig } from '../types.js';
-import { findHubRoot } from './git.js';
+import type { NodeModulesStrategy } from '../types.js';
+import { getWorktreesDir } from './paths.js';
 
 const log = createLogger('pi-worktree');
 
-export const WORKTREES_DIR = '.worktrees';
-export const SETUP_DIR = '.pi/worktree-setup';
+// ── node_modules 策略 ──
 
-function getSetupDir(repoPath: string): string {
-	return join(findHubRoot(repoPath) || repoPath, SETUP_DIR);
-}
+/**
+ * 根据所选策略设置 worktree 的 node_modules。
+ * 仅在 main checkout 有 node_modules 时执行。
+ *
+ * @returns 标记执行了什么策略的字符串
+ */
+export function setupNodeModules(
+	repoRoot: string,
+	worktreePath: string,
+	strategy: NodeModulesStrategy,
+): string {
+	if (strategy === 'none') return 'none';
+	const mainModules = join(repoRoot, 'node_modules');
+	if (!existsSync(mainModules)) {
+		log.info('no main node_modules to setup', { strategy });
+		return 'none (no main node_modules)';
+	}
 
-function loadSetupConfig(repoPath: string): SetupConfig | null {
-	const path = join(getSetupDir(repoPath), 'setup.json');
-	if (!existsSync(path)) return null;
-	try {
-		return JSON.parse(readFileSync(path, 'utf-8')) as SetupConfig;
-	} catch (e) {
-		log.error('Invalid setup.json', { error: (e as Error).message });
-		return null;
+	switch (strategy) {
+		case 'symlink':
+			return doSymlink(mainModules, join(worktreePath, 'node_modules'));
+		case 'copy':
+			return doHardlinkCopy(repoRoot, worktreePath);
+		case 'install':
+			return doInstall(worktreePath);
+		default:
+			return 'unknown strategy';
 	}
 }
 
-function matchesPattern(entry: string, pattern: string): boolean {
-	if (pattern.endsWith('*')) return entry.startsWith(pattern.slice(0, -1));
-	return entry === pattern.replace(/\/$/, '');
+function doSymlink(src: string, dest: string): string {
+	if (existsSync(dest)) {
+		log.info('node_modules already exists in worktree, skipping symlink');
+		return 'symlink (skipped, exists)';
+	}
+	try {
+		symlinkSync(src, dest, 'junction');
+		return 'symlink';
+	} catch (err) {
+		log.error('symlink node_modules failed', { error: String(err), src, dest });
+		return `symlink (failed: ${(err as Error).message})`;
+	}
 }
 
-function symlinkMatching(repoPath: string, targetDir: string, patterns: string[]): string[] {
+function doHardlinkCopy(repoRoot: string, worktreePath: string): string {
+	const dest = join(worktreePath, 'node_modules');
+	if (existsSync(dest)) return 'copy (skipped, exists)';
+	try {
+		const result = spawnSync('cp', ['-al', join(repoRoot, 'node_modules'), dest], {
+			cwd: repoRoot,
+			encoding: 'utf-8',
+		});
+		if (result.status === 0) return 'copy (cp -al)';
+		// fallback: 如果 -a 不支持（macOS 特定场景），用 -R
+		const fallback = spawnSync('cp', ['-R', join(repoRoot, 'node_modules'), dest], {
+			cwd: repoRoot,
+			encoding: 'utf-8',
+		});
+		if (fallback.status === 0) return 'copy (cp -R fallback)';
+		return `copy (failed: ${fallback.stderr?.trim() || 'unknown'})`;
+	} catch (err) {
+		return `copy (failed: ${(err as Error).message})`;
+	}
+}
+
+function doInstall(worktreePath: string): string {
+	const dest = join(worktreePath, 'node_modules');
+	if (existsSync(dest)) return 'install (skipped, exists)';
+
+	const pm = existsSync(join(worktreePath, 'pnpm-lock.yaml'))
+		? 'pnpm'
+		: existsSync(join(worktreePath, 'yarn.lock'))
+			? 'yarn'
+			: 'npm';
+	const child = spawn(pm, ['install'], { cwd: worktreePath, stdio: 'ignore', detached: true });
+	child.unref();
+	return `${pm} install (background)`;
+}
+
+// ── 环境文件 symlink ──
+
+/**
+ * 将 main checkout 下的 .env* 文件 symlink 到 worktree。
+ * 默认在创建时执行。
+ */
+export function setupEnvFiles(repoRoot: string, worktreePath: string): string[] {
 	const linked: string[] = [];
-	for (const entry of readdirSync(repoPath)) {
-		if (!patterns.some((p) => matchesPattern(entry, p))) continue;
-		const src = join(repoPath, entry);
-		const dest = join(targetDir, entry);
-		if (existsSync(dest)) continue;
-		try {
-			symlinkSync(src, dest);
-			linked.push(entry);
-		} catch (e) {
-			log.error('Failed to symlink', { entry, error: (e as Error).message });
+	try {
+		for (const entry of readdirSync(repoRoot)) {
+			if (!entry.startsWith('.env')) continue;
+			const src = join(repoRoot, entry);
+			const dest = join(worktreePath, entry);
+			if (existsSync(dest)) continue;
+			try {
+				symlinkSync(src, dest);
+				linked.push(entry);
+			} catch {
+				/* skip */
+			}
 		}
+	} catch {
+		/* skip */
 	}
 	return linked;
 }
 
-function autoInstall(repoPath: string, targetDir: string): void {
-	if (
-		existsSync(join(repoPath, 'package.json')) &&
-		!existsSync(join(targetDir, 'node_modules'))
-	) {
-		const pm = existsSync(join(repoPath, 'pnpm-lock.yaml'))
-			? 'pnpm'
-			: existsSync(join(repoPath, 'yarn.lock'))
-				? 'yarn'
-				: 'npm';
-		const child = spawn(pm, ['install'], { cwd: targetDir, stdio: 'ignore', detached: true });
-		child.on('exit', (code) => {
-			if (code !== 0) {
-				log.error(`autoInstall failed: ${pm} install exited with code ${code}`, {
-					targetDir,
-				});
-			}
-		});
-		child.unref();
-	}
-}
+// ── 用户 setup 脚本 ──
 
-function setupLogPath(targetDir: string): string {
-	const gitFile = join(targetDir, '.git');
-	try {
-		const content = readFileSync(gitFile, 'utf-8').trim();
-		const match = content.match(/^gitdir:\s*(.+)$/);
-		if (match) return join(match[1].trim(), 'pi-worktree-setup.log');
-	} catch {
-		/* ignore */
-	}
-	return join(targetDir, '.pi-worktree-setup.log');
-}
+const SETUP_DIR = '.pi/worktree-setup';
 
-function runSetupScript(
-	scriptPath: string,
-	repoPath: string,
-	targetDir: string,
-): { ok: boolean; output: string } {
+function runSetupScript(repoRoot: string, worktreePath: string): { ok: boolean; output: string } {
+	const scriptPath = join(repoRoot, SETUP_DIR, `${basename(repoRoot)}.sh`);
+	if (!existsSync(scriptPath)) return { ok: true, output: '' };
 	const result = spawnSync('bash', [scriptPath], {
-		cwd: targetDir,
+		cwd: worktreePath,
 		encoding: 'utf-8',
 		env: {
 			...process.env,
-			WT_REPO: targetDir,
-			WT_MAIN: repoPath,
-			WT_NAME: basename(targetDir),
-			WT_REPO_NAME: basename(repoPath),
+			WT_REPO: worktreePath,
+			WT_MAIN: repoRoot,
+			WT_NAME: basename(worktreePath),
 		},
 	});
 	if (result.error) return { ok: false, output: result.error.message };
@@ -107,44 +142,32 @@ function runSetupScript(
 	};
 }
 
-function runSetupScriptBackground(scriptPath: string, repoPath: string, targetDir: string): string {
-	const logPath = setupLogPath(targetDir);
-	const fd = openSync(logPath, 'w');
-	spawn('bash', [scriptPath], {
-		cwd: targetDir,
-		stdio: ['ignore', fd, fd],
-		detached: true,
-		env: {
-			...process.env,
-			WT_REPO: targetDir,
-			WT_MAIN: repoPath,
-			WT_NAME: basename(targetDir),
-			WT_REPO_NAME: basename(repoPath),
-		},
-	}).unref();
-	closeSync(fd);
-	return logPath;
-}
+// ── 完整创建后设置 ──
 
-export function runRepoSetup(repoPath: string, targetDir: string): string {
-	const repoName = basename(repoPath);
-	const config = loadSetupConfig(repoPath);
-	const symlinkPatterns = config?.repos?.[repoName]?.symlink ??
-		config?.defaultSymlink ?? ['.env*'];
-	const linked = symlinkMatching(repoPath, targetDir, symlinkPatterns);
-	const linkedNote = linked.length ? ` (linked ${linked.join(', ')})` : '';
-	const background = config?.repos?.[repoName]?.background ?? config?.background ?? false;
+/**
+ * 创建 worktree 后执行全套设置。
+ */
+export function runWorktreeSetup(
+	repoRoot: string,
+	worktreePath: string,
+	nodeModulesStrategy: NodeModulesStrategy,
+): string[] {
+	const notes: string[] = [];
 
-	const scriptPath = join(getSetupDir(repoPath), `${repoName}.sh`);
-	if (existsSync(scriptPath)) {
-		if (background) {
-			return `setup: ${repoName}.sh ⧖ background${linkedNote}\n  log: ${runSetupScriptBackground(scriptPath, repoPath, targetDir)}`;
-		}
-		const { ok, output } = runSetupScript(scriptPath, repoPath, targetDir);
-		if (ok) return `setup: ${repoName}.sh ✓${linkedNote}`;
-		return `setup: ${repoName}.sh ✗${output ? `\n${output.split('\n').slice(-6).join('\n')}` : ''}`;
+	// 1. 环境文件
+	const envLinked = setupEnvFiles(repoRoot, worktreePath);
+	if (envLinked.length > 0) notes.push(`env: ${envLinked.join(', ')} linked`);
+
+	// 2. node_modules
+	const nm = setupNodeModules(repoRoot, worktreePath, nodeModulesStrategy);
+	if (nm !== 'none') notes.push(`node_modules: ${nm}`);
+
+	// 3. 用户 setup 脚本
+	const { ok, output } = runSetupScript(repoRoot, worktreePath);
+	if (output) {
+		notes.push(`setup script: ${ok ? 'ok' : 'failed'}`);
+		if (!ok) notes.push(`  ${output.split('\n').slice(-3).join('\n')}`);
 	}
 
-	autoInstall(repoPath, targetDir);
-	return `setup: default${linkedNote}`;
+	return notes;
 }
