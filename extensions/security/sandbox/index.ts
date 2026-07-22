@@ -9,11 +9,11 @@
  * how built-in tools can be replaced. Alternatively, you could sandbox `bash`
  * via `tool_call` input mutation without replacing the tool.
  *
- * Config files (merged, project takes precedence):
- * - ~/.pi/agent/extensions/sandbox.json (global)
- * - <cwd>/.pi/sandbox.json (project-local)
+ * Config files (merged, project takes precedence, using @zenone/pi-config standard):
+ * - ~/.pi/agent/extensions-data/sandbox/config.json (user global)
+ * - <cwd>/.pi/extensions-data/sandbox/config.json (project-local)
  *
- * Example .pi/sandbox.json:
+ * Example <cwd>/.pi/extensions-data/sandbox/config.json:
  * ```json
  * {
  *   "enabled": true,
@@ -40,16 +40,15 @@
  *
  * Linux also requires: bubblewrap, socat, ripgrep
  */
-import { createLogger } from '@zenone/pi-logger';
-
-const log = createLogger('sandbox');
-
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { createLogger } from '@zenone/pi-logger';
+import { resolveConfigPaths, readJsonFile } from '@zenone/pi-config';
 import { SandboxManager, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { type BashOperations, createBashTool, getAgentDir } from '@earendil-works/pi-coding-agent';
+import { type BashOperations, createBashTool } from '@earendil-works/pi-coding-agent';
+
+const log = createLogger('sandbox');
 
 interface SandboxConfig extends SandboxRuntimeConfig {
 	enabled?: boolean;
@@ -80,29 +79,23 @@ const DEFAULT_CONFIG: SandboxConfig = {
 };
 
 function loadConfig(cwd: string): SandboxConfig {
-	const projectConfigPath = join(cwd, '.pi', 'sandbox.json');
-	const globalConfigPath = join(getAgentDir(), 'extensions', 'sandbox.json');
+	const paths = resolveConfigPaths('sandbox', { cwd });
 
-	let globalConfig: Partial<SandboxConfig> = {};
-	let projectConfig: Partial<SandboxConfig> = {};
+	let merged: SandboxConfig = { ...DEFAULT_CONFIG };
 
-	if (existsSync(globalConfigPath)) {
-		try {
-			globalConfig = JSON.parse(readFileSync(globalConfigPath, 'utf-8'));
-		} catch (e) {
-			log.warn('Could not parse %s: %s', globalConfigPath, e);
-		}
+	// 用户级
+	const globalRaw = readJsonFile(paths.userFile);
+	if (globalRaw !== null) {
+		merged = deepMerge(merged, globalRaw as Partial<SandboxConfig>);
 	}
 
-	if (existsSync(projectConfigPath)) {
-		try {
-			projectConfig = JSON.parse(readFileSync(projectConfigPath, 'utf-8'));
-		} catch (e) {
-			log.warn('Could not parse %s: %s', projectConfigPath, e);
-		}
+	// 项目级（最高优先级）
+	const projectRaw = readJsonFile(paths.projectFile);
+	if (projectRaw !== null) {
+		merged = deepMerge(merged, projectRaw as Partial<SandboxConfig>);
 	}
 
-	return deepMerge(deepMerge(DEFAULT_CONFIG, globalConfig), projectConfig);
+	return merged;
 }
 
 function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): SandboxConfig {

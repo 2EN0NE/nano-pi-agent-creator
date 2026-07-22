@@ -1,7 +1,6 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { resolveConfigPaths, readJsonFile, deepMerge } from '@zenone/pi-config';
 
 // ============================================================================
 // Logger
@@ -107,133 +106,30 @@ export const CUSTOM_TYPE = 'rate-limiter-state';
 export const STATUS_KEY = 'rate-limiter';
 
 // ============================================================================
-// Extension directory (for built-in default config)
-// ============================================================================
-
-export function getExtensionDir(): string {
-	try {
-		return dirname(fileURLToPath(import.meta.url));
-	} catch {
-		return __dirname;
-	}
-}
-
-// ============================================================================
-// YAML parsing
+// Config loading (JSON-based, using @zenone/pi-config)
 // ============================================================================
 
 /**
- * Parse a minimal subset of YAML sufficient for this extension's config.
- * Supports top-level key: value pairs only. Numbers and booleans are auto-detected.
+ * Load config from user + project levels using pi-config standard paths.
+ * Defaults are built-in; no bundled config file needed.
  */
-export function parseSimpleYaml(text: string): Record<string, string | number | boolean> {
-	const result: Record<string, string | number | boolean> = {};
-	for (const raw of text.split('\n')) {
-		const line = raw.trim();
-		if (!line || line.startsWith('#')) continue;
-		const colonIdx = line.indexOf(':');
-		if (colonIdx === -1) continue;
-		const key = line.slice(0, colonIdx).trim();
-		const val = line.slice(colonIdx + 1).trim();
-		if (val === 'true') {
-			result[key] = true;
-		} else if (val === 'false') {
-			result[key] = false;
-		} else if (val !== '' && !Number.isNaN(Number(val))) {
-			result[key] = Number(val);
-		} else {
-			result[key] = val;
-		}
-	}
-	return result;
-}
-
-// ============================================================================
-// Config loading (4-layer priority)
-// ============================================================================
-
-export function loadYamlConfig(cwd: string, extensionDir: string): Partial<RateLimitConfig> {
-	const builtinPath = join(extensionDir, 'pi-rate-limiter.yaml');
-	const globalPath = join(
-		homedir(),
-		'.pi',
-		'agent',
-		'extensions-data',
-		'pi-rate-limiter',
-		'pi-rate-limiter.yaml',
-	);
-	const projectPath = join(cwd, '.pi', 'agent', 'extensions', 'pi-rate-limiter.yaml');
-
+export function loadConfig(cwd: string): Partial<RateLimitConfig> {
+	const paths = resolveConfigPaths('pi-rate-limiter', { cwd });
 	let merged: Partial<RateLimitConfig> = {};
 
-	for (const path of [builtinPath, globalPath, projectPath]) {
-		if (existsSync(path)) {
-			try {
-				const raw = readFileSync(path, 'utf8');
-				const parsed = parseSimpleYaml(raw);
-				const picked: Partial<RateLimitConfig> = {};
-				if ('maxRequestsPerMinute' in parsed)
-					picked.maxRequestsPerMinute = Number(parsed.maxRequestsPerMinute);
-				if ('maxTokensPerMinute' in parsed)
-					picked.maxTokensPerMinute = Number(parsed.maxTokensPerMinute);
-				if ('autoResumeOn432' in parsed)
-					picked.autoResumeOn432 = Boolean(parsed.autoResumeOn432);
-				if ('tokenEstimateRatio' in parsed)
-					picked.tokenEstimateRatio = Number(parsed.tokenEstimateRatio);
-				if ('throttleThresholdPercent' in parsed)
-					picked.throttleThresholdPercent = Number(parsed.throttleThresholdPercent);
-				if ('globalRateLimit' in parsed)
-					picked.globalRateLimit = Boolean(parsed.globalRateLimit);
-				if ('heartbeatIntervalMs' in parsed)
-					picked.heartbeatIntervalMs = Number(parsed.heartbeatIntervalMs);
-				if ('lockTimeoutMs' in parsed) picked.lockTimeoutMs = Number(parsed.lockTimeoutMs);
-				if ('staleProcessTimeoutMs' in parsed)
-					picked.staleProcessTimeoutMs = Number(parsed.staleProcessTimeoutMs);
-				if ('adaptiveRateLimit' in parsed) {
-					const raw = parsed.adaptiveRateLimit;
-					if (raw === true || raw === 'true' || raw === 'both')
-						picked.adaptiveRateLimit = 'both';
-					else if (raw === false || raw === 'off' || raw === 'false')
-						picked.adaptiveRateLimit = 'off';
-					else if (raw === 'bayesian') picked.adaptiveRateLimit = 'bayesian';
-					else if (raw === 'ucb') picked.adaptiveRateLimit = 'ucb';
-				}
-				if ('modelProfiles' in parsed) {
-					try {
-						const mp = JSON.parse(String(parsed.modelProfiles));
-						if (Array.isArray(mp)) picked.modelProfiles = mp as ModelProfile[];
-					} catch {
-						// ignore malformed modelProfiles
-					}
-				}
-				merged = { ...merged, ...picked };
-			} catch {
-				// ignore malformed config
-			}
-		}
+	// User level
+	const userRaw = readJsonFile(paths.userFile);
+	if (userRaw !== null) {
+		merged = deepMerge(merged, userRaw as Partial<RateLimitConfig>);
+	}
+
+	// Project level (highest priority)
+	const projectRaw = readJsonFile(paths.projectFile);
+	if (projectRaw !== null) {
+		merged = deepMerge(merged, projectRaw as Partial<RateLimitConfig>);
 	}
 
 	return merged;
-}
-
-export function mergeConfig(
-	base: RateLimitConfig,
-	overrides: Partial<RateLimitConfig>,
-): RateLimitConfig {
-	return {
-		maxRequestsPerMinute: overrides.maxRequestsPerMinute ?? base.maxRequestsPerMinute,
-		maxTokensPerMinute: overrides.maxTokensPerMinute ?? base.maxTokensPerMinute,
-		autoResumeOn432: overrides.autoResumeOn432 ?? base.autoResumeOn432,
-		tokenEstimateRatio: overrides.tokenEstimateRatio ?? base.tokenEstimateRatio,
-		throttleThresholdPercent:
-			overrides.throttleThresholdPercent ?? base.throttleThresholdPercent,
-		globalRateLimit: overrides.globalRateLimit ?? base.globalRateLimit,
-		heartbeatIntervalMs: overrides.heartbeatIntervalMs ?? base.heartbeatIntervalMs,
-		lockTimeoutMs: overrides.lockTimeoutMs ?? base.lockTimeoutMs,
-		staleProcessTimeoutMs: overrides.staleProcessTimeoutMs ?? base.staleProcessTimeoutMs,
-		modelProfiles: overrides.modelProfiles ?? base.modelProfiles,
-		adaptiveRateLimit: overrides.adaptiveRateLimit ?? base.adaptiveRateLimit,
-	};
 }
 
 // ============================================================================

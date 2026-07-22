@@ -12,7 +12,7 @@ import { ROOT_DIR } from '../helpers/sandbox.js';
 
 describe('e2e-test skill', () => {
 	it('skill directory has SKILL.md', () => {
-		const skillMd = resolve(ROOT_DIR, 'skills/e2e-test/SKILL.md');
+		const skillMd = resolve(ROOT_DIR, '.pi/skills/e2e-test/SKILL.md');
 		expect(existsSync(skillMd)).toBe(true);
 	});
 

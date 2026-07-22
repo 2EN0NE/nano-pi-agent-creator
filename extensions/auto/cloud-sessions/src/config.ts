@@ -1,9 +1,10 @@
 import { execSync } from 'node:child_process';
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
+import { resolveConfigPaths } from '@zenone/pi-config';
 
 const log = createLogger('pi-cloud-sessions');
 
@@ -43,13 +44,12 @@ function expandTilde(value: string): string {
 	return value;
 }
 
-const CONFIG_DIR = join(homedir(), '.config', 'pi');
-const CONFIG_FILE = join(CONFIG_DIR, 'cloud-sessions.json');
+/** User-level config path via @zenone/pi-config standard. */
+const PLUGIN_NAME = 'cloud-sessions';
 
 /** Directory for per-extension persistent data (`~/.pi/agent/extensions-data/cloud-sessions/`). */
 function extensionsDataDir(): string {
-	const home = homedir();
-	return join(home, '.pi', 'agent', 'extensions-data', 'cloud-sessions');
+	return resolveConfigPaths(PLUGIN_NAME).userDir;
 }
 
 /** Path to the project-match config file. */
@@ -111,13 +111,14 @@ interface RawConfig {
 }
 
 async function readRawConfig(): Promise<RawConfig> {
-	if (!existsSync(CONFIG_FILE)) return {};
+	const paths = resolveConfigPaths(PLUGIN_NAME);
+	if (!existsSync(paths.userFile)) return {};
 	try {
-		return JSON.parse(await readFile(CONFIG_FILE, 'utf-8')) as RawConfig;
+		return JSON.parse(await readFile(paths.userFile, 'utf-8')) as RawConfig;
 	} catch (err) {
 		log.warn(
 			'failed to parse config file at %s, using defaults: %s',
-			CONFIG_FILE,
+			paths.userFile,
 			(err as Error).message ?? err,
 		);
 		return {};
@@ -188,9 +189,9 @@ export function isProviderConfigured(config: CloudSessionsConfig): boolean {
 }
 
 export function configFilePath(): string {
-	return CONFIG_FILE;
+	return resolveConfigPaths(PLUGIN_NAME).userFile;
 }
 
 export function configDir(): string {
-	return CONFIG_DIR;
+	return resolveConfigPaths(PLUGIN_NAME).userDir;
 }

@@ -1,0 +1,23 @@
+{
+	"name": "@zenone/pi-config",
+	"version": "0.1.0",
+	"description": "Unified configuration store for pi extensions — multi-layer config (default, user, project, session), deep merge, atomic writes, /config inspector command",
+	"type": "module",
+	"exports": {
+		".": {
+			"import": "./api.ts"
+		},
+		"./types": {
+			"import": "./types.ts"
+		}
+	},
+	"keywords": [
+		"pi-extension",
+		"config",
+		"configuration",
+		"store"
+	],
+	"devDependencies": {
+		"typescript": "^7.0.2"
+	}
+}

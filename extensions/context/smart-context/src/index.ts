@@ -225,10 +225,11 @@ export default function (pi: ExtensionAPI) {
 			if (!profileArg) {
 				const current = resolveProfile(ctx.cwd);
 				const names = Object.keys(profiles);
+				const cfgPath = configFilePath(ctx.cwd);
 				ctx.ui.notify(
 					`Available profiles: ${names.join(', ')}\n` +
 						`Current: ${_activeProfileName(current)}\n` +
-						`Config: ${configFilePath(ctx.cwd) ?? '<none>'}\n` +
+						`Config: ${cfgPath}\n` +
 						`To switch: /smart-context-profile {profileName}`,
 					'info',
 				);
@@ -248,7 +249,7 @@ export default function (pi: ExtensionAPI) {
 			const cfgPath = configFilePath(ctx.cwd);
 			if (!cfgPath) {
 				ctx.ui.notify(
-					'No .pi/smart-context.json found; cannot persist profile selection.',
+					'Config path unavailable; cannot persist profile selection.',
 					'warning',
 				);
 				return;

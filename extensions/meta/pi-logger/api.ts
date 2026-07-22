@@ -30,12 +30,37 @@ import { LOG_EVENT_CHANNEL } from './types.js';
 
 const GLOBAL_EVENTBUS_KEY = '__pi_logger_eventbus__';
 
+// ============================================================================
+// Event buffer: capture log events emitted before initEventBus() is called.
+// Fixes the startup ordering issue where other extensions' factories run before
+// pi-logger's factory.  Buffered events are flushed on initEventBus().
+// ============================================================================
+
+const GLOBAL_BUFFER_KEY = '__pi_logger_pending_events__';
+
+function getPendingEvents(): LogEvent[] {
+	const g = globalThis as Record<string, unknown>;
+	if (!g[GLOBAL_BUFFER_KEY]) {
+		g[GLOBAL_BUFFER_KEY] = [] as LogEvent[];
+	}
+	return g[GLOBAL_BUFFER_KEY] as LogEvent[];
+}
+
 /**
- * Initialize the EventBus reference. Called by the pi-logger extension factory
- * (index.ts) at startup. Must be called before any createLogger() usage.
+ * Initialize the EventBus reference AND flush any buffered events.
+ * Called by the pi-logger extension factory (index.ts) at startup.
  */
 export function initEventBus(bus: EventBus): void {
 	(globalThis as Record<string, unknown>)[GLOBAL_EVENTBUS_KEY] = bus;
+
+	// Flush buffered events
+	const pending = getPendingEvents();
+	if (pending.length > 0) {
+		for (const event of pending) {
+			bus.emit(LOG_EVENT_CHANNEL, event);
+		}
+		pending.length = 0;
+	}
 }
 
 /**
@@ -117,8 +142,6 @@ function formatMessage(template: string, args: unknown[]): { message: string; de
 
 function emitLogEvent(level: LogLevel, source: string, message: string, details?: unknown): void {
 	const bus = getEventBus();
-	if (!bus) return; // silently drop until initEventBus is called
-
 	const event: LogEvent = {
 		level,
 		source,
@@ -126,7 +149,12 @@ function emitLogEvent(level: LogLevel, source: string, message: string, details?
 		details,
 		timestamp: Date.now(),
 	};
-	bus.emit(LOG_EVENT_CHANNEL, event);
+	if (bus) {
+		bus.emit(LOG_EVENT_CHANNEL, event);
+	} else {
+		// Buffer until pi-logger's initEventBus() is called
+		getPendingEvents().push(event);
+	}
 }
 
 // ============================================================================

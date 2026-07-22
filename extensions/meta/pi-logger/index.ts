@@ -25,6 +25,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { resolveConfigPaths } from '@zenone/pi-config';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import type { SelectItem } from '@earendil-works/pi-tui';
@@ -282,8 +283,8 @@ async function interactivePersist(
 	loggerName: string,
 	level: LogLevel,
 ): Promise<void> {
-	const projectPath = join(ctx.cwd, '.pi', 'pi-logger.json');
-	const globalPath = join(homedir(), '.pi', 'agents', 'pi-logger.json');
+	const projectPath = resolveConfigPaths('pi-logger', { cwd: ctx.cwd }).projectFile;
+	const globalPath = resolveConfigPaths('pi-logger').userFile;
 
 	const items: SelectItem[] = [
 		{

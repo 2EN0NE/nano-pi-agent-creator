@@ -7,14 +7,13 @@
  *   3. 项目级配置（<cwd>/.pi/extensions-data/git-merge-and-resolve/config.json）
  *
  * 优先级：项目级 > 用户级 > 默认值（逐层 deepMerge）
+ *
+ * 使用 @zenone/pi-config 实现统一路径解析与文件 IO。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { createLogger } from '@zenone/pi-logger';
-
-const log = createLogger('git-merge-and-resolve:config');
+import { existsSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { deepMerge, resolveConfigPaths, readJsonFile, writeJsonAtomic } from '@zenone/pi-config';
 
 // ============================================================================
 // 类型定义
@@ -40,35 +39,18 @@ const DEFAULT_CONFIG: GitMergeConfig = {
 };
 
 // ============================================================================
-// 路径常量
+// 统一路径解析
 // ============================================================================
 
 const PLUGIN_NAME = 'git-merge-and-resolve';
 
-/** 用户级配置目录 */
-const USER_CONFIG_DIR = join(homedir(), '.pi', 'agent', 'extensions-data', PLUGIN_NAME);
-/** 用户级配置文件名 */
-const USER_CONFIG_FILE = join(USER_CONFIG_DIR, 'config.json');
-
-/** 项目级配置目录（相对于 cwd） */
-function getProjectConfigDir(cwd: string): string {
-	return join(cwd, '.pi', 'extensions-data', PLUGIN_NAME);
-}
-
-/** 项目级配置文件名 */
-function getProjectConfigFile(cwd: string): string {
-	return join(getProjectConfigDir(cwd), 'config.json');
-}
-
-// ============================================================================
-// 公共函数
-// ============================================================================
-
 /**
  * 解析项目级或用户级配置文件的完整路径。
+ * 委托给 @zenone/pi-config 的 resolveConfigPaths。
  */
 export function resolveConfigPath(cwd: string, scope: 'project' | 'user'): string {
-	return scope === 'project' ? getProjectConfigFile(cwd) : USER_CONFIG_FILE;
+	const paths = resolveConfigPaths(PLUGIN_NAME, { cwd });
+	return scope === 'project' ? paths.projectFile : paths.userFile;
 }
 
 /**
@@ -81,60 +63,34 @@ export function ensureConfigDir(path: string): void {
 	}
 }
 
-// ============================================================================
-// 配置文件加载
-// ============================================================================
-
-function loadConfigFile(path: string): Partial<GitMergeConfig> | null {
-	try {
-		if (!existsSync(path)) return null;
-		const raw = readFileSync(path, 'utf-8');
-		return JSON.parse(raw) as Partial<GitMergeConfig>;
-	} catch (err) {
-		log.error('Failed to parse config file: %s', path, err);
-		return null;
-	}
-}
-
-// ============================================================================
-// deepMerge — 深度合并
-// ============================================================================
-
-export function deepMerge(
-	base: GitMergeConfig,
-	overrides: Partial<GitMergeConfig>,
-): GitMergeConfig {
-	return {
-		enabled: overrides.enabled ?? base.enabled,
-		notifications: overrides.notifications ?? base.notifications,
-		showWidget: overrides.showWidget ?? base.showWidget,
-	};
-}
+/** 导出统一 deepMerge */
+export { deepMerge };
 
 // ============================================================================
 // 加载配置（项目级优先，用户级兜底）
 // ============================================================================
 
 export function loadConfig(cwd: string): GitMergeConfig {
+	const paths = resolveConfigPaths(PLUGIN_NAME, { cwd });
 	let merged: GitMergeConfig = { ...DEFAULT_CONFIG };
 
-	// 1. 加载用户级配置
-	const userConfig = loadConfigFile(USER_CONFIG_FILE);
-	if (userConfig) {
-		merged = deepMerge(merged, userConfig);
+	// 1. 用户级
+	const userRaw = readJsonFile(paths.userFile);
+	if (userRaw !== null) {
+		merged = deepMerge(merged, userRaw as Partial<GitMergeConfig>);
 	}
 
-	// 2. 加载项目级配置（优先级最高）
-	const projectConfig = loadConfigFile(getProjectConfigFile(cwd));
-	if (projectConfig) {
-		merged = deepMerge(merged, projectConfig);
+	// 2. 项目级（最高优先级）
+	const projectRaw = readJsonFile(paths.projectFile);
+	if (projectRaw !== null) {
+		merged = deepMerge(merged, projectRaw as Partial<GitMergeConfig>);
 	}
 
 	return merged;
 }
 
 // ============================================================================
-// 保存配置
+// 保存配置（使用 pi-config 原子写入）
 // ============================================================================
 
 export function saveConfig(cwd: string, config: GitMergeConfig, scope: 'project' | 'user'): void {
@@ -147,7 +103,7 @@ export function saveConfig(cwd: string, config: GitMergeConfig, scope: 'project'
 		showWidget: config.showWidget,
 	};
 
-	writeFileSync(filePath, JSON.stringify(output, null, 2) + '\n', 'utf-8');
+	writeJsonAtomic(filePath, output);
 }
 
 // ============================================================================

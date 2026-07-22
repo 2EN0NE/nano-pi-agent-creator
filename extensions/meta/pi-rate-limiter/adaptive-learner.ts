@@ -6,8 +6,8 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { resolveConfigPaths } from '@zenone/pi-config';
 
 // ============================================================================
 // Types
@@ -57,7 +57,7 @@ const UCB_MIN_STEP_RATIO = 0.005; // Minimum step = 0.5% of configured limit
 const UCB_PENALTY_WEIGHT = 10; // 432 penalty weight in UCB bonus formula
 
 function getBeliefsPath(): string {
-	return join(homedir(), '.pi', 'agent', 'rate-limiter', 'adaptive-beliefs.json');
+	return join(resolveConfigPaths('pi-rate-limiter').userDir, 'adaptive-beliefs.json');
 }
 
 function emptyBeliefs(): AdaptiveBeliefs {
@@ -364,7 +364,7 @@ export class AdaptiveLearner {
 
 	saveBeliefs(): void {
 		try {
-			const dir = join(homedir(), '.pi', 'agent', 'rate-limiter');
+			const dir = resolveConfigPaths('pi-rate-limiter').userDir;
 			if (!existsSync(dir)) {
 				mkdirSync(dir, { recursive: true });
 			}

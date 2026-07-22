@@ -197,7 +197,7 @@ tui_run_pi_test() {
 	# 扩展中 import '@zenone/pi-logger' 需要能找到本地包
 	# 在项目目录中通过 node_modules/@zenone/pi-logger -> ../../extensions/meta/pi-logger 链接工作
 	mkdir -p "$test_home/node_modules"
-	local pkgs=("pi-logger" "selector")
+	local pkgs=("pi-logger" "selector" "pi-config")
 	for pkg in "${pkgs[@]}"; do
 		local pkg_src="$ROOT_DIR/extensions/meta/$pkg"
 		local pkg_name="@zenone/$pkg"

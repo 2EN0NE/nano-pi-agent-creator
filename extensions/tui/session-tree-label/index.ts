@@ -15,9 +15,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Key, matchesKey } from '@earendil-works/pi-tui';
 import { createLogger } from '@zenone/pi-logger';
-import { readFileSync, existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolveConfigPaths, readJsonFile } from '@zenone/pi-config';
 
 const log = createLogger('session-tree-label');
 
@@ -64,21 +62,37 @@ const DEFAULT_CONFIG: PluginConfig = {
 	timeout: 2000,
 };
 
-// ── 配置加载 ──────────────────────────────────────────────────────────────
+// ── 配置加载（使用 @zenone/pi-config 标准路径） ─────────────────
+
+let _cachedConfig: PluginConfig | null = null;
 
 function loadConfig(): PluginConfig {
-	try {
-		const dir = dirname(fileURLToPath(import.meta.url));
-		const configPath = resolve(dir, 'config.json');
-		if (existsSync(configPath)) {
-			const raw = readFileSync(configPath, 'utf-8');
-			const parsed = JSON.parse(raw) as Partial<PluginConfig>;
-			return { ...DEFAULT_CONFIG, ...parsed };
-		}
-	} catch (err) {
-		log.error('Failed to load config file, using defaults', err);
+	if (_cachedConfig) return _cachedConfig;
+
+	const paths = resolveConfigPaths('session-tree-label');
+	let merged: PluginConfig = { ...DEFAULT_CONFIG };
+
+	// 用户级
+	const userRaw = readJsonFile(paths.userFile);
+	if (userRaw !== null) {
+		merged = { ...merged, ...(userRaw as Partial<PluginConfig>) };
 	}
-	return DEFAULT_CONFIG;
+
+	// 项目级（最高优先级）
+	const projectRaw = readJsonFile(paths.projectFile);
+	if (projectRaw !== null) {
+		merged = { ...merged, ...(projectRaw as Partial<PluginConfig>) };
+	}
+
+	_cachedConfig = merged;
+	return merged;
+}
+
+function reloadConfig(): void {
+	_cachedConfig = null;
+	loadConfig();
+	const config = _cachedConfig!;
+	log.info('Config reloaded', { leaderKey: config.leaderKey, labels: buildHint(config.labels) });
 }
 
 // ── 安全通知 ──────────────────────────────────────────────────────────────
@@ -166,8 +180,6 @@ export default function sessionTreeLabel(pi: ExtensionAPI): void {
 		hint: buildHint(config.labels),
 	});
 
-	const configDir = dirname(fileURLToPath(import.meta.url));
-
 	// ═══════════════════════════════════════════════════
 	//  /label 命令
 	// ═══════════════════════════════════════════════════
@@ -191,16 +203,9 @@ export default function sessionTreeLabel(pi: ExtensionAPI): void {
 			// /label reload → 重载配置
 			if (trimmed === 'reload') {
 				try {
-					const p = resolve(configDir, 'config.json');
-					if (existsSync(p)) {
-						Object.assign(config, {
-							...DEFAULT_CONFIG,
-							...JSON.parse(readFileSync(p, 'utf-8')),
-						});
-						safeNotify(ctx, `配置已重载 (${buildHint(config.labels)})`, 'info');
-					} else {
-						safeNotify(ctx, '未找到 config.json', 'warning');
-					}
+					reloadConfig();
+					const fresh = loadConfig();
+					safeNotify(ctx, `配置已重载 (${buildHint(fresh.labels)})`, 'info');
 				} catch (err) {
 					safeNotify(ctx, `重载失败: ${err}`, 'error');
 				}

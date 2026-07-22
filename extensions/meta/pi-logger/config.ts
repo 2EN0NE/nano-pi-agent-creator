@@ -3,11 +3,10 @@
  *
  * Java Logback-style hierarchical logger configuration.
  *
- * Config file locations (merged, later takes precedence):
+ * Config file locations (merged, later takes precedence, using pi-config standard):
  *   1. ./extensions/meta/pi-logger/pi-logger.json   (plugin-bundled default)
- *   2. ~/.pi/agents/pi-logger.json              (user global)
- *   3. <project-root>/.pi/pi-logger.json         (project .pi/ config)
- *   4. <project-root>/pi-logger.json or upward  (project-root / upward search)
+ *   2. ~/.pi/agent/extensions-data/pi-logger/config.json  (user global)
+ *   3. <project-root>/.pi/extensions-data/pi-logger/config.json (project-local)
  *
  * Hierarchy rules (matches Log4j/Logback):
  *   Given logger name "review.file-scanner":
@@ -23,6 +22,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { resolveConfigPaths } from '@zenone/pi-config';
 
 // ============================================================================
 // Config file name
@@ -94,21 +94,6 @@ function mergeConfig(base: LoggerRuntimeConfig, overlay: LoggerConfig): LoggerRu
 	};
 }
 
-/**
- * Walk upward from `startDir` looking for the first directory that contains
- * a `pi-logger.json` file. Returns the full path if found, or null.
- */
-function findConfigUpward(startDir: string): string | null {
-	let current = resolve(startDir);
-	while (true) {
-		const candidate = join(current, CONFIG_FILE);
-		if (existsSync(candidate)) return candidate;
-		const parent = dirname(current);
-		if (parent === current) return null; // reached filesystem root
-		current = parent;
-	}
-}
-
 // ============================================================================
 // Public API
 // ============================================================================
@@ -177,19 +162,17 @@ export function getRuntimeConfig(): Readonly<LoggerRuntimeConfig> {
  *
  * Search order (later wins):
  *   1. Plugin-bundled default: alongside this module
- *   2. User global: ~/.pi/agents/pi-logger.json
- *   3. Project-local .pi/: <project-root>/.pi/pi-logger.json
- *   4. Project-local upward: first pi-logger.json walking upward from cwd
+ *   2. User global: ~/.pi/agent/extensions-data/pi-logger/config.json
+ *   3. Project-local: <cwd>/.pi/extensions-data/pi-logger/config.json
  *
- * @param cwd - Current working directory (project root hint for upward search)
+ * @param cwd - Current working directory (for project-level config)
  */
 export function loadConfiguration(cwd: string): void {
 	// Determine plugin's own directory (where this module lives)
 	const pluginDir = dirname(fileURLToPath(import.meta.url));
 
 	const bundledPath = join(pluginDir, CONFIG_FILE);
-	const userGlobalPath = join(homedir(), '.pi', 'agents', CONFIG_FILE);
-	const projectPath = findConfigUpward(cwd);
+	const paths = resolveConfigPaths('pi-logger', { cwd });
 
 	// Load in priority order (later overrides earlier)
 	let merged: LoggerRuntimeConfig = deepClone(DEFAULT_CONFIG);
@@ -198,20 +181,13 @@ export function loadConfiguration(cwd: string): void {
 	const bundled = loadConfigFile(bundledPath);
 	if (bundled) merged = mergeConfig(merged, bundled);
 
-	// 2) User global (~/.pi/agents/)
-	const userGlobal = loadConfigFile(userGlobalPath);
-	if (userGlobal) merged = mergeConfig(merged, userGlobal);
+	// 2) User global (~/.pi/agent/extensions-data/pi-logger/config.json)
+	const userCfg = loadConfigFile(paths.userFile);
+	if (userCfg) merged = mergeConfig(merged, userCfg);
 
-	// 3) Project-local .pi/ (<project-root>/.pi/pi-logger.json)
-	const dotPiPath = join(cwd, '.pi', CONFIG_FILE);
-	const dotPiCfg = loadConfigFile(dotPiPath);
-	if (dotPiCfg) merged = mergeConfig(merged, dotPiCfg);
-
-	// 4) Project-local upward (recursive upward from cwd)
-	if (projectPath) {
-		const projectCfg = loadConfigFile(projectPath);
-		if (projectCfg) merged = mergeConfig(merged, projectCfg);
-	}
+	// 3) Project-local (extensions-data/pi-logger/config.json)
+	const projectCfg = loadConfigFile(paths.projectFile);
+	if (projectCfg) merged = mergeConfig(merged, projectCfg);
 
 	// If the config specifies a relative path for file appender, resolve it against cwd
 	if (

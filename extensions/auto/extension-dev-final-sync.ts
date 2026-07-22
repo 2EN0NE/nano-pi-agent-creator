@@ -108,25 +108,25 @@ function resolveSyncTargets(
 	const hasProject = extensionExistsInDir(projectExtDir, extName);
 
 	if (hasUser && hasProject) {
-		log.info(
+		log.debug(
 			`Extension "${extName}" found in both user (~/.pi/agent/extensions/) and project (.pi/extensions/) — updating both`,
 		);
 		return { roots: [userExtDir, projectExtDir], label: '用户级 + 项目级' };
 	}
 	if (hasUser) {
-		log.info(
+		log.debug(
 			`Extension "${extName}" found in user (~/.pi/agent/extensions/) only — updating user`,
 		);
 		return { roots: [userExtDir], label: '用户级 (~/.pi/agent/extensions/)' };
 	}
 	if (hasProject) {
-		log.info(
+		log.debug(
 			`Extension "${extName}" found in project (.pi/extensions/) only — updating project`,
 		);
 		return { roots: [projectExtDir], label: '项目级 (.pi/extensions/)' };
 	}
 
-	log.info(`Extension "${extName}" not found in either — placing in project (.pi/extensions/)`);
+	log.debug(`Extension "${extName}" not found in either — placing in project (.pi/extensions/)`);
 	return { roots: [projectExtDir], label: '项目级 (.pi/extensions/)' };
 }
 
@@ -574,11 +574,11 @@ let pi: ExtensionAPI;
 export default function (api: ExtensionAPI): void {
 	pi = api;
 
-	log.debug('Extension loaded');
+	log.info('Extension loaded');
 
 	// ── agent_end 事件：每轮对话结束后触发 ────────────────────
 	pi.on('agent_end', async (_event, ctx) => {
-		log.debug('event: agent_end');
+		log.info('event: agent_end');
 
 		// 保护锁：防止重入（同步过程中另一个 agent_end 事件到达）
 		if (syncingInProgress) {
@@ -594,7 +594,7 @@ export default function (api: ExtensionAPI): void {
 			// 1. 检测 extensions/ 目录下的变更
 			const changed = await getChangedExtensions(pi, ctx);
 			if (changed.length === 0) {
-				log.debug('No extensions changed, skipping');
+				log.info('No extensions changed, skipping');
 				notifyTitle = '✅ 无扩展变更，无需同步';
 			} else {
 				log.info('Changed extensions:', changed.join(', '));
@@ -619,7 +619,7 @@ export default function (api: ExtensionAPI): void {
 					}
 
 					if (validExts.length === 0) {
-						log.debug('No valid extensions to sync');
+						log.info('No valid extensions to sync');
 						notifyTitle = `⚠️ ${changed.join(', ')} 有编译错误，未同步`;
 						notifyLevel = 'warning';
 					} else {

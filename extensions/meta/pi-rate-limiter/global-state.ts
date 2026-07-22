@@ -4,19 +4,19 @@
  * Uses a JSON state file + atomic directory lock (mkdir) to coordinate
  * multiple pi.dev processes on the same machine.
  *
- * State directory: ~/.pi/agent/rate-limiter/
+ * State directory: ~/.pi/agent/extensions-data/pi-rate-limiter/
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { resolveConfigPaths } from '@zenone/pi-config';
 
 // ============================================================================
 // Paths
 // ============================================================================
 
 export function getGlobalRateLimiterDir(): string {
-	return join(homedir(), '.pi', 'agent', 'rate-limiter');
+	return resolveConfigPaths('pi-rate-limiter').userDir;
 }
 
 export function getGlobalStatePath(): string {

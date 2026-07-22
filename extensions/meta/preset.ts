@@ -5,26 +5,21 @@
  * and system prompt instructions. Presets are defined in JSON config files
  * and can be activated via CLI flag, /preset command, or Ctrl+Shift+U to cycle.
  *
- * Config files (merged, project takes precedence):
- * - ~/.pi/agent/presets.json (global)
- * - <cwd>/.pi/presets.json (project-local)
+ * Config files (merged, project takes precedence, using @zenone/pi-config standard):
+ * - ~/.pi/agent/extensions-data/preset/config.json (user global)
+ * - <cwd>/.pi/extensions-data/preset/config.json (project-local)
  *
- * Example presets.json:
+ * Example config.json:
  * ```json
  * {
  *   "plan": {
  *     "provider": "openai-codex",
  *     "model": "gpt-5.2-codex",
- *     "thinkingLevel": "high",
- *     "tools": ["read", "grep", "find", "ls"],
- *     "instructions": "You are in PLANNING MODE. Your job is to deeply understand the problem and create a detailed implementation plan.\n\nRules:\n- DO NOT make any changes. You cannot edit or write files.\n- Read files IN FULL (no offset/limit) to get complete context. Partial reads miss critical details.\n- Explore thoroughly: grep for related code, find similar patterns, understand the architecture.\n- Ask clarifying questions if requirements are ambiguous. Do not assume.\n- Identify risks, edge cases, and dependencies before proposing solutions.\n\nOutput:\n- Create a structured plan with numbered steps.\n- For each step: what to change, why, and potential risks.\n- List files that will be modified.\n- Note any tests that should be added or updated.\n\nWhen done, ask the user if they want you to:\n1. Write the plan to a markdown file (e.g., PLAN.md)\n2. Create a GitHub issue with the plan\n3. Proceed to implementation (they should switch to 'implement' preset)"
+ *     ...
  *   },
  *   "implement": {
  *     "provider": "anthropic",
- *     "model": "claude-sonnet-4-5",
- *     "thinkingLevel": "high",
- *     "tools": ["read", "bash", "edit", "write"],
- *     "instructions": "You are in IMPLEMENTATION MODE. Your job is to make focused, correct changes.\n\nRules:\n- Keep scope tight. Do exactly what was asked, no more.\n- Read files before editing to understand current state.\n- Make surgical edits. Prefer edit over write for existing files.\n- Explain your reasoning briefly before each change.\n- Run tests or type checks after changes if the project has them (npm test, npm run check, etc.).\n- If you encounter unexpected complexity, STOP and explain the issue rather than hacking around it.\n\nIf no plan exists:\n- Ask clarifying questions before starting.\n- Propose what you'll do and get confirmation for non-trivial changes.\n\nAfter completing changes:\n- Summarize what was done.\n- Note any follow-up work or tests that should be added."
+ *     ...
  *   }
  * }
  * ```
@@ -38,13 +33,12 @@
  * CLI flags always override preset values.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { DynamicBorder, getAgentDir } from '@earendil-works/pi-coding-agent';
+import { DynamicBorder } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
 import { Container, Key, type SelectItem, SelectList, Text } from '@earendil-works/pi-tui';
+import { readJsonFile, resolveConfigPaths } from '@zenone/pi-config';
 
 const log = createLogger('preset');
 
@@ -69,32 +63,24 @@ interface PresetsConfig {
 /**
  * Load presets from config files.
  * Project-local presets override global presets with the same name.
+ * Uses @zenone/pi-config standard paths.
  */
 function loadPresets(cwd: string): PresetsConfig {
-	const globalPath = join(getAgentDir(), 'presets.json');
-	const projectPath = join(cwd, '.pi', 'presets.json');
+	const paths = resolveConfigPaths('preset', { cwd });
 
 	let globalPresets: PresetsConfig = {};
 	let projectPresets: PresetsConfig = {};
 
 	// Load global presets
-	if (existsSync(globalPath)) {
-		try {
-			const content = readFileSync(globalPath, 'utf-8');
-			globalPresets = JSON.parse(content);
-		} catch (err) {
-			log.error(`Failed to load global presets from ${globalPath}: %s`, err);
-		}
+	const globalRaw = readJsonFile(paths.userFile);
+	if (globalRaw !== null) {
+		globalPresets = globalRaw as PresetsConfig;
 	}
 
 	// Load project presets
-	if (existsSync(projectPath)) {
-		try {
-			const content = readFileSync(projectPath, 'utf-8');
-			projectPresets = JSON.parse(content);
-		} catch (err) {
-			log.error(`Failed to load project presets from ${projectPath}: %s`, err);
-		}
+	const projectRaw = readJsonFile(paths.projectFile);
+	if (projectRaw !== null) {
+		projectPresets = projectRaw as PresetsConfig;
 	}
 
 	// Merge (project overrides global)
@@ -239,7 +225,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 
 		if (presetNames.length === 0) {
 			ctx.ui.notify(
-				'No presets defined. Add presets to ~/.pi/agent/presets.json or .pi/presets.json',
+				'No presets defined. Add presets to extensions-data/preset/config.json',
 				'warning',
 			);
 			return;
@@ -352,7 +338,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 		const presetNames = getPresetOrder();
 		if (presetNames.length === 0) {
 			ctx.ui.notify(
-				'No presets defined. Add presets to ~/.pi/agent/presets.json or .pi/presets.json',
+				'No presets defined. Add presets to extensions-data/preset/config.json',
 				'warning',
 			);
 			return;

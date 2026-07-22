@@ -7,13 +7,15 @@
  *   3. 项目级配置（<cwd>/.pi/extensions-data/permission-gate/config.json）
  *
  * 优先级：项目级 > 用户级 > 默认值（逐层 deepMerge）
+ *
+ * 使用 @zenone/pi-config 实现统一路径解析与文件 IO。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createLogger } from '@zenone/pi-logger';
+import { deepMerge, resolveConfigPaths, readJsonFile, writeJsonAtomic } from '@zenone/pi-config';
 
 const log = createLogger('permission-gate:config');
 
@@ -91,98 +93,33 @@ const DEFAULT_CONFIG: PermissionGateConfig = {
 	},
 };
 
-// ============================================================================
-// 路径解析
-// ============================================================================
-
-/** 用户级配置目录 */
-const USER_CONFIG_DIR = join(homedir(), '.pi', 'agent', 'extensions-data', 'permission-gate');
-/** 用户级配置文件名 */
-const USER_CONFIG_FILE = join(USER_CONFIG_DIR, 'config.json');
-
-/** 项目级配置目录（相对于 cwd） */
-function getProjectConfigDir(cwd: string): string {
-	return join(cwd, '.pi', 'extensions-data', 'permission-gate');
-}
-
-/** 项目级配置文件名 */
-function getProjectConfigFile(cwd: string): string {
-	return join(getProjectConfigDir(cwd), 'config.json');
-}
+/**
+ * 导出 deepMerge（保留签名，底层由 pi-config 实现）。
+ * 深度合并两个配置，数组直接覆盖（不 concat），嵌套对象递归。
+ */
+export { deepMerge };
 
 // ============================================================================
-// 公共函数
+// 公共路径函数
 // ============================================================================
 
 /**
  * 解析项目级或用户级配置文件的完整路径。
+ * 委托给 @zenone/pi-config 的 resolveConfigPaths。
  */
 export function resolveConfigPath(cwd: string, scope: 'project' | 'user'): string {
-	return scope === 'project' ? getProjectConfigFile(cwd) : USER_CONFIG_FILE;
+	const paths = resolveConfigPaths('permission-gate', { cwd });
+	return scope === 'project' ? paths.projectFile : paths.userFile;
 }
 
 /**
  * 确保配置目录存在（含父目录递归创建）。
  */
 export function ensureConfigDir(path: string): void {
-	const dir = dirname(path);
+	const dir = path.substring(0, path.lastIndexOf('/'));
 	if (!existsSync(dir)) {
 		mkdirSync(dir, { recursive: true });
 	}
-}
-
-// ============================================================================
-// 配置文件加载
-// ============================================================================
-
-function loadConfigFile(path: string): Partial<PermissionGateConfig> | null {
-	try {
-		if (!existsSync(path)) return null;
-		const raw = readFileSync(path, 'utf-8');
-		return JSON.parse(raw) as Partial<PermissionGateConfig>;
-	} catch (err) {
-		log.error('Failed to parse config file: %s', path, err);
-		return null;
-	}
-}
-
-// ============================================================================
-// deepMerge — 深度合并
-// ============================================================================
-
-/**
- * 深度合并两个配置对象。
- * - 基本类型的属性直接覆盖
- * - patterns 数组直接覆盖（而非 concat）
- * - dynamicPolicy 嵌套对象逐层合并
- * - approvalCounts 对象合并
- */
-export function deepMerge(
-	base: PermissionGateConfig,
-	overrides: Partial<PermissionGateConfig>,
-): PermissionGateConfig {
-	const result: PermissionGateConfig = {
-		enabled: overrides.enabled ?? base.enabled,
-		dynamicPolicyEnabled: overrides.dynamicPolicyEnabled ?? base.dynamicPolicyEnabled,
-		patterns: overrides.patterns ?? base.patterns,
-		dynamicPolicy: {
-			scope: overrides.dynamicPolicy?.scope ?? base.dynamicPolicy.scope,
-			thresholds: {
-				sameCommand:
-					overrides.dynamicPolicy?.thresholds?.sameCommand ??
-					base.dynamicPolicy.thresholds.sameCommand,
-				sameTool:
-					overrides.dynamicPolicy?.thresholds?.sameTool ??
-					base.dynamicPolicy.thresholds.sameTool,
-				sameFolder:
-					overrides.dynamicPolicy?.thresholds?.sameFolder ??
-					base.dynamicPolicy.thresholds.sameFolder,
-			},
-		},
-		widget: overrides.widget ?? base.widget,
-	};
-
-	return result;
 }
 
 // ============================================================================
@@ -200,22 +137,22 @@ export function deepMerge(
  * 注意：项目级覆盖用户级，用户级覆盖默认值。
  */
 export function loadConfig(cwd: string): PermissionGateConfig {
-	// 从默认值开始
-	let merged: PermissionGateConfig = { ...DEFAULT_CONFIG };
+	const paths = resolveConfigPaths('permission-gate', { cwd });
+	let merged: PermissionGateConfig = getDefaultConfig();
 
-	// 1. 加载用户级配置
-	const userConfig = loadConfigFile(USER_CONFIG_FILE);
-	if (userConfig) {
-		merged = deepMerge(merged, userConfig);
+	// 1. 用户级
+	const userRaw = readJsonFile(paths.userFile);
+	if (userRaw !== null) {
+		merged = deepMerge(merged, userRaw as Partial<PermissionGateConfig>);
 	}
 
-	// 2. 加载项目级配置（优先级最高）
-	const projectConfig = loadConfigFile(getProjectConfigFile(cwd));
-	if (projectConfig) {
-		merged = deepMerge(merged, projectConfig);
+	// 2. 项目级（最高优先级）
+	const projectRaw = readJsonFile(paths.projectFile);
+	if (projectRaw !== null) {
+		merged = deepMerge(merged, projectRaw as Partial<PermissionGateConfig>);
 	}
 
-	// 3. 如果 scope 是相对路径，解析为绝对路径
+	// 3. scope 相对路径解析为绝对路径
 	if (merged.dynamicPolicy.scope && !merged.dynamicPolicy.scope.startsWith('/')) {
 		merged.dynamicPolicy.scope = resolve(cwd, merged.dynamicPolicy.scope);
 	}
@@ -229,6 +166,7 @@ export function loadConfig(cwd: string): PermissionGateConfig {
 
 /**
  * 将配置保存到指定级别的配置文件中。
+ * 使用 pi-config 的原子写入（tmp + rename）。
  *
  * @param cwd 当前工作目录
  * @param config 要保存的配置（完整对象）
@@ -250,11 +188,11 @@ export function saveConfig(
 		widget: config.widget,
 	};
 
-	writeFileSync(filePath, JSON.stringify(output, null, 2) + '\n', 'utf-8');
+	writeJsonAtomic(filePath, output);
 }
 
 // ============================================================================
-// 计数 key 生成
+// 计数 key 生成（domain 逻辑，原地保留）
 // ============================================================================
 
 /**

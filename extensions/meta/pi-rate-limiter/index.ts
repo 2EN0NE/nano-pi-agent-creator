@@ -45,20 +45,18 @@ import { Container, type SettingItem, SettingsList } from '@earendil-works/pi-tu
 import { AdaptiveLearner } from './adaptive-learner.js';
 import { GlobalRateLimiter } from './global-state.js';
 import { estimateTokensAccurate } from './token-counter.js';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { deepMerge, resolveConfigPaths } from '@zenone/pi-config';
 import {
 	CUSTOM_TYPE,
 	DEFAULT_CONFIG,
 	detectModelFromPayload,
 	estimateTokensFromPayload,
 	getEffectiveLimits,
-	getExtensionDir,
 	getWindowStart,
 	is432LikeError,
-	loadYamlConfig,
+	loadConfig,
 	logger,
-	mergeConfig,
 	setLogFile,
 	setLogLevel,
 	sleep,
@@ -75,7 +73,7 @@ import {
 
 export default function rateLimiterExtension(pi: ExtensionAPI) {
 	// Initialize logging
-	const logDir = join(homedir(), '.pi', 'agent', 'rate-limiter');
+	const logDir = join(resolveConfigPaths('pi-rate-limiter').userDir);
 	const logPath = join(logDir, 'extension.log');
 	setLogFile(logPath);
 	setLogLevel('debug');
@@ -96,7 +94,6 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 	let outcomeClassified = false; // Prevents duplicate classifyAndRecordOutcome calls per turn
 	let consecutive429Count = 0; // Track consecutive 432/429 responses
 	const MAX_CONSECUTIVE_429 = 3; // Threshold before entering deep cooldown
-	const extensionDir = getExtensionDir();
 
 	// Helper: is UCB mode active? (ucb or both)
 	const isUcbMode = () =>
@@ -111,10 +108,10 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 	// Config management
 	// -------------------------------------------------------------------------
 
-	function loadConfig(ctx: ExtensionContext) {
-		logger.debug('loadConfig: loading YAML config', { cwd: ctx.cwd, extensionDir });
-		const yamlOverrides = loadYamlConfig(ctx.cwd, extensionDir);
-		config = mergeConfig(DEFAULT_CONFIG, yamlOverrides);
+	function loadConfigFromDisk(ctx: ExtensionContext) {
+		logger.debug('loadConfig: loading JSON config', { cwd: ctx.cwd });
+		const overrides = loadConfig(ctx.cwd);
+		config = deepMerge(DEFAULT_CONFIG, overrides);
 		logger.info('loadConfig: config loaded', {
 			maxReq: config.maxRequestsPerMinute,
 			maxTok: config.maxTokensPerMinute,
@@ -152,19 +149,16 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 			}
 		}
 		if (latest?.config) {
-			config = mergeConfig(config, latest.config);
+			config = deepMerge(config, latest.config);
 			if (latest.config.modelProfiles) {
 				config.modelProfiles = latest.config.modelProfiles;
 			}
 			if (latest.config.adaptiveRateLimit !== undefined) {
-				const raw = latest.config.adaptiveRateLimit;
-				// Migrate old boolean values (false→'off', true→'both')
-				if (raw === true) {
-					config.adaptiveRateLimit = 'both';
-				} else if (raw === false) {
-					config.adaptiveRateLimit = 'off';
+				// Migrate old boolean format (true→'both', false→'off') to string
+				if (typeof latest.config.adaptiveRateLimit === 'boolean') {
+					config.adaptiveRateLimit = latest.config.adaptiveRateLimit ? 'both' : 'off';
 				} else {
-					config.adaptiveRateLimit = raw as AdaptiveMode;
+					config.adaptiveRateLimit = latest.config.adaptiveRateLimit as AdaptiveMode;
 				}
 			}
 		}
@@ -614,232 +608,244 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 					}
 
 					let settingsList: SettingsList;
-					try {
-						settingsList = new SettingsList(
-							buildItems(),
-							Math.min(7, 10),
-							getSettingsListTheme(),
-							(id, newValue) => {
-								logger.debug('rate-limit: onChange', { id, newValue });
-								if (id === 'autoResumeOn432') {
-									config.autoResumeOn432 = newValue === '开启';
-									persistState();
-									settingsList.updateValue(id, newValue);
-									tui.requestRender();
-									return;
-								}
+					const onCancelHandler = () => {
+						logger.debug('rate-limit: panel closed via onCancel');
+						closePanel();
+					};
+					const onChangeHandler = (id: string, newValue: string) => {
+						logger.debug('rate-limit: onChange', { id, newValue });
+						if (id === 'autoResumeOn432') {
+							config.autoResumeOn432 = newValue === '开启';
+							persistState();
+							settingsList.updateValue(id, newValue);
+							tui.requestRender();
+							return;
+						}
 
-								if (id === 'globalRateLimit') {
-									config.globalRateLimit = newValue === '开启';
-									persistState();
-									settingsList.updateValue(id, newValue);
-									tui.requestRender();
-									return;
-								}
+						if (id === 'globalRateLimit') {
+							config.globalRateLimit = newValue === '开启';
+							persistState();
+							settingsList.updateValue(id, newValue);
+							tui.requestRender();
+							return;
+						}
 
-								if (id === 'adaptiveRateLimit') {
-									const mode = MODE_MAP[newValue] ?? 'off';
-									config.adaptiveRateLimit = mode;
-									persistState();
-									settingsList.updateValue(id, newValue);
-									tui.requestRender();
-									return;
-								}
+						if (id === 'adaptiveRateLimit') {
+							const mode = MODE_MAP[newValue] ?? 'off';
+							config.adaptiveRateLimit = mode;
+							persistState();
+							settingsList.updateValue(id, newValue);
+							tui.requestRender();
+							return;
+						}
 
-								// Done button
-								if (id === 'done' && newValue === '退出') {
-									logger.debug('rate-limit: user clicked done');
-									closePanel();
-									return;
-								}
+						// Done button
+						if (id === 'done' && newValue === '退出') {
+							logger.debug('rate-limit: user clicked done');
+							closePanel();
+							return;
+						}
 
-								// Model profile management
-								if (id === 'addModelProfile' && newValue === '添加') {
+						// Model profile management
+						if (id === 'addModelProfile' && newValue === '添加') {
+							ctx.ui
+								.input(
+									'模型匹配模式 (如: claude-* 或 /^gpt-4.*/)',
+									'claude-sonnet-4-6',
+								)
+								.then((pattern) => {
+									if (!pattern) return;
 									ctx.ui
 										.input(
-											'模型匹配模式 (如: claude-* 或 /^gpt-4.*/)',
-											'claude-sonnet-4-6',
+											'每分钟最大请求数',
+											String(config.maxRequestsPerMinute),
 										)
-										.then((pattern) => {
-											if (!pattern) return;
+										.then((rpmStr) => {
+											if (!rpmStr) return;
+											const rpm = Number(rpmStr);
+											if (Number.isNaN(rpm)) {
+												ctx.ui.notify('请输入有效数字', 'error');
+												return;
+											}
 											ctx.ui
 												.input(
-													'每分钟最大请求数',
-													String(config.maxRequestsPerMinute),
+													'每分钟最大输入 Token',
+													String(config.maxTokensPerMinute),
 												)
-												.then((rpmStr) => {
-													if (!rpmStr) return;
-													const rpm = Number(rpmStr);
-													if (Number.isNaN(rpm)) {
+												.then((tpmStr) => {
+													if (!tpmStr) return;
+													const tpm = Number(tpmStr);
+													if (Number.isNaN(tpm)) {
 														ctx.ui.notify('请输入有效数字', 'error');
 														return;
 													}
-													ctx.ui
-														.input(
-															'每分钟最大输入 Token',
-															String(config.maxTokensPerMinute),
-														)
-														.then((tpmStr) => {
-															if (!tpmStr) return;
-															const tpm = Number(tpmStr);
-															if (Number.isNaN(tpm)) {
-																ctx.ui.notify(
-																	'请输入有效数字',
-																	'error',
-																);
-																return;
-															}
-															config.modelProfiles.push({
-																modelPattern: pattern,
-																maxRequestsPerMinute: Math.max(
-																	0,
-																	rpm,
-																),
-																maxTokensPerMinute: Math.max(
-																	0,
-																	tpm,
-																),
-															});
-															persistState();
-															settingsList.setItems(buildItems());
-															tui.requestRender();
-														});
+													config.modelProfiles.push({
+														modelPattern: pattern,
+														maxRequestsPerMinute: Math.max(0, rpm),
+														maxTokensPerMinute: Math.max(0, tpm),
+													});
+													persistState();
+													settingsList = new SettingsList(
+														buildItems(),
+														Math.min(7, 10),
+														getSettingsListTheme(),
+														onChangeHandler,
+														onCancelHandler,
+													);
+													tui.requestRender();
 												});
 										});
-									return;
-								}
+								});
+							return;
+						}
 
-								if (id.startsWith('modelProfile-')) {
-									const idx = Number(id.slice('modelProfile-'.length));
-									const profile = config.modelProfiles[idx];
-									if (!profile) return;
-									if (newValue === '删除') {
-										config.modelProfiles.splice(idx, 1);
-										persistState();
-										settingsList.setItems(buildItems());
-										tui.requestRender();
-										return;
-									}
-									if (newValue === '编辑') {
+						if (id.startsWith('modelProfile-')) {
+							const idx = Number(id.slice('modelProfile-'.length));
+							const profile = config.modelProfiles[idx];
+							if (!profile) return;
+							if (newValue === '删除') {
+								config.modelProfiles.splice(idx, 1);
+								persistState();
+								settingsList = new SettingsList(
+									buildItems(),
+									Math.min(7, 10),
+									getSettingsListTheme(),
+									onChangeHandler,
+									onCancelHandler,
+								);
+								tui.requestRender();
+								return;
+							}
+							if (newValue === '编辑') {
+								ctx.ui
+									.input('模型匹配模式', profile.modelPattern)
+									.then((pattern) => {
+										if (pattern === undefined) return;
 										ctx.ui
-											.input('模型匹配模式', profile.modelPattern)
-											.then((pattern) => {
-												if (pattern === undefined) return;
+											.input(
+												'每分钟最大请求数',
+												String(profile.maxRequestsPerMinute),
+											)
+											.then((rpmStr) => {
+												if (!rpmStr) return;
+												const rpm = Number(rpmStr);
+												if (Number.isNaN(rpm)) {
+													ctx.ui.notify('请输入有效数字', 'error');
+													return;
+												}
 												ctx.ui
 													.input(
-														'每分钟最大请求数',
-														String(profile.maxRequestsPerMinute),
+														'每分钟最大输入 Token',
+														String(profile.maxTokensPerMinute),
 													)
-													.then((rpmStr) => {
-														if (!rpmStr) return;
-														const rpm = Number(rpmStr);
-														if (Number.isNaN(rpm)) {
+													.then((tpmStr) => {
+														if (!tpmStr) return;
+														const tpm = Number(tpmStr);
+														if (Number.isNaN(tpm)) {
 															ctx.ui.notify(
 																'请输入有效数字',
 																'error',
 															);
 															return;
 														}
-														ctx.ui
-															.input(
-																'每分钟最大输入 Token',
-																String(profile.maxTokensPerMinute),
-															)
-															.then((tpmStr) => {
-																if (!tpmStr) return;
-																const tpm = Number(tpmStr);
-																if (Number.isNaN(tpm)) {
-																	ctx.ui.notify(
-																		'请输入有效数字',
-																		'error',
-																	);
-																	return;
-																}
-																profile.modelPattern = pattern;
-																profile.maxRequestsPerMinute =
-																	Math.max(0, rpm);
-																profile.maxTokensPerMinute =
-																	Math.max(0, tpm);
-																persistState();
-																settingsList.setItems(buildItems());
-																tui.requestRender();
-															});
+														profile.modelPattern = pattern;
+														profile.maxRequestsPerMinute = Math.max(
+															0,
+															rpm,
+														);
+														profile.maxTokensPerMinute = Math.max(
+															0,
+															tpm,
+														);
+														persistState();
+														settingsList = new SettingsList(
+															buildItems(),
+															Math.min(7, 10),
+															getSettingsListTheme(),
+															onChangeHandler,
+															onCancelHandler,
+														);
+														tui.requestRender();
 													});
 											});
-										return;
-									}
-								}
+									});
+								return;
+							}
+						}
 
-								// For numeric fields, prompt via input dialog
-								let title = '';
-								let placeholder = '';
-								switch (id) {
-									case 'maxRequestsPerMinute':
-										title = '每分钟最大请求数 (0=不限)';
-										placeholder = String(config.maxRequestsPerMinute);
-										break;
-									case 'maxTokensPerMinute':
-										title = '每分钟最大输入 Token (0=不限)';
-										placeholder = String(config.maxTokensPerMinute);
-										break;
-									case 'tokenEstimateRatio':
-										title = 'Token 估算分母';
-										placeholder = String(config.tokenEstimateRatio);
-										break;
-									case 'throttleThresholdPercent':
-										title = '限流触发阈值 %';
-										placeholder = String(config.throttleThresholdPercent);
-										break;
-								}
+						// For numeric fields, prompt via input dialog
+						let title = '';
+						let placeholder = '';
+						switch (id) {
+							case 'maxRequestsPerMinute':
+								title = '每分钟最大请求数 (0=不限)';
+								placeholder = String(config.maxRequestsPerMinute);
+								break;
+							case 'maxTokensPerMinute':
+								title = '每分钟最大输入 Token (0=不限)';
+								placeholder = String(config.maxTokensPerMinute);
+								break;
+							case 'tokenEstimateRatio':
+								title = 'Token 估算分母';
+								placeholder = String(config.tokenEstimateRatio);
+								break;
+							case 'throttleThresholdPercent':
+								title = '限流触发阈值 %';
+								placeholder = String(config.throttleThresholdPercent);
+								break;
+						}
 
-								ctx.ui.input(title, placeholder).then((val) => {
-									if (val === undefined) return;
-									const num = Number(val);
-									if (Number.isNaN(num)) {
-										ctx.ui.notify('请输入有效数字', 'error');
-										return;
-									}
-									switch (id) {
-										case 'maxRequestsPerMinute':
-											config.maxRequestsPerMinute = Math.max(0, num);
-											break;
-										case 'maxTokensPerMinute':
-											config.maxTokensPerMinute = Math.max(0, num);
-											break;
-										case 'tokenEstimateRatio':
-											config.tokenEstimateRatio = Math.max(1, num);
-											break;
-										case 'throttleThresholdPercent':
-											config.throttleThresholdPercent = Math.max(
-												1,
-												Math.min(100, num),
-											);
-											break;
-									}
-									persistState();
-									let updatedValue = '';
-									switch (id) {
-										case 'maxRequestsPerMinute':
-											updatedValue = String(config.maxRequestsPerMinute);
-											break;
-										case 'maxTokensPerMinute':
-											updatedValue = String(config.maxTokensPerMinute);
-											break;
-										case 'tokenEstimateRatio':
-											updatedValue = String(config.tokenEstimateRatio);
-											break;
-										case 'throttleThresholdPercent':
-											updatedValue = String(config.throttleThresholdPercent);
-											break;
-									}
-									settingsList.updateValue(id, updatedValue);
-									tui.requestRender();
-								});
-							},
-							() => {
-								logger.debug('rate-limit: panel closed via onCancel');
-								closePanel();
-							},
+						ctx.ui.input(title, placeholder).then((val) => {
+							if (val === undefined) return;
+							const num = Number(val);
+							if (Number.isNaN(num)) {
+								ctx.ui.notify('请输入有效数字', 'error');
+								return;
+							}
+							switch (id) {
+								case 'maxRequestsPerMinute':
+									config.maxRequestsPerMinute = Math.max(0, num);
+									break;
+								case 'maxTokensPerMinute':
+									config.maxTokensPerMinute = Math.max(0, num);
+									break;
+								case 'tokenEstimateRatio':
+									config.tokenEstimateRatio = Math.max(1, num);
+									break;
+								case 'throttleThresholdPercent':
+									config.throttleThresholdPercent = Math.max(
+										1,
+										Math.min(100, num),
+									);
+									break;
+							}
+							persistState();
+							let updatedValue = '';
+							switch (id) {
+								case 'maxRequestsPerMinute':
+									updatedValue = String(config.maxRequestsPerMinute);
+									break;
+								case 'maxTokensPerMinute':
+									updatedValue = String(config.maxTokensPerMinute);
+									break;
+								case 'tokenEstimateRatio':
+									updatedValue = String(config.tokenEstimateRatio);
+									break;
+								case 'throttleThresholdPercent':
+									updatedValue = String(config.throttleThresholdPercent);
+									break;
+							}
+							settingsList.updateValue(id, updatedValue);
+							tui.requestRender();
+						});
+					};
+					try {
+						settingsList = new SettingsList(
+							buildItems(),
+							Math.min(7, 10),
+							getSettingsListTheme(),
+							onChangeHandler,
+							onCancelHandler,
 						);
 					} catch (err) {
 						logger.error('rate-limit: SettingsList creation error', err);
@@ -992,7 +998,7 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 	pi.on('session_start', async (_event, ctx) => {
 		logger.info('session_start');
 		activeCtx = ctx;
-		loadConfig(ctx);
+		loadConfigFromDisk(ctx);
 		restoreFromBranch(ctx);
 		if (config.globalRateLimit) {
 			logger.info('session_start: initializing global rate limiter');

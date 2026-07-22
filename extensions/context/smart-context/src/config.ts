@@ -1,5 +1,21 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+/**
+ * Smart Context — 配置引擎
+ *
+ * 配置解析优先级：
+ *   1. 用户级：~/.pi/agent/extensions-data/smart-context/config.json
+ *   2. 项目级：<cwd>/.pi/extensions-data/smart-context/config.json
+ *   3. 内建 profiles（balanced / fast / quality）
+ *
+ * 使用 @zenone/pi-config 实现统一路径解析与文件 IO。
+ * 路径硬切换（原 <root>/.pi/smart-context.json 不再读取）。
+ */
+
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { resolveConfigPaths, readJsonFile } from '@zenone/pi-config';
+import { createLogger } from '@zenone/pi-logger';
+
+const log = createLogger('smart-context:config');
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -96,26 +112,51 @@ const BUILTIN_PROFILES: Record<string, ModelProfile> = {
 /** Default profile to use when nothing is configured */
 const DEFAULT_PROFILE_NAME = 'balanced';
 
-const CONFIG_FILE = 'smart-context.json';
+// ── Config loader (using pi-config layering) ───────────────────────
 
-// ── Helpers ────────────────────────────────────────────────────────
+let cachedMerge: { raw: Record<string, unknown> } | null = null;
+let cachedCwd: string | null = null;
 
-function findProjectRoot(cwd: string): string | null {
-	let dir = cwd;
-	for (let i = 0; i < 12; i++) {
-		if (existsSync(join(dir, '.pi')) || existsSync(join(dir, '.git'))) return dir;
-		const parent = dirname(dir);
-		if (parent === dir) return null;
-		dir = parent;
+function loadConfigRaw(cwd: string): { raw: Record<string, unknown> } {
+	if (cachedMerge && cachedCwd === cwd) {
+		return cachedMerge;
 	}
-	return null;
+
+	const paths = resolveConfigPaths('smart-context', { cwd });
+	let merged: Record<string, unknown> = {};
+
+	// 1. 用户级（低优先级）
+	const userRaw = readJsonFile(paths.userFile);
+	if (userRaw !== null) {
+		merged = { ...merged, ...userRaw };
+	}
+
+	// 2. 项目级（高优先级，覆盖 user — 浅合并，smart-context 配置为扁平结构）
+	const projectRaw = readJsonFile(paths.projectFile);
+	if (projectRaw !== null) {
+		merged = { ...merged, ...projectRaw };
+	}
+
+	// 3. 从旧路径 <cwd>/.pi/smart-context.json 迁移（首次加载时检测）
+	const oldPath = join(cwd, '.pi', 'smart-context.json');
+	if (existsSync(oldPath) && Object.keys(merged).length === 0) {
+		const oldRaw = readJsonFile(oldPath);
+		if (oldRaw !== null) {
+			merged = { ...merged, ...oldRaw };
+			log.warn(
+				'old config found at %s — consider migrating to %s',
+				oldPath,
+				paths.projectFile,
+			);
+		}
+	}
+
+	cachedMerge = { raw: merged };
+	cachedCwd = cwd;
+	return cachedMerge;
 }
 
-function configPath(cwd: string): string | null {
-	const root = findProjectRoot(cwd);
-	if (!root) return null;
-	return join(root, '.pi', CONFIG_FILE);
-}
+// ── Domain logic (keep all profile resolution logic unchanged) ──────
 
 function mergeRef(base: ModelRef, override?: Partial<ModelRef>): ModelRef {
 	if (!override) return base;
@@ -152,39 +193,13 @@ function mergeIntoProfile(base: ModelProfile, raw: Record<string, unknown>): Mod
 	};
 }
 
-// ── Config loader ──────────────────────────────────────────────────
-
-let cachedRaw: { raw: Record<string, unknown> } | null = null;
-let cachedKey: string | null = null;
-
-function loadConfigRaw(cwd: string): { raw: Record<string, unknown> } {
-	const path = configPath(cwd);
-	const key = path ?? cwd;
-	if (cachedRaw && cachedKey === key) {
-		return cachedRaw;
-	}
-
-	let raw: Record<string, unknown> = {};
-	if (path && existsSync(path)) {
-		try {
-			raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
-		} catch {
-			raw = {};
-		}
-	}
-
-	cachedRaw = { raw };
-	cachedKey = key;
-	return cachedRaw;
-}
-
 // ── Public API ─────────────────────────────────────────────────────
 
 /**
  * Resolve the effective ModelProfile from config.
  *
  * Resolution priority:
- * 1. If `smart-context.json` has `profiles` + `activeProfile` → use that profile
+ * 1. If `smart-context.json` (user/project merged) has `profiles` + `activeProfile` → use that profile
  * 2. If legacy flat fields (classifier/routing/largeContext) exist → merge onto default profile
  * 3. Otherwise → return the default (balanced) profile
  */
@@ -239,12 +254,16 @@ export function loadConfig(cwd: string = process.cwd()): ModelProfile {
 
 /** Invalidate the in-memory cache (useful for testing / reload) */
 export function clearCache(): void {
-	cachedRaw = null;
-	cachedKey = null;
+	cachedMerge = null;
+	cachedCwd = null;
 }
 
+/**
+ * Return the project-level config file path for display.
+ */
 export function configFilePath(cwd: string = process.cwd()): string | null {
-	return configPath(cwd);
+	const paths = resolveConfigPaths('smart-context', { cwd });
+	return paths.projectFile;
 }
 
 export function defaultProfile(): ModelProfile {

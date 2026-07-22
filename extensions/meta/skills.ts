@@ -2,7 +2,8 @@
  * Skills Extension
  *
  * Provides a /skills command to enable/disable skills interactively.
- * Skill selection is persisted to .pi/skills-config.json for cross-session
+ * Skill selection is persisted via @zenone/pi-config (user-level: ~/.pi/agent/extensions-data/skills/config.json,
+ * project-level: <cwd>/.pi/extensions-data/skills/config.json) for cross-session
  * persistence, plus session entries for branch navigation within a session.
  * Disabled skills are filtered out of the <available_skills> block in the system prompt.
  * Closing the dialog posts a summary message to the conversation (non-LLM-triggering).
@@ -17,8 +18,9 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { getSettingsListTheme, formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
 import { Container, type SettingItem, SettingsList, truncateToWidth } from '@earendil-works/pi-tui';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
+import { resolveConfigPaths } from '@zenone/pi-config';
 
 const log = createLogger('skills');
 
@@ -27,8 +29,6 @@ const log = createLogger('skills');
 interface SkillsState {
 	enabledSkills: string[];
 }
-
-const CONFIG_FILE = 'skills-config.json';
 
 export default function skillsExtension(pi: ExtensionAPI) {
 	log.info('Skills extension loaded');
@@ -117,7 +117,7 @@ export default function skillsExtension(pi: ExtensionAPI) {
 		initialized = true;
 
 		if (!configFilePath) {
-			configFilePath = join(ctx.cwd, '.pi', CONFIG_FILE);
+			configFilePath = resolveConfigPaths('skills', { cwd: ctx.cwd }).projectFile;
 		}
 
 		const fileSkills = loadFromFile();
@@ -394,7 +394,7 @@ export default function skillsExtension(pi: ExtensionAPI) {
 
 		// Re-evaluate on branch navigation: file baseline + branch entries
 		if (!configFilePath) {
-			configFilePath = join(ctx.cwd, '.pi', CONFIG_FILE);
+			configFilePath = resolveConfigPaths('skills', { cwd: ctx.cwd }).projectFile;
 		}
 		const fileSkills = loadFromFile();
 		const branchSkills = getBranchSkills(ctx);

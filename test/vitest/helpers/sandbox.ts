@@ -238,9 +238,10 @@ export function createSandbox(options: SandboxOptions = {}): string {
 		}
 	}
 
-	// @zenone/pi-logger 符号链接（与 bash run-e2e.sh 行为一致）
+	// @zenone/pi-logger + @zenone/pi-config 符号链接（与 bash run-e2e.sh 行为一致）
 	const sandboxNodeModules = resolve(testHome, 'node_modules/@zenone');
 	mkdirSync(sandboxNodeModules, { recursive: true });
+
 	const piLoggerTarget = resolve(sandboxNodeModules, 'pi-logger');
 	if (!existsSync(piLoggerTarget)) {
 		try {
@@ -250,8 +251,20 @@ export function createSandbox(options: SandboxOptions = {}): string {
 		}
 		const piLoggerSrc = resolve(ROOT_DIR, 'extensions/meta/pi-logger');
 		if (existsSync(piLoggerSrc)) {
-			// 目录扩展用符号链接（避免 jiti 在 fork 中找不到本地包）
 			cpSync(piLoggerSrc, piLoggerTarget, { recursive: true });
+		}
+	}
+
+	const piConfigTarget = resolve(sandboxNodeModules, 'pi-config');
+	if (!existsSync(piConfigTarget)) {
+		try {
+			rmSync(piConfigTarget, { force: true });
+		} catch {
+			/* ignore */
+		}
+		const piConfigSrc = resolve(ROOT_DIR, 'extensions/meta/pi-config');
+		if (existsSync(piConfigSrc)) {
+			cpSync(piConfigSrc, piConfigTarget, { recursive: true });
 		}
 	}
 

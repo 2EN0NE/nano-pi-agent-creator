@@ -5,11 +5,10 @@ import type {
 	ExtensionWidgetOptions,
 	WidgetPlacement,
 } from '@earendil-works/pi-coding-agent';
-import { getAgentDir, getSettingsListTheme } from '@earendil-works/pi-coding-agent';
+import { getSettingsListTheme } from '@earendil-works/pi-coding-agent';
 import { Container, type SettingItem, SettingsList, Text } from '@earendil-works/pi-tui';
 import { createLogger } from '@zenone/pi-logger';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { resolveConfigPaths, readJsonFile, writeJsonAtomic } from '@zenone/pi-config';
 
 const log = createLogger('widget-wrangler');
 
@@ -18,13 +17,14 @@ const OWN_WIDGET_KEY = 'widget-wrangler';
 const STATUS_PREFIX = 'status:';
 
 function configPath(): string {
-	return join(getAgentDir(), 'widget-wrangler.json');
+	return resolveConfigPaths('widget-wrangler').userFile;
 }
 
 function loadGlobalConfig(): string[] | null {
 	try {
-		const raw = readFileSync(configPath(), 'utf8');
-		const data = JSON.parse(raw) as WranglerState | undefined;
+		const raw = readJsonFile(configPath());
+		if (raw === null) return null;
+		const data = raw as unknown as WranglerState;
 		return Array.isArray(data?.disabled) ? data.disabled : null;
 	} catch {
 		return null;
@@ -33,11 +33,7 @@ function loadGlobalConfig(): string[] | null {
 
 function saveGlobalConfig(state: WranglerState): boolean {
 	try {
-		const path = configPath();
-		mkdirSync(dirname(path), { recursive: true });
-		const tmp = `${path}.${process.pid}.tmp`;
-		writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-		renameSync(tmp, path);
+		writeJsonAtomic(configPath(), state);
 		return true;
 	} catch (err) {
 		log.error('saveGlobalConfig: failed to persist config', err);

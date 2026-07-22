@@ -11,48 +11,43 @@
  * This avoids depending on import.meta.url (which jiti may resolve differently
  * across reloads), ensuring session configs are always found after /reload.
  *
- * Writing: All modifications create a session config at <sessionId>.json.
- * The base config.json is never modified by the UI.
- *
- * On /reload or new session: session_start fires → setSessionId(sid) is called
- * → if <sid>.json exists, it is loaded. This happens before any config reads,
- * so session settings always survive reload.
+ * Uses @zenone/pi-config for layered loading (default → user → session).
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
+import { createConfigStore, type ConfigStore } from '@zenone/pi-config';
 import { type CompactionConfig, type CompactionProfile, createDefaultConfig } from './types.js';
 
 const log = createLogger('custom-compaction:config');
 
-// ── Deterministic config directory ─────────────────────────────
+// ── ConfigStore ──────────────────────────────────────────────────
+// sessionScoped: 启用 session 级覆盖（<sessionId>.json 优先于 config.json）
+// validate: 校验 profiles 并兜底 activeProfileId
 
-function getConfigDir(): string {
-	return join(homedir(), '.pi', 'agent', 'extensions-data', 'custom-compaction');
-}
+const store: ConfigStore<CompactionConfig> = createConfigStore({
+	pluginName: 'custom-compaction',
+	defaults: createDefaultConfig(),
+	sessionScoped: true,
+	validate: (raw: unknown): Partial<CompactionConfig> | null => {
+		const parsed = raw as CompactionConfig;
+		if (!parsed.profiles || typeof parsed.profiles !== 'object') {
+			log.warn('Invalid config: missing or invalid profiles field, skipping layer');
+			return null;
+		}
+		if (!parsed.activeProfileId || !parsed.profiles[parsed.activeProfileId]) {
+			parsed.activeProfileId = Object.keys(parsed.profiles)[0] ?? 'default';
+		}
+		return parsed;
+	},
+});
 
-function getBaseConfigPath(): string {
-	return join(getConfigDir(), 'config.json');
-}
-
-function getSessionConfigPath(sessionId: string): string {
-	return join(getConfigDir(), `${sessionId}.json`);
-}
-
-// ── Config loading state ────────────────────────────────────────
-
-let _cachedConfig: CompactionConfig | undefined;
-let _activeConfigPath: string | undefined;
-let _activeSessionId: string | undefined;
+// ── State query helpers ─────────────────────────────────────────
 
 /**
  * Whether the currently loaded config is session-specific.
  */
 export function isSessionConfig(): boolean {
-	if (!_activeConfigPath || !_activeSessionId) return false;
-	return _activeConfigPath === getSessionConfigPath(_activeSessionId);
+	return store.getActiveSource() === 'session';
 }
 
 /**
@@ -60,7 +55,7 @@ export function isSessionConfig(): boolean {
  */
 export function getConfigLabel(): string {
 	if (isSessionConfig()) return 'session级配置';
-	const config = loadConfig();
+	const config = store.get();
 	const profile = config.profiles[config.activeProfileId];
 	return profile?.name ?? 'Default';
 }
@@ -69,112 +64,57 @@ export function getConfigLabel(): string {
 
 /**
  * Set the current session ID and re-resolve the active config.
- * If a session-specific config file exists, it becomes the active config.
+ * Delegates to store.setSessionId — reloads on next get().
  */
 export function setSessionId(sessionId: string): void {
-	_activeSessionId = sessionId;
-	const sessionPath = getSessionConfigPath(sessionId);
-
-	if (existsSync(sessionPath)) {
-		_activeConfigPath = sessionPath;
-		reloadConfig();
-		log.info('Session config loaded:', sessionPath);
-	} else {
-		reloadConfig();
-	}
+	store.setSessionId(sessionId);
+	log.info('Session ID set:', sessionId);
 }
 
 /**
- * Load config from disk. Priority: <sessionId>.json > config.json
+ * Load config from disk. Priority: session > user > defaults
  */
 export function loadConfig(): CompactionConfig {
-	if (_cachedConfig) return _cachedConfig;
-
-	const sessionPath = _activeSessionId ? getSessionConfigPath(_activeSessionId) : null;
-	const basePath = getBaseConfigPath();
-	const activePath =
-		sessionPath && existsSync(sessionPath)
-			? sessionPath
-			: existsSync(basePath)
-				? basePath
-				: basePath;
-
-	_activeConfigPath = activePath;
-
-	try {
-		if (existsSync(activePath)) {
-			const raw = readFileSync(activePath, 'utf-8');
-			const parsed = JSON.parse(raw) as CompactionConfig;
-
-			if (!parsed.profiles || typeof parsed.profiles !== 'object') {
-				throw new Error("Invalid config: missing or invalid 'profiles'");
-			}
-			if (!parsed.activeProfileId || !parsed.profiles[parsed.activeProfileId]) {
-				parsed.activeProfileId = Object.keys(parsed.profiles)[0] ?? 'default';
-			}
-
-			_cachedConfig = parsed;
-			log.info('Config loaded from', activePath);
-			return parsed;
-		}
-	} catch (err) {
-		log.warn('Failed to load config from', activePath, String(err));
-	}
-
-	const config = createDefaultConfig();
-	_cachedConfig = config;
-	return config;
+	return store.get();
 }
 
 /**
  * Save config to disk as a session-specific file (<sessionId>.json).
+ * Delegates to store.save with 'session' scope.
  */
 export function saveConfig(config: CompactionConfig): boolean {
-	if (!_activeSessionId) {
-		log.warn('No session ID set, cannot save session-specific config');
-		return false;
-	}
-
-	const targetPath = getSessionConfigPath(_activeSessionId);
-
-	try {
-		const dir = dirname(targetPath);
-		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-
-		writeFileSync(targetPath, JSON.stringify(config, null, 2), 'utf-8');
-		_cachedConfig = config;
-		_activeConfigPath = targetPath;
-		log.info('Config saved to', targetPath);
-		return true;
-	} catch (err) {
-		log.error('Failed to save config to', targetPath, String(err));
-		return false;
-	}
+	return store.save(config, 'session');
 }
 
 /**
  * Force-reload config from disk (discard in-memory cache).
  */
 export function reloadConfig(): CompactionConfig {
-	_cachedConfig = undefined;
-	_activeConfigPath = undefined;
-	return loadConfig();
+	return store.reload();
 }
 
 /**
  * Get the active config path for display.
  */
 export function getActiveConfigPath(): string {
-	if (_activeConfigPath) return _activeConfigPath;
-	const basePath = getBaseConfigPath();
-	const sessionPath = _activeSessionId ? getSessionConfigPath(_activeSessionId) : null;
-	return sessionPath && existsSync(sessionPath) ? sessionPath : basePath;
+	const paths = store.getPaths();
+	const source = store.getActiveSource();
+	if (source === 'session') {
+		// sessionFile is populated by getPaths() when sessionScoped is enabled
+		// Fall back to userFile when no session file exists
+		return (
+			('sessionFile' in paths
+				? (paths as { sessionFile?: string }).sessionFile
+				: undefined) ?? paths.userFile
+		);
+	}
+	return source === 'project' ? paths.projectFile : paths.userFile;
 }
 
 // ── Profile helpers ─────────────────────────────────────────────
 
 export function getActiveProfile(): CompactionProfile {
-	const config = loadConfig();
+	const config = store.get();
 	const profile = config.profiles[config.activeProfileId];
 	if (profile) return profile;
 
@@ -189,20 +129,20 @@ export function getActiveProfile(): CompactionProfile {
 }
 
 export function setActiveProfile(profileId: string): boolean {
-	const config = loadConfig();
+	const config = store.get();
 	if (!config.profiles[profileId]) return false;
 	config.activeProfileId = profileId;
 	return saveConfig(config);
 }
 
 export function upsertProfile(profile: CompactionProfile): boolean {
-	const config = loadConfig();
+	const config = store.get();
 	config.profiles[profile.id] = profile;
 	return saveConfig(config);
 }
 
 export function deleteProfile(profileId: string): boolean {
-	const config = loadConfig();
+	const config = store.get();
 	const keys = Object.keys(config.profiles);
 	if (keys.length <= 1) return false;
 	if (!config.profiles[profileId]) return false;

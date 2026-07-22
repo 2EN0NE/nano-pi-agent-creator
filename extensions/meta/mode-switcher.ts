@@ -8,8 +8,9 @@
  *   Ctrl+Shift+M          → 打开 mode 管理面板（增删改）
  *   Ctrl+Space            → 循环切换 mode
  *
- * Mode 配置保存在 ~/.pi/agent/modes.json（全局）或 .pi/modes.json（项目覆盖）。
- * 编辑器顶部显示当前 mode 名称，边框颜色随 mode 变化。
+ * Mode 配置保存路径（使用 @zenone/pi-config 标准约定）：
+ *   用户级：~/.pi/agent/extensions-data/mode-switcher/config.json
+ *   项目级：<cwd>/.pi/extensions-data/mode-switcher/config.json
  */
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import {
@@ -18,9 +19,9 @@ import {
 	SettingsManager,
 } from '@earendil-works/pi-coding-agent';
 import path from 'node:path';
-import os from 'node:os';
 import fs from 'node:fs/promises';
 import { createLogger } from '@zenone/pi-logger';
+import { resolveConfigPaths } from '@zenone/pi-config';
 
 const log = createLogger('mode-switcher');
 
@@ -54,26 +55,16 @@ type ModesFile = {
 const DEFAULT_MODE_ORDER = ['default'] as const;
 const CUSTOM_MODE_NAME = 'custom' as const;
 
-function expandUserPath(p: string): string {
-	if (p === '~') return os.homedir();
-	if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
-	return p;
-}
+const PLUGIN_NAME = 'mode-switcher';
 
-function getGlobalAgentDir(): string {
-	// Mirror pi-coding-agent's getAgentDir() behavior (best-effort).
-	// For the canonical implementation see pi-mono/packages/coding-agent/src/config.ts
-	const env = process.env.PI_CODING_AGENT_DIR;
-	if (env) return expandUserPath(env);
-	return path.join(os.homedir(), '.pi', 'agent');
-}
-
+/** 用户级配置路径：~/.pi/agent/extensions-data/mode-switcher/config.json */
 function getGlobalModesPath(): string {
-	return path.join(getGlobalAgentDir(), 'modes.json');
+	return resolveConfigPaths(PLUGIN_NAME).userFile;
 }
 
+/** 项目级配置路径：<cwd>/.pi/extensions-data/mode-switcher/config.json */
 function getProjectModesPath(cwd: string): string {
-	return path.join(cwd, '.pi', 'modes.json');
+	return resolveConfigPaths(PLUGIN_NAME, { cwd }).projectFile;
 }
 
 async function fileExists(p: string): Promise<boolean> {

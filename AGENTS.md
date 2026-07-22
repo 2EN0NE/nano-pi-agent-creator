@@ -153,7 +153,60 @@ log.error('错误');
 
 ### 扩展的配置文件设计
 
-扩展的配置文件都放在~/.pi/agent/extensions-data/{plugin-name}目录下，让用户可以集中管理，也能直观的知悉这个配置文件与插件的关系。
+所有扩展的配置文件采用**标准化双层路径**，由 `@zenone/pi-config` 提供统一访问 API：
+
+```
+用户级：~/.pi/agent/extensions-data/<plugin-name>/config.json
+项目级：<cwd>/.pi/extensions-data/<plugin-name>/config.json
+```
+
+**合并规则**：项目级覆盖用户级，用户级覆盖内置默认值。
+
+#### 标准配置 API
+
+所有新扩展和迁移扩展，必须使用 `@zenone/pi-config` 管理配置（禁止手写文件路径拼接、自定义 deepMerge、raw JSON 读取）：
+
+```typescript
+import { createConfigStore } from '@zenone/pi-config';
+import type { ConfigStore } from '@zenone/pi-config';
+
+interface MyConfig {
+	param1: string;
+	param2: number;
+}
+
+const store: ConfigStore<MyConfig> = createConfigStore<MyConfig>({
+	pluginName: 'my-plugin', // extensions-data/{plugin-name}/
+	defaults: { param1: 'a', param2: 42 },
+	// sessionScoped: true,     // 可选：启用会话级覆盖
+});
+
+// 读取（自动分2层合并 + 缓存）
+const config = store.get();
+
+// 保存
+store.save({ param1: 'b', param2: 99 }, 'user');
+
+// 刷新缓存
+store.reload();
+```
+
+该模块自动处理：双层路径解析、原子写入（tmp+rename）、JSON 读写、深合并、cache。
+
+可用函数：
+
+| API                                     | 用途                                     |
+| --------------------------------------- | ---------------------------------------- |
+| `resolveConfigPaths(pluginName, opts?)` | 获取用户/项目级的文件/目录路径           |
+| `deepMerge(base, overlay)`              | 纯对象深合并（数组替换、undefined 跳过） |
+| `readJsonFile(path)`                    | 安全读 JSON，失败返回 null               |
+| `writeJsonAtomic(path, data)`           | 原子写入（tmp+rename）                   |
+| `loadLayeredConfig<T>(opts)`            | 一次性分层加载（不含缓存）               |
+| `createConfigStore<T>(opts)`            | 返回带缓存的 ConfigStore<T>（推荐）      |
+
+> ⚠️ **pi-logger 例外**：pi-logger 是其他扩展依赖的基础设施，为避免循环依赖，保留自身配置加载机制，但搜索路径已对齐到标准 `extensions-data/pi-logger/config.json`。
+
+详细 API 说明见 [`extensions/meta/pi-config/README.md`](extensions/meta/pi-config/README.md)。
 
 ### 扩展的快捷键设计
 
@@ -169,29 +222,38 @@ log.error('错误');
 
 一种特殊的测试辅助扩展是 **mock-llm**，用于在 e2e 测试中替代真实 LLM API 调用。实现原理：
 
-1. 使用 `@earendil-works/pi-ai` 内置的 `createFauxCore()` 创建虚假 provider
-2. 通过 `pi.registerProvider(name, { streamSimple })` 注册到 Pi
+1. 使用 `@earendil-works/pi-ai` 内置的 `registerFauxProvider()` 创建虚假 provider
+2. 通过 `pi.registerProvider(name, config)` 将模型注册到 ModelRegistry
 3. 在 `session_start` 中用 `pi.setModel()` 切换到 mock 模型
 
 **关键实现要点：**
 
 ```typescript
-import { createFauxCore, fauxAssistantMessage } from '@earendil-works/pi-ai';
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { registerFauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai';
+import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-agent';
 
 export default function (pi: ExtensionAPI) {
-	const faux = createFauxCore({
+	const faux = registerFauxProvider({
 		provider: 'mock-llm',
 		models: [{ id: 'mock-model-1', name: 'Mock Model' }],
 	});
-	// streamSimple 不发起真实 HTTP 请求
+	// registerFauxProvider 已内部注册 streamSimple，无需额外传入
+	// 只需将模型注册到 ModelRegistry 使 ctx.modelRegistry.find() 可用
 	pi.registerProvider('mock-llm', {
 		name: 'Mock LLM Provider',
-		api: faux.api,
+		api: faux.api as ProviderConfig['api'],
 		baseUrl: 'http://localhost:0',
 		apiKey: 'mock-key-noop',
-		streamSimple: faux.streamSimple,
-		models: faux.models.map((m) => ({/* model defs */})),
+		models: faux.models.map((m) => ({
+			id: m.id,
+			name: m.name ?? m.id,
+			api: faux.api as ProviderConfig['api'],
+			provider: 'mock-llm',
+			apiKey: 'mock-key-noop',
+			baseUrl: 'http://localhost:0',
+			input: m.input ?? (['text', 'image'] as const),
+			reasoning: m.reasoning ?? false,
+		})),
 	});
 	faux.setResponses([fauxAssistantMessage('Mock LLM is ready.')]);
 	pi.on('session_start', async (_event, ctx) => {

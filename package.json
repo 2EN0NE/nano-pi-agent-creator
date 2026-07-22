@@ -44,6 +44,7 @@
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",
 		"@types/js-yaml": "^4.0.9",
+		"@zenone/pi-config": "file:extensions/meta/pi-config",
 		"@zenone/pi-logger": "file:extensions/meta/pi-logger",
 		"@zenone/pi-selector": "file:extensions/meta/selector",
 		"eslint": "^10.4.1",

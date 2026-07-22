@@ -2,6 +2,8 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from '@earendil-works/pi-ai';
 import { execSync } from 'node:child_process';
 import { createLogger } from '@zenone/pi-logger';
+import { createConfigStore } from '@zenone/pi-config';
+import type { ConfigStore } from '@zenone/pi-config';
 
 const log = createLogger('ci-watch');
 
@@ -263,6 +265,21 @@ export default function (pi: ExtensionAPI) {
 		stepMs: DEFAULT_POLL_STEP_MS,
 	};
 
+	// 从持久化存储加载 PollConfig（用户级配置）
+	let configStore: ConfigStore<{ pollConfig: PollConfig }> | null = null;
+	try {
+		configStore = createConfigStore<{ pollConfig: PollConfig }>({
+			pluginName: 'ci-watch',
+			defaults: { pollConfig },
+		});
+		const saved = configStore.get();
+		if (saved.pollConfig) {
+			pollConfig = saved.pollConfig;
+		}
+	} catch {
+		// 配置加载失败时使用默认值
+	}
+
 	let autoMode = true;
 
 	let ghChecked = false;
@@ -468,6 +485,9 @@ export default function (pi: ExtensionAPI) {
 				maxMs: parts[1] * 1000,
 				stepMs: parts[2] * 1000,
 			};
+			if (configStore) {
+				configStore.save({ pollConfig }, 'user');
+			}
 			ctx.ui.notify(`✅ CI 轮询：${parts[0]}s → ${parts[1]}s（步长 ${parts[2]}s）`, 'info');
 		},
 	});

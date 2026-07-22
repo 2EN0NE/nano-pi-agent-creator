@@ -40,6 +40,7 @@ profiles:
             # ── 基础设施（其他扩展依赖） ──
             - selector # @zenone/pi-selector
             - pi-logger # @zenone/pi-logger  ⚠ flag: --log-level
+            - pi-config # @zenone/pi-config 统一配置模块
             # ── 安全 / 审计 ──
             - confirm-destructive # 破坏性操作二次确认
             - dirty-repo-guard # 脏仓库阻止切换
@@ -135,6 +136,7 @@ profiles:
                 # 已放 user-install 的全局插件（避免冲突）
                 - selector
                 - pi-logger
+                - pi-config
                 - confirm-destructive
                 - dirty-repo-guard
                 - permission-gate

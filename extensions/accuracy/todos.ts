@@ -44,6 +44,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createLogger } from '@zenone/pi-logger';
+import { resolveConfigPaths } from '@zenone/pi-config';
 
 const log = createLogger('todos');
 import crypto from 'node:crypto';
@@ -767,8 +768,13 @@ function getTodosDirLabel(cwd: string): string {
 	return TODO_DIR_NAME;
 }
 
-function getTodoSettingsPath(todosDir: string): string {
-	return path.join(todosDir, TODO_SETTINGS_NAME);
+function getTodoSettingsPath(cwd: string): string {
+	return resolveConfigPaths('todos', { cwd }).projectFile;
+}
+
+/** Old settings path (pre-pi-config): <todosDir>/settings.json */
+function getOldTodoSettingsPath(todosDir: string): string {
+	return path.join(todosDir, 'settings.json');
 }
 
 function normalizeTodoSettings(raw: Partial<TodoSettings>): TodoSettings {
@@ -780,15 +786,33 @@ function normalizeTodoSettings(raw: Partial<TodoSettings>): TodoSettings {
 	};
 }
 
-async function readTodoSettings(todosDir: string): Promise<TodoSettings> {
-	const settingsPath = getTodoSettingsPath(todosDir);
+async function readTodoSettings(todosDir: string, cwd: string): Promise<TodoSettings> {
+	const settingsPath = getTodoSettingsPath(cwd);
 	let data: Partial<TodoSettings> = {};
 
+	// Try new path first
 	try {
 		const raw = await fs.readFile(settingsPath, 'utf8');
 		data = JSON.parse(raw) as Partial<TodoSettings>;
 	} catch {
-		data = {};
+		// New path not found — try old <todosDir>/settings.json
+		const oldPath = getOldTodoSettingsPath(todosDir);
+		try {
+			const oldRaw = await fs.readFile(oldPath, 'utf8');
+			data = JSON.parse(oldRaw) as Partial<TodoSettings>;
+			// Migrate: write to new path, delete old
+			const dir = path.dirname(settingsPath);
+			if (!existsSync(dir)) {
+				const { mkdir } = await import('node:fs/promises');
+				await mkdir(dir, { recursive: true });
+			}
+			const { writeFile } = await import('node:fs/promises');
+			await writeFile(settingsPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+			await fs.unlink(oldPath);
+			log.info('migrated todo settings from %s to %s', oldPath, settingsPath);
+		} catch {
+			// No old file either — use defaults
+		}
 	}
 
 	return normalizeTodoSettings(data);
@@ -1479,9 +1503,10 @@ async function deleteTodo(
 
 export default function todosExtension(pi: ExtensionAPI) {
 	pi.on('session_start', async (_event, ctx) => {
-		const todosDir = getTodosDir(ctx.cwd);
+		const cwd = ctx.cwd;
+		const todosDir = getTodosDir(cwd);
 		await ensureTodosDir(todosDir);
-		const settings = await readTodoSettings(todosDir);
+		const settings = await readTodoSettings(todosDir, cwd);
 		await garbageCollectTodos(todosDir, settings);
 	});
 
