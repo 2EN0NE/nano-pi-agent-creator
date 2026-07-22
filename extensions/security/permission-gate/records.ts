@@ -406,10 +406,10 @@ export function getStrategySummary(
 /**
  * 计算 widget 纯文本（无 ANSI 颜色），供 updateWidgetStatus 和单元测试使用。
  *
- * Gate OFF:              "[-] gate:off"
- * Gate ON + Dynamic OFF: "gate(100):on[cmd(42),tool(1),folder(1)]"
+ * Gate OFF:              "|gate:off"
+ * Gate ON + Dynamic OFF: "|gate(100):on[cmd(42),tool(1),folder(1)]"
  *                         (100 = 总记录数; 括号内为各维度历史策略数)
- * Gate ON + Dynamic ON:  "dynamic-gate(100[8]):on[cmd(40[0]):1/2,tool(1[0]):0/3,folder(1[0]):0/4]"
+ * Gate ON + Dynamic ON:  "|dynamic-gate(100[8]):on[cmd(40[0]):1/2,tool(1[0]):0/3,folder(1[0]):0/4]"
  *                         (100 = 总记录数, [8] = 已沉淀策略总数)
  *
  * 注意：当某维度阈值 <= 0 时，该维度的已沉淀数强制为 0（阈值 0 表示不自动放行）。
@@ -421,7 +421,7 @@ export function calcWidgetContentText(
 	thresholds: { sameCommand: number; sameTool: number; sameFolder: number },
 	totalRecords: number,
 ): string {
-	if (!enabled) return '[-] gate:off';
+	if (!enabled) return '|gate:off';
 
 	const summary = getStrategySummary(counts, thresholds);
 	const cmdTotal = summary.cmd.total;
@@ -437,7 +437,7 @@ export function calcWidgetContentText(
 		if (dirTotal > 0) parts.push(`folder(${dirTotal})`);
 
 		const suffix = parts.length > 0 ? `(${totalRecords}):on[${parts.join(',')}]` : ':on';
-		return `gate${suffix}`;
+		return `|gate${suffix}`;
 	}
 
 	// Dynamic ON: 已沉淀数（阈值<=0 时强制为 0）
@@ -471,7 +471,7 @@ export function calcWidgetContentText(
 
 	const suffix =
 		parts.length > 0 ? `(${totalRecords}[${totalAuto}]):on[${parts.join(',')}]` : ':on';
-	return `dynamic-gate${suffix}`;
+	return `|dynamic-gate${suffix}`;
 }
 
 // ============================================================================

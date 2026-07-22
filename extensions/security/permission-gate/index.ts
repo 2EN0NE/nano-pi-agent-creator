@@ -534,6 +534,7 @@ function summarizeApprovalCounts(): string {
  * 更新 status widget，使用 calcWidgetContentText 计算纯文本 + ANSI 着色。
  *
  * Dynamic ON 时，对最优进度（仅限活跃策略，不包含已沉淀的）着色。
+ * 注意：内层 th.fg() 避免嵌套，防止 \x1b[39m 重置外层 accent 色。
  */
 function updateWidgetStatus(ctx: ExtensionContext | ExtensionCommandContext): void {
 	if (!ctx.hasUI) return;
@@ -573,6 +574,11 @@ function updateWidgetStatus(ctx: ExtensionContext | ExtensionCommandContext): vo
 	}
 
 	// Dynamic ON: 对已达阈值的进度部分高亮
+	// 提取 accent SGR 码，用于内层高亮后恢复外层 accent 色
+	const accentTest = th.fg('accent', 'X');
+	const sgrMatch = accentTest.match(/^\x1b\[\d+m/);
+	const accentSgr = sgrMatch ? sgrMatch[0] : '';
+
 	let colored = text;
 	const dims: { prefix: string }[] = [
 		{ prefix: 'cmd' },
@@ -586,11 +592,14 @@ function updateWidgetStatus(ctx: ExtensionContext | ExtensionCommandContext): vo
 		const capped = parseInt(m[1], 10);
 		const threshold = parseInt(m[2], 10);
 		const atTh = capped >= threshold;
+		if (!atTh) continue;
+
 		const fullMatch = m[0];
-		const coloredFull = fullMatch.replace(
-			`:${capped}/${threshold}`,
-			`:${th.fg(atTh ? 'warning' : 'accent', `${capped}/${threshold}`)}`,
-		);
+		// 内层高亮：使用 th.fg() 但去除尾部的 \x1b[39m，替换为 accent 色码
+		// 这样外层 th.fg('accent', colored) 的 \x1b[39m 是唯一的 reset
+		const progressColored = th.fg('warning', `${capped}/${threshold}`);
+		const progressFixed = progressColored.replace(/\x1b\[39m$/, accentSgr);
+		const coloredFull = fullMatch.replace(`:${capped}/${threshold}`, `:${progressFixed}`);
 		colored = colored.replace(fullMatch, coloredFull);
 	}
 

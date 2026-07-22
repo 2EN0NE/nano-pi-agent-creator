@@ -445,12 +445,12 @@ describe('calcWidgetContentText', () => {
 	const thresholds = { sameCommand: 2, sameTool: 3, sameFolder: 4 };
 
 	it('renders gate off', () => {
-		expect(calcWidgetContentText(false, false, {}, thresholds, 0)).toBe('[-] gate:off');
-		expect(calcWidgetContentText(false, true, {}, thresholds, 0)).toBe('[-] gate:off');
+		expect(calcWidgetContentText(false, false, {}, thresholds, 0)).toBe('|gate:off');
+		expect(calcWidgetContentText(false, true, {}, thresholds, 0)).toBe('|gate:off');
 	});
 
 	it('renders gate on + dynamic off with empty counts', () => {
-		expect(calcWidgetContentText(true, false, {}, thresholds, 0)).toBe('gate:on');
+		expect(calcWidgetContentText(true, false, {}, thresholds, 0)).toBe('|gate:on');
 	});
 
 	it('renders gate on + dynamic off with counts', () => {
@@ -462,35 +462,35 @@ describe('calcWidgetContentText', () => {
 		};
 		// totalRecords=4, cmd(2),tool(1),folder(1)
 		const text = calcWidgetContentText(true, false, counts, thresholds, 4);
-		expect(text).toBe('gate(4):on[cmd(2),tool(1),folder(1)]');
+		expect(text).toBe('|gate(4):on[cmd(2),tool(1),folder(1)]');
 	});
 
 	it('renders gate on + dynamic off with single dimension', () => {
 		const counts = { 'cmd:aaa': 1 };
 		const text = calcWidgetContentText(true, false, counts, thresholds, 1);
-		expect(text).toBe('gate(1):on[cmd(1)]');
+		expect(text).toBe('|gate(1):on[cmd(1)]');
 	});
 
 	it('renders dynamic on with empty counts', () => {
-		expect(calcWidgetContentText(true, true, {}, thresholds, 0)).toBe('dynamic-gate:on');
+		expect(calcWidgetContentText(true, true, {}, thresholds, 0)).toBe('|dynamic-gate:on');
 	});
 
 	it('renders dynamic on with one active cmd strategy (1/2)', () => {
 		const counts = { 'cmd:abc': 1 };
 		const text = calcWidgetContentText(true, true, counts, thresholds, 1);
-		expect(text).toBe('dynamic-gate(1[0]):on[cmd(1[0]):1/2]');
+		expect(text).toBe('|dynamic-gate(1[0]):on[cmd(1[0]):1/2]');
 	});
 
 	it('renders dynamic on with cmd at threshold (2/2) — graduated', () => {
 		const counts = { 'cmd:abc': 2 };
 		const text = calcWidgetContentText(true, true, counts, thresholds, 1);
-		expect(text).toBe('dynamic-gate(1[1]):on[cmd(1[1]):0/2]');
+		expect(text).toBe('|dynamic-gate(1[1]):on[cmd(1[1]):0/2]');
 	});
 
 	it('renders dynamic on: two identical cmds reach 2/2 then graduate', () => {
 		const counts = { 'cmd:same': 2 };
 		const text = calcWidgetContentText(true, true, counts, thresholds, 1);
-		expect(text).toBe('dynamic-gate(1[1]):on[cmd(1[1]):0/2]');
+		expect(text).toBe('|dynamic-gate(1[1]):on[cmd(1[1]):0/2]');
 	});
 
 	it('renders dynamic on: mix of active and graduated per dimension', () => {
@@ -503,14 +503,14 @@ describe('calcWidgetContentText', () => {
 		const text = calcWidgetContentText(true, true, counts, thresholds, 4);
 		// cmd: total=2, active=1, auto=1, best=1
 		// tool: total=2, active=1, auto=1, best=2
-		expect(text).toBe('dynamic-gate(4[2]):on[cmd(2[1]):1/2,tool(2[1]):2/3]');
+		expect(text).toBe('|dynamic-gate(4[2]):on[cmd(2[1]):1/2,tool(2[1]):2/3]');
 	});
 
 	it('renders dynamic on with threshold=0 (no strategies can graduate)', () => {
 		const zeroThresholds = { sameCommand: 0, sameTool: 0, sameFolder: 0 };
 		const counts = { 'cmd:aaa': 5 };
 		const text = calcWidgetContentText(true, true, counts, zeroThresholds, 1);
-		expect(text).toBe('dynamic-gate(1[0]):on[cmd(1[0]):0/0]');
+		expect(text).toBe('|dynamic-gate(1[0]):on[cmd(1[0]):0/0]');
 	});
 
 	it('renders all three dimensions on dynamic on', () => {
@@ -520,7 +520,7 @@ describe('calcWidgetContentText', () => {
 			'dir:/tmp': 3,
 		};
 		const text = calcWidgetContentText(true, true, counts, thresholds, 3);
-		expect(text).toBe('dynamic-gate(3[0]):on[cmd(1[0]):1/2,tool(1[0]):2/3,folder(1[0]):3/4]');
+		expect(text).toBe('|dynamic-gate(3[0]):on[cmd(1[0]):1/2,tool(1[0]):2/3,folder(1[0]):3/4]');
 	});
 
 	it('renders graduated tool: all tool strategies at threshold', () => {
@@ -529,7 +529,7 @@ describe('calcWidgetContentText', () => {
 			'tool:sudo': 4,
 		};
 		const text = calcWidgetContentText(true, true, counts, thresholds, 2);
-		expect(text).toBe('dynamic-gate(2[2]):on[tool(2[2]):0/3]');
+		expect(text).toBe('|dynamic-gate(2[2]):on[tool(2[2]):0/3]');
 	});
 });
 
