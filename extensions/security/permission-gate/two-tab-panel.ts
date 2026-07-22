@@ -12,6 +12,13 @@ import { loadRecords, deleteStrategy, normalizeDim, type ApprovalEntry } from '.
 
 const log = createLogger('permission-gate:two-tab');
 
+/**
+ * 替换字符串中的换行符为可见的 \n 表示，确保 TUI 单行渲染不被换行打断。
+ */
+function sanitizeInline(text: string): string {
+	return text.replace(/\r\n/g, '\\n').replace(/\n/g, '\\n');
+}
+
 // ============================================================================
 // 展示数据类型
 // ============================================================================
@@ -371,10 +378,6 @@ export class TwoTabPanel {
 		const th = this.theme_;
 		const lines: string[] = [];
 
-		// 顶部边框
-		const topBorder = '┌─ Current Allowed' + '─'.repeat(Math.max(0, width - 19)) + '┐';
-		lines.push(truncateToWidth(th.fg('accent', topBorder), width));
-
 		// Tab 头
 		const stratLabel =
 			this.activeTab === 'strategies'
@@ -384,13 +387,11 @@ export class TwoTabPanel {
 			this.activeTab === 'history'
 				? th.fg('accent', th.bold('[History]'))
 				: th.fg('dim', '[History]');
-		const tabLine = '│  ' + stratLabel + '  ' + histLabel;
-		const tabPadded =
-			tabLine + ' '.repeat(Math.max(0, width - visibleWidth(tabLine) - 1)) + '│';
-		lines.push(truncateToWidth(tabPadded, width));
+		const tabLine = '  ' + stratLabel + '  ' + histLabel;
+		lines.push(truncateToWidth(tabLine, width));
 
 		// 分隔
-		lines.push(truncateToWidth('│' + th.fg('dim', '─'.repeat(width - 2)) + '│', width));
+		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
 
 		// 过滤栏
 		const filterText = this.currentFilter;
@@ -399,11 +400,8 @@ export class TwoTabPanel {
 			: filterText
 				? `Filter: ${th.fg('accent', filterText)}   (/ edit, ESC clear)`
 				: `/ filter   (Tab switch, Ctrl+Shift+O expand, ESC close)`;
-		const filterPadded = '│  ' + filterLine;
-		const filterFull =
-			filterPadded + ' '.repeat(Math.max(0, width - visibleWidth(filterPadded) - 1)) + '│';
-		lines.push(truncateToWidth(filterFull, width));
-		lines.push(truncateToWidth('│' + th.fg('dim', '─'.repeat(width - 2)) + '│', width));
+		lines.push(truncateToWidth('  ' + filterLine, width));
+		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
 
 		// 列表内容
 		const list = this.currentFilteredList;
@@ -414,15 +412,7 @@ export class TwoTabPanel {
 		if (list.length === 0) {
 			const msg =
 				this.activeTab === 'strategies' ? 'No strategies found' : 'No history entries';
-			lines.push(
-				truncateToWidth(
-					'│  ' +
-						th.fg('dim', msg) +
-						' '.repeat(Math.max(0, width - visibleWidth(msg) - 4)) +
-						'│',
-					width,
-				),
-			);
+			lines.push(truncateToWidth('  ' + th.fg('dim', msg), width));
 		} else {
 			for (let i = startIdx; i < endIdx; i++) {
 				const isSel = i === this.selectedIndex;
@@ -448,24 +438,15 @@ export class TwoTabPanel {
 		// 滚动提示
 		if (list.length > maxVisible) {
 			const scrollInfo = `  (${this.selectedIndex + 1}/${list.length})`;
-			lines.push(
-				truncateToWidth(
-					'│' +
-						th.fg('dim', scrollInfo) +
-						' '.repeat(Math.max(0, width - visibleWidth(scrollInfo) - 2)) +
-						'│',
-					width,
-				),
-			);
+			lines.push(truncateToWidth(th.fg('dim', scrollInfo), width));
 		}
 
 		// 展开详情
 		if (this.expanded && list.length > 0 && this.selectedIndex < list.length) {
 			const item = list[this.selectedIndex];
 			if (item) {
-				lines.push(truncateToWidth('│' + th.fg('dim', '─'.repeat(width - 2)) + '│', width));
-				const detailTitle = '│  ' + th.fg('accent', th.bold('Expanded Detail:'));
-				lines.push(truncateToWidth(detailTitle, width));
+				lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
+				lines.push(truncateToWidth(th.fg('accent', th.bold('  Expanded Detail:')), width));
 				const detailLines = this.renderExpandedDetail(item, width);
 				for (const dl of detailLines) {
 					lines.push(truncateToWidth(dl, width));
@@ -474,27 +455,18 @@ export class TwoTabPanel {
 		}
 
 		// 底部操作提示
-		lines.push(truncateToWidth('│' + th.fg('dim', '─'.repeat(width - 2)) + '│', width));
+		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
 		const footer =
 			this.activeTab === 'strategies'
 				? '↑↓ navigate  / filter  x delete  Tab switch  Ctrl+Shift+O expand  Esc close'
 				: '↑↓ navigate  / filter  Tab switch  Ctrl+Shift+O expand  Esc close';
-		const footerLine = '│  ' + th.fg('dim', footer);
-		const footerFull =
-			footerLine + ' '.repeat(Math.max(0, width - visibleWidth(footerLine) - 1)) + '│';
-		lines.push(truncateToWidth(footerFull, width));
-
-		// 底部边框
-		lines.push(truncateToWidth(th.fg('accent', '└' + '─'.repeat(width - 2) + '┘'), width));
+		lines.push(truncateToWidth('  ' + th.fg('dim', footer), width));
 
 		// 填充到最小高度，防止 overlay 高度变化导致溢出渲染到屏幕顶部。
-		// Pi TUI overlay 在首次渲染后不会动态调整高度，
-		// 切换 tab (Strategies ↔ History) 时列表行数变化可能超出分配空间。
-		// 填充至至少容纳 header(5) + maxVisible(12) + scroll(1) + footer(3) = 21 行
 		const MIN_TOTAL_LINES = 5 + 12 + 1 + 3; // 21
 		const padCount = Math.max(0, MIN_TOTAL_LINES - lines.length);
 		for (let i = 0; i < padCount; i++) {
-			lines.push(''); // 透明填充行，不显示边框
+			lines.push('');
 		}
 
 		this.cachedWidth = width;
@@ -520,11 +492,10 @@ export class TwoTabPanel {
 		// tool/folder: 名称 + 时间
 		let detail: string;
 		if (item.dimension === 'cmd') {
-			const cmdText = item.subCommand
-				? item.subCommand.length > 50
-					? item.subCommand.slice(0, 47) + '...'
-					: item.subCommand
-				: cmdHash;
+			const rawCmd = item.subCommand || cmdHash;
+			const sanitizedCmd = sanitizeInline(rawCmd);
+			const cmdText =
+				sanitizedCmd.length > 50 ? sanitizedCmd.slice(0, 47) + '...' : sanitizedCmd;
 			detail = `${cmdHash}  ${ts ? ts + '  ' : ''}${cmdText}`;
 		} else {
 			detail = `${item.displayKey}  ${ts}`;
@@ -533,19 +504,11 @@ export class TwoTabPanel {
 		const mainText = `${dimLabel} ${detail}  >  ${progress}`;
 
 		if (isSel) {
-			const selLine = '│ ' + prefix + th.fg('accent', mainText);
-			return truncateToWidth(
-				selLine + ' '.repeat(Math.max(0, width - visibleWidth(selLine))),
-				width,
-			);
+			return truncateToWidth(prefix + th.fg('accent', mainText), width);
 		}
 
 		const color = item.isActive ? 'accent' : 'warning';
-		const textLine = '│ ' + prefix + th.fg(color, mainText);
-		return truncateToWidth(
-			textLine + ' '.repeat(Math.max(0, width - visibleWidth(textLine))),
-			width,
-		);
+		return truncateToWidth(prefix + th.fg(color, mainText), width);
 	}
 
 	private renderHistoryLine(
@@ -560,9 +523,9 @@ export class TwoTabPanel {
 		const action = item.entry.action;
 		const ts = item.entry.ts.slice(0, 19).replace('T', ' ');
 		const dimStr = normalizeDim(item.entry.dim)?.join(',') ?? '-';
-		const lineText = `${statusMark} ${action.padEnd(9)} | ${item.summary} | ${dimStr} | ${ts}`;
+		const lineText = `${statusMark} ${action.padEnd(9)} | ${sanitizeInline(item.summary)} | ${dimStr} | ${ts}`;
 
-		const availWidth = width - 4 - visibleWidth(prefix);
+		const availWidth = width - visibleWidth(prefix);
 		let display: string;
 		if (visibleWidth(lineText) > availWidth) {
 			// 用 visibleWidth 逐个字符截断，确保不超出可用宽度
@@ -580,12 +543,12 @@ export class TwoTabPanel {
 		}
 
 		if (isSel) {
-			return truncateToWidth('│ ' + prefix + th.fg('accent', display), width);
+			return truncateToWidth(prefix + th.fg('accent', display), width);
 		}
 
 		const prefixColored = th.fg(item.isPassed ? 'success' : 'error', statusMark);
 		const rest = display.slice(statusMark.length + 1);
-		return truncateToWidth('│ ' + prefix + prefixColored + ' ' + th.fg('text', rest), width);
+		return truncateToWidth(prefix + prefixColored + ' ' + th.fg('text', rest), width);
 	}
 
 	private renderExpandedDetail(
@@ -594,7 +557,7 @@ export class TwoTabPanel {
 	): string[] {
 		const th = this.theme_;
 		const lines: string[] = [];
-		const pad = '│  ';
+		const pad = '  ';
 
 		if ('dimension' in item) {
 			const s = item as StrategyDisplayItem;
@@ -627,13 +590,14 @@ export class TwoTabPanel {
 
 			// 子命令（当前条目的 cmd）
 			const cmdLabel = pad + th.fg('text', 'Command: ');
+			const cmdDisplay = sanitizeInline(e.cmd);
 			const cmdAvail = width - visibleWidth(cmdLabel);
-			if (visibleWidth(e.cmd) <= cmdAvail) {
-				lines.push(truncateToWidth(cmdLabel + e.cmd, width));
+			if (visibleWidth(cmdDisplay) <= cmdAvail) {
+				lines.push(truncateToWidth(cmdLabel + cmdDisplay, width));
 			} else {
 				let truncated = '';
 				let tw = 0;
-				for (const ch of e.cmd) {
+				for (const ch of cmdDisplay) {
 					const cw = visibleWidth(ch);
 					if (tw + cw >= cmdAvail - 1) break;
 					truncated += ch;
@@ -645,13 +609,14 @@ export class TwoTabPanel {
 			// 原始复合命令（如有）
 			if (e.originalCommand && e.originalCommand !== e.cmd) {
 				const origLabel = pad + th.fg('text', 'Original: ');
+				const origDisplay = sanitizeInline(e.originalCommand);
 				const origAvail = width - visibleWidth(origLabel);
-				if (visibleWidth(e.originalCommand) <= origAvail) {
-					lines.push(truncateToWidth(origLabel + e.originalCommand, width));
+				if (visibleWidth(origDisplay) <= origAvail) {
+					lines.push(truncateToWidth(origLabel + origDisplay, width));
 				} else {
 					let truncated = '';
 					let tw = 0;
-					for (const ch of e.originalCommand) {
+					for (const ch of origDisplay) {
 						const cw = visibleWidth(ch);
 						if (tw + cw >= origAvail - 1) break;
 						truncated += ch;

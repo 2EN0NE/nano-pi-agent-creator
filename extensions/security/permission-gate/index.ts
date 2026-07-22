@@ -607,6 +607,7 @@ function updateWidgetStatus(ctx: ExtensionContext | ExtensionCommandContext): vo
 }
 
 async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
+	let lastMenuIndex = 0;
 	while (true) {
 		const items: SelectItem[] = [
 			{
@@ -670,12 +671,16 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 			'Permission Gate Control Panel',
 			items,
 			'up/down navigate  enter select  esc close',
+			lastMenuIndex,
 		);
 
 		if (!selected) {
 			ctx.ui.notify('Permission Gate closed', 'info');
 			return;
 		}
+
+		// 记住当前选中项的位置，下次循环恢复
+		lastMenuIndex = items.findIndex((item) => item.value === selected);
 
 		// 处理选中项
 		switch (selected) {
@@ -776,6 +781,7 @@ async function makeCustomSelection(
 	title: string,
 	items: SelectItem[],
 	footer: string,
+	defaultIndex = 0,
 ): Promise<string | null> {
 	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 		const container = new Container();
@@ -789,6 +795,10 @@ async function makeCustomSelection(
 			scrollInfo: (t) => theme.fg('dim', t),
 			noMatch: (t) => theme.fg('warning', t),
 		});
+
+		if (defaultIndex > 0 && defaultIndex < items.length) {
+			selectList.setSelectedIndex(defaultIndex);
+		}
 
 		selectList.onSelect = (item) => done(item.value);
 		selectList.onCancel = () => done(null);
