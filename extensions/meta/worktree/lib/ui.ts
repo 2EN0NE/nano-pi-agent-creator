@@ -157,7 +157,7 @@ class WorktreeSwitcherPanel {
 		}
 
 		if (data === 's' || data === 'S') {
-			this.done_({ action: 'shell' });
+			this.done_({ action: 'shell', target: this.resolveTarget_() });
 			return;
 		}
 

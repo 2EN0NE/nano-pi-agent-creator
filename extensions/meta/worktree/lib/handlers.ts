@@ -295,7 +295,7 @@ async function handlePanel(repoRoot: string, ctx: any): Promise<void> {
 			await handleRebase(repoRoot, {}, ctx);
 			break;
 		case 'shell':
-			handleShell(repoRoot, ctx);
+			handleShell(repoRoot, ctx, result.target);
 			break;
 		case 'quit':
 			break;
@@ -1129,7 +1129,8 @@ function handleShell(repoRoot: string, ctx: any, targetName?: string): void {
 		return;
 	}
 
-	const targetDir = getWorktreePath(repoRoot, name);
+	const isMain = name === 'main';
+	const targetDir = isMain ? repoRoot : getWorktreePath(repoRoot, name);
 	if (!existsSync(targetDir)) {
 		ctx.ui.notify(`Worktree directory not found: ${targetDir}`, 'error');
 		return;
