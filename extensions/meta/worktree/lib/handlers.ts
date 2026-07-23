@@ -5,6 +5,7 @@ import { createLogger } from '@zenone/pi-logger';
 import { basename } from 'node:path';
 import { spawnSync, spawn, execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import type { MergeStrategy } from '../types.js';
 import {
 	getCurrentBranch,
 	execRebase,
@@ -33,8 +34,10 @@ import {
 	showOperationSubmenu,
 	askSessionStrategy,
 	askSymlinkTargetsPanel,
+	askMergeStrategy,
 	promptWorktreeName,
 	confirmDelete,
+	confirmRebaseFF,
 	confirmForceDelete,
 	askBranchDelete,
 	showConflictPanel,
@@ -86,7 +89,7 @@ export const COMMANDS = [
 	'use <name>  or  main',
 	'list',
 	'delete <name>',
-	'merge [--source <n>] [--target <b>]',
+	'merge [--source <n>] [--target <b>] [--strategy <merge|squash|rebase-ff>]',
 	'rebase [--source <n>] [--target <b>]',
 	'continue',
 	'abort',
@@ -620,7 +623,12 @@ export interface MergeResult {
 	originalBranch?: string;
 }
 
-export function execMerge(repo: string, sourceBranch: string, targetBranch: string): MergeResult {
+export function execMerge(
+	repo: string,
+	sourceBranch: string,
+	targetBranch: string,
+	strategy: MergeStrategy = 'merge',
+): MergeResult {
 	const git = (args: string[]) =>
 		spawnSync('git', args, { cwd: repo, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 });
 
@@ -652,19 +660,40 @@ export function execMerge(repo: string, sourceBranch: string, targetBranch: stri
 		git(['pull', 'origin', targetBranch, '--ff-only']);
 	}
 
-	const merge = git(['merge', sourceBranch, '--no-ff', '--log']);
+	const isSquash = strategy === 'squash';
+	const merge = git(
+		isSquash
+			? ['merge', sourceBranch, '--squash']
+			: ['merge', sourceBranch, '--no-ff', '--log'],
+	);
 
 	if (merge.status === 0) {
+		// squash 需手动提交
+		if (isSquash) {
+			const commit = git([
+				'commit',
+				'-m',
+				`Squash merge '${sourceBranch}' -> '${targetBranch}'`,
+			]);
+			if (commit.status !== 0) {
+				git(['checkout', origBranch]);
+				if (stashed) git(['stash', 'pop']);
+				return {
+					ok: false,
+					message: 'Squash merge succeeded but commit failed',
+					conflicts: [],
+				};
+			}
+		}
 		git(['checkout', origBranch]);
 		if (stashed) git(['stash', 'pop']);
 		return {
 			ok: true,
-			message: "Merged '" + sourceBranch + "' -> '" + targetBranch + "'",
+			message: "Merged '" + sourceBranch + "' -> '" + targetBranch + "' (" + strategy + ')',
 			conflicts: [],
 		};
 	}
 
-	// P0-1: 冲突 → 留在 targetBranch 不切回，不 pop stash
 	const unmerged = (git(['diff', '--name-only', '--diff-filter=U']).stdout || '').trim();
 	const conflictFiles = unmerged
 		.split('\n')
@@ -679,7 +708,23 @@ export function execMerge(repo: string, sourceBranch: string, targetBranch: stri
 		}));
 
 	if (conflictFiles.length > 0) {
-		// 真正冲突：留在 targetBranch，用户解决
+		// P0-1: 冲突
+		if (isSquash) {
+			// squash merge 不产生 MERGE_HEAD，/worktree continue/abort 均不可用
+			// 必须主动 reset 清理工作区
+			git(['reset', '--hard', 'HEAD']);
+			git(['checkout', origBranch]);
+			if (stashed) git(['stash', 'pop']);
+			return {
+				ok: false,
+				message:
+					'Squash merge conflict in ' +
+					conflictFiles.length +
+					' file(s). Working tree has been reset. Resolve conflicts in the worktree and re-run merge.',
+				conflicts: conflictFiles,
+			};
+		}
+		// 普通 merge：留在 targetBranch，用户解决后用 /worktree continue
 		return {
 			ok: false,
 			message: 'Merge failed. ' + conflictFiles.length + ' file(s) conflict.',
@@ -697,6 +742,198 @@ export function execMerge(repo: string, sourceBranch: string, targetBranch: stri
 	return {
 		ok: false,
 		message: 'Merge failed: ' + stderr.split('\n').pop(),
+		conflicts: [],
+	};
+}
+
+// ═══════════════════════════════════════════
+// rebase + fast-forward（线性历史，无 merge commit）
+// ═══════════════════════════════════════════
+
+/**
+ * Rebase worktree 分支到 target 分支后 fast-forward 合并。
+ *
+ * 核心约束：sourceBranch 在 worktree 中被 checkout，git 禁止从主仓库 rebase 它。
+ * 因此 rebase 操作必须从 worktree 目录内执行（那里 branch 已是当前 HEAD）。
+ *
+ * 流程：
+ *   1. stash 主仓库 dirty
+ *   2. fetch + checkout target（主仓库内完成，target 即 main，不是 worktree branch）
+ *   3. 在 worktree 目录内 `git rebase origin/<target>`（当前 HEAD = sourceBranch）
+ *   4. 若冲突 → abort（从 worktree 内），恢复原始状态，报告
+ *   5. 切回主仓库 target → `git merge <sourceBranch> --ff-only`（此时已可 ff）
+ *   6. 恢复原始分支，pop stash
+ *
+ * @param sourceDir source worktree 的实际目录路径（rebase 在此目录内执行）
+ */
+export function execRebaseFF(
+	repo: string,
+	sourceBranch: string,
+	targetBranch: string,
+	sourceDir: string,
+): MergeResult {
+	const mainGit = (args: string[]) =>
+		spawnSync('git', args, { cwd: repo, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 });
+	const wtGit = (args: string[]) =>
+		spawnSync('git', args, { cwd: sourceDir, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 });
+
+	if (!existsSync(sourceDir)) {
+		return { ok: false, message: 'Worktree directory not found: ' + sourceDir, conflicts: [] };
+	}
+
+	// 验证 worktree 的 HEAD 确实是 sourceBranch
+	const wtBranch = getCurrentBranch(sourceDir);
+	if (wtBranch !== sourceBranch) {
+		return {
+			ok: false,
+			message:
+				"Worktree is on '" +
+				wtBranch +
+				"', expected '" +
+				sourceBranch +
+				"'. Cannot rebase.",
+			conflicts: [],
+		};
+	}
+
+	// 检查 worktree 是否有脏文件（rebase 前清理，避免 git 拒绝的模糊报错）
+	try {
+		const wtDirty = execSync('git status --porcelain', {
+			cwd: sourceDir,
+			encoding: 'utf-8',
+		}).trim();
+		if (wtDirty) {
+			return {
+				ok: false,
+				message:
+					"Worktree '" +
+					sourceBranch +
+					"' has uncommitted changes. Commit or stash them first.",
+				conflicts: [],
+			};
+		}
+	} catch {
+		/* worktree dir might be inaccessible, skip dirty check */
+	}
+
+	const origBranch = getCurrentBranch(repo);
+	let mainDirty = '';
+	let mainStashed = false;
+	try {
+		mainDirty = execSync('git status --porcelain', { cwd: repo, encoding: 'utf-8' }).trim();
+	} catch {
+		/* git inaccessible, treat as clean */
+	}
+
+	if (mainDirty) {
+		const stashResult = mainGit(['stash', 'push', '-m', 'worktree-merge-auto-' + Date.now()]);
+		if (stashResult.status !== 0) {
+			return { ok: false, message: 'Cannot stash changes in main repo', conflicts: [] };
+		}
+		mainStashed = true;
+	}
+
+	// Fetch + checkout target（主仓库内）
+	const hasRemote = mainGit(['remote', 'get-url', 'origin']).status === 0;
+	if (hasRemote) {
+		mainGit(['fetch', 'origin', targetBranch, '--quiet']);
+	}
+
+	const checkout = mainGit(['checkout', targetBranch]);
+	if (checkout.status !== 0) {
+		if (mainStashed) mainGit(['stash', 'pop']);
+		return { ok: false, message: "Cannot checkout '" + targetBranch + "'", conflicts: [] };
+	}
+
+	if (hasRemote) {
+		const pull = mainGit(['pull', 'origin', targetBranch, '--ff-only']);
+		if (pull.status !== 0) {
+			mainGit(['checkout', origBranch]);
+			if (mainStashed) mainGit(['stash', 'pop']);
+			return {
+				ok: false,
+				message: "Pull on '" + targetBranch + "' failed, aborting.",
+				conflicts: [],
+			};
+		}
+	}
+
+	// ═══════════════════════════════════════════════
+	// Rebase 在 worktree 目录内执行
+	// 不需要指定 branch——worktree 的 HEAD 就是 sourceBranch
+	// ═══════════════════════════════════════════════
+	const ontoRef = hasRemote ? 'origin/' + targetBranch : targetBranch;
+	const rebase = wtGit(['rebase', ontoRef]);
+
+	if (rebase.status !== 0) {
+		const unmerged = (wtGit(['diff', '--name-only', '--diff-filter=U']).stdout || '').trim();
+		const conflictFiles = unmerged.split('\n').filter(Boolean);
+
+		if (conflictFiles.length > 0) {
+			// 从 worktree 内 abort
+			wtGit(['rebase', '--abort']);
+			// 恢复主仓库
+			mainGit(['checkout', origBranch]);
+			if (mainStashed) mainGit(['stash', 'pop']);
+			return {
+				ok: false,
+				message:
+					'Rebase conflict: ' +
+					conflictFiles.length +
+					' file(s). Resolve conflicts in worktree and re-run merge with rebase+ff.',
+				conflicts: conflictFiles.map((f) => ({
+					file: f,
+					lines: (wtGit(['diff', '--', f]).stdout || '')
+						.split('\n')
+						.filter((l) => l.startsWith('@@'))
+						.slice(0, 3)
+						.join('; '),
+				})),
+			};
+		}
+
+		// 非冲突失败——恢复主仓库
+		mainGit(['checkout', origBranch]);
+		if (mainStashed) mainGit(['stash', 'pop']);
+		const stderr = rebase.stderr?.trim() || 'unknown error';
+		return {
+			ok: false,
+			message: 'Rebase failed: ' + stderr.split('\n').pop(),
+			conflicts: [],
+		};
+	}
+
+	// Rebase 成功 → 切回主仓库 target → fast-forward merge
+	mainGit(['checkout', targetBranch]);
+	if (hasRemote) {
+		const pull = mainGit(['pull', 'origin', targetBranch, '--ff-only']);
+		if (pull.status !== 0) {
+			mainGit(['checkout', origBranch]);
+			if (mainStashed) mainGit(['stash', 'pop']);
+			return {
+				ok: false,
+				message: "Pull on '" + targetBranch + "' failed after rebase, aborting.",
+				conflicts: [],
+			};
+		}
+	}
+
+	const ffMerge = mainGit(['merge', sourceBranch, '--ff-only']);
+	if (ffMerge.status !== 0) {
+		mainGit(['checkout', origBranch]);
+		if (mainStashed) mainGit(['stash', 'pop']);
+		return {
+			ok: false,
+			message: 'Fast-forward merge failed after rebase (unexpected)',
+			conflicts: [],
+		};
+	}
+
+	mainGit(['checkout', origBranch]);
+	if (mainStashed) mainGit(['stash', 'pop']);
+	return {
+		ok: true,
+		message: "Rebased '" + sourceBranch + "' and fast-forward merged -> '" + targetBranch + "'",
 		conflicts: [],
 	};
 }
@@ -738,30 +975,68 @@ async function handleMerge(
 	const sourceBranch = 'wt/' + sourceWorktree;
 	const targetBranch = flags.target || 'main';
 
-	log.info('merging', { source: sourceBranch, target: targetBranch, repo: basename(repoRoot) });
+	// ── 策略选择 ──
+	let strategy: MergeStrategy = 'merge';
+	if (flags.strategy === 'squash' || flags.strategy === 'rebase-ff') {
+		strategy = flags.strategy;
+	} else if (ctx.hasUI) {
+		const picked = await askMergeStrategy(ctx);
+		if (!picked) {
+			ctx.ui.notify('Cancelled', 'info');
+			return;
+		}
+		strategy = picked;
+	}
+
+	const strategyLabel = { merge: 'merge', squash: 'squash', 'rebase-ff': 'rebase+ff' }[strategy];
+
+	log.info('merging', {
+		source: sourceBranch,
+		target: targetBranch,
+		strategy,
+		repo: basename(repoRoot),
+	});
 
 	// P2-6: 合并前确认
 	if (ctx.hasUI) {
-		const confirmed = await ctx.ui.confirm(`Merge '${sourceBranch}' -> '${targetBranch}'?`);
+		let confirmed: boolean;
+		if (strategy === 'rebase-ff') {
+			confirmed = await confirmRebaseFF(ctx, sourceWorktree, sourceBranch, targetBranch);
+		} else {
+			confirmed = await ctx.ui.confirm(
+				`Merge '${sourceBranch}' -> '${targetBranch}'? (${strategyLabel})`,
+			);
+		}
 		if (!confirmed) {
 			ctx.ui.notify('Cancelled', 'info');
 			return;
 		}
 	}
 
-	ctx.ui.notify("Merging '" + sourceBranch + "' -> '" + targetBranch + "'...", 'info');
+	ctx.ui.notify(
+		"Merging '" + sourceBranch + "' -> '" + targetBranch + "'... ['" + strategyLabel + "']",
+		'info',
+	);
 
-	const result = execMerge(repoRoot, sourceBranch, targetBranch);
+	let result: MergeResult;
+	if (strategy === 'rebase-ff') {
+		const sourceDir = getWorktreePath(repoRoot, sourceWorktree);
+		result = execRebaseFF(repoRoot, sourceBranch, targetBranch, sourceDir);
+	} else {
+		result = execMerge(repoRoot, sourceBranch, targetBranch, strategy);
+	}
+
+	// 根据策略选择 post-merge guide 类型
+	const guideType: 'merge' | 'rebase' | 'rebase-ff' =
+		strategy === 'rebase-ff' ? 'rebase-ff' : strategy === 'squash' ? 'merge' : 'merge';
 
 	if (result.ok) {
-		// P0-2: 合并成功 → 步骤引导
 		if (ctx.hasUI) {
-			await showPostMergeGuide(ctx, repoRoot, result.message, 'merge');
+			await showPostMergeGuide(ctx, repoRoot, result.message, guideType, targetBranch);
 		} else {
 			ctx.ui.notify(result.message, 'success');
 		}
 	} else if (result.conflicts.length > 0) {
-		// P0-1: 冲突 → 显示冲突面板（含 stash 信息），留在 targetBranch
 		const stashMsg = result.stashed
 			? '\n(note: your dirty files were auto-stashed; use /worktree abort to restore)'
 			: '';
@@ -781,10 +1056,16 @@ async function handleMerge(
 		}
 	} else {
 		ctx.ui.notify('Merge failed: ' + result.message, 'error');
+		// execMerge 可能在冲突后留下 MERGE_HEAD，需要清理
+		// execRebaseFF 已自行清理，此处 abort 无害——无 merge 时 git 静默失败
 		try {
-			execSync('git merge --abort', { cwd: repoRoot, encoding: 'utf-8' });
+			execSync('git merge --abort', {
+				cwd: repoRoot,
+				encoding: 'utf-8',
+				timeout: 5000,
+			});
 		} catch {
-			/* ignore */
+			/* no merge in progress, nothing to abort */
 		}
 	}
 }

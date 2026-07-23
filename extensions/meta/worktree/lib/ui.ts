@@ -601,6 +601,36 @@ class CustomPathsInput {
 // node_modules 策略（内部）
 // ═══════════════════════════════════════════
 
+// ═══════════════════════════════════════════
+// 合并策略选择
+// ═══════════════════════════════════════════
+
+export async function askMergeStrategy(ctx: any): Promise<'merge' | 'squash' | 'rebase-ff' | null> {
+	const options: Array<{ value: 'merge' | 'squash' | 'rebase-ff'; label: string }> = [
+		{ value: 'merge', label: 'Merge -- preserve branch history (merge commit)' },
+		{ value: 'squash', label: 'Squash -- single commit, linear history' },
+		{ value: 'rebase-ff', label: 'Rebase + ff -- linear, no merge commit' },
+	];
+
+	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<
+		'merge' | 'squash' | 'rebase-ff'
+	>((tui, theme, _kb, done) => {
+		const selector = new ListSelector({
+			tui,
+			theme,
+			done,
+			title: 'Merge strategy',
+			options,
+			footer: 'up/down navigate  Enter confirm  Esc cancel',
+		});
+		return {
+			render: (w: number) => selector.render(w),
+			handleInput: (d: string) => selector.handleInput(d),
+			invalidate: () => selector.invalidate(),
+		};
+	});
+}
+
 export async function askNodeModulesStrategy(
 	ctx: any,
 	lastStrategy: NodeModulesStrategy,
@@ -742,6 +772,73 @@ export async function askSymlinkTargetsPanel(ctx: any): Promise<SymlinkSelection
 		customPaths,
 		nodeModulesStrategy,
 	};
+}
+
+// ═══════════════════════════════════════════
+// Rebase+ff 确认面板
+// ═══════════════════════════════════════════
+
+/**
+ * rebase+ff 确认弹窗。警告用户 worktree 文件将被重写。
+ */
+export async function confirmRebaseFF(
+	ctx: any,
+	sourceName: string,
+	sourceBranch: string,
+	targetBranch: string,
+): Promise<boolean> {
+	if (!ctx.hasUI) return true;
+	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<boolean>(
+		(_tui, theme, _kb, done) => ({
+			render(w: number): string[] {
+				const lines: string[] = [];
+				lines.push(
+					truncateToWidth(theme.fg('warning', theme.bold(' Rebase + fast-forward')), w),
+				);
+				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
+				lines.push(
+					truncateToWidth(
+						theme.fg('text', ` Rebase '${sourceBranch}' -> '${targetBranch}'`),
+						w,
+					),
+				);
+				lines.push(truncateToWidth(theme.fg('dim', ''), w));
+				lines.push(
+					truncateToWidth(
+						theme.fg(
+							'warning',
+							' Files in worktree "' + sourceName + '" will be rewritten!',
+						),
+						w,
+					),
+				);
+				lines.push(
+					truncateToWidth(
+						theme.fg(
+							'warning',
+							' Open files will show changes; uncommitted work will abort.',
+						),
+						w,
+					),
+				);
+				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
+				lines.push(truncateToWidth(` ${theme.fg('accent', '[y]')} Proceed with rebase`, w));
+				lines.push(truncateToWidth(` ${theme.fg('dim', '[n/esc]')} Cancel`, w));
+				return lines;
+			},
+			handleInput(data: string): void {
+				if (data === 'y' || data === 'Y' || matchesKey(data, 'enter')) {
+					done(true);
+					return;
+				}
+				if (data === 'n' || data === 'N' || matchesKey(data, 'escape')) {
+					done(false);
+					return;
+				}
+			},
+			invalidate(): void {},
+		}),
+	);
 }
 
 // ═══════════════════════════════════════════
@@ -1181,13 +1278,15 @@ export async function showConflictPanel(
 /**
  * 显示 merge/rebase 成功后的检查清单。
  *
- * @param type 'merge' | 'rebase'
+ * @param type 'merge' | 'rebase' | 'rebase-ff'
+ * @param targetBranch 目标分支名（用于 rebase-ff 的 push 提示，默认 main）
  */
 export async function showPostMergeGuide(
 	ctx: any,
 	_repoRoot: string,
 	resultMsg: string,
-	type: 'merge' | 'rebase',
+	type: 'merge' | 'rebase' | 'rebase-ff',
+	targetBranch?: string,
 ): Promise<void> {
 	if (!ctx.hasUI) return;
 
@@ -1207,6 +1306,14 @@ export async function showPostMergeGuide(
 					lines.push(
 						truncateToWidth(
 							theme.fg('accent', '  [4] git add + git commit (manual)'),
+							w,
+						),
+					);
+				} else if (type === 'rebase-ff') {
+					const pushBranch = targetBranch || 'main';
+					lines.push(
+						truncateToWidth(
+							theme.fg('accent', `  [4] git push origin ${pushBranch}`),
 							w,
 						),
 					);

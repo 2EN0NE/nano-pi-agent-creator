@@ -15,6 +15,10 @@ export interface OpResult {
 
 export type NodeModulesStrategy = 'symlink' | 'copy' | 'install' | 'none';
 
+// ── 合并策略 ──
+
+export type MergeStrategy = 'merge' | 'squash' | 'rebase-ff';
+
 // ── 软链接目标 ──
 
 export interface SymlinkTargetDef {
