@@ -1179,7 +1179,10 @@ export default function (pi: ExtensionAPI) {
 				if (!target) {
 					if (!ctx.hasUI) return;
 					const names = orderedModeNames(runtime.data.modes);
-					const selected = await ctx.ui.select('Store current selection into mode', names);
+					const selected = await ctx.ui.select(
+						'Store current selection into mode',
+						names,
+					);
 					if (!selected) return;
 					target = selected;
 				}
