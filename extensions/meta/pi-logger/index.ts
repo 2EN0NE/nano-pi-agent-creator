@@ -381,7 +381,7 @@ async function interactivePersist(
 	reloadConfiguration(ctx.cwd);
 	await initFileAppender(getRuntimeConfig());
 
-	ctx.ui.notify(`Log level saved to ${configPath}`, 'success');
+	ctx.ui.notify(`Log level saved to ${configPath}`, 'info');
 }
 
 async function logCommandHandler(args: string, ctx: ExtensionCommandContext): Promise<void> {

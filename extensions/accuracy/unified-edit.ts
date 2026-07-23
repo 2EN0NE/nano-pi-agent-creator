@@ -1820,8 +1820,7 @@ export default function unifiedEditExtension(pi: ExtensionAPI) {
 			}
 			const details = await applyPlan(plan, signal);
 			log.info('Unified edit applied', {
-				changes: details?.changes?.length,
-				sourceChanges: details?.sourceChanges?.length,
+				files: details.files.length,
 			});
 			return { content: [{ type: 'text' as const, text: formatSummary(details) }], details };
 		},

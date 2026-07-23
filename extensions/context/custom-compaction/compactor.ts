@@ -12,7 +12,7 @@
  *   in the options. Without this, the model call will fail with an auth error.
  */
 
-import { type Api, type Model, complete } from '@earendil-works/pi-ai';
+import { type Api, type Model, complete } from '@earendil-works/pi-ai/compat';
 import {
 	convertToLlm,
 	serializeConversation,

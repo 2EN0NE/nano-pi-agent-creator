@@ -606,7 +606,6 @@ export default function (pi: ExtensionAPI) {
 		const { session } = await createAgentSession({
 			sessionManager: SessionManager.inMemory(),
 			model: ctx.model,
-			modelRegistry: ctx.modelRegistry as AgentSession['modelRegistry'],
 			thinkingLevel: pi.getThinkingLevel() as SessionThinkingLevel,
 			tools: ['read', 'bash', 'edit', 'write'],
 			resourceLoader: createBtwResourceLoader(ctx),
@@ -802,7 +801,6 @@ export default function (pi: ExtensionAPI) {
 		const { session } = await createAgentSession({
 			sessionManager: SessionManager.inMemory(),
 			model,
-			modelRegistry: ctx.modelRegistry as AgentSession['modelRegistry'],
 			thinkingLevel: 'off',
 			tools: [],
 			resourceLoader: createBtwResourceLoader(ctx, [BTW_SUMMARY_PROMPT]),

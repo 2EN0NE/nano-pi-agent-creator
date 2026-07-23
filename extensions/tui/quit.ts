@@ -15,7 +15,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
-import { getModel } from '@earendil-works/pi-ai';
+import { getModel } from '@earendil-works/pi-ai/compat';
 
 const log = createLogger('quit');
 

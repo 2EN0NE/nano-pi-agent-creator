@@ -56,8 +56,8 @@ import {
 	type Api,
 	type UserMessage,
 	type TextContent,
-} from '@earendil-works/pi-ai';
-import { StringEnum } from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
+import { StringEnum } from '@earendil-works/pi-ai/compat';
 import { Box, Container, Markdown, Spacer, Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { promises as fs } from 'node:fs';
@@ -947,7 +947,7 @@ async function sendRpcCommand(
 							if (!waitForEvent) {
 								cleanup();
 								socket.end();
-								resolve({ response });
+								resolve({ response: response! });
 								return;
 							}
 						}

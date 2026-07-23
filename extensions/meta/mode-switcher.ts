@@ -32,7 +32,7 @@ log.debug('Extension loaded');
 // =============================================================================
 
 type ModeName = string;
-type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 type ModeSpec = {
 	provider?: string;
@@ -175,8 +175,11 @@ async function atomicWriteUtf8(filePath: string, content: string): Promise<void>
 }
 
 function cloneModesFile(file: ModesFile): ModesFile {
-	// JSON-based clone is fine here (small, plain data structure).
-	return JSON.parse(JSON.stringify(file)) as ModesFile;
+	try {
+		return JSON.parse(JSON.stringify(file)) as ModesFile;
+	} catch {
+		throw new Error('Failed to clone modes file');
+	}
 }
 
 type ModeSpecPatch = {
@@ -1176,8 +1179,9 @@ export default function (pi: ExtensionAPI) {
 				if (!target) {
 					if (!ctx.hasUI) return;
 					const names = orderedModeNames(runtime.data.modes);
-					target = await ctx.ui.select('Store current selection into mode', names);
-					if (!target) return;
+					const selected = await ctx.ui.select('Store current selection into mode', names);
+					if (!selected) return;
+					target = selected;
 				}
 
 				if (target === CUSTOM_MODE_NAME) {

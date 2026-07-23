@@ -13,7 +13,7 @@
  * Try it in a project containing .pi, AGENTS.md/CLAUDE.md, or .agents/skills.
  */
 
-import type { ExtensionAPI, ProjectTrustEventResult } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext, ProjectTrustEventResult } from '@earendil-works/pi-coding-agent';
 import { showSelect } from '@zenone/pi-selector';
 import { createLogger } from '@zenone/pi-logger';
 
@@ -40,7 +40,7 @@ export default function (pi: ExtensionAPI) {
 			return { trusted: 'undecided' };
 		}
 
-		const choice = await showSelect(ctx, `Project trust for:\n${event.cwd}`, [
+		const choice = await showSelect(ctx as unknown as ExtensionContext, `Project trust for:\n${event.cwd}`, [
 			{ value: 'trust-remember', label: 'Trust and remember' },
 			{ value: 'trust-note-remember', label: 'Trust with note and remember' },
 			{ value: 'trust-session', label: 'Trust this session' },

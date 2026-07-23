@@ -127,7 +127,7 @@ export const editPath = async (
 		});
 
 		return {
-			render: () => '',
+			render: () => [],
 			invalidate: () => {},
 			handleInput: () => {},
 		};

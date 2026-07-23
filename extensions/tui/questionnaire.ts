@@ -12,7 +12,7 @@
  *   - Clear help annotation per interaction mode
  */
 
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { showSelect } from '@zenone/pi-selector';
 import {
 	Editor,
@@ -221,7 +221,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 
 async function handleSingleQuestion(
 	q: Question,
-	ctx: any,
+	ctx: ExtensionContext,
 ): Promise<{
 	content: { type: 'text'; text: string }[];
 	details: QuestionnaireResult;
@@ -296,7 +296,7 @@ async function handleSingleQuestion(
 
 async function handleMultiQuestion(
 	questions: Question[],
-	ctx: any,
+	ctx: ExtensionContext,
 ): Promise<{
 	content: { type: 'text'; text: string }[];
 	details: QuestionnaireResult;

@@ -23,6 +23,7 @@
 
 import type {
 	ExtensionAPI,
+	ExtensionCommandContext,
 	ExtensionContext,
 	BuildSystemPromptOptions,
 } from '@earendil-works/pi-coding-agent';
@@ -166,7 +167,7 @@ function discoverComponents(options: BuildSystemPromptOptions, cwd: string): Pro
 				type: 'skill',
 				label: `Skill: ${skill.name ?? 'unnamed'}`,
 				source: skill.name ?? 'unknown',
-				content: skill.prompt ?? '',
+				content: skill.description ?? '',
 				toggleable: true,
 				editable: true,
 				order: 6,
@@ -291,7 +292,7 @@ async function showPromptPanel(
 		needsRedraw: true,
 	};
 
-	await ctx.ui.custom<any>((tui, theme, keybindings, done) => {
+	await ctx.ui.custom<any>((tui, theme, _keybindings, done) => {
 		const dim = (text: string) => theme.fg('dim', text);
 		const accent = (text: string) => theme.fg('accent', text);
 
@@ -569,20 +570,22 @@ export default function (pi: ExtensionAPI) {
 	pi.registerShortcut('ctrl+shift+p', {
 		description: 'Open prompt assembly panel',
 		handler: async (ctx) => {
-			const options = ctx.getSystemPromptOptions?.();
+			const cmdCtx = ctx as ExtensionCommandContext;
+			const options = cmdCtx.getSystemPromptOptions?.();
 			if (!options) {
 				if (ctx.hasUI) {
 					ctx.ui.notify('System prompt options not available', 'warning');
 				}
 				return;
 			}
-			await showPromptPanel(pi, ctx, options);
+			await showPromptPanel(pi, cmdCtx, options);
 		},
 	});
 
 	// Log system prompt structure at session start (for debugging)
 	pi.on('session_start', async (_event, ctx) => {
-		const options = ctx.getSystemPromptOptions?.();
+		const cmdCtx = ctx as ExtensionCommandContext;
+		const options = cmdCtx.getSystemPromptOptions?.();
 		if (options) {
 			const components = discoverComponents(options, ctx.cwd);
 			log.info('Session started — prompt components', {

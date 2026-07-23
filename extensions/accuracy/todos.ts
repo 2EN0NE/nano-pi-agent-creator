@@ -101,9 +101,8 @@ interface TodoSettings {
 	gcDays: number;
 }
 
-type KeybindingMatcher = {
-	matches: (keyData: string, keybindingId: string) => boolean;
-};
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type KeybindingMatcher = { matches: (...args: any[]) => boolean };
 
 const TodoParams = Type.Object({
 	action: StringEnum([
@@ -782,7 +781,7 @@ function normalizeTodoSettings(raw: Partial<TodoSettings>): TodoSettings {
 	const gcDays = Number.isFinite(raw.gcDays) ? raw.gcDays : DEFAULT_TODO_SETTINGS.gcDays;
 	return {
 		gc: Boolean(gc),
-		gcDays: Math.max(0, Math.floor(gcDays)),
+		gcDays: Math.max(0, Math.floor(gcDays as number)),
 	};
 }
 
@@ -1893,6 +1892,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 			let nextPrompt: string | null = null;
 			let rootTui: TUI | null = null;
+			// eslint-disable-next-line prefer-const
 			await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
 				rootTui = tui;
 				let selector: TodoSelectorComponent | null = null;
@@ -2163,7 +2163,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 			if (nextPrompt) {
 				ctx.ui.setEditorText(nextPrompt);
-				rootTui?.requestRender();
+				(rootTui as TUI | null)?.requestRender();
 			}
 		},
 	});
