@@ -215,8 +215,6 @@ describe('worktree execMerge', () => {
 		const dirtyFile = join(repoDir, 'untracked-dirty.txt');
 		if (existsSync(dirtyFile)) rmSync(dirtyFile);
 
-		const { execMerge } = await import(resolve(EXT_LIB, 'handlers.ts'));
-
 		// Create shared base file
 		writeFileSync(join(repoDir, 'squash-conflict.txt'), 'base line\n');
 		execSync('git add squash-conflict.txt && git commit -m "add squash-conflict base" -q', {
@@ -302,32 +300,33 @@ describe('worktree execRebaseFF', () => {
 	});
 
 	afterAll(() => {
-		// Clean up worktrees before rm -rf
+		// Clean up worktrees before rm -rf.
+		// Empty catch is intentional: worktrees may have been removed by tests already.
 		try {
-			execSync(`git worktree remove ${wtSuccessDir} --force --quiet`, { cwd: repoDir });
+			execSync(`git worktree remove ${wtSuccessDir} --force`, { cwd: repoDir });
 		} catch {
-			/* */
+			/* worktree may already be gone */
 		}
 		try {
-			execSync(`git worktree remove ${join(baseDir, 'wt-rff-ca')} --force --quiet`, {
+			execSync(`git worktree remove ${join(baseDir, 'wt-rff-ca')} --force`, {
 				cwd: repoDir,
 			});
 		} catch {
-			/* */
+			/* worktree may already be gone */
 		}
 		try {
-			execSync(`git worktree remove ${join(baseDir, 'wt-rff-cb')} --force --quiet`, {
+			execSync(`git worktree remove ${join(baseDir, 'wt-rff-cb')} --force`, {
 				cwd: repoDir,
 			});
 		} catch {
-			/* */
+			/* worktree may already be gone */
 		}
 		try {
-			execSync(`git worktree remove ${join(baseDir, 'wt-rff-dirty')} --force --quiet`, {
+			execSync(`git worktree remove ${join(baseDir, 'wt-rff-dirty')} --force`, {
 				cwd: repoDir,
 			});
 		} catch {
-			/* */
+			/* worktree may already be gone */
 		}
 		rmSync(baseDir, { recursive: true, force: true });
 	});

@@ -2,19 +2,16 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # pre-commit hook: 提交前快速校验（对齐 CI，但跳过耗时步骤）
 # ──────────────────────────────────────────────────────────────────────────────
-# 策略：pre-commit 只跑轻量检查（~5s），重量级留给 pre-push 或 CI。
-#   ✅ lint-staged  — 对 staged 文件 auto-fix（prettier --write + eslint --fix）
-#   ✅ format:check — 全局格式校验（prettier 很快，~2s）
-#   ✅ test         — Vitest 单元测试（对齐 CI unit-tests job）
-#   ❌ typecheck    — 在 pre-push 跑（tsc --noEmit 较慢 ~15s）
-#   ❌ e2e          — 在 pre-push 跑（bash 集成测试）
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
+
+# Debug: check if GIT_INDEX_FILE is set
+echo "debug: GIT_INDEX_FILE=${GIT_INDEX_FILE:-<not set>}" >&2
 
 # ── 1. 增量 auto-fix ──
 npm run lint:staged
 
-# ── 2. 格式校验（对齐 CI format job，阻塞）──
+# ── 2. 格式校验 ──
 echo "🔍 pre-commit: format:check..."
 npm run format:check
 if [ $? -ne 0 ]; then
@@ -22,8 +19,9 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# ── 3. 单元测试（对齐 CI unit-tests job）──
+# ── 3. 单元测试（清除 GIT_INDEX_FILE 避免干扰 git 操作）──
 echo "🔍 pre-commit: vitest..."
+unset GIT_INDEX_FILE
 npm test
 if [ $? -ne 0 ]; then
   echo "❌ Unit tests failed. Fix before committing."

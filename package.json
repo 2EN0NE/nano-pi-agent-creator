@@ -69,9 +69,9 @@
 		"typecheck": "tsc --noEmit",
 		"semgrep": "semgrep --config .semgrep.yml --exclude 'node_modules/**' --exclude '.pi/**' --exclude '.git/**' --metrics=off --no-git-ignore",
 		"semgrep:ci": "npm run semgrep -- --severity ERROR --severity WARNING",
-		"test": "vitest run",
+		"test": "vitest run --pool forks",
 		"test:watch": "vitest",
-		"test:ci": "CI=true vitest run --reporter default --reporter junit",
+		"test:ci": "CI=true vitest run --pool forks --reporter default --reporter junit",
 		"e2e": "bash test/scripts/run-e2e.sh",
 		"check": "npm run format:check && npm run typecheck && npm run semgrep:ci && npm run lint"
 	},
