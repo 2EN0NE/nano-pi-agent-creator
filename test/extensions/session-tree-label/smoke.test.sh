@@ -23,7 +23,7 @@ test_it "/label reload 命令触发日志输出 [REVIEW]" <<'TEST'
     --prompt "/label reload" \
     --save-output
   if [[ -d "$PI_LOG_DIR" ]]; then
-    label_log=$(ls "$PI_LOG_DIR"/session-tree-label_*.log 2>/dev/null | head -1)
+    label_log=$(ls "$PI_LOG_DIR"/session-tree-label_*.log 2>/dev/null | head -1 || true)
     if [[ -n "$label_log" ]]; then
       echo "=== session-tree-label 日志 ==="
       cat "$label_log"
