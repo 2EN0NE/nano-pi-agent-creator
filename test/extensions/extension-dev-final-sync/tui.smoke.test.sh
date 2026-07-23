@@ -44,29 +44,26 @@ test_it "extension logs captured in TUI mode" <<'TEST'
   tui_run_pi_test "pi-logger,quit,extension-dev-final-sync" "/quit" 15
 
   # 检查 pi-logger 日志是否记录了 extension-dev-final-sync
-  local padded
   padded=$(printf '%03d' "$CASE_INDEX")
-  local log_dir="$CASE_DIR/${padded}-logs"
+  log_dir="$CASE_DIR/${padded}-logs"
   if [[ -d "$log_dir" ]]; then
-    local ext_log
-    ext_log=$(find "$log_dir" -name "*extension-dev-final-sync*" -type f 2>/dev/null | head -1)
+    ext_log=$(find "$log_dir" -name "*extension-dev-final-sync*" -type f 2>/dev/null | head -1 || true)
     if [[ -n "$ext_log" ]]; then
       echo "PASS: extension-dev-final-sync log found: $ext_log"
     else
-      local ext_refs
-      ext_refs=$(grep -rl "extension-dev-final-sync" "$log_dir" 2>/dev/null | head -3)
+      ext_refs=$(grep -rl "extension-dev-final-sync" "$log_dir" 2>/dev/null || true)
       if [[ -n "$ext_refs" ]]; then
         echo "PASS: extension-dev-final-sync references found in logs: $ext_refs"
       else
         echo "WARN: No extension-dev-final-sync specific logs found"
-        ls "$log_dir" 2>/dev/null | head -5
+        ls "$log_dir" 2>/dev/null || true
       fi
     fi
   else
     echo "WARN: No logs directory captured"
   fi
 
-  tui_cleanup
+  tui_cleanup 2>/dev/null || true
 TEST
 
 test_it "TUI infra detects sync notification text" <<'TEST'
@@ -83,5 +80,5 @@ test_it "TUI infra detects sync notification text" <<'TEST'
     exit 1
   fi
 
-  tui_cleanup
+  tui_cleanup 2>/dev/null || true
 TEST
