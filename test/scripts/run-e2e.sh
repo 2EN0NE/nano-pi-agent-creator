@@ -348,7 +348,18 @@ run_test_file() {
 
 		echo "  [$padded] $name ..."
 
-		local case_log="$CASE_DIR/${padded}-${name//\//-}.log"
+		# 清理文件名中 GitHub Actions/NTFS 不允许的字符: " : < > | * ? \r \n
+		local safe_name="${name//\//-}"
+		safe_name="${safe_name//:/ -}"
+		safe_name="${safe_name//\"/}"
+		safe_name="${safe_name//</}"
+		safe_name="${safe_name//>/}"
+		safe_name="${safe_name//|/}"
+		safe_name="${safe_name//\*/}"
+		safe_name="${safe_name//\?/}"
+		safe_name="${safe_name//$'\r'/}"
+		safe_name="${safe_name//$'\n'/}"
+		local case_log="$CASE_DIR/${padded}-${safe_name}.log"
 		{
 			echo "========================================"
 			echo "Case: $name"
@@ -402,7 +413,7 @@ run_test_file() {
 		} >>"$case_log"
 
 		local rel_path="${MODULE_DIR#$RUN_DIR/}"
-		module_results+=("$padded|$name|$result|$rel_path/cases/${padded}-${name//\//-}.log")
+		module_results+=("$padded|$name|$result|$rel_path/cases/${padded}-${safe_name}.log")
 		echo "    → $result"
 	done
 
@@ -645,15 +656,15 @@ run_pool() {
 	local next_task=0
 
 	while ((next_task < task_count)); do
-		# 清理已完成 worker
+		# 清理已完成 worker（bash 3.2 兼容：空数组用 + 展开）
 		declare -a active_pids=()
 		local pid
-		for pid in "${worker_pids[@]}"; do
+		for pid in "${worker_pids[@]+"${worker_pids[@]}"}"; do
 			if kill -0 "$pid" 2>/dev/null; then
 				active_pids+=("$pid")
 			fi
 		done
-		worker_pids=("${active_pids[@]}")
+		worker_pids=("${active_pids[@]+"${active_pids[@]}"}")
 
 		# 填充空闲 slot
 		while ((${#worker_pids[@]} < POOL_SIZE && next_task < task_count)); do
@@ -676,7 +687,7 @@ run_pool() {
 
 	# 等待所有 worker 完成
 	local remaining=${#worker_pids[@]}
-	for pid in "${worker_pids[@]}"; do
+	for pid in "${worker_pids[@]+"${worker_pids[@]}"}"; do
 		wait "$pid" 2>/dev/null || true
 		remaining=$((remaining - 1))
 		echo "  Worker pid=$pid finished (${remaining} remaining)"

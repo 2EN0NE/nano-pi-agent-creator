@@ -15,7 +15,7 @@ import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createSandbox, destroySandbox, resolvePiBin } from '../helpers/sandbox';
+import { createSandbox, destroySandbox } from '../helpers/sandbox';
 
 // 手动 resolve extension 源码路径（vitest 无法从 extensions/ 自动解析 .ts）
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -36,25 +36,6 @@ const { createWorktree, removeWorktree, pickAvailableName } = await import(
 
 // ── 测试辅助 ──
 
-function runPi(home: string, cwd: string, prompt: string): { stdout: string; exitCode: number } {
-	const piBin = resolvePiBin();
-	try {
-		const out = execSync(`${piBin} --no-session -p ${JSON.stringify(prompt)}`, {
-			cwd,
-			timeout: 15_000,
-			env: { ...process.env, HOME: home, CI: 'true' },
-			maxBuffer: 2 * 1024 * 1024,
-			encoding: 'utf-8',
-		});
-		return { stdout: out, exitCode: 0 };
-	} catch (err: any) {
-		return {
-			stdout: (err.stdout || '').toString(),
-			exitCode: err.status || 1,
-		};
-	}
-}
-
 // ═══════════════════════════════════════════
 // 套件 1：扩展加载测试
 // ═══════════════════════════════════════════
@@ -72,10 +53,14 @@ describe('worktree extension — sandbox loading', () => {
 		});
 		isolatedHome = resolve(sandbox, 'home');
 
-		// 在沙箱 HOME 下创建 git 仓库
+		// 在沙箱 HOME 下创建 git 仓库（CI 无全局 git config，需内联设置）
 		repoDir = join(isolatedHome, 'test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir, encoding: 'utf-8' });
+		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
 		writeFileSync(join(repoDir, 'README.md'), '# Test\n');
 		execSync('git add README.md && git commit -m init', {
 			cwd: repoDir,
@@ -124,6 +109,10 @@ describe('worktree extension — getRepoRoot (real git)', () => {
 		repoDir = join(isolatedHome, 'integration-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
+		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
 		writeFileSync(join(repoDir, 'a.txt'), 'a');
 		execSync('git add a.txt && git commit -m init', { cwd: repoDir });
 	});
@@ -168,6 +157,10 @@ describe('worktree extension — create/delete (real git)', () => {
 		repoDir = join(isolatedHome, 'wt-test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
+		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
 		writeFileSync(join(repoDir, 'README.md'), '# WT Test\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 
@@ -295,6 +288,10 @@ describe('worktree extension — dirty/force/multiple', () => {
 		repoDir = join(isolatedHome, 'dirty-test');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
+		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
 		writeFileSync(join(repoDir, 'README.md'), '# Dirty\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 	});
@@ -361,6 +358,10 @@ describe('worktree extension — session file creation', () => {
 		repoDir = join(isolatedHome, 'session-test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
+		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
 		writeFileSync(join(repoDir, 'README.md'), '# Session test\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 
@@ -759,6 +760,10 @@ describe('worktree extension — fork history', () => {
 		repoDir = join(isolatedHome, 'fork-test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
+		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
 		writeFileSync(join(repoDir, 'README.md'), '# Fork test\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 
