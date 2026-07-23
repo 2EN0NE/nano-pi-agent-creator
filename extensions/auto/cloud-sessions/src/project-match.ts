@@ -119,6 +119,35 @@ export function matchBySuffix(encodedCwd: string, dirName: string, segments: num
 	return currentSuffix.every((part, i) => part === dirSuffix[i]);
 }
 
+// ─── ProjectMatcher 接口 ───────────────────────────────────────────────────
+
+/**
+ * 从同步镜像中查找同一项目的其他机器目录，复制匹配会话到当前 cwd 目录。
+ */
+export interface ProjectMatcher {
+	match(
+		config: ProjectMatchConfig,
+		machineId: string,
+		sessionsRoot: string,
+		mirrorRoot: string,
+	): Promise<MergeResult>;
+}
+
+/**
+ * SuffixAndGitMatcher — 默认 ProjectMatcher 实现。
+ * 通过路径后缀匹配 + git remote URL 匹配查找同一项目的其他机器目录。
+ */
+export class SuffixAndGitMatcher implements ProjectMatcher {
+	async match(
+		config: ProjectMatchConfig,
+		machineId: string,
+		sessionsRoot: string,
+		mirrorRoot: string,
+	): Promise<MergeResult> {
+		return mergeMatchingSessions(config, machineId, sessionsRoot, mirrorRoot);
+	}
+}
+
 // ─── Merge ─────────────────────────────────────────────────────────────────
 
 export interface MergeResult {
