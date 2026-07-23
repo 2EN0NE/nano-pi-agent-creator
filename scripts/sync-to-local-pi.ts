@@ -28,7 +28,6 @@
 
 import {
 	readFileSync,
-	writeFileSync,
 	existsSync,
 	mkdirSync,
 	statSync,
@@ -41,9 +40,10 @@ import {
 import { homedir } from 'node:os';
 import { join, dirname, resolve, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
-import { execSync, exec } from 'node:child_process';
 import * as yaml from 'js-yaml';
+import { isNpmPackageDir } from './lib/utils.js';
+import { PackageManager } from './lib/package-manager.js';
+import { BridgeBuilder } from './lib/bridge-builder.js';
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Constants
@@ -342,20 +342,6 @@ function expandTargetPath(target: string, projectRoot: string): string {
 		return target;
 	}
 	return resolve(projectRoot, target);
-}
-
-/**
- * Check if a directory is an npm-style package directory (has package.json with "pi" field).
- */
-function isNpmPackageDir(dir: string): boolean {
-	const pkgPath = join(dir, 'package.json');
-	if (!existsSync(pkgPath)) return false;
-	try {
-		const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-		return !!(pkg.pi && Array.isArray(pkg.pi.extensions) && pkg.pi.extensions.length > 0);
-	} catch {
-		return false;
-	}
 }
 
 /**
@@ -978,221 +964,6 @@ function syncResource(
 	return { action, resource };
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// npm install Handling
-// ══════════════════════════════════════════════════════════════════════════════
-
-interface NpmInstallResult {
-	path: string;
-	success: boolean;
-	output: string;
-}
-
-/**
- * Check if a directory has a package.json with dependencies.
- */
-function hasDependencies(dir: string): boolean {
-	const pkgPath = join(dir, 'package.json');
-	if (!existsSync(pkgPath)) return false;
-
-	try {
-		const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-		if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) return true;
-		if (pkg.devDependencies && Object.keys(pkg.devDependencies).length > 0) return true;
-		if (pkg.peerDependencies && Object.keys(pkg.peerDependencies).length > 0) return true;
-		return false;
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Scan target extensions directory for local @zenone/* packages (directories with package.json
- * whose name starts with "@zenone/"). These packages are both pi extensions AND npm packages
- * used by other extensions via import.
- */
-/**
- * Scan a directory for @zenone/* npm packages (directories with package.json
- * whose name starts with "@zenone/"). Recursively searches subdirectories.
- */
-function findZenonePackages(dir: string): Map<string, string> {
-	const packages = new Map<string, string>();
-	if (!existsSync(dir)) return packages;
-
-	function scan(currentDir: string, depth: number) {
-		if (depth > 6) return;
-		let entries: Dirent[];
-		try {
-			entries = readdirSync(currentDir, { withFileTypes: true });
-		} catch {
-			return;
-		}
-
-		for (const entry of entries) {
-			if (entry.name.startsWith('.')) continue;
-			if (entry.name === 'node_modules') continue;
-			if (!entry.isDirectory()) continue;
-
-			const fullPath = join(currentDir, entry.name);
-			const pkgPath = join(fullPath, 'package.json');
-			if (!existsSync(pkgPath)) {
-				// Recurse into category dirs (auto/, tui/, etc.)
-				scan(fullPath, depth + 1);
-				continue;
-			}
-
-			try {
-				const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-				if (pkg.name && typeof pkg.name === 'string' && pkg.name.startsWith('@zenone/')) {
-					if (!packages.has(pkg.name)) {
-						packages.set(pkg.name, fullPath);
-					}
-				}
-			} catch {
-				// Skip invalid package.json
-			}
-		}
-	}
-
-	scan(dir, 0);
-	return packages;
-}
-
-/**
- * Build the root package.json dependency map for @zenone/* local packages.
- *
- * Scans both the target extensions dir (already-synced packages, relative paths)
- * and the project source extensions dir (all @zenone/* packages, absolute paths).
- * Source extensions not found in the target get absolute-path entries so that
- * npm-style extensions (e.g. ci-watch) can resolve their @zenone/* peer/dev deps
- * even when the dependency package is in a different sync profile.
- *
- * The target-dir entries take priority (keep relative paths for synced packages).
- */
-function findLocalPackages(targetDir: string): Map<string, string> {
-	const packages = new Map<string, string>();
-
-	// 1. Scan target extensions dir for already-synced packages (relative paths)
-	const extDir = join(targetDir, 'extensions');
-	if (existsSync(extDir)) {
-		let entries: Dirent[];
-		try {
-			entries = readdirSync(extDir, { withFileTypes: true });
-		} catch {
-			entries = [];
-		}
-
-		for (const entry of entries) {
-			if (entry.name.startsWith('.')) continue;
-			if (entry.name === 'node_modules') continue;
-			if (!entry.isDirectory()) continue;
-
-			const pkgPath = join(extDir, entry.name, 'package.json');
-			if (!existsSync(pkgPath)) continue;
-
-			try {
-				const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-				if (pkg.name && typeof pkg.name === 'string' && pkg.name.startsWith('@zenone/')) {
-					packages.set(pkg.name, `./extensions/${entry.name}`);
-				}
-			} catch {
-				// Skip invalid package.json
-			}
-		}
-	}
-
-	// 2. Scan source extensions dir for any @zenone/* packages not yet in the map.
-	//    These get absolute paths so they're resolvable for npm-style extension builds
-	//    even when the package belongs to a different sync profile.
-	const sourceExtDir = join(PROJECT_ROOT, 'extensions');
-	if (existsSync(sourceExtDir)) {
-		const sourcePackages = findZenonePackages(sourceExtDir);
-		for (const [name, absPath] of sourcePackages) {
-			if (!packages.has(name)) {
-				packages.set(name, absPath);
-			}
-		}
-	}
-
-	return packages;
-}
-
-/**
- * Run npm install in a directory. Returns the result.
- */
-function runNpmInstall(dir: string, dryRun: boolean): NpmInstallResult {
-	if (dryRun) {
-		return {
-			path: dir,
-			success: true,
-			output: '[dry-run] npm install would run here',
-		};
-	}
-
-	try {
-		const output = execSync('npm install', {
-			cwd: dir,
-			encoding: 'utf8',
-			stdio: ['ignore', 'pipe', 'pipe'],
-			timeout: 120_000, // 2 minute timeout
-		});
-		return { path: dir, success: true, output: output.trim() };
-	} catch (err: unknown) {
-		const error = err as { stdout?: string; stderr?: string; message?: string };
-		const msg = error.stderr || error.stdout || error.message || 'unknown error';
-		return { path: dir, success: false, output: msg };
-	}
-}
-
-const execPromise = promisify(exec);
-
-/**
- * Async version of npm install (for parallel execution across extensions).
- */
-async function runNpmInstallAsync(dir: string, dryRun: boolean): Promise<NpmInstallResult> {
-	if (dryRun) {
-		return { path: dir, success: true, output: '[dry-run] npm install would run here' };
-	}
-
-	try {
-		const { stdout, stderr } = await execPromise('npm install', {
-			cwd: dir,
-			encoding: 'utf8',
-			timeout: 120_000,
-		});
-		return { path: dir, success: true, output: (stdout + stderr).trim() };
-	} catch (err: unknown) {
-		const error = err as { stdout?: string; stderr?: string; code?: number; message?: string };
-		const msg = (error.stderr || error.stdout || error.message || 'unknown error').toString();
-		return { path: dir, success: false, output: msg };
-	}
-}
-
-/**
- * Check whether npm install can be skipped because node_modules is already up-to-date.
- * Returns true if node_modules/ exists and is newer than package.json
- * (and package-lock.json if present).
- */
-function shouldSkipNpmInstall(dir: string): boolean {
-	const pkgPath = join(dir, 'package.json');
-	const nodeModulesPath = join(dir, 'node_modules');
-	if (!existsSync(nodeModulesPath)) return false;
-	if (!existsSync(pkgPath)) return true;
-	try {
-		const pkgStat = statSync(pkgPath);
-		const nmStat = statSync(nodeModulesPath);
-		const lockPath = join(dir, 'package-lock.json');
-		if (existsSync(lockPath)) {
-			const lockStat = statSync(lockPath);
-			return nmStat.mtimeMs >= Math.max(pkgStat.mtimeMs, lockStat.mtimeMs);
-		}
-		return nmStat.mtimeMs >= pkgStat.mtimeMs;
-	} catch {
-		return false;
-	}
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // Profile Processing (shared by config mode and inline mode)
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -1329,82 +1100,46 @@ async function processProfile(
 		}
 	}
 
-	// ── Root-level local package resolution (link @zenone/* packages) ──
-	// MUST run BEFORE per-extension npm install so that npm-style extensions
-	// (e.g. ci-watch) can resolve @zenone/* peer/dev deps from root node_modules.
+	// ── npm 编排：包依赖管理 + 安装 + 桥接 ──
+	const pm = new PackageManager({
+		targetDir,
+		projectRoot: PROJECT_ROOT,
+		dryRun: opts.dryRun,
+	});
+	const bb = new BridgeBuilder({ dryRun: opts.dryRun });
+
 	let npmCount = 0;
 	let npmFailCount = 0;
 	let npmSkippedCount = 0;
+	let npmBuildCount = 0;
+	let npmBuildFailCount = 0;
 
-	const localPackages = findLocalPackages(targetDir);
+	// ── Root-level local package resolution (link @zenone/* packages) ──
+	// MUST run BEFORE per-extension npm install so that npm-style extensions
+	// (e.g. ci-watch) can resolve @zenone/* peer/dev deps from root node_modules.
+	const localPackages = pm.scanLocalPackages();
 	if (localPackages.size > 0) {
-		const rootPkgPath = join(targetDir, 'package.json');
-		let rootPkg: Record<string, unknown> = {};
-		if (existsSync(rootPkgPath)) {
-			try {
-				rootPkg = JSON.parse(readFileSync(rootPkgPath, 'utf8'));
-			} catch {
-				rootPkg = {};
-			}
-		}
+		const depChange = pm.writeRootPackageJson(localPackages);
 
-		rootPkg.private = true;
-		rootPkg.type = 'module';
-		if (!rootPkg.dependencies) {
-			rootPkg.dependencies = {} as Record<string, string>;
-		}
-		const deps = rootPkg.dependencies as Record<string, string>;
-
-		// Rebuild @zenone/* entries from scratch — remove stale ones, add new ones.
-		// Non-@zenone/* entries are preserved (e.g. user-added deps).
-		let packagesAdded = 0;
-		let packagesRemoved = 0;
-
-		// Phase 1: Remove stale @zenone/* entries that no longer exist as local packages
-		for (const depName of Object.keys(deps)) {
-			if (depName.startsWith('@zenone/') && !localPackages.has(depName)) {
-				delete deps[depName];
-				packagesRemoved++;
-			}
-		}
-
-		// Phase 2: Add new @zenone/* entries from localPackages
-		for (const [name, relPath] of localPackages) {
-			if (deps[name] !== relPath) {
-				deps[name] = relPath;
-				packagesAdded++;
-			}
-		}
-
-		if (packagesAdded > 0 || packagesRemoved > 0) {
-			if (!opts.dryRun) {
-				writeFileSync(rootPkgPath, JSON.stringify(rootPkg, null, 2) + '\n', 'utf8');
-			}
+		if (depChange.added > 0 || depChange.removed > 0) {
 			const parts: string[] = [];
-			if (packagesAdded > 0) parts.push(`added ${packagesAdded}`);
-			if (packagesRemoved > 0) parts.push(`removed ${packagesRemoved}`);
+			if (depChange.added > 0) parts.push(`added ${depChange.added}`);
+			if (depChange.removed > 0) parts.push(`removed ${depChange.removed}`);
 			console.log(
 				`      📝 Updated root package.json (${parts.join(', ')}) — ${localPackages.size} local package(s)`,
 			);
-			writeLog('INFO', `Updated root package.json at ${rootPkgPath} (${parts.join(', ')})`);
-		} else if (existsSync(rootPkgPath)) {
-			console.log(
-				`      ⏭️  Root package.json up-to-date (${localPackages.size} local package(s))`,
+			writeLog(
+				'INFO',
+				`Updated root package.json at ${join(targetDir, 'package.json')} (${parts.join(', ')})`,
 			);
-		}
 
-		// Run npm install in target root (creates node_modules symlinks for file: deps)
-		const rootPkgChanged = packagesAdded > 0 || packagesRemoved > 0;
-		if (!opts.dryRun) {
-			if (!rootPkgChanged && shouldSkipNpmInstall(targetDir)) {
-				console.log(`      ⏭️  Root node_modules up-to-date, skipping`);
-				npmSkippedCount++;
-			} else {
+			// 依赖变更，强制重新安装
+			if (!opts.dryRun) {
 				console.log(
 					`      ⚙️  Running npm install in ${relative(PROJECT_ROOT, targetDir)}...`,
 				);
 				writeLog('INFO', `Running npm install in ${targetDir}`);
-				const result = runNpmInstall(targetDir, opts.dryRun);
+				const result = await pm.installRoot(true);
 				if (result.success) {
 					console.log(
 						`      ✅ npm install completed in ${relative(PROJECT_ROOT, targetDir)}`,
@@ -1422,170 +1157,110 @@ async function processProfile(
 					);
 					npmFailCount++;
 				}
+			} else {
+				console.log(
+					`      ⚙️  [dry-run] npm install would run in ${relative(PROJECT_ROOT, targetDir)}`,
+				);
 			}
-		} else {
+		} else if (existsSync(join(targetDir, 'package.json'))) {
 			console.log(
-				`      ⚙️  [dry-run] npm install would run in ${relative(PROJECT_ROOT, targetDir)}`,
+				`      ⏭️  Root package.json up-to-date (${localPackages.size} local package(s))`,
 			);
+
+			// 依赖未变，检查 node_modules 缓存
+			if (!opts.dryRun) {
+				const result = await pm.installRoot(false);
+				if (result.output.includes('skipped')) {
+					console.log(`      ⏭️  Root node_modules up-to-date, skipping`);
+					npmSkippedCount++;
+				} else if (result.success) {
+					console.log(
+						`      ✅ npm install completed in ${relative(PROJECT_ROOT, targetDir)}`,
+					);
+					writeLog('INFO', `npm install completed successfully in ${targetDir}`);
+					npmCount++;
+				} else {
+					console.error(
+						`      ❌ npm install failed in ${relative(PROJECT_ROOT, targetDir)}`,
+					);
+					console.error(`         ${result.output.slice(0, 200)}`);
+					writeLog(
+						'ERROR',
+						`npm install failed in ${targetDir}: ${result.output.slice(0, 200)}`,
+					);
+					npmFailCount++;
+				}
+			} else {
+				console.log(
+					`      ⚙️  [dry-run] npm install would run in ${relative(PROJECT_ROOT, targetDir)}`,
+				);
+			}
 		}
 	} else {
 		console.log(`      ⏭️  No local @zenone/* packages found — skipping root npm install`);
 	}
 
 	// ── Per-extension npm install (sequential) ──
-	interface NpmInstallTask {
-		path: string;
-		name: string;
-	}
+	if (!opts.dryRun) {
+		const extResult = await pm.installExtensions(resources);
+		npmCount += extResult.count;
+		npmFailCount += extResult.failed;
 
-	const npmInstallTasks: NpmInstallTask[] = [];
-	for (const resource of resources) {
-		const checkPath = resource.isDirectory ? resource.targetPath : dirname(resource.targetPath);
-
-		// Skip npm-style packages (with "pi" field in package.json) – their
-		// @zenone/* dependencies are resolved from the root node_modules via
-		// the root package.json file: references. Running npm install inside
-		// these extensions would fail because @zenone/* packages aren't on npm.
-		if (resource.isDirectory && isNpmPackageDir(checkPath)) {
-			console.log(
-				`      ⏭️  [npm:${resource.name}] npm-style package — deps resolved from root`,
+		for (const r of extResult.results) {
+			// 找到对应的资源名称用于日志
+			const matched = resources.find(
+				(res) => (res.isDirectory ? res.targetPath : dirname(res.targetPath)) === r.path,
 			);
-			continue;
-		}
-
-		const hasDep = hasDependencies(checkPath);
-		if (hasDep && !opts.dryRun) {
-			if (shouldSkipNpmInstall(checkPath)) {
-				console.log(`      ⏭️  [npm:${resource.name}] node_modules up-to-date, skipping`);
-				npmSkippedCount++;
+			const name = matched?.name ?? r.path;
+			if (r.success) {
+				console.log(`      ✅ [npm:${name}] completed`);
+				writeLog('INFO', `npm install completed in ${r.path}`);
 			} else {
-				npmInstallTasks.push({ path: checkPath, name: resource.name });
+				console.error(`      ❌ [npm:${name}] FAILED`);
+				console.error(`         ${r.output.slice(0, 200)}`);
+				writeLog('ERROR', `npm install failed in ${r.path}: ${r.output.slice(0, 200)}`);
 			}
-		} else if (hasDep && opts.dryRun) {
-			console.log(
-				`      ⚙️  [dry-run] npm install would run in ${relative(PROJECT_ROOT, checkPath)}`,
-			);
 		}
-	}
-
-	if (npmInstallTasks.length > 0) {
-		console.log(`      ⚙️  Running ${npmInstallTasks.length} npm install(s) sequentially...`);
-		writeLog('INFO', `Running ${npmInstallTasks.length} npm install(s) sequentially`);
-
-		for (const task of npmInstallTasks) {
-			const result = await runNpmInstallAsync(task.path, opts.dryRun);
-			if (result.success) {
-				console.log(`      ✅ [npm:${task.name}] completed`);
-				writeLog('INFO', `npm install completed in ${task.path}`);
-				npmCount++;
-			} else {
-				console.error(`      ❌ [npm:${task.name}] FAILED`);
-				console.error(`         ${result.output.slice(0, 200)}`);
-				writeLog(
-					'ERROR',
-					`npm install failed in ${task.path}: ${result.output.slice(0, 200)}`,
+	} else {
+		// 在 dry-run 模式下找出需要安装的扩展
+		let found = 0;
+		for (const resource of resources) {
+			const checkPath = resource.isDirectory
+				? resource.targetPath
+				: dirname(resource.targetPath);
+			const pkgPath = join(checkPath, 'package.json');
+			if (existsSync(pkgPath)) {
+				console.log(
+					`      ⚙️  [dry-run] npm install would run in ${relative(PROJECT_ROOT, checkPath)}`,
 				);
-				npmFailCount++;
+				found++;
 			}
 		}
+		if (found === 0) console.log(`      ⏭️  [dry-run] No extension npm installs needed`);
 	}
 
 	// -- npm package extension: bridge creation --
-	// Auto-detects extensions with package.json + "pi" field (npm-style packages).
-	// Falls back to profile.npmBuild for explicit opt-in.
-	let npmBuildCount = 0;
-	let npmBuildFailCount = 0;
+	// 自动检测：package.json 含 "pi" 字段的扩展
+	// 显式配置：profile.npmBuild 中的扩展名列表
+	const bridgeResult = bb.ensureBridges(resources, profile.npmBuild);
 
-	const npmBuildNames = new Set(profile.npmBuild ?? []);
-	// Also auto-detect: directories with package.json containing "pi" field.
-	// This ensures inline mode works without explicit npmBuild config.
-	for (const resource of resources) {
-		if (resource.type !== 'extensions') continue;
-		if (!resource.isDirectory) continue;
-		if (npmBuildNames.has(resource.name)) continue;
-		if (isNpmPackageDir(resource.sourcePath)) {
-			npmBuildNames.add(resource.name);
-		}
-	}
-
-	if (npmBuildNames.size > 0) {
-		for (const resource of resources) {
-			if (resource.type !== 'extensions') continue;
-			if (!resource.isDirectory) continue;
-			if (!npmBuildNames.has(resource.name)) continue;
-
-			const npmDir = resource.targetPath;
-			if (!existsSync(npmDir)) {
-				if (opts.dryRun) {
-					console.log(
-						`      🌉  [npm:${resource.name}] bridge index.ts → src/index.ts (dry-run)`,
-					);
-				}
-				continue;
-			}
-
-			const bridgePath = join(npmDir, 'index.ts');
-			const srcEntry = join(npmDir, 'src', 'index.ts');
-			const bridgeContent = `// Auto-generated by sync-to-local-pi - do not edit\nexport { default } from "./src/index.ts";\n`;
-
-			if (opts.dryRun) {
-				if (!existsSync(bridgePath)) {
-					console.log(
-						`      🌉  [npm:${resource.name}] bridge index.ts → src/index.ts (dry-run)`,
-					);
-				}
-				continue;
-			}
-
-			if (existsSync(bridgePath)) {
-				// Bridge already exists — nothing to do
-				continue;
-			}
-
-			if (!existsSync(srcEntry)) {
-				console.error(
-					`      ❌ [npm:${resource.name}] src/index.ts not found in ${npmDir}`,
-				);
-				writeLog('ERROR', `Bridge failed for ${resource.name}: src/index.ts not found`);
+	for (const d of bridgeResult.details) {
+		switch (d.status) {
+			case 'created':
+				console.log(`      🌉  [npm:${d.name}] Created bridge: index.ts → src/index.ts`);
+				writeLog('INFO', `Bridge index.ts created for ${d.name}`);
+				npmBuildCount++;
+				break;
+			case 'skipped':
+				if (d.reason) console.log(`      ⏭️  [npm:${d.name}] ${d.reason}`);
+				break;
+			case 'failed':
+				console.error(`      ❌ [npm:${d.name}] Bridge failed: ${d.reason}`);
+				writeLog('ERROR', `Bridge failed for ${d.name}: ${d.reason}`);
 				npmBuildFailCount++;
-				continue;
-			}
-
-			// Ensure node_modules exists (per-extension npm install may have been
-			// skipped for npm-style packages). Check if root node_modules provides
-			// the dependencies instead of running a local install that would fail
-			// on unresolvable @zenone/* packages.
-			if (!existsSync(join(npmDir, 'node_modules'))) {
-				const rootNodeModules = join(dirname(dirname(npmDir)), 'node_modules');
-				if (existsSync(rootNodeModules)) {
-					console.log(
-						`      ⏭️  [npm:${resource.name}] using root node_modules — skipping local install`,
-					);
-				} else {
-					console.log(`      ⚙️  [npm:${resource.name}] Running npm install...`);
-					const installResult = runNpmInstall(npmDir, false);
-					if (!installResult.success) {
-						console.error(
-							`         ❌ npm install failed: ${installResult.output.slice(0, 200)}`,
-						);
-						writeLog(
-							'ERROR',
-							`npm install failed for ${resource.name}: ${installResult.output.slice(0, 200)}`,
-						);
-						npmBuildFailCount++;
-						continue;
-					}
-				}
-			}
-
-			// Create bridge index.ts
-			writeFileSync(bridgePath, bridgeContent, 'utf8');
-			console.log(`      🌉  [npm:${resource.name}] Created bridge: index.ts → src/index.ts`);
-			writeLog('INFO', `Bridge index.ts created for ${resource.name} in ${npmDir}`);
-			npmBuildCount++;
+				break;
 		}
 	}
-
 	// ── Summary for this profile ──
 	const skipTotal = Object.values(skipByType).reduce((a, b) => a + b, 0);
 	const newTotal = Object.values(newItems).reduce((a, b) => a + b.length, 0);
