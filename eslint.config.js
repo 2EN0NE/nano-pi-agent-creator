@@ -3,7 +3,14 @@ import prettierConfig from 'eslint-config-prettier';
 
 export default [
 	{
-		ignores: ['node_modules', 'dist', 'build', '.husky/**', '**/package-lock.json', '.pi/**'],
+		ignores: [
+			'node_modules',
+			'**/dist/**',
+			'build',
+			'.husky/**',
+			'**/package-lock.json',
+			'.pi/**',
+		],
 	},
 	prettierConfig,
 	{

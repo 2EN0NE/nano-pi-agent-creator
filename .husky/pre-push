@@ -1,7 +1,14 @@
 #!/bin/sh
 # ──────────────────────────────────────────────────────────────────────────────
-# pre-push hook: 推送前对已变更的扩展/技能运行 e2e 测试
+# pre-push hook: 推送前类型检查 + 单元测试 + 变更模块的 e2e 测试
 # ──────────────────────────────────────────────────────────────────────────────
+# 策略：与 CI 对齐但降权耗时步骤。
+#   ✅ typecheck  — 有 .ts 变更时运行（CI 阻塞，此处也阻塞）
+#   ✅ test       — Vitest 单元测试（CI 阻塞，此处也阻塞）
+#   ✅ e2e 测试   — 仅变更模块（CI 阻塞，此处 blocking exit 1）
+#   ❌ format:check — pre-commit 已跑，不重复
+#   ❌ semgrep     — 太慢，仅 CI 跑
+#
 # 通过 git diff --name-only 检测本次推送变更的模块，仅运行受影响模块的测试。
 # 如果变更覆盖多个模块，最坏情况跑全量测试（耗时可能较长）。
 
@@ -15,6 +22,25 @@ CHANGED_FILES=$(git diff --name-only "@{push}..HEAD" 2>/dev/null || echo "")
 
 if [ -z "$CHANGED_FILES" ]; then
   exit 0
+fi
+
+# ── 类型检查（当有 .ts/.tsx 变更时）──
+echo "$CHANGED_FILES" | grep -q '\.tsx\?$'
+if [ $? -eq 0 ]; then
+	echo "🔍 pre-push: typecheck..."
+  npm run typecheck
+  if [ $? -ne 0 ]; then
+    echo "❌ TypeScript errors found. Fix before pushing."
+    exit 1
+  fi
+fi
+
+# ── 单元测试（对齐 CI unit-tests job）──
+echo "🔍 pre-push: vitest..."
+npm test
+if [ $? -ne 0 ]; then
+  echo "❌ Unit tests failed. Fix before pushing."
+  exit 1
 fi
 
 # 提取变更的扩展名和技能名

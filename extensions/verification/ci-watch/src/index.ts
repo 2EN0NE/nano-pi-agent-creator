@@ -243,14 +243,14 @@ async function pollCiCompletion(
 		}
 
 		if (result.status === 'pass') {
-			return { outcome: 'pass', message: `[PASS] ${refLabel} CI passed!` };
+			return { outcome: 'pass', message: `[PASS] ${refLabel} CI 通过！` };
 		}
 
 		if (result.status === 'fail') {
 			const logs = getFailedLogs(pr, workDir);
 			return {
 				outcome: 'fail',
-				message: `[FAIL] ${refLabel} CI failed.`,
+				message: `[FAIL] ${refLabel} CI 失败。`,
 				logs,
 				failedRuns: result.failedRuns,
 			};
@@ -262,7 +262,7 @@ async function pollCiCompletion(
 			if (consecutiveEmptyPolls >= maxEmptyPolls) {
 				return {
 					outcome: 'error',
-					message: `[STOP] ${refLabel} has no CI runs after ${maxEmptyPolls} checks. Confirm branch name and CI trigger.`,
+					message: `[STOP] ${refLabel} 在 ${maxEmptyPolls} 次检查后仍未发现 CI 运行。请确认分支名和 CI 触发条件。`,
 				};
 			}
 		} else {
@@ -272,7 +272,7 @@ async function pollCiCompletion(
 		if (elapsed >= maxWaitMs) {
 			return {
 				outcome: 'timeout',
-				message: `[TIMEOUT] ${refLabel} CI not completed after ${Math.round(maxWaitMs / 60000)} min. Check manually.`,
+				message: `[TIMEOUT] ${refLabel} CI 在 ${Math.round(maxWaitMs / 60000)} 分钟内未完成，请手动检查。`,
 			};
 		}
 
@@ -280,11 +280,11 @@ async function pollCiCompletion(
 		elapsed += currentDelay;
 		currentDelay = nextPollDelay(currentDelay, pollConfig);
 		onUpdate?.(
-			`[WAIT] ${refShort} CI running... (${Math.round(elapsed / 1000)}s elapsed, next check in ${currentDelay / 1000}s)`,
+			`[WAIT] ${refShort} CI 运行中...（已过 ${Math.round(elapsed / 1000)}s，下次检查 ${currentDelay / 1000}s 后）`,
 		);
 	}
 
-	return { outcome: 'cancelled', message: 'CI monitoring cancelled.' };
+	return { outcome: 'cancelled', message: 'CI 监控已取消。' };
 }
 
 // ====================================================================
@@ -309,20 +309,20 @@ function makeCiWatchPanel(
 	const items: SelectItem[] = [
 		{
 			value: '__monitor_pr',
-			label: '> Monitor PR',
-			description: 'Enter a PR number to monitor its CI status',
+			label: '> 监控 PR',
+			description: '输入 PR 编号来监控其 CI 状态',
 		},
 		{
 			value: '__monitor_branch',
-			label: '> Monitor Branch',
-			description: 'Enter a branch name to monitor its CI status',
+			label: '> 监控分支',
+			description: '输入分支名来监控其 CI 状态',
 		},
 		{
 			value: '__toggle_auto',
-			label: `Auto-mode: ${state.autoMode ? 'ON' : 'OFF'}`,
+			label: `自动模式：${state.autoMode ? '开' : '关'}`,
 			description: state.autoMode
-				? 'Enabled — auto-monitor CI after git push'
-				: 'Disabled — no auto-monitoring after push',
+				? '已开启——git push 后自动监控 CI'
+				: '已关闭——推送后不会自动监控',
 		},
 	];
 
@@ -330,42 +330,42 @@ function makeCiWatchPanel(
 	if (state.pollConfigExpanded) {
 		items.push({
 			value: '__toggle_config',
-			label: `Polling: ${state.pollConfig.minMs / 1000}s - ${state.pollConfig.maxMs / 1000}s (step ${state.pollConfig.stepMs / 1000}s) [expanded]`,
-			description: 'Ctrl+O to collapse  |  Enter to edit',
+			label: `轮询：${state.pollConfig.minMs / 1000}s - ${state.pollConfig.maxMs / 1000}s（步长 ${state.pollConfig.stepMs / 1000}s）[已展开]`,
+			description: 'Ctrl+O 折叠  |  Enter 编辑',
 		});
 		items.push({
 			value: '__config_min',
-			label: `  min: ${state.pollConfig.minMs / 1000}s`,
-			description: 'Change minimum polling interval',
+			label: `  最小值：${state.pollConfig.minMs / 1000}s`,
+			description: '修改最小轮询间隔',
 		});
 		items.push({
 			value: '__config_max',
-			label: `  max: ${state.pollConfig.maxMs / 1000}s`,
-			description: 'Change maximum polling interval',
+			label: `  最大值：${state.pollConfig.maxMs / 1000}s`,
+			description: '修改最大轮询间隔',
 		});
 		items.push({
 			value: '__config_step',
-			label: `  step: ${state.pollConfig.stepMs / 1000}s`,
-			description: 'Change polling interval step',
+			label: `  步长：${state.pollConfig.stepMs / 1000}s`,
+			description: '修改轮询间隔步长',
 		});
 	} else {
 		items.push({
 			value: '__toggle_config',
-			label: `Polling: ${state.pollConfig.minMs / 1000}s - ${state.pollConfig.maxMs / 1000}s (step ${state.pollConfig.stepMs / 1000}s)`,
-			description: 'Ctrl+O to expand config details',
+			label: `轮询：${state.pollConfig.minMs / 1000}s - ${state.pollConfig.maxMs / 1000}s（步长 ${state.pollConfig.stepMs / 1000}s）`,
+			description: 'Ctrl+O 展开配置详情',
 		});
 	}
 
 	const statusText = ghAvailable
 		? state.monitoringStatus
-			? `Status: ${state.monitoringStatus}`
-			: 'Status: idle'
-		: 'Status: gh CLI not available';
+			? `状态：${state.monitoringStatus}`
+			: '状态：空闲'
+		: '状态：gh CLI 不可用';
 
 	ctx.ui.custom<void>((tui, theme, _kb, done) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
-		container.addChild(new Text(theme.fg('accent', theme.bold('CI Watch')), 1, 0));
+		container.addChild(new Text(theme.fg('accent', theme.bold('CI 监控')), 1, 0));
 
 		const selectList = new SelectList(items, Math.min(items.length + 1, 12), {
 			selectedPrefix: (t) => theme.fg('accent', t),
@@ -394,11 +394,7 @@ function makeCiWatchPanel(
 		container.addChild(selectList);
 		container.addChild(new Text(theme.fg('dim', statusText), 1, 0));
 		container.addChild(
-			new Text(
-				theme.fg('dim', 'up/down navigate  enter select  esc close  ctrl+o toggle config'),
-				1,
-				0,
-			),
+			new Text(theme.fg('dim', '上下导航  回车选择  esc关闭  ctrl+o 展开/折叠配置'), 1, 0),
 		);
 		container.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
 
@@ -435,14 +431,14 @@ async function handlePanelAction(
 	switch (value) {
 		case '__monitor_pr': {
 			if (!ghAvailable) {
-				ctx.ui.notify('gh CLI not available. Install gh first.', 'error');
+				ctx.ui.notify('gh CLI 不可用，请先安装 gh。', 'error');
 				return;
 			}
-			const prInput = await ctx.ui.input('Enter PR number', '');
+			const prInput = await ctx.ui.input('请输入 PR 编号', '');
 			if (!prInput || !prInput.trim()) return;
 			const pr = prInput.trim();
 			if (!isPrRef(pr)) {
-				ctx.ui.notify('Invalid PR number. Enter digits only.', 'error');
+				ctx.ui.notify('无效的 PR 编号，请输入纯数字。', 'error');
 				return;
 			}
 			await startCiWatch(pr, ctx, state, pi);
@@ -450,7 +446,7 @@ async function handlePanelAction(
 		}
 		case '__monitor_branch': {
 			if (!ghAvailable) {
-				ctx.ui.notify('gh CLI not available. Install gh first.', 'error');
+				ctx.ui.notify('gh CLI 不可用，请先安装 gh。', 'error');
 				return;
 			}
 			// 自动检测当前分支作默认值
@@ -463,11 +459,11 @@ async function handlePanelAction(
 			} catch {
 				/* ignore */
 			}
-			const branchInput = await ctx.ui.input('Enter branch name', defaultBranch);
+			const branchInput = await ctx.ui.input('请输入分支名', defaultBranch);
 			if (!branchInput || !branchInput.trim()) return;
 			const branch = branchInput.trim();
 			if (!isValidBranch(branch)) {
-				ctx.ui.notify(`Invalid branch name: ${branch}`, 'error');
+				ctx.ui.notify(`无效的分支名：${branch}`, 'error');
 				return;
 			}
 			await startCiWatch(branch, ctx, state, pi);
@@ -476,7 +472,7 @@ async function handlePanelAction(
 		case '__toggle_auto': {
 			state.autoMode = !state.autoMode;
 			ctx.ui.notify(
-				`Auto-monitor: ${state.autoMode ? 'ON' : 'OFF'}`,
+				`自动模式：${state.autoMode ? '开' : '关'}`,
 				state.autoMode ? 'info' : 'warning',
 			);
 			break;
@@ -487,50 +483,50 @@ async function handlePanelAction(
 		}
 		case '__config_min': {
 			const val = await ctx.ui.input(
-				'Minimum polling interval (seconds)',
+				'最小轮询间隔（秒）',
 				String(state.pollConfig.minMs / 1000),
 			);
 			if (!val) return;
 			const n = Number(val.trim());
 			if (isNaN(n) || n < 1) {
-				ctx.ui.notify('Invalid value', 'error');
+				ctx.ui.notify('无效的值', 'error');
 				return;
 			}
 			state.pollConfig.minMs = n * 1000;
 			saveConfig(state, configStore);
-			ctx.ui.notify(`Min polling set to ${n}s`, 'info');
+			ctx.ui.notify(`最小轮询已设为 ${n}s`, 'info');
 			break;
 		}
 		case '__config_max': {
 			const val = await ctx.ui.input(
-				'Maximum polling interval (seconds)',
+				'最大轮询间隔（秒）',
 				String(state.pollConfig.maxMs / 1000),
 			);
 			if (!val) return;
 			const n = Number(val.trim());
 			if (isNaN(n) || n < 1) {
-				ctx.ui.notify('Invalid value', 'error');
+				ctx.ui.notify('无效的值', 'error');
 				return;
 			}
 			state.pollConfig.maxMs = n * 1000;
 			saveConfig(state, configStore);
-			ctx.ui.notify(`Max polling set to ${n}s`, 'info');
+			ctx.ui.notify(`最大轮询已设为 ${n}s`, 'info');
 			break;
 		}
 		case '__config_step': {
 			const val = await ctx.ui.input(
-				'Polling step (seconds)',
+				'轮询间隔步长（秒）',
 				String(state.pollConfig.stepMs / 1000),
 			);
 			if (!val) return;
 			const n = Number(val.trim());
 			if (isNaN(n) || n < 1) {
-				ctx.ui.notify('Invalid value', 'error');
+				ctx.ui.notify('无效的值', 'error');
 				return;
 			}
 			state.pollConfig.stepMs = n * 1000;
 			saveConfig(state, configStore);
-			ctx.ui.notify(`Polling step set to ${n}s`, 'info');
+			ctx.ui.notify(`轮询步长已设为 ${n}s`, 'info');
 			break;
 		}
 	}
@@ -555,11 +551,11 @@ async function startCiWatch(
 	state: TuiState,
 	pi: ExtensionAPI,
 ): Promise<void> {
-	const refLabel = isPrRef(ref) ? `PR ${ref}` : `Branch ${ref}`;
+	const refLabel = isPrRef(ref) ? `PR ${ref}` : `分支 ${ref}`;
 	const refShort = isPrRef(ref) ? `PR ${ref}` : ref;
 
-	state.monitoringStatus = `Monitoring ${refLabel}...`;
-	ctx.ui.notify(`[ci-watch] Monitoring ${refLabel}...`, 'info');
+	state.monitoringStatus = `正在监控 ${refLabel}...`;
+	ctx.ui.notify(`[ci-watch] 开始监控 ${refLabel}...`, 'info');
 
 	const result = await pollCiCompletion(
 		ref,
@@ -573,10 +569,10 @@ async function startCiWatch(
 	state.monitoringStatus = null;
 
 	if (result.outcome === 'pass') {
-		ctx.ui.notify(`[ci-watch] ${refLabel} CI passed!`, 'info');
+		ctx.ui.notify(`[ci-watch] ${refLabel} CI 通过！`, 'info');
 	} else if (result.outcome === 'fail') {
 		pi.sendUserMessage(
-			`[ci-watch] ${refLabel} CI failed.\n\nFailed checks: ${result.failedRuns?.join(', ')}\n\n--- Failure logs (last 100 lines) ---\n${result.logs}\n\n---\nPlease fix and push, then use /ci-watch ${refShort} to re-monitor.`,
+			`[ci-watch] ${refLabel} CI 失败。\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n请修复代码，并在提交前先本地验证（tsc --noEmit 检查类型、运行 e2e 测试、格式化代码），再 commit 和 push，然后执行 /ci-watch ${refShort} 重新监控。`,
 			{ deliverAs: 'followUp' },
 		);
 	} else {
@@ -625,13 +621,13 @@ export default function (pi: ExtensionAPI) {
 			execSync('command -v gh', { encoding: 'utf-8', stdio: 'pipe' });
 			ghAvailable = true;
 			if (state.autoMode) {
-				ctx.ui.notify('[ci-watch] gh CLI detected, auto-monitor enabled', 'info');
+				ctx.ui.notify('[ci-watch] 已检测到 gh CLI，自动监控已启用', 'info');
 			}
 		} catch {
 			ghAvailable = false;
 			state.autoMode = false;
 			ctx.ui.notify(
-				'[ci-watch] gh CLI not found. Install: brew install gh / apt install gh',
+				'[ci-watch] 未找到 gh CLI。请安装：brew install gh / apt install gh',
 				'error',
 			);
 		}
@@ -697,7 +693,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.cwd,
 			);
 
-			const refLabel = prOutput ? `PR ${prOutput}` : `Branch ${branch}`;
+			const refLabel = prOutput ? `PR ${prOutput}` : `分支 ${branch}`;
 			const refShort = prOutput ?? branch;
 
 			if (prOutput) {
@@ -736,7 +732,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			log.info('触发 CI 自动监控', { pr: prOutput, branch });
-			state.monitoringStatus = `Monitoring ${refLabel} (auto)...`;
+			state.monitoringStatus = `正在监控 ${refLabel}（自动）...`;
 
 			// 直接轮询，不经过 LLM
 			const result = await pollCiCompletion(
@@ -750,14 +746,14 @@ export default function (pi: ExtensionAPI) {
 			state.monitoringStatus = null;
 
 			if (result.outcome === 'pass') {
-				ctx.ui.notify(`[ci-watch] Auto: ${refLabel} CI passed!`, 'info');
+				ctx.ui.notify(`[ci-watch] 自动：${refLabel} CI 通过！`, 'info');
 			} else if (result.outcome === 'fail') {
 				pi.sendUserMessage(
-					`[ci-watch] Auto: ${refLabel} CI failed.\n\nFailed checks: ${result.failedRuns?.join(', ')}\n\n--- Failure logs (last 100 lines) ---\n${result.logs}\n\n---\nPlease fix and push, then use /ci-watch ${prOutput ?? branch} to re-monitor.`,
+					`[ci-watch] 自动：${refLabel} CI 失败。\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n请修复代码，并在提交前先本地验证（tsc --noEmit 检查类型、运行 e2e 测试、格式化代码），再 commit 和 push，然后 /ci-watch ${prOutput ?? branch} 重新监控。`,
 					{ deliverAs: 'followUp' },
 				);
 			} else {
-				ctx.ui.notify(`[ci-watch] Auto: ${result.message}`, 'error');
+				ctx.ui.notify(`[ci-watch] 自动：${result.message}`, 'error');
 			}
 		} catch (autoErr) {
 			log.warn('自动监控异常', { branch, error: String(autoErr) });
@@ -772,13 +768,12 @@ export default function (pi: ExtensionAPI) {
 		name: 'ci_watch',
 		label: 'CI Monitor',
 		description:
-			'Monitor CI status on a GitHub PR or branch, wait for completion, and report results. If CI fails, return failure logs for fixing. Supports PR number (e.g. 12) or branch name (e.g. main).',
-		promptSnippet:
-			'Monitor CI on a PR or branch, wait for completion, return failure logs if any',
+			'监控 GitHub PR 或分支的 CI 状态，等待完成并报告结果。如果 CI 失败，返回失败日志供修复。支持 PR 编号（如 12）或分支名（如 main）。',
+		promptSnippet: '监控 PR 或分支的 CI 状态，等待完成，如有失败则返回失败日志',
 		promptGuidelines: [
-			'Use ci_watch after pushing a branch or opening a PR. Supports PR number or branch name.',
-			'When ci_watch reports failure, read logs, fix issues, commit, push, then call ci_watch again (max 3 attempts).',
-			'Do not call ci_watch proactively — only when the user explicitly asks to monitor CI.',
+			'在推送分支或打开 PR 后使用 ci_watch。支持 PR 编号或分支名。',
+			'当 ci_watch 报告失败时：1) 读取失败日志并修复问题。2) 提交前必须先在本地运行验证：检查 TypeScript 错误（tsc --noEmit 或 npm run lint）、为变更的模块运行 e2e 测试（bash test/scripts/run-e2e.sh --ext <模块名>）、格式化代码（npx prettier --write .）。3) 确认本地验证通过后再 commit 和 push。4) 调用 ci_watch 再次检查（最多 3 次尝试）。',
+			'不要主动调用 ci_watch——只有用户明确要求监控 CI 时才调用。',
 		],
 		parameters: Type.Object({
 			pr: Type.String({ description: 'PR number or branch name to monitor' }),
@@ -799,7 +794,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: 'text',
-							text: `[STOP] CI still failing after ${MAX_ATTEMPTS} fix attempts. Manual intervention needed.`,
+							text: `[STOP] CI 在 ${MAX_ATTEMPTS} 次修复后仍然失败，需要人工介入。`,
 						},
 					],
 					details: { status: 'max_attempts_reached', pr, attempts: MAX_ATTEMPTS },
@@ -810,7 +805,7 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: 'text',
-						text: `Waiting for ${refLabel} CI (attempt ${attempt}/${MAX_ATTEMPTS})...`,
+						text: `等待 ${refLabel} CI 结果（第 ${attempt}/${MAX_ATTEMPTS} 次尝试）...`,
 					},
 				],
 				details: {},
@@ -843,7 +838,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: 'text',
-							text: `${result.message}\n\nFailed checks: ${result.failedRuns?.join(', ')}\n\n--- Failure logs (last 100 lines) ---\n${result.logs}\n\n---\nFix issues, commit, push, then call ci_watch with attempt=${attempt + 1}.`,
+							text: `${result.message}\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n修复后，先本地验证（tsc --noEmit 检查类型、运行 e2e 测试、格式化代码），再 commit 和 push，然后 ci_watch attempt=${attempt + 1}。`,
 						},
 					],
 					details: { status: 'fail', pr, attempt, failedChecks: result.failedRuns },
@@ -863,18 +858,18 @@ export default function (pi: ExtensionAPI) {
 	//   - 有参数 → 直接监控 PR/分支
 	// ====================================================================
 	pi.registerCommand('ci-watch', {
-		description: 'Monitor CI. Usage: /ci-watch <pr|branch> or /ci-watch (opens TUI panel)',
+		description: '监控 CI。用法：/ci-watch <PR编号|分支名> 或 /ci-watch（打开交互面板）',
 		handler: async (args, ctx) => {
 			if (args?.trim()) {
 				// 直接监控模式
 				const ref = args.trim();
 				if (!ghAvailable) {
-					ctx.ui.notify('[ci-watch] gh CLI not available. Install gh first.', 'error');
+					ctx.ui.notify('[ci-watch] gh CLI 不可用，请先安装 gh。', 'error');
 					return;
 				}
 				if (!isPrRef(ref) && !isValidBranch(ref)) {
 					ctx.ui.notify(
-						`[ci-watch] Invalid ref: ${ref}. Use PR number or branch name.`,
+						`[ci-watch] 无效的引用：${ref}。请使用 PR 编号或分支名。`,
 						'error',
 					);
 					return;

@@ -30,11 +30,10 @@ jobs:
             - name: Check formatting
               run: npm run format:check
 
-    # ── Type checking (non-blocking — pi API version mismatch) ──
+    # ── Type checking ──
     typecheck:
         name: TypeScript
         runs-on: ubuntu-latest
-        continue-on-error: true
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
@@ -45,11 +44,10 @@ jobs:
             - name: TypeScript check
               run: npm run typecheck
 
-    # ── Linting (non-blocking — 10 pre-existing errors in sub-packages) ──
+    # ── Linting ──
     lint:
         name: ESLint
         runs-on: ubuntu-latest
-        continue-on-error: true
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
@@ -89,15 +87,27 @@ jobs:
                     --no-git-ignore \
                     --severity WARNING
 
-    # ── E2E Tests (with mock LLM, no API key required) ──
-    # 故意设为 continue-on-error: true（非阻塞参考测试），原因：
-    # 1. permission-gate TUI 日志测试仍含 1 个 [REVIEW] 用例需人工衡量
-    # 2. 其他模块可能仍有 REVIEW 用例
-    # 若需改为阻塞模式，需先让所有模块的 REVIEW 用例归零
+    # ── Unit Tests（Vitest，阻塞）──
+    unit-tests:
+        name: Vitest
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: npm
+            - run: npm ci
+            - name: Setup CI environment
+              run: bash scripts/setup-ci.sh
+            - name: Run Vitest tests
+              run: npm test
+
+    # ── E2E Tests（bash 集成测试，阻塞）──
     e2e:
         name: E2E Tests
         runs-on: ubuntu-latest
-        continue-on-error: true
         timeout-minutes: 30
         steps:
             - uses: actions/checkout@v4
@@ -109,10 +119,7 @@ jobs:
               run: npm ci
             - name: Setup CI environment
               run: bash scripts/setup-ci.sh
-            - name: Run Vitest tests
-              run: npm test
             - name: Run bash e2e tests (auto-pool)
-              # 并行度自动检测：GitHub Actions=2核→pool=4
               env:
                   E2E_POOL_SIZE: 4
               run: bash test/scripts/run-e2e.sh

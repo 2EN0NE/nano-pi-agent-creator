@@ -87,23 +87,37 @@ npm run test:ci    # CI 模式（输出 JUnit XML）
 
 ## 🔄 CI 与 Git Hooks
 
+项目采用分层校验策略：**CI 是绝对标准（全部阻塞对齐），本地 hook 轻重分层。**
+
+| 检查项                       | CI（阻塞） | pre-push             | pre-commit            |
+| ---------------------------- | ---------- | -------------------- | --------------------- |
+| **format:check** (Prettier)  | ✅ 阻塞    | —                    | ✅ 阻塞（~2s）        |
+| **typecheck** (tsc --noEmit) | ✅ 阻塞    | ✅ 有 .ts 变更时阻塞 | —                     |
+| **lint** (ESLint)            | ✅ 阻塞    | —                    | ✅ auto-fix 仅 staged |
+| **test** (Vitest)            | ✅ 阻塞    | ✅ 阻塞              | ✅ 阻塞               |
+| **e2e** (bash 集成测试)      | ✅ 阻塞    | ✅ 仅变更模块        | —                     |
+| **semgrep** ERROR            | ✅ 阻塞    | —                    | —                     |
+
 ### CI Pipeline
 
-在 GitHub Actions（`.github/workflows/ci.yml`）中自动运行：
+在 GitHub Actions（`.github/workflows/ci.yml`）中自动运行。所有 job 均为阻塞（merge gate）：
 
-| Job        | 检查项         | 是否阻塞   |
-| ---------- | -------------- | ---------- |
-| Prettier   | 格式检查       | ✅ 必过    |
-| TypeScript | 类型检查       | ❌ 参考    |
-| ESLint     | 代码风格       | ❌ 参考    |
-| Semgrep    | SAST 安全扫描  | ERROR 阻塞 |
-| E2E Tests  | 端到端集成测试 | ❌ 参考    |
+- **Prettier** — `npm run format:check`
+- **TypeScript** — `npm run typecheck`
+- **ESLint** — `npm run lint`
+- **Vitest** — `npm test`（单元测试）
+- **E2E Tests** — `bash test/scripts/run-e2e.sh`（集成测试，使用 mock-llm 自动注入，无需 API Key）
+- **Semgrep** — ERROR 级别阻塞，WARNING 参考
 
-所有 e2e 测试在 CI 中使用 mock-llm 自动注入，无需 API Key。
+### Git Hooks（husky v9）
 
-### Pre-push Hook
+| Hook                              | 触发时机     | 耗时 | 检查内容                                          |
+| --------------------------------- | ------------ | ---- | ------------------------------------------------- |
+| [`pre-commit`](.husky/pre-commit) | `git commit` | ~5s  | lint-staged auto-fix + format:check + vitest      |
+| [`pre-push`](.husky/pre-push)     | `git push`   | 中   | typecheck（.ts 变更时）+ vitest + e2e（变更模块） |
 
-推送时自动检测变更的扩展/技能并运行对应 e2e 测试（`.husky/pre-push`）。advisory 模式，不阻塞推送。
+> **对 coding agent**：commit/sync/ci-watch 等工具已被约束不使用 `--no-verify` 跳过 hook。
+> 手动维护时，提交前确保 `npm run format:check && npm run typecheck` 通过。
 
 ## 📦 同步脚本
 
