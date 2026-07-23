@@ -7,6 +7,10 @@
  * - /permission-gate TUI 控制面板
  * - 持久化配置（项目级 > 用户级 > 默认值）
  * - --no-permission-gate CLI flag
+ *
+ * ── 状态模型 ──
+ * 使用 PermissionGateState 作为显式状态容器，在 session_start 时创建，
+ * 通过参数传递给所有 handler。不再使用模块级 let 变量。
  */
 
 import { Container, SelectList, Text, type SelectItem } from '@earendil-works/pi-tui';
@@ -33,24 +37,15 @@ import {
 } from './config.js';
 import {
 	loadRecords,
-	appendRecord,
-	appendBlockedRecord,
 	getStrategySummary,
 	calcWidgetContentText,
 	splitCompoundCommand,
 	countNonBlockedEntries,
 } from './records.js';
 import { showTwoTabPanel } from './two-tab-panel.js';
-
-// ============================================================================
-// Module-level state
-// ============================================================================
+import { PermissionGateState } from './state.js';
 
 const log = createLogger('permission-gate');
-let _config: PermissionGateConfig = getDefaultConfig();
-let _counts: Record<string, number> = {};
-// biome-ignore lint/style/noConst: must be reassigned on appendRecord
-let _totalRecords = 0;
 
 // ============================================================================
 // Helpers
@@ -263,7 +258,7 @@ export function checkThreshold(
 
 /**
  * 检查某条子命令是否已沉淀（存在 graduated 策略）。
- * 当命令的 cmd:hash 在 _counts 中计数 >= sameCommand 阈值时，
+ * 当命令的 cmd:hash 在 counts 中计数 >= sameCommand 阈值时，
  * 表示该命令已积累了足够次数，可以自动放行。
  */
 export function hasGraduatedStrategy(
@@ -285,6 +280,7 @@ export function hasGraduatedStrategy(
 async function handleToolCall(
 	event: ToolCallEvent,
 	ctx: ExtensionContext,
+	state: PermissionGateState,
 ): Promise<{ block?: boolean; reason?: string } | undefined> {
 	if (event.toolName !== 'bash') {
 		return undefined;
@@ -293,7 +289,7 @@ async function handleToolCall(
 	const fullCommand = event.input.command as string;
 
 	// 1. Gate 关闭 → 直接放行
-	if (!_config.enabled) {
+	if (!state.config.enabled) {
 		log.debug('Gate disabled, passing through: %s', fullCommand.slice(0, 80));
 		return undefined;
 	}
@@ -312,7 +308,7 @@ async function handleToolCall(
 	let anyDangerous = false;
 
 	for (const sub of subCommands) {
-		const isDangerous = _config.patterns.some((p) => {
+		const isDangerous = state.config.patterns.some((p) => {
 			try {
 				return new RegExp(p, 'i').test(sub);
 			} catch {
@@ -329,9 +325,9 @@ async function handleToolCall(
 		anyDangerous = true;
 
 		// 动态策略开启时，先查已沉淀策略，再查阈值
-		if (_config.dynamicPolicyEnabled) {
+		if (state.config.dynamicPolicyEnabled) {
 			// 查已沉淀策略：cmd 已毕业 → 自动放行
-			if (hasGraduatedStrategy(sub, _counts, _config.dynamicPolicy.thresholds)) {
+			if (hasGraduatedStrategy(sub, state.counts, state.config.dynamicPolicy.thresholds)) {
 				log.debug('Graduated strategy match: %s', sub.slice(0, 80));
 				results.push({ cmd: sub, dangerous: true, pass: true, dim: 'graduated' });
 				continue;
@@ -341,8 +337,8 @@ async function handleToolCall(
 			const subTool = extractToolName(sub);
 			const subDir = extractTargetDir(sub, ctx.cwd);
 
-			if (isInScope(sub, ctx.cwd, _config.dynamicPolicy.scope)) {
-				const thResult = checkThreshold(sub, subTool, subDir, _config, _counts);
+			if (isInScope(sub, ctx.cwd, state.config.dynamicPolicy.scope)) {
+				const thResult = checkThreshold(sub, subTool, subDir, state.config, state.counts);
 				if (thResult.pass) {
 					results.push({
 						cmd: sub,
@@ -359,7 +355,7 @@ async function handleToolCall(
 			} else {
 				log.info(
 					'Dynamic policy: not in scope — falling through to confirm (scope=%s)',
-					_config.dynamicPolicy.scope,
+					state.config.dynamicPolicy.scope,
 				);
 			}
 		}
@@ -384,7 +380,7 @@ async function handleToolCall(
 			log.warn('Dangerous command blocked (no UI): %s', fullCommand.slice(0, 80));
 			for (const r of results) {
 				if (r.dangerous) {
-					appendBlockedRecord(ctx.cwd, {
+					state.recordBlocked(ctx.cwd, {
 						ts: new Date().toISOString(),
 						cmd: r.cmd,
 						tool: extractToolName(r.cmd),
@@ -411,25 +407,20 @@ async function handleToolCall(
 			// 逐条记录 confirmed（dim=null 表示用户手动确认，非阈值自动放行）
 			for (const r of results) {
 				if (!r.dangerous) continue;
-				appendRecord(
-					ctx.cwd,
-					{
-						ts: new Date().toISOString(),
-						cmd: r.cmd,
-						tool: extractToolName(r.cmd),
-						dir: extractTargetDir(r.cmd, ctx.cwd),
-						dim: null,
-						action: 'confirmed',
-						originalCommand: fullCommand,
-						subCommands,
-					},
-					_counts,
-				);
-				_totalRecords++;
+				state.recordEntry(ctx.cwd, {
+					ts: new Date().toISOString(),
+					cmd: r.cmd,
+					tool: extractToolName(r.cmd),
+					dir: extractTargetDir(r.cmd, ctx.cwd),
+					dim: null,
+					action: 'confirmed',
+					originalCommand: fullCommand,
+					subCommands,
+				});
 			}
 
 			event.input.command = `echo "✓ User approved"\n${fullCommand}`;
-			updateWidgetStatus(ctx);
+			updateWidgetStatus(ctx, state);
 			return undefined;
 		}
 
@@ -437,7 +428,7 @@ async function handleToolCall(
 		log.info('User blocked: %s', fullCommand.slice(0, 80));
 		for (const r of results) {
 			if (r.dangerous) {
-				appendBlockedRecord(ctx.cwd, {
+				state.recordBlocked(ctx.cwd, {
 					ts: new Date().toISOString(),
 					cmd: r.cmd,
 					tool: extractToolName(r.cmd),
@@ -462,21 +453,16 @@ async function handleToolCall(
 		const recordDim: string[] | null =
 			r.dim === 'graduated' ? ['sameCommand'] : Array.isArray(r.dim) ? r.dim : null;
 
-		appendRecord(
-			ctx.cwd,
-			{
-				ts: new Date().toISOString(),
-				cmd: r.cmd,
-				tool: extractToolName(r.cmd),
-				dir: extractTargetDir(r.cmd, ctx.cwd),
-				dim: recordDim,
-				action: 'auto',
-				originalCommand: fullCommand,
-				subCommands,
-			},
-			_counts,
-		);
-		_totalRecords++;
+		state.recordEntry(ctx.cwd, {
+			ts: new Date().toISOString(),
+			cmd: r.cmd,
+			tool: extractToolName(r.cmd),
+			dir: extractTargetDir(r.cmd, ctx.cwd),
+			dim: recordDim,
+			action: 'auto',
+			originalCommand: fullCommand,
+			subCommands,
+		});
 		if (r.dim && typeof r.dim === 'string') autoDims.add(r.dim);
 		else if (Array.isArray(r.dim)) r.dim.forEach((d) => autoDims.add(d));
 	}
@@ -484,7 +470,7 @@ async function handleToolCall(
 	const dimSummary = [...autoDims].join(',');
 	log.info('Auto-approved (%s): %s', dimSummary || 'graduated', fullCommand.slice(0, 80));
 	event.input.command = `echo "✓ Auto-approved (${dimSummary || 'graduated'})"\n${fullCommand}`;
-	updateWidgetStatus(ctx);
+	updateWidgetStatus(ctx, state);
 	return undefined;
 }
 
@@ -495,34 +481,35 @@ async function handleToolCall(
 async function handlePermissionGateCommand(
 	_args: string,
 	ctx: ExtensionCommandContext,
+	state: PermissionGateState,
 ): Promise<void> {
 	if (!ctx.hasUI) {
 		// Print mode: output config as text
 		const lines = [
 			'Permission Gate Configuration:',
-			`  Enabled: ${_config.enabled}`,
-			`  Dynamic Policy: ${_config.dynamicPolicyEnabled}`,
-			`  Scope: ${_config.dynamicPolicy.scope}`,
-			`  Patterns (${_config.patterns.length}):`,
-			..._config.patterns.map((p) => `    - ${p}`),
+			`  Enabled: ${state.config.enabled}`,
+			`  Dynamic Policy: ${state.config.dynamicPolicyEnabled}`,
+			`  Scope: ${state.config.dynamicPolicy.scope}`,
+			`  Patterns (${state.config.patterns.length}):`,
+			...state.config.patterns.map((p) => `    - ${p}`),
 			`  Thresholds:`,
-			`    Same Command: ${_config.dynamicPolicy.thresholds.sameCommand}`,
-			`    Same Tool: ${_config.dynamicPolicy.thresholds.sameTool}`,
-			`    Same Folder: ${_config.dynamicPolicy.thresholds.sameFolder}`,
-			`  Approval Counts: ${summarizeApprovalCounts()}`,
+			`    Same Command: ${state.config.dynamicPolicy.thresholds.sameCommand}`,
+			`    Same Tool: ${state.config.dynamicPolicy.thresholds.sameTool}`,
+			`    Same Folder: ${state.config.dynamicPolicy.thresholds.sameFolder}`,
+			`  Approval Counts: ${summarizeApprovalCounts(state)}`,
 		];
 		ctx.ui.notify(lines.join('\n'), 'info');
 		return;
 	}
 
-	await showMainMenu(ctx);
+	await showMainMenu(ctx, state);
 }
 
 /**
  * 计算各维度策略总数的摘要字符串（用于 print 模式展示）。
  */
-function summarizeApprovalCounts(): string {
-	const summary = getStrategySummary(_counts, _config.dynamicPolicy.thresholds);
+function summarizeApprovalCounts(state: PermissionGateState): string {
+	const summary = getStrategySummary(state.counts, state.config.dynamicPolicy.thresholds);
 	const parts: string[] = [];
 	if (summary.cmd.total > 0) parts.push(`Cmd(${summary.cmd.total})`);
 	if (summary.tool.total > 0) parts.push(`Tool(${summary.tool.total})`);
@@ -532,27 +519,27 @@ function summarizeApprovalCounts(): string {
 
 /**
  * 更新 status widget，使用 calcWidgetContentText 计算纯文本 + ANSI 着色。
- *
- * Dynamic ON 时，对最优进度（仅限活跃策略，不包含已沉淀的）着色。
- * 注意：内层 th.fg() 避免嵌套，防止 \x1b[39m 重置外层 accent 色。
  */
-function updateWidgetStatus(ctx: ExtensionContext | ExtensionCommandContext): void {
+function updateWidgetStatus(
+	ctx: ExtensionContext | ExtensionCommandContext,
+	state: PermissionGateState,
+): void {
 	if (!ctx.hasUI) return;
-	if (!_config.widget.show) {
+	if (!state.config.widget.show) {
 		ctx.ui.setStatus('permission-gate', '');
 		return;
 	}
 
 	const th = ctx.ui.theme;
 	const text = calcWidgetContentText(
-		_config.enabled,
-		_config.dynamicPolicyEnabled,
-		_counts,
-		_config.dynamicPolicy.thresholds,
-		_totalRecords,
+		state.config.enabled,
+		state.config.dynamicPolicyEnabled,
+		state.counts,
+		state.config.dynamicPolicy.thresholds,
+		state.totalRecords,
 	);
 
-	if (_config.widget.detailLevel === 'gate') {
+	if (state.config.widget.detailLevel === 'gate') {
 		// 仅显示 gate 级别（取第一个括号段）
 		const gateMatch = text.match(/^.*?\(\d+\[\d+\]\)/);
 		if (gateMatch) {
@@ -562,19 +549,18 @@ function updateWidgetStatus(ctx: ExtensionContext | ExtensionCommandContext): vo
 	}
 
 	// Gate OFF: 简洁着色
-	if (!_config.enabled) {
+	if (!state.config.enabled) {
 		ctx.ui.setStatus('permission-gate', th.fg('dim', text));
 		return;
 	}
 
 	// Dynamic OFF: 整体着色
-	if (!_config.dynamicPolicyEnabled) {
+	if (!state.config.dynamicPolicyEnabled) {
 		ctx.ui.setStatus('permission-gate', th.fg('accent', text));
 		return;
 	}
 
 	// Dynamic ON: 对已达阈值的进度部分高亮
-	// 提取 accent SGR 码，用于内层高亮后恢复外层 accent 色
 	const accentTest = th.fg('accent', 'X');
 	const sgrMatch = accentTest.match(/^\x1b\[\d+m/);
 	const accentSgr = sgrMatch ? sgrMatch[0] : '';
@@ -595,8 +581,6 @@ function updateWidgetStatus(ctx: ExtensionContext | ExtensionCommandContext): vo
 		if (!atTh) continue;
 
 		const fullMatch = m[0];
-		// 内层高亮：使用 th.fg() 但去除尾部的 \x1b[39m，替换为 accent 色码
-		// 这样外层 th.fg('accent', colored) 的 \x1b[39m 是唯一的 reset
 		const progressColored = th.fg('warning', `${capped}/${threshold}`);
 		const progressFixed = progressColored.replace(/\x1b\[39m$/, accentSgr);
 		const coloredFull = fullMatch.replace(`:${capped}/${threshold}`, `:${progressFixed}`);
@@ -606,62 +590,65 @@ function updateWidgetStatus(ctx: ExtensionContext | ExtensionCommandContext): vo
 	ctx.ui.setStatus('permission-gate', th.fg('accent', colored));
 }
 
-async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
+async function showMainMenu(
+	ctx: ExtensionCommandContext,
+	state: PermissionGateState,
+): Promise<void> {
 	let lastMenuIndex = 0;
 	while (true) {
 		const items: SelectItem[] = [
 			{
 				value: '__toggle_gate',
-				label: `[${_config.enabled ? 'X' : ' '}]  Permission Gate`,
-				description: _config.enabled
+				label: `[${state.config.enabled ? 'X' : ' '}]  Permission Gate`,
+				description: state.config.enabled
 					? 'Enabled — commands are intercepted'
 					: 'Disabled — all commands pass through',
 			},
 			{
 				value: '__edit_patterns',
 				label: '[Patterns]  Intercepted Commands',
-				description: `${_config.patterns.length} patterns configured`,
+				description: `${state.config.patterns.length} patterns configured`,
 			},
 			{
 				value: '__toggle_dynamic',
-				label: `[${_config.dynamicPolicyEnabled ? 'X' : ' '}]  Dynamic Policy`,
-				description: _config.dynamicPolicyEnabled
+				label: `[${state.config.dynamicPolicyEnabled ? 'X' : ' '}]  Dynamic Policy`,
+				description: state.config.dynamicPolicyEnabled
 					? 'Enabled — auto-approve within thresholds'
 					: 'Disabled — always ask',
 			},
 		];
 
 		// 动态策略配置项（仅启用时显示）
-		if (_config.dynamicPolicyEnabled) {
+		if (state.config.dynamicPolicyEnabled) {
 			items.push({
 				value: '__edit_scope',
 				label: '[Scope]',
-				description: `Folder: ${_config.dynamicPolicy.scope}`,
+				description: `Folder: ${state.config.dynamicPolicy.scope}`,
 			});
 			items.push({
 				value: '__edit_thresholds',
 				label: '[Thresholds]',
-				description: `Cmd:${_config.dynamicPolicy.thresholds.sameCommand}  Tool:${_config.dynamicPolicy.thresholds.sameTool}  Folder:${_config.dynamicPolicy.thresholds.sameFolder}`,
+				description: `Cmd:${state.config.dynamicPolicy.thresholds.sameCommand}  Tool:${state.config.dynamicPolicy.thresholds.sameTool}  Folder:${state.config.dynamicPolicy.thresholds.sameFolder}`,
 			});
 		}
 
 		items.push({
 			value: '__view_strategies',
-			label: `[Strategies]  Current Allowed  ${summarizeApprovalCounts()}`,
+			label: `[Strategies]  Current Allowed  ${summarizeApprovalCounts(state)}`,
 			description: 'View and manage strategies & history',
 		});
 
 		// Widget 控制选项
 		items.push({
 			value: '__toggle_widget_show',
-			label: `[Widget]  ${_config.widget.show ? 'Shown' : 'Hidden'}`,
+			label: `[Widget]  ${state.config.widget.show ? 'Shown' : 'Hidden'}`,
 			description: 'Toggle widget display in status bar',
 		});
 		items.push({
 			value: '__toggle_widget_detail',
-			label: `[Widget Detail]  ${_config.widget.detailLevel === 'full' ? 'Full' : 'Gate Only'}`,
+			label: `[Widget Detail]  ${state.config.widget.detailLevel === 'full' ? 'Full' : 'Gate Only'}`,
 			description:
-				_config.widget.detailLevel === 'full'
+				state.config.widget.detailLevel === 'full'
 					? 'Show gate + cmd/tool/folder details'
 					: 'Show gate summary only',
 		});
@@ -685,36 +672,36 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 		// 处理选中项
 		switch (selected) {
 			case '__toggle_gate': {
-				_config.enabled = !_config.enabled;
-				saveConfig(ctx.cwd, _config, 'project');
+				state.config.enabled = !state.config.enabled;
+				saveConfig(ctx.cwd, state.config, 'project');
 				ctx.ui.notify(
-					`Permission Gate ${_config.enabled ? 'enabled' : 'disabled'}`,
-					_config.enabled ? 'info' : 'warning',
+					`Permission Gate ${state.config.enabled ? 'enabled' : 'disabled'}`,
+					state.config.enabled ? 'info' : 'warning',
 				);
-				updateWidgetStatus(ctx);
+				updateWidgetStatus(ctx, state);
 				break;
 			}
 
 			case '__edit_patterns': {
-				await editPatternsMenu(ctx);
+				await editPatternsMenu(ctx, state);
 				break;
 			}
 
 			case '__toggle_dynamic': {
-				_config.dynamicPolicyEnabled = !_config.dynamicPolicyEnabled;
-				saveConfig(ctx.cwd, _config, 'project');
+				state.config.dynamicPolicyEnabled = !state.config.dynamicPolicyEnabled;
+				saveConfig(ctx.cwd, state.config, 'project');
 				ctx.ui.notify(
-					`Dynamic Policy ${_config.dynamicPolicyEnabled ? 'enabled' : 'disabled'}`,
+					`Dynamic Policy ${state.config.dynamicPolicyEnabled ? 'enabled' : 'disabled'}`,
 					'info',
 				);
-				updateWidgetStatus(ctx);
+				updateWidgetStatus(ctx, state);
 				break;
 			}
 
 			case '__edit_scope': {
 				const newScopeVal = await ctx.ui.input(
 					'Scope Folder Path',
-					_config.dynamicPolicy.scope,
+					state.config.dynamicPolicy.scope,
 				);
 				if (newScopeVal === undefined || !newScopeVal.trim()) break;
 				const trimmedScope = newScopeVal.trim();
@@ -723,47 +710,51 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 					ctx.ui.notify(`Path does not exist: ${trimmedScope}`, 'error');
 					break;
 				}
-				_config.dynamicPolicy.scope = trimmedScope;
-				saveConfig(ctx.cwd, _config, 'project');
+				state.config.dynamicPolicy.scope = trimmedScope;
+				saveConfig(ctx.cwd, state.config, 'project');
 				ctx.ui.notify(`Scope set to: ${trimmedScope}`, 'info');
 				break;
 			}
 
 			case '__edit_thresholds': {
-				await editThresholdsMenu(ctx);
+				await editThresholdsMenu(ctx, state);
 				break;
 			}
 
 			case '__view_strategies': {
+				const onCountsUpdate = (newCounts: Record<string, number>) => {
+					state.replaceCounts(
+						newCounts,
+						countNonBlockedEntries(loadRecords(ctx.cwd).entries),
+					);
+					updateWidgetStatus(ctx, state);
+				};
 				await showTwoTabPanel(
 					ctx,
-					_counts,
-					_config.dynamicPolicy.thresholds,
-					(newCounts) => {
-						_counts = newCounts;
-						updateWidgetStatus(ctx);
-					},
+					state.counts,
+					state.config.dynamicPolicy.thresholds,
+					onCountsUpdate,
 				);
 				break;
 			}
 
 			case '__toggle_widget_show': {
-				_config.widget.show = !_config.widget.show;
-				saveConfig(ctx.cwd, _config, 'project');
-				ctx.ui.notify(`Widget ${_config.widget.show ? 'shown' : 'hidden'}`, 'info');
-				updateWidgetStatus(ctx);
+				state.config.widget.show = !state.config.widget.show;
+				saveConfig(ctx.cwd, state.config, 'project');
+				ctx.ui.notify(`Widget ${state.config.widget.show ? 'shown' : 'hidden'}`, 'info');
+				updateWidgetStatus(ctx, state);
 				break;
 			}
 
 			case '__toggle_widget_detail': {
-				_config.widget.detailLevel =
-					_config.widget.detailLevel === 'full' ? 'gate' : 'full';
-				saveConfig(ctx.cwd, _config, 'project');
+				state.config.widget.detailLevel =
+					state.config.widget.detailLevel === 'full' ? 'gate' : 'full';
+				saveConfig(ctx.cwd, state.config, 'project');
 				ctx.ui.notify(
-					`Widget detail: ${_config.widget.detailLevel === 'full' ? 'Full' : 'Gate Only'}`,
+					`Widget detail: ${state.config.widget.detailLevel === 'full' ? 'Full' : 'Gate Only'}`,
 					'info',
 				);
-				updateWidgetStatus(ctx);
+				updateWidgetStatus(ctx, state);
 				break;
 			}
 
@@ -821,9 +812,12 @@ async function makeCustomSelection(
 /**
  * 编辑拦截命令模式列表。
  */
-async function editPatternsMenu(ctx: ExtensionCommandContext): Promise<void> {
+async function editPatternsMenu(
+	ctx: ExtensionCommandContext,
+	state: PermissionGateState,
+): Promise<void> {
 	while (true) {
-		const items: SelectItem[] = _config.patterns.map((p, i) => ({
+		const items: SelectItem[] = state.config.patterns.map((p, i) => ({
 			value: `__pattern_${i}`,
 			label: p,
 		}));
@@ -846,14 +840,14 @@ async function editPatternsMenu(ctx: ExtensionCommandContext): Promise<void> {
 			if (newPattern && newPattern.trim()) {
 				const trimmed = newPattern.trim();
 				// 检查重复
-				if (_config.patterns.includes(trimmed)) {
+				if (state.config.patterns.includes(trimmed)) {
 					ctx.ui.notify(`Pattern already exists: ${trimmed}`, 'error');
 					continue;
 				}
 				try {
 					new RegExp(trimmed);
-					_config.patterns.push(trimmed);
-					saveConfig(ctx.cwd, _config, 'project');
+					state.config.patterns.push(trimmed);
+					saveConfig(ctx.cwd, state.config, 'project');
 					ctx.ui.notify(`Pattern added: ${trimmed}`, 'info');
 				} catch {
 					ctx.ui.notify(`Invalid regex: ${trimmed}`, 'error');
@@ -864,7 +858,7 @@ async function editPatternsMenu(ctx: ExtensionCommandContext): Promise<void> {
 
 		// Remove pattern
 		const idx = parseInt(selected.replace('__pattern_', ''), 10);
-		const pattern = _config.patterns[idx];
+		const pattern = state.config.patterns[idx];
 		if (pattern) {
 			const confirmed = await showConfirmDestructive(
 				ctx,
@@ -872,8 +866,8 @@ async function editPatternsMenu(ctx: ExtensionCommandContext): Promise<void> {
 				`Remove pattern:\n\`${pattern}\``,
 			);
 			if (confirmed) {
-				_config.patterns.splice(idx, 1);
-				saveConfig(ctx.cwd, _config, 'project');
+				state.config.patterns.splice(idx, 1);
+				saveConfig(ctx.cwd, state.config, 'project');
 				ctx.ui.notify('Pattern removed', 'info');
 			}
 		}
@@ -883,23 +877,26 @@ async function editPatternsMenu(ctx: ExtensionCommandContext): Promise<void> {
 /**
  * 编辑阈值。
  */
-async function editThresholdsMenu(ctx: ExtensionCommandContext): Promise<void> {
+async function editThresholdsMenu(
+	ctx: ExtensionCommandContext,
+	state: PermissionGateState,
+): Promise<void> {
 	while (true) {
 		const items: SelectItem[] = [
 			{
 				value: '__threshold_sameCommand',
 				label: `[sameCommand]  Same Command Threshold`,
-				description: `Current: ${_config.dynamicPolicy.thresholds.sameCommand}`,
+				description: `Current: ${state.config.dynamicPolicy.thresholds.sameCommand}`,
 			},
 			{
 				value: '__threshold_sameTool',
 				label: `[sameTool]  Same Tool Threshold`,
-				description: `Current: ${_config.dynamicPolicy.thresholds.sameTool}`,
+				description: `Current: ${state.config.dynamicPolicy.thresholds.sameTool}`,
 			},
 			{
 				value: '__threshold_sameFolder',
 				label: `[sameFolder]  Same Folder Threshold`,
-				description: `Current: ${_config.dynamicPolicy.thresholds.sameFolder}`,
+				description: `Current: ${state.config.dynamicPolicy.thresholds.sameFolder}`,
 			},
 			{
 				value: '__back',
@@ -923,16 +920,16 @@ async function editThresholdsMenu(ctx: ExtensionCommandContext): Promise<void> {
 			__threshold_sameTool: 'sameTool',
 			__threshold_sameFolder: 'sameFolder',
 		};
-		const configKey = keyMap[selected] as keyof typeof _config.dynamicPolicy.thresholds;
+		const configKey = keyMap[selected] as keyof typeof state.config.dynamicPolicy.thresholds;
 		if (!configKey) continue;
 
-		const currentValue = _config.dynamicPolicy.thresholds[configKey];
+		const currentValue = state.config.dynamicPolicy.thresholds[configKey];
 		const input = await ctx.ui.input(`Enter threshold for ${configKey}`, String(currentValue));
 		if (input !== undefined) {
 			const num = parseInt(input.trim(), 10);
 			if (!Number.isNaN(num) && num >= 0) {
-				(_config.dynamicPolicy.thresholds as Record<string, number>)[configKey] = num;
-				saveConfig(ctx.cwd, _config, 'project');
+				(state.config.dynamicPolicy.thresholds as Record<string, number>)[configKey] = num;
+				saveConfig(ctx.cwd, state.config, 'project');
 				ctx.ui.notify(`${configKey} threshold set to ${num}`, 'info');
 			} else {
 				ctx.ui.notify('Invalid number, please enter a non-negative integer', 'error');
@@ -946,6 +943,9 @@ async function editThresholdsMenu(ctx: ExtensionCommandContext): Promise<void> {
 // ============================================================================
 
 export default function permissionGateExtension(pi: ExtensionAPI) {
+	// state 实例：session_start 时创建，闭包持有
+	let state: PermissionGateState | null = null;
+
 	// 1. Register CLI flag
 	pi.registerFlag('no-permission-gate', {
 		description: 'Disable permission gate entirely',
@@ -958,8 +958,12 @@ export default function permissionGateExtension(pi: ExtensionAPI) {
 		const flagDisabled = pi.getFlag('no-permission-gate') === true;
 		if (flagDisabled) {
 			log.info('Permission gate disabled via --no-permission-gate flag');
-			_config = { ...getDefaultConfig(), enabled: false };
-			updateWidgetStatus(ctx);
+			state = new PermissionGateState({
+				config: { ...getDefaultConfig(), enabled: false },
+				counts: {},
+				totalRecords: 0,
+			});
+			updateWidgetStatus(ctx, state);
 			if (ctx.hasUI) {
 				ctx.ui.notify('Permission Gate disabled via --no-permission-gate', 'warning');
 			}
@@ -967,30 +971,42 @@ export default function permissionGateExtension(pi: ExtensionAPI) {
 		}
 
 		// Load config from files
-		_config = loadConfig(ctx.cwd);
+		const config = loadConfig(ctx.cwd);
 		log.info(
 			'Config loaded: enabled=%s, dynamicPolicy=%s',
-			_config.enabled,
-			_config.dynamicPolicyEnabled,
+			config.enabled,
+			config.dynamicPolicyEnabled,
 		);
 
 		// Load approval records & migrate legacy counts (if any)
 		const result = loadRecords(ctx.cwd);
-		_counts = result.counts;
-		_totalRecords = countNonBlockedEntries(result.entries);
+		state = new PermissionGateState({
+			config,
+			counts: result.counts,
+			totalRecords: countNonBlockedEntries(result.entries),
+		});
 
-		updateWidgetStatus(ctx);
+		updateWidgetStatus(ctx, state);
 	});
 
 	// 3. Register /permission-gate command
 	pi.registerCommand('permission-gate', {
 		description: 'Open Permission Gate control panel',
-		handler: handlePermissionGateCommand,
+		handler: async (args, ctx) => {
+			if (!state) {
+				ctx.ui.notify('Permission Gate not initialized', 'error');
+				return;
+			}
+			await handlePermissionGateCommand(args, ctx, state);
+		},
 	});
 
 	// 4. Intercept bash tool calls
 	pi.on('tool_call', async (event, ctx) => {
-		return handleToolCall(event, ctx);
+		if (!state) {
+			return undefined;
+		}
+		return handleToolCall(event, ctx, state);
 	});
 
 	log.debug('Permission Gate v2 loaded');

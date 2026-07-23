@@ -35,6 +35,7 @@ import {
 	hasGraduatedStrategy,
 } from '../../../extensions/security/permission-gate/index';
 import { buildStrategyItems } from '../../../extensions/security/permission-gate/two-tab-panel';
+import { PermissionGateState } from '../../../extensions/security/permission-gate/state';
 
 // ============================================================================
 // makeCommandKey
@@ -871,5 +872,126 @@ describe('countNonBlockedEntries', () => {
 			} as ApprovalEntry,
 		];
 		expect(countNonBlockedEntries(entries)).toBe(3);
+	});
+});
+
+// ============================================================================
+// PermissionGateState（显式状态容器）
+// ============================================================================
+describe('PermissionGateState', () => {
+	const baseConfig = getDefaultConfig();
+	const mkEntry = (overrides?: Partial<ApprovalEntry>): ApprovalEntry => ({
+		ts: new Date().toISOString(),
+		cmd: 'rm -rf /tmp/test',
+		tool: 'rm',
+		dir: '/tmp',
+		dim: null,
+		action: 'auto',
+		...overrides,
+	});
+
+	it('constructor sets initial values', () => {
+		const state = new PermissionGateState({
+			config: baseConfig,
+			counts: { 'cmd:abc': 3, 'tool:rm': 5 },
+			totalRecords: 2,
+		});
+		expect(state.config.enabled).toBe(true);
+		expect(state.counts['cmd:abc']).toBe(3);
+		expect(state.counts['tool:rm']).toBe(5);
+		expect(state.totalRecords).toBe(2);
+	});
+
+	it('recordEntry updates counts and totalRecords', () => {
+		const state = new PermissionGateState({
+			config: baseConfig,
+			counts: {},
+			totalRecords: 0,
+		});
+
+		const entry = mkEntry();
+		state.recordEntry('', entry);
+
+		// cmd key should exist
+		const cmdKey = Object.keys(state.counts).find((k) => k.startsWith('cmd:'));
+		expect(cmdKey).toBeTruthy();
+		expect(state.counts[cmdKey!]).toBe(1);
+		// tool key
+		expect(state.counts['tool:rm']).toBe(1);
+		// dir key
+		expect(state.counts['dir:/tmp']).toBe(1);
+		// totalRecords incremented
+		expect(state.totalRecords).toBe(1);
+	});
+
+	it('recordEntry increments existing counts', () => {
+		const state = new PermissionGateState({
+			config: baseConfig,
+			counts: {},
+			totalRecords: 0,
+		});
+
+		state.recordEntry('', mkEntry());
+		state.recordEntry('', mkEntry());
+
+		const cmdKey = Object.keys(state.counts).find((k) => k.startsWith('cmd:'));
+		expect(state.counts[cmdKey!]).toBe(2);
+		expect(state.counts['tool:rm']).toBe(2);
+		expect(state.totalRecords).toBe(2);
+	});
+
+	it('recordBlocked does not update counts or totalRecords', () => {
+		const state = new PermissionGateState({
+			config: baseConfig,
+			counts: {},
+			totalRecords: 0,
+		});
+
+		state.recordBlocked('', mkEntry({ action: 'blocked' }));
+
+		expect(Object.keys(state.counts).length).toBe(0);
+		expect(state.totalRecords).toBe(0);
+	});
+
+	it('replaceCounts replaces counts and totalRecords', () => {
+		const state = new PermissionGateState({
+			config: baseConfig,
+			counts: { 'cmd:old': 5 },
+			totalRecords: 3,
+		});
+
+		state.replaceCounts({ 'cmd:new': 1 }, 1);
+
+		expect(state.counts).toEqual({ 'cmd:new': 1 });
+		expect(state.counts['cmd:old']).toBeUndefined();
+		expect(state.totalRecords).toBe(1);
+	});
+
+	it('recordEntry with different commands creates separate cmd keys', () => {
+		const state = new PermissionGateState({
+			config: baseConfig,
+			counts: {},
+			totalRecords: 0,
+		});
+
+		state.recordEntry('', mkEntry({ cmd: 'rm -rf /tmp/a' }));
+		state.recordEntry('', mkEntry({ cmd: 'rm -rf /tmp/b' }));
+
+		const cmdKeys = Object.keys(state.counts).filter((k) => k.startsWith('cmd:'));
+		expect(cmdKeys).toHaveLength(2);
+		expect(state.totalRecords).toBe(2);
+	});
+
+	it('recordEntry with dim captures dimension info', () => {
+		const state = new PermissionGateState({
+			config: baseConfig,
+			counts: {},
+			totalRecords: 0,
+		});
+
+		state.recordEntry('', mkEntry({ dim: ['sameCommand', 'sameTool'] }));
+
+		expect(state.totalRecords).toBe(1);
+		expect(state.counts['tool:rm']).toBe(1);
 	});
 });
