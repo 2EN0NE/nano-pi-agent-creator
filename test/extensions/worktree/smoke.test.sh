@@ -153,5 +153,114 @@ test_it "pi continues working after worktree commands" <<'TEST'
 
   tui_assert_contains "worktree" "worktree output should appear"
   tui_cleanup
-  mark_for_review "验证/worktree命令后pi仍可继续接收用户输入"
+TEST
+
+# ── 测试 11：default merge e2e（通过 /worktree 命令触发） ──
+test_it "default merge via /worktree command" <<'TEST'
+  local sandbox test_repo wt_dir wt_name
+  sandbox=$(mktemp -d "/tmp/pi-wt-merge-e2e-$$")
+  test_repo="$sandbox/repo"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  wt_name="merge-test"
+  git -C "$test_repo" checkout -b "wt/$wt_name" >/dev/null 2>&1
+  echo feature > "$test_repo/feat.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m feat >/dev/null 2>&1
+  git -C "$test_repo" checkout main >/dev/null 2>&1
+
+  local wt_parent="${test_repo}-worktrees"
+  wt_dir="$wt_parent/$wt_name"
+  mkdir -p "$wt_parent"
+  git -C "$test_repo" worktree add "$wt_dir" "wt/$wt_name" >/dev/null 2>&1
+
+  cd "$test_repo"
+  tui_run_pi_test "pi-logger,worktree" "/worktree merge --source $wt_name --strategy merge" 20
+
+  if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
+    echo "PASS: default merge completed (code=$TUI_EXIT_CODE)"
+  else
+    echo "FAIL: merge exited with code $TUI_EXIT_CODE"
+    exit 1
+  fi
+
+  git -C "$test_repo" worktree remove "$wt_dir" --force >/dev/null 2>&1 || true
+  rm -rf "$sandbox"
+  tui_cleanup
+TEST
+
+# ── 测试 12：squash merge e2e ──
+test_it "squash merge via /worktree command" <<'TEST'
+  local sandbox test_repo wt_dir wt_name
+  sandbox=$(mktemp -d "/tmp/pi-wt-squash-e2e-$$")
+  test_repo="$sandbox/repo"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  wt_name="squash-test"
+  git -C "$test_repo" checkout -b "wt/$wt_name" >/dev/null 2>&1
+  echo feat1 > "$test_repo/f1.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m feat1 >/dev/null 2>&1
+  echo feat2 > "$test_repo/f2.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m feat2 >/dev/null 2>&1
+  git -C "$test_repo" checkout main >/dev/null 2>&1
+
+  local wt_parent="${test_repo}-worktrees"
+  wt_dir="$wt_parent/$wt_name"
+  mkdir -p "$wt_parent"
+  git -C "$test_repo" worktree add "$wt_dir" "wt/$wt_name" >/dev/null 2>&1
+
+  cd "$test_repo"
+  tui_run_pi_test "pi-logger,worktree" "/worktree merge --source $wt_name --strategy squash" 20
+
+  if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
+    echo "PASS: squash merge completed (code=$TUI_EXIT_CODE)"
+  else
+    echo "FAIL: squash merge exited with code $TUI_EXIT_CODE"
+    exit 1
+  fi
+
+  git -C "$test_repo" worktree remove "$wt_dir" --force >/dev/null 2>&1 || true
+  rm -rf "$sandbox"
+  tui_cleanup
+TEST
+
+# ── 测试 13：rebase+ff e2e ──
+test_it "rebase+ff via /worktree command" <<'TEST'
+  local sandbox test_repo wt_dir wt_name
+  sandbox=$(mktemp -d "/tmp/pi-wt-rebaseff-e2e-$$")
+  test_repo="$sandbox/repo"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  wt_name="rebaseff-test"
+  git -C "$test_repo" checkout -b "wt/$wt_name" >/dev/null 2>&1
+  echo feature > "$test_repo/rff.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m rff-feat >/dev/null 2>&1
+  git -C "$test_repo" checkout main >/dev/null 2>&1
+
+  local wt_parent="${test_repo}-worktrees"
+  wt_dir="$wt_parent/$wt_name"
+  mkdir -p "$wt_parent"
+  git -C "$test_repo" worktree add "$wt_dir" "wt/$wt_name" >/dev/null 2>&1
+
+  cd "$test_repo"
+  tui_run_pi_test "pi-logger,worktree" "/worktree merge --source $wt_name --strategy rebase-ff" 20
+
+  if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
+    echo "PASS: rebase+ff completed (code=$TUI_EXIT_CODE)"
+  else
+    echo "FAIL: rebase+ff exited with code $TUI_EXIT_CODE"
+    exit 1
+  fi
+
+  git -C "$test_repo" worktree remove "$wt_dir" --force >/dev/null 2>&1 || true
+  rm -rf "$sandbox"
+  tui_cleanup
 TEST

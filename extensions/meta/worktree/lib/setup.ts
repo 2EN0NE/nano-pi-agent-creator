@@ -1,12 +1,11 @@
 /**
  * pi-worktree — 环境创建时设置（symlink、node_modules、setup 脚本）
  */
-import { existsSync, readFileSync, readdirSync, symlinkSync } from 'node:fs';
-import { join, basename } from 'node:path';
-import { spawnSync, spawn } from 'node:child_process';
+import { existsSync, readdirSync, symlinkSync, mkdirSync } from 'node:fs';
+import { join, basename, dirname } from 'node:path';
+import { spawnSync, spawn, execSync } from 'node:child_process';
 import { createLogger } from '@zenone/pi-logger';
-import type { NodeModulesStrategy } from '../types.js';
-import { getWorktreesDir } from './paths.js';
+import type { NodeModulesStrategy, SymlinkSelections } from '../types.js';
 
 const log = createLogger('pi-worktree');
 
@@ -143,6 +142,86 @@ function runSetupScript(repoRoot: string, worktreePath: string): { ok: boolean; 
 	};
 }
 
+// ── 通用 symlink ──
+
+/**
+ * 将 main checkout 下的指定相对路径 symlink 到 worktree。
+ * 跳过源不存在的、目标已存在的。
+ *
+ * @returns 对每个路径的操作说明
+ */
+export function setupSymlinkPaths(
+	repoRoot: string,
+	worktreePath: string,
+	relativePaths: string[],
+): string[] {
+	const results: string[] = [];
+	for (const relPath of relativePaths) {
+		const src = join(repoRoot, relPath);
+		const dest = join(worktreePath, relPath);
+		if (!existsSync(src)) {
+			results.push(`${relPath}: source not found, skip`);
+			continue;
+		}
+		if (existsSync(dest)) {
+			results.push(`${relPath}: already exists, skip`);
+			continue;
+		}
+		try {
+			const parentDir = dirname(dest);
+			if (!existsSync(parentDir)) {
+				mkdirSync(parentDir, { recursive: true });
+			}
+			symlinkSync(src, dest);
+			results.push(`${relPath}: symlinked`);
+		} catch (err) {
+			results.push(`${relPath}: failed (${(err as Error).message})`);
+		}
+	}
+	return results;
+}
+
+// ── Husky hooks 自动配置 ──
+
+/**
+ * 如果 repo 有 .husky/ 目录且 core.hooksPath 未设置，
+ * 自动设为 .husky/ 使所有 worktree 的 hooks 生效。
+ *
+ * @returns 说明字符串，或空字符串（无需操作时）
+ */
+function setupHuskyHooks(repoRoot: string): string {
+	const huskyDir = join(repoRoot, '.husky');
+	if (!existsSync(huskyDir)) return '';
+
+	try {
+		// 检查是否已设置
+		const current = execSync('git config core.hooksPath', {
+			cwd: repoRoot,
+			encoding: 'utf-8',
+			stdio: ['pipe', 'pipe', 'pipe'],
+		}).trim();
+		if (current) {
+			log.info('core.hooksPath already set', { current });
+			return ''; // 已设置，跳过
+		}
+	} catch {
+		// 未设置，继续
+	}
+
+	try {
+		execSync('git config core.hooksPath .husky/', {
+			cwd: repoRoot,
+			encoding: 'utf-8',
+			stdio: ['pipe', 'pipe', 'pipe'],
+		});
+		log.info('hooks configured', { repoRoot });
+		return 'hooks: core.hooksPath -> .husky/';
+	} catch (err) {
+		log.warn('failed to set core.hooksPath', { error: String(err) });
+		return `hooks: failed (${(err as Error).message})`;
+	}
+}
+
 // ── 完整创建后设置 ──
 
 /**
@@ -152,6 +231,7 @@ export function runWorktreeSetup(
 	repoRoot: string,
 	worktreePath: string,
 	nodeModulesStrategy: NodeModulesStrategy,
+	selections?: SymlinkSelections,
 ): string[] {
 	const notes: string[] = [];
 
@@ -159,11 +239,36 @@ export function runWorktreeSetup(
 	const envLinked = setupEnvFiles(repoRoot, worktreePath);
 	if (envLinked.length > 0) notes.push(`env: ${envLinked.join(', ')} linked`);
 
-	// 2. node_modules
-	const nm = setupNodeModules(repoRoot, worktreePath, nodeModulesStrategy);
-	if (nm !== 'none') notes.push(`node_modules: ${nm}`);
+	// 2. 选中的 symlink 目标（除 node_modules 外由通用路径处理器处理）
+	if (selections) {
+		// 预设目标（不含 node_modules—由下一步单独处理）
+		const presetPaths = selections.targets
+			.filter((t) => t.id !== 'node_modules')
+			.map((t) => t.relativePath);
+		const presetNotes = setupSymlinkPaths(repoRoot, worktreePath, presetPaths);
+		for (const n of presetNotes) notes.push(n);
 
-	// 3. 用户 setup 脚本
+		// 自定义路径
+		const customNotes = setupSymlinkPaths(repoRoot, worktreePath, selections.customPaths);
+		for (const n of customNotes) notes.push(n);
+
+		// 3. Husky hooks 自动配置（如果选了 .husky/ 且 symlink 成功）
+		const hasHusky = selections.targets.some((t) => t.id === 'husky');
+		if (hasHusky) {
+			const hooksNote = setupHuskyHooks(repoRoot);
+			if (hooksNote) notes.push(hooksNote);
+		}
+
+		// 4. node_modules（使用独立策略）
+		const nm = setupNodeModules(repoRoot, worktreePath, selections.nodeModulesStrategy);
+		if (nm !== 'none') notes.push(`node_modules: ${nm}`);
+	} else {
+		// 向后兼容：无 selections 时使用独立的 nodeModulesStrategy
+		const nm = setupNodeModules(repoRoot, worktreePath, nodeModulesStrategy);
+		if (nm !== 'none') notes.push(`node_modules: ${nm}`);
+	}
+
+	// 4. 用户 setup 脚本
 	const { ok, output } = runSetupScript(repoRoot, worktreePath);
 	if (output) {
 		notes.push(`setup script: ${ok ? 'ok' : 'failed'}`);

@@ -76,7 +76,31 @@ export function findExistingSession(
 	targetName: string,
 ): string | null {
 	const isMain = targetName === 'main';
-	// main 同时检查两种命名约定，兼容旧创建文件 (worktree-main.jsonl) 和新创建文件 (main.jsonl)
+	const sessionDir = resolveSessionDir(targetCwd);
+
+	// 1. 优先扫描目标 cwd 的 session 目录中已有的所有 .jsonl 文件
+	//    对 main 尤其重要：Pi 默认用 <timestamp>_<uuid>.jsonl，不叫 main.jsonl
+	//    先扫目录能找到这些真实 session（含历史记录），而非空的新建文件
+	if (existsSync(sessionDir)) {
+		const files = readdirSync(sessionDir, { withFileTypes: true });
+		const sessionFiles = files
+			.filter((f) => f.isFile() && f.name.endsWith('.jsonl'))
+			.map((f) => join(sessionDir, f.name));
+		for (const fp of sessionFiles) {
+			// 跳过本插件建立的 worktree-*.jsonl（由候选人路径统一处理）
+			if (fp.includes('worktree-')) continue;
+			// 跳过 main.jsonl（同样由候选人路径处理）
+			if (fp.endsWith('main.jsonl') || fp.endsWith('worktree-main.jsonl')) continue;
+			try {
+				const sm = SessionManager.open(fp);
+				if (sm && sm.getCwd() === targetCwd) return fp;
+			} catch {
+				continue;
+			}
+		}
+	}
+
+	// 2. 降级检查本插件命名的候选人文件（兼容旧创建的文件）
 	const candidates: string[] = isMain
 		? [mainSessionFileName(repoRoot), worktreeSessionFileName(repoRoot, 'main')]
 		: [worktreeSessionFileName(repoRoot, targetName)];
@@ -88,25 +112,6 @@ export function findExistingSession(
 				if (sm && sm.getCwd() === targetCwd) return sessionPath;
 			} catch {
 				/* header 不匹配或文件损坏 */
-			}
-		}
-	}
-
-	// 新格式：在目标 cwd 的 session 目录查找
-	if (!isMain) {
-		const sessionDir = resolveSessionDir(targetCwd);
-		if (existsSync(sessionDir)) {
-			const files = readdirSync(sessionDir, { withFileTypes: true });
-			const sessionFiles = files
-				.filter((f) => f.isFile() && f.name.endsWith('.jsonl'))
-				.map((f) => join(sessionDir, f.name));
-			for (const fp of sessionFiles) {
-				try {
-					const sm = SessionManager.open(fp);
-					if (sm && sm.getCwd() === targetCwd) return fp;
-				} catch {
-					continue;
-				}
 			}
 		}
 	}

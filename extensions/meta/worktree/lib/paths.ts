@@ -6,6 +6,9 @@
  */
 import { execSync } from 'node:child_process';
 import { join, dirname, basename, resolve, relative } from 'node:path';
+import { createLogger } from '@zenone/pi-logger';
+
+const log = createLogger('pi-worktree');
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 
 // ── 类型 ──
@@ -141,6 +144,7 @@ export function getManagedWorktrees(repoRoot: string): ManagedWorktree[] {
 export function parseWorktreeList(output: string, wtDir: string): ManagedWorktree[] {
 	const results: ManagedWorktree[] = [];
 	const blocks = output.trim().split('\n\n');
+	const normalizedWtDir = resolve(wtDir);
 
 	for (const block of blocks) {
 		const lines = block.split('\n');
@@ -149,14 +153,13 @@ export function parseWorktreeList(output: string, wtDir: string): ManagedWorktre
 		// 第一行: worktree <path>
 		const pathLine = lines[0];
 		if (!pathLine.startsWith('worktree ')) continue;
-		const wtPath = pathLine.slice('worktree '.length).trim();
+		const wtPath = resolve(pathLine.slice('worktree '.length).trim());
 
 		// 过滤：只接受在 wtDir 下，且不是主仓库根
-		if (!wtPath.startsWith(wtDir)) continue;
-		if (wtPath === wtDir) continue;
+		if (!wtPath.startsWith(normalizedWtDir + '/')) continue;
 
 		// 提取名称
-		const rel = relative(wtDir, wtPath);
+		const rel = relative(normalizedWtDir, wtPath);
 		if (!rel || rel.startsWith('..')) continue;
 		const name = rel.split(/[/\\]/)[0];
 		if (!name) continue;

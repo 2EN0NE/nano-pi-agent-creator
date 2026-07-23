@@ -65,7 +65,7 @@ EOF
 #   上限 CPU×4       — 绝对兜底
 # 最少 2，可通过 E2E_POOL_SIZE 环境变量或 --pool 参数覆盖
 _AUTO_POOL_CPU=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
-_AUTO_POOL_MEM_MB=$(free -m 2>/dev/null | grep Mem | awk '{print $2}')
+_AUTO_POOL_MEM_MB=$(free -m 2>/dev/null | grep Mem | awk '{print $2}' || true)
 _AUTO_POOL=$((_AUTO_POOL_CPU * 2))
 # 内存约束：每 worker 至少 250MB
 if [[ -n "$_AUTO_POOL_MEM_MB" ]]; then

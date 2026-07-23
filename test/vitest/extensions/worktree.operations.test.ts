@@ -180,6 +180,273 @@ describe('worktree execMerge', () => {
 		const result = execMerge(repoDir, 'feature/non-existent', 'main');
 		expect(result.ok).toBe(false);
 	});
+
+	// ── squash merge ──
+
+	it('6. execMerge squash merges feature branch into main', async () => {
+		const { execMerge } = await import(resolve(EXT_LIB, 'handlers.ts'));
+
+		// Create a new feature branch for squash test
+		gitCreateBranch(repoDir, 'feature/squash-test');
+		gitCommit(repoDir, 'squash1.txt', 'squash content v1');
+		gitCommit(repoDir, 'squash2.txt', 'squash content v2');
+		gitCommit(repoDir, 'squash3.txt', 'squash content v3');
+		gitCheckout(repoDir, 'main');
+
+		const result = execMerge(repoDir, 'feature/squash-test', 'main', 'squash');
+
+		expect(result.ok).toBe(true);
+		expect(result.message).toContain('squash');
+		expect(result.conflicts).toEqual([]);
+
+		// 验证 squash 吸收了原始 commit（commit message 不应出现在 log 中）
+		const log = execSync('git log --oneline -10', { cwd: repoDir, encoding: 'utf-8' });
+		expect(log).not.toContain('update squash1.txt');
+		expect(log).not.toContain('update squash2.txt');
+		expect(log).not.toContain('update squash3.txt');
+
+		// 验证文件存在
+		expect(existsSync(join(repoDir, 'squash1.txt'))).toBe(true);
+		expect(existsSync(join(repoDir, 'squash3.txt'))).toBe(true);
+	});
+
+	it('7. execMerge squash conflict auto-resets worktree', async () => {
+		// 清除之前测试遗留的脏文件
+		const dirtyFile = join(repoDir, 'untracked-dirty.txt');
+		if (existsSync(dirtyFile)) rmSync(dirtyFile);
+
+		const { execMerge } = await import(resolve(EXT_LIB, 'handlers.ts'));
+
+		// Create shared base file
+		writeFileSync(join(repoDir, 'squash-conflict.txt'), 'base line\n');
+		execSync('git add squash-conflict.txt && git commit -m "add squash-conflict base" -q', {
+			cwd: repoDir,
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: 'test',
+				GIT_AUTHOR_EMAIL: 'test@test',
+				GIT_COMMITTER_NAME: 'test',
+				GIT_COMMITTER_EMAIL: 'test@test',
+			},
+		});
+
+		// Branch A: modify base file
+		gitCreateBranch(repoDir, 'feature/squash-a');
+		writeFileSync(join(repoDir, 'squash-conflict.txt'), 'version A\n');
+		gitCommit(repoDir, 'squash-conflict.txt', 'version A change');
+
+		// Branch B: modify same file differently
+		gitCheckout(repoDir, 'main');
+		gitCreateBranch(repoDir, 'feature/squash-b');
+		writeFileSync(join(repoDir, 'squash-conflict.txt'), 'version B\n');
+		gitCommit(repoDir, 'squash-conflict.txt', 'version B change');
+
+		gitCheckout(repoDir, 'main');
+
+		// Merge A first (success)
+		const { execMerge: mergeFn } = await import(resolve(EXT_LIB, 'handlers.ts'));
+		const resultA = mergeFn(repoDir, 'feature/squash-a', 'main', 'squash');
+		expect(resultA.ok).toBe(true);
+		expect(resultA.conflicts).toEqual([]);
+
+		// Merge B with squash -- should auto-reset on conflict
+		const resultB = mergeFn(repoDir, 'feature/squash-b', 'main', 'squash');
+		expect(resultB.ok).toBe(false);
+		expect(resultB.conflicts.length).toBeGreaterThan(0);
+		expect(resultB.conflicts[0].file).toBe('squash-conflict.txt');
+
+		// Verify worktree is clean (reset carried out)
+		const status = execSync('git status --porcelain', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		}).trim();
+		expect(status).toBe('');
+
+		// Verify we're back on main
+		const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		}).trim();
+		expect(branch).toBe('main');
+	});
+});
+
+// ═══════════════════════════════════════════
+// 套件 1b：execRebaseFF（rebase + fast-forward）
+// ═══════════════════════════════════════════
+
+describe('worktree execRebaseFF', () => {
+	let baseDir: string;
+	let repoDir: string;
+	let wtSuccessDir: string;
+	let wtCaDir: string;
+	let wtCbDir: string;
+
+	beforeAll(async () => {
+		baseDir = resolve(tmpdir(), 'pi-wt-rebaseff-' + Date.now());
+		mkdirSync(baseDir, { recursive: true });
+		repoDir = createGitRepo(baseDir, 'rebaseff-repo');
+
+		// Create feature branch with commits
+		gitCreateBranch(repoDir, 'feature/rff-success');
+		gitCommit(repoDir, 'rff1.txt', 'rff content v1');
+		gitCommit(repoDir, 'rff2.txt', 'rff content v2');
+		gitCheckout(repoDir, 'main');
+
+		// Create real worktrees (simulating pi-worktree setup)
+		// Branch already exists from gitCreateBranch above, so omit -b
+		wtSuccessDir = join(baseDir, 'wt-rff-success');
+		execSync(`git worktree add ${wtSuccessDir} feature/rff-success --quiet`, {
+			cwd: repoDir,
+		});
+	});
+
+	afterAll(() => {
+		// Clean up worktrees before rm -rf
+		try {
+			execSync(`git worktree remove ${wtSuccessDir} --force --quiet`, { cwd: repoDir });
+		} catch {
+			/* */
+		}
+		try {
+			execSync(`git worktree remove ${join(baseDir, 'wt-rff-ca')} --force --quiet`, {
+				cwd: repoDir,
+			});
+		} catch {
+			/* */
+		}
+		try {
+			execSync(`git worktree remove ${join(baseDir, 'wt-rff-cb')} --force --quiet`, {
+				cwd: repoDir,
+			});
+		} catch {
+			/* */
+		}
+		try {
+			execSync(`git worktree remove ${join(baseDir, 'wt-rff-dirty')} --force --quiet`, {
+				cwd: repoDir,
+			});
+		} catch {
+			/* */
+		}
+		rmSync(baseDir, { recursive: true, force: true });
+	});
+
+	it('1. execRebaseFF rebases and fast-forwards feature branch into main', async () => {
+		const { execRebaseFF } = await import(resolve(EXT_LIB, 'handlers.ts'));
+		const result = execRebaseFF(repoDir, 'feature/rff-success', 'main', wtSuccessDir);
+
+		expect(result.ok).toBe(true);
+		expect(result.message).toContain('Rebased');
+		expect(result.message).toContain('fast-forward');
+		expect(result.message).toContain('feature/rff-success');
+		expect(result.conflicts).toEqual([]);
+
+		// 验证 main 包含 rff 的提交
+		const log = execSync('git log --oneline -10', { cwd: repoDir, encoding: 'utf-8' });
+		expect(log).toContain('update rff1.txt');
+
+		// 验证没有 merge commit（线性历史）
+		expect(log).not.toContain('Merge');
+
+		// 验证文件存在
+		expect(existsSync(join(repoDir, 'rff1.txt'))).toBe(true);
+		expect(existsSync(join(repoDir, 'rff2.txt'))).toBe(true);
+	});
+
+	it('2. execRebaseFF conflicts and auto-aborts', async () => {
+		const { execRebaseFF } = await import(resolve(EXT_LIB, 'handlers.ts'));
+
+		// Create shared base
+		writeFileSync(join(repoDir, 'rff-conflict.txt'), 'common base\n');
+		execSync('git add rff-conflict.txt && git commit -m "add rff-conflict base" -q', {
+			cwd: repoDir,
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: 'test',
+				GIT_AUTHOR_EMAIL: 'test@test',
+				GIT_COMMITTER_NAME: 'test',
+				GIT_COMMITTER_EMAIL: 'test@test',
+			},
+		});
+
+		// Branch A: modify
+		gitCreateBranch(repoDir, 'feature/rff-ca');
+		writeFileSync(join(repoDir, 'rff-conflict.txt'), 'version A\n');
+		gitCommit(repoDir, 'rff-conflict.txt', 'rff A');
+
+		// Branch B: modify differently
+		gitCheckout(repoDir, 'main');
+		gitCreateBranch(repoDir, 'feature/rff-cb');
+		writeFileSync(join(repoDir, 'rff-conflict.txt'), 'version B\n');
+		gitCommit(repoDir, 'rff-conflict.txt', 'rff B');
+
+		gitCheckout(repoDir, 'main');
+
+		// Create worktrees for both conflict branches
+		wtCaDir = join(baseDir, 'wt-rff-ca');
+		execSync(`git worktree add ${wtCaDir} feature/rff-ca --quiet`, { cwd: repoDir });
+		wtCbDir = join(baseDir, 'wt-rff-cb');
+		execSync(`git worktree add ${wtCbDir} feature/rff-cb --quiet`, { cwd: repoDir });
+
+		// Merge A first via regular merge (from main repo, source is read-only ref)
+		const { execMerge } = await import(resolve(EXT_LIB, 'handlers.ts'));
+		const resultA = execMerge(repoDir, 'feature/rff-ca', 'main');
+		expect(resultA.ok).toBe(true);
+
+		// Now rebase+ff B should fail with conflict and auto-abort
+		const resultB = execRebaseFF(repoDir, 'feature/rff-cb', 'main', wtCbDir);
+		expect(resultB.ok).toBe(false);
+		expect(resultB.conflicts.length).toBeGreaterThan(0);
+		expect(resultB.conflicts[0].file).toBe('rff-conflict.txt');
+
+		// Verify clean state after abort
+		const status = execSync('git status --porcelain', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		}).trim();
+		expect(status).toBe('');
+
+		// Verify back on main
+		const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		}).trim();
+		expect(branch).toBe('main');
+	});
+
+	it('3. execRebaseFF handles dirty working directory', async () => {
+		const { execRebaseFF } = await import(resolve(EXT_LIB, 'handlers.ts'));
+
+		gitCheckout(repoDir, 'main');
+		gitCreateBranch(repoDir, 'feature/rff-dirty');
+		gitCommit(repoDir, 'rff-dirty.txt', 'clean content');
+		gitCheckout(repoDir, 'main');
+
+		// Create worktree for dirty test
+		const wtDirtyDir = join(baseDir, 'wt-rff-dirty');
+		execSync(`git worktree add ${wtDirtyDir} feature/rff-dirty --quiet`, { cwd: repoDir });
+
+		// Dirty main (not worktree)
+		writeFileSync(join(repoDir, 'rff-untracked.txt'), 'dirty');
+
+		const result = execRebaseFF(repoDir, 'feature/rff-dirty', 'main', wtDirtyDir);
+
+		// Dirty main should not block (gets stashed)
+		expect(result.ok).toBe(true);
+	});
+
+	it('4. execRebaseFF fails when sourceDir does not exist', async () => {
+		const { execRebaseFF } = await import(resolve(EXT_LIB, 'handlers.ts'));
+		const result = execRebaseFF(
+			repoDir,
+			'feature/rff-nonexistent',
+			'main',
+			join(baseDir, 'wt-not-exists'),
+		);
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain('not found');
+	});
 });
 
 // ═══════════════════════════════════════════
@@ -677,7 +944,9 @@ describe('worktree parseArgs', () => {
 		expect(COMMANDS).toContain('use <name>  or  main');
 		expect(COMMANDS).toContain('list');
 		expect(COMMANDS).toContain('delete <name>');
-		expect(COMMANDS).toContain('merge [--source <n>] [--target <b>]');
+		expect(COMMANDS).toContain(
+			'merge [--source <n>] [--target <b>] [--strategy <merge|squash|rebase-ff>]',
+		);
 		expect(COMMANDS).toContain('clean [--dry-run]');
 		expect(COMMANDS).toContain('shell');
 	});

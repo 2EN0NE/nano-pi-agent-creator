@@ -6,7 +6,7 @@
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createLogger } from '@zenone/pi-logger';
-import type { OpResult } from '../types.js';
+import type { OpResult, SymlinkSelections } from '../types.js';
 import {
 	getWorktreesDir,
 	getWorktreePath,
@@ -47,6 +47,7 @@ export function createWorktree(
 	name: string,
 	branch?: string,
 	nodeModulesStrat?: NodeModulesStrategy,
+	selections?: SymlinkSelections,
 ): OpResult {
 	const targetDir = getWorktreePath(repoRoot, name);
 
@@ -58,6 +59,8 @@ export function createWorktree(
 	const addArgs = defaultBranch
 		? ['worktree', 'add', '-b', newBranch, targetDir, `origin/${defaultBranch}`]
 		: ['worktree', 'add', '-b', newBranch, targetDir];
+
+	const nmStrategy = (nodeModulesStrat || selections?.nodeModulesStrategy) ?? 'none';
 
 	const result = spawnSync('git', addArgs, { cwd: repoRoot, encoding: 'utf-8' });
 
@@ -71,7 +74,7 @@ export function createWorktree(
 				{ cwd: repoRoot, encoding: 'utf-8' },
 			);
 			if (r2.status !== 0) return { ok: false, message: `Failed: ${r2.stderr?.trim()}` };
-			const setupNotes = runWorktreeSetup(repoRoot, targetDir, nodeModulesStrat || 'none');
+			const setupNotes = runWorktreeSetup(repoRoot, targetDir, nmStrategy, selections);
 			return {
 				ok: true,
 				message: `Created '${name}' (existing branch)\n  ${setupNotes.join('\n  ')}`,
@@ -81,7 +84,7 @@ export function createWorktree(
 		return { ok: false, message: `Failed: ${err}` };
 	}
 
-	const setupNotes = runWorktreeSetup(repoRoot, targetDir, nodeModulesStrat || 'none');
+	const setupNotes = runWorktreeSetup(repoRoot, targetDir, nmStrategy, selections);
 	return {
 		ok: true,
 		message: `Created '${name}' → ${newBranch}${defaultBranch ? ` (from origin/${defaultBranch})` : ''}\n  ${setupNotes.join('\n  ')}`,

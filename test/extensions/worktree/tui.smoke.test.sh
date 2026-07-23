@@ -78,7 +78,6 @@ test_it "removed commands (stop/mode) no longer available" <<'TEST'
   fi
 
   tui_cleanup
-  mark_for_review "验证 /worktree stop 和 /worktree mode 旧命令不再被处理"
 TEST
 
 # ── 测试 5：session 文件创建验证（print 模式） ──
