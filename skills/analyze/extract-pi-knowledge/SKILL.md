@@ -78,8 +78,7 @@ error_keywords = ["错误", "不工作", "失败", "没触发", "wrong", "error"
 本技能提供 `analyze.py` 脚本，自动扫描会话文件并输出分析结果：
 
 ```bash
-cd /home/zenone/popular_projects/forked_projects/nano-pi-stuff
-uv run .pi/skills/extract-pi-knowledge/analyze.py --session-dir ~/.pi/agent/sessions/--home-zenone-popular_projects-forked_projects-nano-pi-stuff--
+uv run .pi/skills/extract-pi-knowledge/analyze.py --session-dir ~/.pi/agent/sessions/--home-username-path-to-repo-nano-pi-agent-creator--
 ```
 
 输出：

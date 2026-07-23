@@ -103,7 +103,7 @@ profiles:
     #   - research/ + analyze/   → user-install profile（信息获取 + 分析规划）
     #   - communication/         → 两个 profile 都不含（沟通文档类按需使用）
     project:
-        description: 'Project-specific extensions for nano-pi-stuff'
+        description: 'Project-specific extensions for nano-pi-agent-creator'
         target: './.pi'
         extensions: '*'
         # 白名单：development/（开发流程）+ tooling/（工具链）

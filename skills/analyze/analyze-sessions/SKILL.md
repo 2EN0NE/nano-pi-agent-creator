@@ -219,6 +219,5 @@ uv run skills/analyze-sessions/analyze-sessions.py -A -n 10 -f all
 - **近期会话选择**：`--recent N` 快速查看最新 N 个会话
 
 ```bash
-cd /home/zenone/popular_projects/forked_projects/nano-pi-stuff
 uv run skills/analyze-sessions/analyze-sessions.py --focus all --recent 5
 ```

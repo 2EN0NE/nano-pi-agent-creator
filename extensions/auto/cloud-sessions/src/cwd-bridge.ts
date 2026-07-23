@@ -1,7 +1,7 @@
 /**
  * cwd-bridge — 跨机器 session cwd 适配
  *
- * 问题：从另一台机器拉取的 session 文件中的原始 cwd（如 /home/zenone/...）
+ * 问题：从另一台机器拉取的 session 文件中的原始 cwd（如 /home/user/...）
  * 在本地不存在（如 mac 上 /home 只读），导致 Pi 的 cwd 检查失败，
  * /tree 文件引用也无法正确解析。
  *
@@ -13,8 +13,8 @@
  *   2. cwd 重写（修改 JSONL 中的 cwd 字段）— 通用兜底
  *
  * 使用场景:
- *   机器 A: /home/zenone/.../nano-pi-stuff  →  会话在此创建
- *   机器 B: /Users/jojo/.../nano-pi-stuff    →  需要 resume
+ *   机器 A: /home/user/.../nano-pi-agent-creator  →  会话在此创建
+ *   机器 B: /Users/another/.../nano-pi-agent-creator    →  需要 resume
  */
 
 import {

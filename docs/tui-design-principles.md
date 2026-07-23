@@ -1,6 +1,6 @@
 # Pi 扩展 TUI 设计规范
 
-本文档系统梳理了 nano-pi-stuff 仓库中现有 TUI 扩展的 UI 设计模式与最佳实践，供后续 TUI 开发参考。
+本文档系统梳理了 nano-pi-agent-creator 仓库中现有 TUI 扩展的 UI 设计模式与最佳实践，供后续 TUI 开发参考。
 
 > 目录
 >

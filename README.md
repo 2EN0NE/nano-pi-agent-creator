@@ -1,8 +1,8 @@
 # Agent Stuff
 
-[![CI](https://github.com/2EN0NE/nano-pi-stuff/actions/workflows/ci.yml/badge.svg)](https://github.com/2EN0NE/nano-pi-stuff/actions/workflows/ci.yml)
+[![CI](https://github.com/2EN0NE/nano-pi-agent-creator/actions/workflows/ci.yml/badge.svg)](https://github.com/2EN0NE/nano-pi-agent-creator/actions/workflows/ci.yml)
 
-> 这个仓库是我在不同项目里复用的 Pi 代理资源集合。
+> 这个仓库forked from mitsuhiko/agent-stuff，是我在不同项目里复用的 Pi 代理资源集合。
 
 ## 🚀 快速开始
 

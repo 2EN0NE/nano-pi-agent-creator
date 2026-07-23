@@ -143,7 +143,7 @@ describe('worktree extension — getRepoRoot (real git)', () => {
 	});
 
 	it('returns null for path outside any git repo', () => {
-		// 注意：测试运行在 nano-pi-stuff 仓库内，tmp 目录也在其中。
+		// 注意：测试运行在 nano-pi-agent-creator 仓库内，tmp 目录也在其中。
 		// 使用 os.tmpdir() 确保在仓库外。
 		const outside = join(tmpdir(), 'pi-wt-test-notagit-' + Date.now());
 		mkdirSync(outside, { recursive: true });

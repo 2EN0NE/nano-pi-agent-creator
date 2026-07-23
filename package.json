@@ -4,7 +4,7 @@
 	"description": "zenone's pi coding agent commands, skills, extensions, and themes",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/2EN0NE/nano-pi-stuff.git"
+		"url": "https://github.com/2EN0NE/nano-pi-agent-creator.git"
 	},
 	"readme": "README.md",
 	"type": "module",
