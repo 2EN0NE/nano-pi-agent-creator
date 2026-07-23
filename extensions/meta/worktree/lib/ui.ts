@@ -803,3 +803,159 @@ export async function showOperationSubmenu(ctx: any, worktreeName: string): Prom
 		},
 	);
 }
+
+// ═══════════════════════════════════════════
+// 冲突解决面板（P0-1）
+// ═══════════════════════════════════════════
+
+/**
+ * 显示 merge/rebase 冲突面板。
+ * 提供两个操作：
+ *  [L] Launch terminal at worktree
+ *  [A] Abort
+ */
+export async function showConflictPanel(
+	ctx: any,
+	conflicts: Array<{ file: string; lines: string }>,
+	repoRoot: string,
+	stashMsg?: string,
+): Promise<void> {
+	if (!ctx.hasUI) return;
+
+	await (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<string | null>(
+		(_tui, theme, _kb, done) => ({
+			render(w: number): string[] {
+				const lines: string[] = [];
+				lines.push(truncateToWidth(theme.fg('error', theme.bold(' Conflict detected')), w));
+				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
+
+				// 冲突文件列表
+				lines.push(truncateToWidth(theme.fg('warning', ' Conflicting files:'), w));
+				const shown = conflicts.slice(0, 10);
+				for (const c of shown) {
+					lines.push(truncateToWidth(`   ${theme.fg('text', c.file)}`, w));
+				}
+				if (conflicts.length > 10) {
+					lines.push(
+						truncateToWidth(
+							`   ${theme.fg('dim', `... and ${conflicts.length - 10} more`)}`,
+							w,
+						),
+					);
+				}
+
+				if (stashMsg) {
+					lines.push(truncateToWidth(theme.fg('dim', stashMsg), w));
+				}
+
+				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
+				lines.push(
+					truncateToWidth(` ${theme.fg('accent', '[L]')} Launch terminal at worktree`, w),
+				);
+				lines.push(
+					truncateToWidth(
+						` ${theme.fg('error', '[A]')} Abort -- rollback to before merge/rebase`,
+						w,
+					),
+				);
+				lines.push(
+					truncateToWidth(
+						` ${theme.fg('dim', '[Esc]')} Dismiss (stay in conflict state)`,
+						w,
+					),
+				);
+				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
+				lines.push(
+					truncateToWidth(
+						theme.fg(
+							'dim',
+							'After resolving, run /worktree continue or /worktree abort',
+						),
+						w,
+					),
+				);
+				return lines;
+			},
+			handleInput(data: string): void {
+				if (data === 'l' || data === 'L') {
+					// L → launch terminal at worktree
+					done('launch');
+					return;
+				}
+				if (data === 'a' || data === 'A') {
+					done('abort');
+					return;
+				}
+				if (matchesKey(data, 'escape')) {
+					done(null);
+					return;
+				}
+			},
+			invalidate(): void {},
+		}),
+	);
+}
+
+// ═══════════════════════════════════════════
+// 合并/变基后步骤引导（P0-2）
+// ═══════════════════════════════════════════
+
+/**
+ * 显示 merge/rebase 成功后的检查清单。
+ *
+ * @param type 'merge' | 'rebase'
+ */
+export async function showPostMergeGuide(
+	ctx: any,
+	repoRoot: string,
+	resultMsg: string,
+	type: 'merge' | 'rebase',
+): Promise<void> {
+	if (!ctx.hasUI) return;
+
+	await (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<string | null>(
+		(_tui, theme, _kb, done) => ({
+			render(w: number): string[] {
+				const lines: string[] = [];
+				lines.push(truncateToWidth(theme.fg('success', theme.bold(' ' + resultMsg)), w));
+				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
+				lines.push(
+					truncateToWidth(theme.fg('text', ' Next steps (recommended order):'), w),
+				);
+				lines.push(truncateToWidth(theme.fg('dim', '  [1] npm run typecheck'), w));
+				lines.push(truncateToWidth(theme.fg('dim', '  [2] npm test'), w));
+				lines.push(truncateToWidth(theme.fg('dim', '  [3] npm run format:check'), w));
+				if (type === 'merge') {
+					lines.push(
+						truncateToWidth(
+							theme.fg('accent', '  [4] git add + git commit (manual)'),
+							w,
+						),
+					);
+				} else {
+					lines.push(
+						truncateToWidth(
+							theme.fg('accent', '  [4] git rebase --continue (if needed)'),
+							w,
+						),
+					);
+				}
+				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
+				lines.push(
+					truncateToWidth(
+						theme.fg('dim', ' Check typecheck and tests before committing.'),
+						w,
+					),
+				);
+				lines.push(truncateToWidth(theme.fg('dim', ' [Esc] Dismiss'), w));
+				return lines;
+			},
+			handleInput(data: string): void {
+				if (matchesKey(data, 'escape')) {
+					done(null);
+				}
+			},
+			invalidate(): void {},
+		}),
+	);
+}

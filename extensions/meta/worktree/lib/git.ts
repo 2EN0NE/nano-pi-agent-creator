@@ -4,6 +4,9 @@
 import { execSync, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { createLogger } from '@zenone/pi-logger';
+
+const log = createLogger('pi-worktree');
 
 // ── 基础 git ──
 
@@ -112,23 +115,15 @@ export function execRebase(
 		};
 	}
 
-	// 失败：收集冲突文件
+	// P0-1: 冲突 → 留在 rebase 冲突状态，不 abort
+	// 收集冲突文件
 	const unmerged = (git(['diff', '--name-only', '--diff-filter=U']).stdout || '').trim();
 	const conflictFiles = unmerged.split('\n').filter(Boolean);
 
-	// 只有存在冲突文件时才需要 abort（rebase 进入了冲突状态）
 	if (conflictFiles.length > 0) {
-		const abort = git(['rebase', '--abort']);
-		if (abort.status !== 0) {
-			return {
-				ok: false,
-				message: `Rebase failed with conflicts; abort also failed: ${abort.stderr?.trim() || 'unknown error'}`,
-				conflicts: conflictFiles,
-			};
-		}
 		return {
 			ok: false,
-			message: `Rebase failed. ${conflictFiles.length} file(s) conflict. Rebase aborted.`,
+			message: `Rebase failed. ${conflictFiles.length} file(s) conflict. Stay on branch with conflict markers.`,
 			conflicts: conflictFiles,
 		};
 	}
@@ -145,6 +140,82 @@ export function execRebase(
 /**
  * 分支与 origin/base 的 ahead/behind 数。
  */
+// ── Merge/Rebase 状态检测 ──
+
+/**
+ * 检测是否有 merge 正在进行中。
+ */
+export function isMergeInProgress(repoPath: string): boolean {
+	return existsSync(join(repoPath, '.git', 'MERGE_MSG'));
+}
+
+/**
+ * 检测是否有 rebase 正在进行中。
+ */
+export function isRebaseInProgress(repoPath: string): boolean {
+	return (
+		existsSync(join(repoPath, '.git', 'rebase-merge')) ||
+		existsSync(join(repoPath, '.git', 'rebase-apply'))
+	);
+}
+
+/**
+ * 获取当前 merge/rebase 冲突文件列表。
+ */
+export function getConflictFiles(repoPath: string): string[] {
+	try {
+		const out = execSync('git diff --name-only --diff-filter=U', {
+			cwd: repoPath,
+			encoding: 'utf-8',
+			timeout: 5000,
+		});
+		return out.trim().split('\n').filter(Boolean);
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * 获取当前 merge 的源分支名（仅 merge in progress 时有值）。
+ * 从 .git/MERGE_HEAD 读取。
+ */
+export function getMergeSourceBranch(repoPath: string): string | null {
+	try {
+		const mergeHeadPath = join(repoPath, '.git', 'MERGE_HEAD');
+		if (!existsSync(mergeHeadPath)) return null;
+		const mergeHead = execSync('git rev-parse --abbrev-ref MERGE_HEAD', {
+			cwd: repoPath,
+			encoding: 'utf-8',
+			timeout: 5000,
+		}).trim();
+		return mergeHead || null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * 查找由 worktree merge 自动创建的 stash 并 pop。
+ * 匹配 stash message 前缀 'worktree-merge-auto-'。
+ */
+export function popWorktreeStash(repoPath: string): boolean {
+	try {
+		const list = execSync('git stash list', {
+			cwd: repoPath,
+			encoding: 'utf-8',
+			timeout: 5000,
+		});
+		if (!list.includes('worktree-merge-auto-')) return false;
+		execSync('git stash pop', { cwd: repoPath, encoding: 'utf-8' });
+		log.info('popped auto-stash after abort/continue');
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+// ── 与原 getAheadBehind 之间的间隙 ──
+
 export function getAheadBehind(
 	repoPath: string,
 	branch: string,

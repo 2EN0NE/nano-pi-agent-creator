@@ -5,7 +5,15 @@ import { createLogger } from '@zenone/pi-logger';
 import { basename } from 'node:path';
 import { spawnSync, spawn, execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { getCurrentBranch, execRebase } from './git.js';
+import {
+	getCurrentBranch,
+	execRebase,
+	isMergeInProgress,
+	isRebaseInProgress,
+	getConflictFiles,
+	getMergeSourceBranch,
+	popWorktreeStash,
+} from './git.js';
 import {
 	createWorktree,
 	removeWorktree,
@@ -29,6 +37,8 @@ import {
 	confirmDelete,
 	confirmForceDelete,
 	askBranchDelete,
+	showConflictPanel,
+	showPostMergeGuide,
 } from './ui.js';
 import {
 	switchToSession,
@@ -79,6 +89,9 @@ export const COMMANDS = [
 	'delete <name>',
 	'merge [--source <n>] [--target <b>]',
 	'rebase [--source <n>] [--target <b>]',
+	'continue',
+	'abort',
+	'status',
 	'clean [--dry-run]',
 	'shell',
 	'widget <on|off>',
@@ -187,6 +200,15 @@ export async function handleWorktreeCommand(
 			break;
 		case 'rebase':
 			await handleRebase(repoRoot, flags, ctx);
+			break;
+		case 'continue':
+			await handleContinue(repoRoot, ctx);
+			break;
+		case 'abort':
+			await handleAbort(repoRoot, ctx);
+			break;
+		case 'status':
+			handleStatus(repoRoot, ctx);
 			break;
 		case 'clean':
 			await handleClean(repoRoot, flags, ctx);
@@ -578,11 +600,19 @@ async function handleDelete(
 // merge
 // ═══════════════════════════════════════════
 
-export function execMerge(
-	repo: string,
-	sourceBranch: string,
-	targetBranch: string,
-): { ok: boolean; message: string; conflicts: Array<{ file: string; lines: string }> } {
+export interface MergeResult {
+	ok: boolean;
+	message: string;
+	conflicts: Array<{ file: string; lines: string }>;
+	/** 当前所在分支（冲突时留在 targetBranch） */
+	currentBranch?: string;
+	/** 是否进行了 stash（用户后续需处理） */
+	stashed?: boolean;
+	/** 切换 stash 前的原始分支（用于 abort 时恢复） */
+	originalBranch?: string;
+}
+
+export function execMerge(repo: string, sourceBranch: string, targetBranch: string): MergeResult {
 	const git = (args: string[]) =>
 		spawnSync('git', args, { cwd: repo, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 });
 
@@ -626,9 +656,7 @@ export function execMerge(
 		};
 	}
 
-	git(['checkout', origBranch]);
-	if (stashed) git(['stash', 'pop']);
-
+	// P0-1: 冲突 → 留在 targetBranch 不切回，不 pop stash
 	const unmerged = (git(['diff', '--name-only', '--diff-filter=U']).stdout || '').trim();
 	const conflictFiles = unmerged
 		.split('\n')
@@ -642,10 +670,26 @@ export function execMerge(
 				.join('; '),
 		}));
 
+	if (conflictFiles.length > 0) {
+		// 真正冲突：留在 targetBranch，用户解决
+		return {
+			ok: false,
+			message: 'Merge failed. ' + conflictFiles.length + ' file(s) conflict.',
+			conflicts: conflictFiles,
+			currentBranch: targetBranch,
+			stashed,
+			originalBranch: stashed ? origBranch : undefined,
+		};
+	}
+
+	// 非冲突失败（分支不存在等）→ 恢复原始状态
+	git(['checkout', origBranch]);
+	if (stashed) git(['stash', 'pop']);
+	const stderr = merge.stderr?.trim() || 'unknown error';
 	return {
 		ok: false,
-		message: 'Merge failed. ' + conflictFiles.length + ' file(s) conflict.',
-		conflicts: conflictFiles,
+		message: 'Merge failed: ' + stderr.split('\n').pop(),
+		conflicts: [],
 	};
 }
 
@@ -687,20 +731,53 @@ async function handleMerge(
 	const targetBranch = flags.target || 'main';
 
 	log.info('merging', { source: sourceBranch, target: targetBranch, repo: basename(repoRoot) });
+
+	// P2-6: 合并前确认
+	if (ctx.hasUI) {
+		const confirmed = await ctx.ui.confirm(`Merge '${sourceBranch}' -> '${targetBranch}'?`);
+		if (!confirmed) {
+			ctx.ui.notify('Cancelled', 'info');
+			return;
+		}
+	}
+
 	ctx.ui.notify("Merging '" + sourceBranch + "' -> '" + targetBranch + "'...", 'info');
 
 	const result = execMerge(repoRoot, sourceBranch, targetBranch);
 
 	if (result.ok) {
-		ctx.ui.notify(result.message, 'success');
+		// P0-2: 合并成功 → 步骤引导
+		if (ctx.hasUI) {
+			await showPostMergeGuide(ctx, repoRoot, result.message, 'merge');
+		} else {
+			ctx.ui.notify(result.message, 'success');
+		}
 	} else if (result.conflicts.length > 0) {
-		const summary = result.conflicts.map((c) => '  - ' + c.file).join('\n');
-		ctx.ui.notify(
-			'Merge conflict in ' + result.conflicts.length + ' file(s):\n' + summary,
-			'error',
-		);
+		// P0-1: 冲突 → 显示冲突面板（含 stash 信息），留在 targetBranch
+		const stashMsg = result.stashed
+			? '\n(note: your dirty files were auto-stashed; use /worktree abort to restore)'
+			: '';
+		if (ctx.hasUI) {
+			await showConflictPanel(ctx, result.conflicts, repoRoot, stashMsg);
+		} else {
+			const summary = result.conflicts.map((c) => '  - ' + c.file).join('\n');
+			ctx.ui.notify(
+				'Merge conflict in ' +
+					result.conflicts.length +
+					' file(s):\n' +
+					summary +
+					stashMsg +
+					'\nUse /worktree continue or /worktree abort',
+				'error',
+			);
+		}
 	} else {
 		ctx.ui.notify('Merge failed: ' + result.message, 'error');
+		try {
+			execSync('git merge --abort', { cwd: repoRoot, encoding: 'utf-8' });
+		} catch {
+			/* ignore */
+		}
 	}
 }
 
@@ -754,15 +831,35 @@ async function handleRebase(
 	const result = execRebase(repoRoot, sourceBranch, ontoBranch);
 
 	if (result.ok) {
-		ctx.ui.notify(result.message, 'success');
+		// P0-2: rebase 成功 → 步骤引导
+		if (ctx.hasUI) {
+			await showPostMergeGuide(ctx, repoRoot, result.message, 'rebase');
+		} else {
+			ctx.ui.notify(result.message, 'success');
+		}
 	} else if (result.conflicts.length > 0) {
-		const summary = result.conflicts.map((f) => '  - ' + f).join('\n');
-		ctx.ui.notify(
-			'Rebase conflict in ' + result.conflicts.length + ' file(s):\n' + summary,
-			'error',
-		);
+		// P0-1: 冲突保留（execRebase 已不再自动 abort）
+		const conflictItems = result.conflicts.map((f) => ({ file: f, lines: '' }));
+		if (ctx.hasUI) {
+			await showConflictPanel(ctx, conflictItems, repoRoot);
+		} else {
+			const summary = result.conflicts.map((f) => '  - ' + f).join('\n');
+			ctx.ui.notify(
+				'Rebase conflict in ' +
+					result.conflicts.length +
+					' file(s):\n' +
+					summary +
+					'\nUse /worktree continue or /worktree abort',
+				'error',
+			);
+		}
 	} else {
 		ctx.ui.notify('Rebase failed: ' + result.message, 'error');
+		try {
+			execSync('git rebase --abort', { cwd: repoRoot, encoding: 'utf-8' });
+		} catch {
+			/* ignore */
+		}
 	}
 }
 
@@ -829,6 +926,17 @@ async function handleClean(
 		return;
 	}
 
+	// P1-1: 确认弹窗
+	if (ctx.hasUI) {
+		const confirmed = await ctx.ui.confirm(`Delete ${merged.length} merged worktree(s)?`, {
+			detail: merged.map((m) => `  ${m.name} (${m.branch})`).join('\n'),
+		});
+		if (!confirmed) {
+			ctx.ui.notify('Cleaning cancelled.', 'info');
+			return;
+		}
+	}
+
 	const results: string[] = [];
 	for (const wt of merged) {
 		const r = removeWorktree(repoRoot, wt.name);
@@ -838,6 +946,131 @@ async function handleClean(
 		}
 	}
 	ctx.ui.notify(results.join('\n'), 'info');
+}
+
+// ═══════════════════════════════════════════
+// continue（P0-3）
+// ═══════════════════════════════════════════
+
+async function handleContinue(repoRoot: string, ctx: any): Promise<void> {
+	const isMerge = isMergeInProgress(repoRoot);
+	const isRebase = isRebaseInProgress(repoRoot);
+
+	if (!isMerge && !isRebase) {
+		ctx.ui.notify('No merge or rebase in progress.', 'info');
+		return;
+	}
+
+	ctx.ui.notify('Continuing...', 'info');
+
+	if (isRebase) {
+		try {
+			execSync('git add -u', { cwd: repoRoot, encoding: 'utf-8' });
+			execSync('git rebase --continue', { cwd: repoRoot, encoding: 'utf-8' });
+			ctx.ui.notify('Rebase continued successfully.', 'success');
+			// 尝试 pop stash（如果有的话）
+			popWorktreeStash(repoRoot);
+		} catch (err: any) {
+			ctx.ui.notify('Continue failed: ' + (err.stderr?.trim() || err.message), 'error');
+		}
+		return;
+	}
+
+	if (isMerge) {
+		// 合并需要用户先 git add 解决冲突的文件
+		const conflictFiles = getConflictFiles(repoRoot);
+		if (conflictFiles.length > 0) {
+			ctx.ui.notify(
+				'Merge conflict still present. Resolve conflicts first, then /worktree continue.\n' +
+					'  Or use /worktree abort to cancel.',
+				'warning',
+			);
+			return;
+		}
+		// 无冲突 → 尝试 git merge --continue
+		try {
+			execSync('git merge --continue --no-edit', {
+				cwd: repoRoot,
+				encoding: 'utf-8',
+			});
+			ctx.ui.notify('Merge continued successfully.', 'success');
+			popWorktreeStash(repoRoot);
+		} catch (err: any) {
+			ctx.ui.notify('Continue failed: ' + (err.stderr?.trim() || err.message), 'error');
+		}
+	}
+}
+
+// ═══════════════════════════════════════════
+// abort（P0-3）
+// ═══════════════════════════════════════════
+
+async function handleAbort(repoRoot: string, ctx: any): Promise<void> {
+	const isMerge = isMergeInProgress(repoRoot);
+	const isRebase = isRebaseInProgress(repoRoot);
+
+	if (!isMerge && !isRebase) {
+		ctx.ui.notify('No merge or rebase to abort.', 'info');
+		return;
+	}
+
+	ctx.ui.notify('Aborting...', 'info');
+
+	if (isRebase) {
+		try {
+			execSync('git rebase --abort', { cwd: repoRoot, encoding: 'utf-8' });
+			ctx.ui.notify('Rebase aborted.', 'success');
+			popWorktreeStash(repoRoot);
+		} catch (err: any) {
+			ctx.ui.notify('Abort failed: ' + (err.stderr?.trim() || err.message), 'error');
+		}
+	}
+	if (isMerge) {
+		try {
+			execSync('git merge --abort', { cwd: repoRoot, encoding: 'utf-8' });
+			ctx.ui.notify('Merge aborted.', 'success');
+			popWorktreeStash(repoRoot);
+		} catch (err: any) {
+			ctx.ui.notify('Abort failed: ' + (err.stderr?.trim() || err.message), 'error');
+		}
+	}
+}
+
+// ═══════════════════════════════════════════
+// status（P0-3）
+// ═══════════════════════════════════════════
+
+function handleStatus(repoRoot: string, ctx: any): void {
+	const isMerge = isMergeInProgress(repoRoot);
+	const isRebase = isRebaseInProgress(repoRoot);
+
+	if (isRebase) {
+		const conflicts = getConflictFiles(repoRoot);
+		let branch = 'unknown';
+		try {
+			branch = execSync('git rev-parse --abbrev-ref HEAD', {
+				cwd: repoRoot,
+				encoding: 'utf-8',
+			}).trim();
+		} catch {
+			/* ignore */
+		}
+		const msg =
+			'Rebase in progress on ' +
+			branch +
+			(conflicts.length > 0 ? '\nConflict files: ' + conflicts.join(', ') : '');
+		ctx.ui.notify(msg, 'info');
+	} else if (isMerge) {
+		const source = getMergeSourceBranch(repoRoot);
+		const conflicts = getConflictFiles(repoRoot);
+		const msg =
+			'Merge in progress' +
+			(source ? ' (merging ' + source + ')' : '') +
+			(conflicts.length > 0 ? '\nConflict files: ' + conflicts.join(', ') : '');
+		ctx.ui.notify(msg, 'info');
+	} else {
+		ctx.ui.notify('No merge or rebase in progress.', 'info');
+	}
 }
 
 // ═══════════════════════════════════════════
