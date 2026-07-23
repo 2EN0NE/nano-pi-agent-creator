@@ -28,17 +28,9 @@ function createGitRepo(basedir: string, name: string): string {
 	const repoDir = join(basedir, name);
 	mkdirSync(repoDir, { recursive: true });
 	execSync('git init --initial-branch main -q', { cwd: repoDir });
+	execSync('git config user.name "test" && git config user.email "test@test"', { cwd: repoDir });
 	writeFileSync(join(repoDir, 'README.md'), `# ${name}\n`);
-	execSync('git add README.md && git commit -m init -q', {
-		cwd: repoDir,
-		env: {
-			...process.env,
-			GIT_AUTHOR_NAME: 'test',
-			GIT_AUTHOR_EMAIL: 'test@test',
-			GIT_COMMITTER_NAME: 'test',
-			GIT_COMMITTER_EMAIL: 'test@test',
-		},
-	});
+	execSync('git add README.md && git commit -m init -q', { cwd: repoDir });
 	return repoDir;
 }
 
