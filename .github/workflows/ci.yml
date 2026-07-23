@@ -107,32 +107,8 @@ jobs:
                   cache: npm
             - name: Install project dependencies
               run: npm ci
-            - name: Debug — Versions
-              run: |
-                  echo "node: $(node -v)"
-                  echo "npm: $(npm -v)"
-                  echo "platform: $(uname -m)"
-            - name: Rebuild native modules (node-pty)
-              run: |
-                  echo "Rebuilding native modules for Linux CI..."
-                  npm rebuild node-pty 2>&1 || echo "WARNING: node-pty rebuild failed (TUI tests will be skipped)"
-            - name: Install pi globally
-              run: npm install -g @earendil-works/pi-coding-agent
-            - name: Link @zenone modules for global pi
-              run: |
-                  PI_PKG=$(node -e "console.log(
-                    require.resolve('@earendil-works/pi-coding-agent/package.json')
-                  )")
-                  echo "pi package: $PI_PKG"
-                  PI_NM=$(dirname "$PI_PKG")/node_modules/@zenone
-                  mkdir -p "$PI_NM"
-                  ln -sf "$PWD/extensions/meta/pi-logger" "$PI_NM/pi-logger" 2>/dev/null || true
-                  ln -sf "$PWD/extensions/meta/pi-config" "$PI_NM/pi-config" 2>/dev/null || true
-                  echo "linked: $(ls -la $PI_NM 2>&1)"
-            - name: Prepare results directory
-              run: mkdir -p test/results
-            - name: Clean stale sandboxes
-              run: rm -rf .pi/tmp/
+            - name: Setup CI environment
+              run: bash scripts/setup-ci.sh
             - name: Run Vitest tests
               run: npm test
             - name: Run bash e2e tests (auto-pool)
@@ -177,30 +153,8 @@ jobs:
                   cache: npm
             - name: Install project dependencies
               run: npm ci
-            - name: Debug — Versions
-              run: |
-                  echo "node: $(node -v)"
-                  echo "npm: $(npm -v)"
-                  echo "platform: $(uname -m)"
-            - name: Rebuild native modules (node-pty)
-              run: |
-                  echo "Rebuilding native modules for Linux CI..."
-                  npm rebuild node-pty 2>&1 || echo "WARNING: node-pty rebuild failed (TUI tests will be skipped)"
-            - name: Install pi globally
-              run: npm install -g @earendil-works/pi-coding-agent
-            - name: Link @zenone modules for global pi
-              run: |
-                  PI_PKG=$(node -e "console.log(
-                    require.resolve('@earendil-works/pi-coding-agent/package.json')
-                  )")
-                  echo "pi package: $PI_PKG"
-                  PI_NM=$(dirname "$PI_PKG")/node_modules/@zenone
-                  mkdir -p "$PI_NM"
-                  ln -sf "$PWD/extensions/meta/pi-logger" "$PI_NM/pi-logger" 2>/dev/null || true
-                  ln -sf "$PWD/extensions/meta/pi-config" "$PI_NM/pi-config" 2>/dev/null || true
-                  echo "linked: $(ls -la $PI_NM 2>&1)"
-            - name: Clean stale sandboxes
-              run: rm -rf .pi/tmp/
+            - name: Setup CI environment
+              run: bash scripts/setup-ci.sh
             - name: Run Vitest worktree tests
               run: |
                   npx vitest run \
