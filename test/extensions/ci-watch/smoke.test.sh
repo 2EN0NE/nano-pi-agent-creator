@@ -175,14 +175,14 @@ test_it "lifecycle log shows extension load" <<'TEST'
 TEST
 
 # ====================================================================
-# 场景 4：发送 /ci-watch 命令不崩溃
+# 场景 4：/ci-watch 不带参数时不崩溃
 # ====================================================================
 test_it "/ci-watch without args shows usage hint (no crash)" <<'TEST'
   slug="ciw-s4-$$"
   test_home="$ROOT_DIR/.pi/tmp/$slug"
   setup_sandbox "$test_home"
 
-  # /ci-watch 不带参数 → 应提示用法而不崩溃
+  # /ci-watch 不带参数 → 应打开 TUI 面板而不崩溃
   run_pi "$test_home" "/ci-watch"
   ec=$?
 
@@ -194,11 +194,9 @@ test_it "/ci-watch without args shows usage hint (no crash)" <<'TEST'
   echo "=== stdout ==="
   cat "$test_home/pi-stdout.log"
 
-  # 如果 gh cli 不可用，ci-watch 应该优雅降级而非崩溃
-  if grep -q "用法\|gh\|未检测到\|not found" "$test_home/pi-stdout.log" 2>/dev/null; then
-    echo "PASS: graceful degradation message found"
-  else
-    echo "INFO: ci-watch processed without visible message in stdout"
+  # 不崩溃即可；TUI 面板不在 print 模式中可见
+  if grep -q "ci-watch\|CI Watch\|Monitor" "$test_home/pi-stdout.log" 2>/dev/null; then
+    echo "INFO: ci-watch references found in stdout"
   fi
 
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
@@ -206,14 +204,15 @@ test_it "/ci-watch without args shows usage hint (no crash)" <<'TEST'
 TEST
 
 # ====================================================================
-# 场景 5：发送 /ci-notify 命令不崩溃
+# 场景 5：/ci-watch 带无效参数时不崩溃
 # ====================================================================
-test_it "/ci-notify without args shows usage hint (no crash)" <<'TEST'
+test_it "/ci-watch with invalid ref shows error (no crash)" <<'TEST'
   slug="ciw-s5-$$"
   test_home="$ROOT_DIR/.pi/tmp/$slug"
   setup_sandbox "$test_home"
 
-  run_pi "$test_home" "/ci-notify"
+  # /ci-watch 带无效 ref
+  run_pi "$test_home" "/ci-watch invalid@ref!"
   ec=$?
 
   if [[ "$ec" -ne 0 && "$ec" -ne 124 ]]; then
@@ -248,6 +247,6 @@ test_it "gh CLI detection logged [REVIEW]" <<'TEST'
 
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
 
-  mark_for_review "验证 gh CLI 检测日志：隔离沙箱中预计无 gh 命令，ci-watch 应输出 '未检测到 gh CLI' 通知。确认日志中有此记录且扩展未崩溃"
+  mark_for_review "验证 gh CLI 检测日志：隔离沙箱中预计无 gh 命令，ci-watch 应输出 'gh CLI not found' 通知。确认日志中有此记录且扩展未崩溃"
   exit 0
 TEST
