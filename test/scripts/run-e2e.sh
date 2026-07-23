@@ -49,6 +49,7 @@ Options:
   --ext <name>        Run tests for a specific extension (e.g., pi-logger)
   --skill <name>      Run tests for a specific skill (e.g., e2e-test)
   --tui               Run TUI tests (tui.smoke.test.sh) for the target
+  --pool <N>          Parallel worker count (default: CPU×2, auto-detected)
   -h, --help          Show this help
 
 Without options, runs all test modules (smoke.test.sh only).
@@ -56,6 +57,28 @@ Use --tui to run TUI-mode tests instead.
 EOF
 	exit 0
 }
+
+# ── 池化并行参数 ──
+# 自动检测 CPU 核心数和内存，按三者中最小值定并行度：
+#   CPU×2           — I/O 密集型任务的合理超订（2x）
+#   总内存/250MB     — 每个 worker 至少 250MB（pi 进程约 100-200MB + 沙箱开销）
+#   上限 CPU×4       — 绝对兜底
+# 最少 2，可通过 E2E_POOL_SIZE 环境变量或 --pool 参数覆盖
+_AUTO_POOL_CPU=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+_AUTO_POOL_MEM_MB=$(free -m 2>/dev/null | grep Mem | awk '{print $2}')
+_AUTO_POOL=$((_AUTO_POOL_CPU * 2))
+# 内存约束：每 worker 至少 250MB
+if [[ -n "$_AUTO_POOL_MEM_MB" ]]; then
+	_AUTO_POOL_MEM_CAP=$((_AUTO_POOL_MEM_MB / 250))
+	[[ $_AUTO_POOL -gt $_AUTO_POOL_MEM_CAP ]] && _AUTO_POOL=$_AUTO_POOL_MEM_CAP
+fi
+# 上限 CPU×4
+_AUTO_POOL_CPU_CAP=$((_AUTO_POOL_CPU * 4))
+[[ $_AUTO_POOL -gt $_AUTO_POOL_CPU_CAP ]] && _AUTO_POOL=$_AUTO_POOL_CPU_CAP
+# 最少 2
+[[ $_AUTO_POOL -lt 2 ]] && _AUTO_POOL=2
+
+POOL_SIZE=${E2E_POOL_SIZE:-$_AUTO_POOL}
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -70,6 +93,10 @@ while [[ $# -gt 0 ]]; do
 	--tui)
 		TUI_ONLY=true
 		shift
+		;;
+	--pool)
+		POOL_SIZE="$2"
+		shift 2
 		;;
 	-h | --help) usage ;;
 	*)
@@ -298,6 +325,10 @@ run_test_file() {
 
 	source "$test_file"
 
+	# 模块计时
+	local module_start_sec
+	module_start_sec=$(date +%s)
+
 	local count=${#TEST_CASES[@]}
 	[[ $count -eq 0 ]] && {
 		echo "  → No test cases, skipping."
@@ -439,7 +470,9 @@ run_test_file() {
 			$first || echo ","
 			first=false
 			IFS='|' read -r n nm st lg <<<"$r"
-			echo -n "    { \"num\": $n, \"name\": \"$nm\", \"status\": \"$st\", \"log\": \"cases/${lg#*/cases/}\" }"
+			# Strip leading zeros from padded case number for valid JSON
+			local json_num=$((10#$n))
+			echo -n "    { \"num\": $json_num, \"name\": \"$nm\", \"status\": \"$st\", \"log\": \"cases/${lg#*/cases/}\" }"
 		done
 		echo ""
 		echo "  ]"
@@ -452,6 +485,31 @@ run_test_file() {
 	TOTAL_FAIL=$((TOTAL_FAIL + mfail))
 	TOTAL_REVIEW=$((TOTAL_REVIEW + mreview))
 	MODULE_RESULTS+=("$module_type|$module_name|$mpass|$mfail|$mreview|$count")
+
+	# ── 模块耗时 ──
+	local module_elapsed
+	module_elapsed=$(($(date +%s) - module_start_sec))
+	# 模块级 summary.json 注入 duration
+	# 使用简单的 jq 风格替换，不依赖外部工具修正 JSON 格式问题
+	# 如果 python3 可用则注入
+	if command -v python3 &>/dev/null && [[ -f "$MODULE_DIR/summary.json" ]]; then
+		python3 -c "
+import json,sys
+p='$MODULE_DIR/summary.json'
+try:
+    with open(p) as f:
+        d=json.load(f)
+    d['duration_seconds']=$module_elapsed
+    with open(p,'w') as f:
+        json.dump(d,f,indent=2)
+except Exception as e:
+    sys.stderr.write('  (warning: could not inject duration into summary.json: %s)\n' % e)
+" 2>&1 || true
+	fi
+
+	# ── 模块耗时输出 ──
+	echo ""
+	echo "  ⏱  Duration: ${module_elapsed}s (${mpass} pass, ${mfail} fail, ${mreview} review)"
 
 	# ── 模块级清理：删除所有 config 残留 ──
 	# 避免 e2e 测试数据污染用户真实的 pi 环境
@@ -484,19 +542,50 @@ echo "  Output: $RUN_DIR"
 echo "  Config backups: $BACKUP_COUNT file(s)"
 echo "═══════════════════════════════════════════════"
 
+# ── 全局计时 ──
+GLOBAL_START_SEC=$(date +%s)
+
 FOUND_ANY=false
+
+# ── 任务队列（用于池化并行） ──
+# 格式：type_dir|module_name|test_file
+TASK_QUEUE=()
+
+# 对单目标（--ext/--skill）直接串行执行
+# 对全量运行使用池化并行
+USE_POOL=false
+if [[ -z "$TARGET_EXT" && -z "$TARGET_SKILL" && $POOL_SIZE -gt 1 ]]; then
+	USE_POOL=true
+fi
 
 run_target() {
 	local type_dir="$1" # "extensions" 或 "skills"
 	local target_name="$2"
+
+	if $USE_POOL; then
+		add_task() {
+			TASK_QUEUE+=("$1|$2|$3")
+			FOUND_ANY=true
+		}
+	elif [[ -n "$target_name" ]]; then
+		add_task() {
+			run_test_file "$3" "$1" "$2"
+			FOUND_ANY=true
+		}
+	else
+		# 全量模式但无池化：直接执行（兼容旧行为）
+		add_task() {
+			run_test_file "$3" "$1" "$2"
+			FOUND_ANY=true
+		}
+	fi
 
 	if [[ -n "$target_name" ]]; then
 		# 根据 --tui flag 选择主测试文件
 		if $TUI_ONLY; then
 			local tf="$TEST_DIR/$type_dir/$target_name/tui.smoke.test.sh"
 			if [[ -f "$tf" ]]; then
-				run_test_file "$tf" "$type_dir" "$target_name"
-				FOUND_ANY=true
+				add_task "$type_dir" "$target_name" "$tf"
 			else
 				echo "Not found: $tf"
 			fi
@@ -504,16 +593,14 @@ run_target() {
 			# 默认：先跑 smoke.test.sh，再跑 tui.smoke.test.sh（如果有）
 			local tf_smoke="$TEST_DIR/$type_dir/$target_name/smoke.test.sh"
 			if [[ -f "$tf_smoke" ]]; then
-				run_test_file "$tf_smoke" "$type_dir" "$target_name"
-				FOUND_ANY=true
+				add_task "$type_dir" "$target_name" "$tf_smoke"
 			else
 				echo "Not found: $tf_smoke"
 			fi
 
 			local tf_tui="$TEST_DIR/$type_dir/$target_name/tui.smoke.test.sh"
 			if [[ -f "$tf_tui" ]]; then
-				run_test_file "$tf_tui" "$type_dir" "$target_name"
-				FOUND_ANY=true
+				add_task "$type_dir" "$target_name" "$tf_tui"
 			fi
 		fi
 	else
@@ -522,8 +609,7 @@ run_target() {
 			bn=$(basename "$d")
 			local tf="$d/smoke.test.sh"
 			if [[ -f "$tf" ]]; then
-				run_test_file "$tf" "$type_dir" "$bn"
-				FOUND_ANY=true
+				add_task "$type_dir" "$bn" "$tf"
 			fi
 		done
 
@@ -535,12 +621,107 @@ run_target() {
 				bn=$(basename "$d")
 				local tf="$d/tui.smoke.test.sh"
 				if [[ -f "$tf" ]]; then
-					run_test_file "$tf" "$type_dir" "$bn"
-					FOUND_ANY=true
+					add_task "$type_dir" "$bn" "$tf"
 				fi
 			done
 		fi
 	fi
+	unset -f add_task 2>/dev/null || true
+}
+
+# ── 池化并行执行器 ──
+# 从 TASK_QUEUE 读取任务，用 POOL_SIZE 个 worker 并行执行
+# 每个 worker 独立运行 run_test_file，输出重定向到 worker 日志
+# 所有 worker 完成后，从 summary.json 汇总全局结果
+run_pool() {
+	local task_count=${#TASK_QUEUE[@]}
+	local worker_log_dir="$RUN_DIR/workers"
+	mkdir -p "$worker_log_dir"
+
+	echo ""
+	echo "─── Parallel pool (${POOL_SIZE} workers, ${task_count} tasks) ───"
+
+	declare -a worker_pids=()
+	local next_task=0
+
+	while ((next_task < task_count)); do
+		# 清理已完成 worker
+		declare -a active_pids=()
+		local pid
+		for pid in "${worker_pids[@]}"; do
+			if kill -0 "$pid" 2>/dev/null; then
+				active_pids+=("$pid")
+			fi
+		done
+		worker_pids=("${active_pids[@]}")
+
+		# 填充空闲 slot
+		while ((${#worker_pids[@]} < POOL_SIZE && next_task < task_count)); do
+			local task_entry="${TASK_QUEUE[$next_task]}"
+			IFS='|' read -r task_type task_name task_file <<<"$task_entry"
+
+			local safe_name="${task_name//\//-}"
+			local worker_log="$worker_log_dir/${safe_name}.log"
+
+			(
+				run_test_file "$task_file" "$task_type" "$task_name"
+			) >"$worker_log" 2>&1 &
+			worker_pids+=($!)
+			next_task=$((next_task + 1))
+			echo "  [${next_task}/${task_count}] Started: $task_type/$task_name (pid=$!)"
+		done
+
+		sleep 1
+	done
+
+	# 等待所有 worker 完成
+	local remaining=${#worker_pids[@]}
+	for pid in "${worker_pids[@]}"; do
+		wait "$pid" 2>/dev/null || true
+		remaining=$((remaining - 1))
+		echo "  Worker pid=$pid finished (${remaining} remaining)"
+	done
+
+	# ── 汇总结果：从每个模块的 summary.json 读取 ──
+	echo ""
+	echo "─── Aggregating results ───"
+	TOTAL_CASES=0
+	TOTAL_PASS=0
+	TOTAL_FAIL=0
+	TOTAL_REVIEW=0
+	MODULE_RESULTS=()
+
+	local base_dir
+	for base_dir in "$RUN_DIR/extensions" "$RUN_DIR/skills"; do
+		[[ -d "$base_dir" ]] || continue
+		local module_name
+		for module_dir in "$base_dir"/*/; do
+			[[ -d "$module_dir" ]] || continue
+			module_name=$(basename "$module_dir")
+			local sf="$module_dir/summary.json"
+			[[ -f "$sf" ]] || continue
+
+			local json_data module_type
+			module_type=$(basename "$base_dir")
+			json_data=$(python3 -c "
+import json,sys
+with open('$sf') as f:
+    d=json.load(f)
+sys.stdout.write('{p}|{f}|{r}|{t}'.format(p=d.get('pass',0),f=d.get('fail',0),r=d.get('review',0),t=d.get('total',0)))
+" 2>/dev/null) || continue
+
+			IFS='|' read -r mp mf mr mt <<<"$json_data"
+			: "${mp:=0}" "${mf:=0}" "${mr:=0}" "${mt:=0}"
+			TOTAL_PASS=$((TOTAL_PASS + mp))
+			TOTAL_FAIL=$((TOTAL_FAIL + mf))
+			TOTAL_REVIEW=$((TOTAL_REVIEW + mr))
+			TOTAL_CASES=$((TOTAL_CASES + mt))
+			MODULE_RESULTS+=("$module_type|$module_name|$mp|$mf|$mr|$mt")
+			echo "  $module_type/$module_name: $mp pass, $mf fail, $mr review"
+		done
+	done
+
+	echo "  Total: $TOTAL_CASES cases ($TOTAL_PASS pass, $TOTAL_FAIL fail, $TOTAL_REVIEW review)"
 }
 
 if [[ -n "$TARGET_EXT" ]]; then
@@ -564,8 +745,18 @@ if ! $FOUND_ANY; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 池化并行执行
+# ══════════════════════════════════════════════════════════════════════════════
+
+if $USE_POOL && [[ ${#TASK_QUEUE[@]} -gt 0 ]]; then
+	run_pool
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 全局汇总报告
 # ══════════════════════════════════════════════════════════════════════════════
+
+GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 
 {
 	echo "# Test Run: $TIMESTAMP"
@@ -578,6 +769,7 @@ fi
 		echo "Target: all modules"
 	fi
 	echo "Total cases: $TOTAL_CASES"
+	echo "Total duration: ${GLOBAL_ELAPSED}s"
 	echo ""
 	echo "## Modules"
 	echo ""
@@ -623,6 +815,7 @@ fi
 	echo "{"
 	echo "  \"timestamp\": \"$TIMESTAMP\","
 	echo "  \"target\": \"${TARGET_EXT:-${TARGET_SKILL:-all}}\","
+	echo "  \"duration_seconds\": $GLOBAL_ELAPSED,"
 	echo "  \"total\": $TOTAL_CASES,"
 	echo "  \"pass\": $TOTAL_PASS,"
 	echo "  \"fail\": $TOTAL_FAIL,"
@@ -647,7 +840,7 @@ fi
 
 echo ""
 echo "═══════════════════════════════════════════════"
-echo "  Results"
+echo "  Results (${GLOBAL_ELAPSED}s total)"
 echo "  Total: $TOTAL_CASES | PASS: $TOTAL_PASS | FAIL: $TOTAL_FAIL | REVIEW: $TOTAL_REVIEW"
 if [[ $TOTAL_REVIEW -gt 20 ]]; then
 	echo "  ⚠️  WARNING: $TOTAL_REVIEW cases need manual review (threshold: 20)"

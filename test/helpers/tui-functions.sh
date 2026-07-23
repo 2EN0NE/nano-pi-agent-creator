@@ -129,7 +129,8 @@ tui_output_count() {
 tui_run_pi_test() {
 	local extensions="$1"
 	local input_script="$2"
-	local timeout_seconds="${3:-15}"
+	# 默认 timeout：CI 模式 8s（加速），本地 15s（兼容）
+	local timeout_seconds="${3:-$([[ "${CI:-false}" == "true" ]] && echo 8 || echo 15)}"
 
 	# CI 模式检测：CI=true 时自动注入 mock-llm
 	local PI_CI_MODE=${CI:-false}
