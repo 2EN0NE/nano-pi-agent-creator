@@ -1,9 +1,8 @@
 import { copyFile, mkdir, readdir, stat, utimes } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { CloudSessionsConfig } from './config.js';
-import { loadProjectMatchConfig, type ProjectMatchConfig } from './config.js';
+import type { CloudSessionsConfig, ProjectMatchConfig } from './config.js';
 import { createProvider, type SyncProvider } from './providers/index.js';
-import { listLocalSessions, sessionsRoot } from './sessions.js';
+import { listLocalSessionsForCwd, sessionsRoot } from './sessions.js';
 import { mergeMatchingSessions, getEncodedCwd } from './project-match.js';
 import { createLogger } from '@zenone/pi-logger';
 
@@ -49,8 +48,12 @@ export class Sync {
 		await this.provider.ensureReady();
 		await this.provider.pull();
 
-		const local = await listLocalSessions();
-		const remote = await this.provider.listRemote();
+		// Only operate on the current cwd's session directory — other projects'
+		// sessions should not be pushed or pulled by this machine.
+		const cwdPrefix = getEncodedCwd() + '/';
+		const local = await listLocalSessionsForCwd(getEncodedCwd());
+		const allRemote = await this.provider.listRemote();
+		const remote = allRemote.filter((f) => f.relativePath.startsWith(cwdPrefix));
 
 		const localByPath = new Map<string, FileState & { absolutePath: string }>();
 		for (const f of local) {

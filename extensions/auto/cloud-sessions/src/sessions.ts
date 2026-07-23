@@ -64,6 +64,25 @@ export async function listLocalSessions(): Promise<LocalSession[]> {
 	return out;
 }
 
+/**
+ * Only list session files inside a specific cwd-encoded subdirectory.
+ *
+ * Pi stores sessions at `~/.pi/agent/sessions/--encoded-cwd--/*.jsonl`.
+ * This function scopes the listing to just that one directory, so cloud
+ * sync operations only push/pull sessions belonging to the current project.
+ */
+export async function listLocalSessionsForCwd(encodedCwd: string): Promise<LocalSession[]> {
+	const root = sessionsRoot();
+	if (!existsSync(root)) {
+		await mkdir(root, { recursive: true });
+		return [];
+	}
+	const targetDir = join(root, encodedCwd);
+	const out: LocalSession[] = [];
+	await walkJsonl(targetDir, root, out);
+	return out;
+}
+
 export async function ensureSessionsRoot(): Promise<string> {
 	const root = sessionsRoot();
 	await mkdir(root, { recursive: true });
