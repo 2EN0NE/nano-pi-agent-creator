@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { truncateToWidth, visibleWidth, matchesKey, Key } from '@earendil-works/pi-tui';
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, Theme } from '@earendil-works/pi-coding-agent';
 import {
 	configFilePath,
 	isProviderConfigured,
@@ -80,25 +80,34 @@ function summarize(result: SyncResult): string {
 	return parts.join(' ');
 }
 
-async function runSync(setStatus: Notify, notifyUser?: NotifyUser): Promise<SyncResult | null> {
+async function runSync(
+	setStatus: Notify,
+	notifyUser?: NotifyUser,
+	theme?: Theme,
+): Promise<SyncResult | null> {
 	if (activeSync) return activeSync;
+	const cs = (text: string, color: Parameters<Theme['fg']>[0]) =>
+		theme ? theme.fg(color, text) : text;
 	activeSync = (async () => {
 		try {
 			const config = await loadConfig();
 			if (!isProviderConfigured(config)) {
-				setStatus(STATUS_KEY, 'sessions: not configured');
+				setStatus(STATUS_KEY, cs('| sessions: not configured', 'dim'));
 				return null;
 			}
-			setStatus(STATUS_KEY, `sessions: syncing (${config.provider})`);
+			setStatus(STATUS_KEY, cs(`| sessions: syncing (${config.provider})`, 'accent'));
 			const sync = new Sync(config);
 			const pm = await loadProjectMatchConfig();
 			const result = await sync.run(pm);
-			setStatus(STATUS_KEY, `sessions: ${config.provider} ${summarize(result)}`);
+			setStatus(
+				STATUS_KEY,
+				cs(`| sessions: ${config.provider} ${summarize(result)}`, 'accent'),
+			);
 			lastSyncFailed = false;
 			return result;
 		} catch (error) {
 			const reason = shortReason(error);
-			setStatus(STATUS_KEY, `sessions: sync error (${reason})`);
+			setStatus(STATUS_KEY, cs(`| sessions: sync error (${reason})`, 'warning'));
 			if (!lastSyncFailed) {
 				notifyUser?.(`cloud-sessions sync failed: ${reason}`, 'warning');
 			}
@@ -115,11 +124,12 @@ function scheduleSync(
 	config: CloudSessionsConfig,
 	setStatus: Notify,
 	notifyUser?: NotifyUser,
+	theme?: Theme,
 ): void {
 	if (debounceTimer) clearTimeout(debounceTimer);
 	debounceTimer = setTimeout(() => {
 		debounceTimer = null;
-		void runSync(setStatus, notifyUser).catch(() => {});
+		void runSync(setStatus, notifyUser, theme).catch(() => {});
 	}, config.pushDebounceMs);
 }
 
@@ -127,11 +137,12 @@ function startPolling(
 	config: CloudSessionsConfig,
 	setStatus: Notify,
 	notifyUser?: NotifyUser,
+	theme?: Theme,
 ): void {
 	if (pollTimer) clearInterval(pollTimer);
 	if (config.pollIntervalMs <= 0) return;
 	pollTimer = setInterval(() => {
-		void runSync(setStatus, notifyUser).catch(() => {});
+		void runSync(setStatus, notifyUser, theme).catch(() => {});
 	}, config.pollIntervalMs);
 	if (typeof pollTimer.unref === 'function') pollTimer.unref();
 }
@@ -176,32 +187,41 @@ async function writeProjectMatchConfig(pm: {
 export default function cloudSessions(pi: ExtensionAPI): void {
 	pi.on('session_start', async (event, ctx) => {
 		const config = await loadConfig();
-		const setStatus: Notify = (k, t) => ctx.ui.setStatus(k, t);
+		const th = ctx.ui.theme;
+		const setStatus: Notify = (k, t) => {
+			if (t === undefined) {
+				ctx.ui.setStatus(k, t);
+				return;
+			}
+			ctx.ui.setStatus(k, th.fg('accent', t));
+		};
 		const notifyUser: NotifyUser = (text, level) => ctx.ui.notify(text, level);
 
 		if (!isProviderConfigured(config)) {
-			setStatus(STATUS_KEY, 'sessions: not configured');
+			ctx.ui.setStatus(STATUS_KEY, th.fg('dim', '| sessions: not configured'));
 			return;
 		}
-		setStatus(STATUS_KEY, `sessions: ${config.provider}`);
+		setStatus(STATUS_KEY, `| sessions: ${config.provider}`);
 
 		if (config.pullOnStart && (event.reason === 'startup' || event.reason === 'reload')) {
 			// Fire-and-forget: don't block session_start on network/git operations.
 			// The sync runs in background; status widget updates via setStatus().
 			// startup/reload both benefit from pulling latest remote sessions.
-			runSync(setStatus, notifyUser).catch(() => {});
+			runSync(setStatus, notifyUser, th).catch(() => {});
 		}
 
-		startPolling(config, setStatus, notifyUser);
+		startPolling(config, setStatus, notifyUser, th);
 	});
 
 	pi.on('session_before_switch', async (_event, ctx) => {
 		const config = await loadConfig();
+		const th = ctx.ui.theme;
 		if (!isProviderConfigured(config)) return;
 		// Fire-and-forget: don't block session switch on sync.
 		runSync(
 			(k, t) => ctx.ui.setStatus(k, t),
 			(text, level) => ctx.ui.notify(text, level),
+			th,
 		).catch(() => {});
 	});
 
@@ -298,22 +318,26 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 
 	pi.on('turn_end', async (_event, ctx) => {
 		const config = await loadConfig();
+		const th = ctx.ui.theme;
 		if (!config.autoPush || !isProviderConfigured(config)) return;
 		scheduleSync(
 			config,
 			(k, t) => ctx.ui.setStatus(k, t),
 			(text, level) => ctx.ui.notify(text, level),
+			th,
 		);
 	});
 
 	pi.on('session_shutdown', async (_event, ctx) => {
 		stopTimers();
+		const th = ctx.ui.theme;
 		const config = await loadConfig();
 		if (!config.autoPush || !isProviderConfigured(config)) return;
 		// Fire-and-forget: don't block session_shutdown (/reload) on sync.
 		runSync(
 			(k, t) => ctx.ui.setStatus(k, t),
 			(text, level) => ctx.ui.notify(text, level),
+			th,
 		).catch(() => {});
 	});
 
@@ -350,7 +374,7 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 					await writeConfig({ provider: 'icloud', icloud: { dir } });
 				}
 
-				ctx.ui.setStatus(STATUS_KEY, `sessions: ${provider}`);
+				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg('accent', `| sessions: ${provider}`));
 				ctx.ui.notify('Cloud sessions configured.', 'info');
 				return true;
 			}
@@ -811,6 +835,7 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 											const result = await runSync(
 												(k, t) => ctx.ui.setStatus(k, t),
 												(text, level) => ctx.ui.notify(text, level),
+												ctx.ui.theme,
 											);
 											lastResult = result;
 										} catch {

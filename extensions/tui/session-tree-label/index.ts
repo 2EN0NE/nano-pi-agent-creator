@@ -248,7 +248,7 @@ export default function sessionTreeLabel(pi: ExtensionAPI): void {
 			} else {
 				ctx.ui.notify(`无标签 | ${hint}`, 'info');
 			}
-			ctx.ui.setStatus('session-tree-label', ` [${hint}]`);
+			ctx.ui.setStatus('session-tree-label', ctx.ui.theme.fg('dim', `| ${hint}`));
 
 			let cleaned = false;
 			const clean = () => {

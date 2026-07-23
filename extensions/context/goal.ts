@@ -294,17 +294,17 @@ export default function goalExtension(pi: ExtensionAPI) {
 					snapshot.tokenBudget === undefined
 						? ''
 						: ` (${formatTokensCompact(snapshot.tokensUsed)} / ${formatTokensCompact(snapshot.tokenBudget)})`;
-				ctx.ui.setStatus('goal', theme.fg('accent', `Pursuing goal${usage}`));
+				ctx.ui.setStatus('goal', theme.fg('accent', `| Pursuing goal${usage}`));
 				break;
 			}
 			case 'paused':
-				ctx.ui.setStatus('goal', theme.fg('warning', 'Goal paused (/goal resume)'));
+				ctx.ui.setStatus('goal', theme.fg('warning', '| Goal paused (/goal resume)'));
 				break;
 			case 'budgetLimited':
-				ctx.ui.setStatus('goal', theme.fg('warning', 'Goal budget reached'));
+				ctx.ui.setStatus('goal', theme.fg('warning', '| Goal budget reached'));
 				break;
 			case 'complete':
-				ctx.ui.setStatus('goal', theme.fg('success', 'Goal complete'));
+				ctx.ui.setStatus('goal', theme.fg('success', '| Goal complete'));
 				break;
 		}
 	}

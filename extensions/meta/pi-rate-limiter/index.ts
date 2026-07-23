@@ -214,7 +214,7 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 
 		if (isWaitingForWindow) {
 			const sec = Math.ceil((60000 - (now % 60000)) / 1000);
-			return C.yellow + `⏳ 限流等待 ${sec}s` + C.reset;
+			return '| ' + C.yellow + `⏳ 限流等待 ${sec}s` + C.reset;
 		}
 
 		const modelPrefix = lastModelId ? `[${lastModelId}] ` : '';
@@ -229,7 +229,7 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 		const percentTok = maxTok > 0 ? tokens / maxTok : 0;
 		const usagePercent = Math.max(percentReq, percentTok);
 
-		return `${prefix}: ` + colorizeByUsage(`${reqStr} · ${tokStr}`, usagePercent);
+		return `| ${prefix}: ` + colorizeByUsage(`${reqStr} · ${tokStr}`, usagePercent);
 	}
 
 	function refreshStatus() {

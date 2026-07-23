@@ -655,7 +655,10 @@ export default function loggerExtension(pi: ExtensionAPI) {
 	pi.on('session_start', async (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		const config = getRuntimeConfig();
-		ctx.ui.setStatus('pi-logger', ctx.ui.theme.fg('dim', `log:${config.defaultLevel}`));
+		const level = config.defaultLevel;
+		const dimLevels = new Set(['info', 'off']);
+		const color = dimLevels.has(level) ? 'dim' : 'accent';
+		ctx.ui.setStatus('pi-logger', ctx.ui.theme.fg(color as any, `| log:${level}`));
 	});
 
 	// 5. Cleanup on shutdown

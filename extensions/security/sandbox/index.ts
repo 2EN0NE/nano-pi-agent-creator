@@ -282,7 +282,7 @@ export default function (pi: ExtensionAPI) {
 				'sandbox',
 				ctx.ui.theme.fg(
 					'accent',
-					`🔒 Sandbox: ${networkCount} domains, ${writeCount} write paths`,
+					`| 🔒 Sandbox: ${networkCount} domains, ${writeCount} write paths`,
 				),
 			);
 			ctx.ui.notify('Sandbox initialized', 'info');

@@ -112,15 +112,15 @@ function buildWidgetText(): string {
 	const status = _config.enabled ? 'on' : 'off';
 	const ref = _upstreamRef || '?';
 
-	if (!_config.enabled) return `[git-merge:off]`;
+	if (!_config.enabled) return `| git-merge:off`;
 
 	// Check if in a merge
 	const hasMergeHead = _inMergeHead;
 	if (hasMergeHead) {
-		return `[git-merge:merge ${ref}]`;
+		return `| git-merge:merge ${ref}`;
 	}
 
-	return `[git-merge:${ref}]`;
+	return `| git-merge:${ref}`;
 }
 
 let _inMergeHead = false;
