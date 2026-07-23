@@ -21,8 +21,11 @@ function extractExtNames(output: string, set: Set<string>): void {
 		const dirMatch = f.match(/^extensions\/[^/]+\/([^/]+)\/index\.tsx?$/);
 		// 裸目录（git status --porcelain 对未跟踪目录的输出）
 		const bareDirMatch = f.match(/^extensions\/[^/]+\/([^/.]+)\/?$/);
-		// 目录扩展深层文件：extensions/category/name/any/file.ts(x)
+		// 目录扩展深层 .ts 文件：extensions/category/name/any/file.ts(x)
 		const subMatch = f.match(/^extensions\/[^/]+\/([^/]+)\/.*\.tsx?$/);
+		// 目录扩展非 .ts 深层文件：extensions/category/name/any/file.ext
+		// 必须 4+ 层深度（extensions/cat/name/file），排除 category 级文件
+		const nonTSDeepMatch = f.match(/^extensions\/[^/]+\/([^/]+)\/.+$/);
 
 		const match = fileMatch || dirMatch || bareDirMatch;
 
@@ -30,6 +33,8 @@ function extractExtNames(output: string, set: Set<string>): void {
 			set.add(match[1]);
 		} else if (subMatch) {
 			set.add(subMatch[1]);
+		} else if (nonTSDeepMatch) {
+			set.add(nonTSDeepMatch[1]);
 		}
 	}
 }
@@ -161,5 +166,38 @@ describe('extractExtNames', () => {
 		// [^/.]+ 确保 bareDirMatch 不匹配含点号的路径段
 		expect(extract('extensions/auto/foo.ts.bak')).toEqual([]);
 		expect(extract('extensions/meta/v1.0/')).toEqual([]);
+	});
+
+	// ── 非 .ts 文件变更检测（Issue 4） ────────────────────
+
+	it('package.json 变更应检测到目录扩展名', () => {
+		expect(extract('extensions/meta/worktree/package.json')).toEqual(['worktree']);
+	});
+
+	it('非 .ts 深层文件变更应检测到目录扩展名', () => {
+		expect(extract('extensions/tui/whimsical/assets/config.yaml')).toEqual(['whimsical']);
+		expect(extract('extensions/meta/worktree/.gitignore')).toEqual(['worktree']);
+	});
+
+	it('非 .ts 目录扩展根文件变更应检测到扩展名', () => {
+		expect(extract('extensions/meta/pi-config/README.md')).toEqual(['pi-config']);
+	});
+
+	it('多个非 .ts 文件同时变更应去重', () => {
+		const input = [
+			'extensions/meta/worktree/package.json',
+			'extensions/meta/worktree/.gitignore',
+			'extensions/meta/worktree/tsconfig.json',
+			'extensions/auto/foo.ts',
+		].join('\n');
+		expect(extract(input)).toEqual(['foo', 'worktree']);
+	});
+
+	it('根目录 extensions/package.json 不变更不被误认为扩展变更', () => {
+		expect(extract('extensions/package.json')).toEqual([]);
+	});
+
+	it('非 TS 文件在扩展分类根目录不变更不误检测', () => {
+		expect(extract('extensions/auto/README.md')).toEqual([]);
 	});
 });
