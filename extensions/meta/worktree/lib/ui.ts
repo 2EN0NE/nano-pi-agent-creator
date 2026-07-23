@@ -8,8 +8,14 @@
  */
 import { truncateToWidth, visibleWidth, matchesKey, getKeybindings } from '@earendil-works/pi-tui';
 import type { ManagedWorktree } from './paths.js';
-import type { NodeModulesStrategy } from '../types.js';
-import { setLastNodeModulesStrategy } from '../state.js';
+import type { NodeModulesStrategy, SymlinkSelections } from '../types.js';
+import { PRESET_SYMLINK_TARGETS } from '../types.js';
+import {
+	setLastNodeModulesStrategy,
+	setLastSymlinkTargetIds,
+	getLastSymlinkTargetIds,
+	getLastNodeModulesStrategy,
+} from '../state.js';
 import { getDirtyCount, getAheadBehind } from './git.js';
 
 // ── 常量 ──
@@ -389,6 +395,8 @@ export async function askSessionStrategy(
 		if (hasHistory) {
 			options.push({ value: 'resume', label: 'Resume existing session' });
 		}
+		// 始终允许带 session 切换回 main
+		options.push({ value: 'new', label: 'Switch to main (new session)' });
 	} else {
 		// worktree 目标：clone 始终可用（有 history 时覆盖，无 history 时首次建立）
 		if (hasHistory) {
@@ -427,7 +435,170 @@ export async function askSessionStrategy(
 }
 
 // ═══════════════════════════════════════════
-// node_modules 策略
+// 多选面板（通用）
+// ═══════════════════════════════════════════
+
+interface MultiSelectItem {
+	id: string;
+	label: string;
+	hint: string;
+	selected: boolean;
+}
+
+class MultiSelectPanel {
+	private tui_: { requestRender: () => void };
+	private theme_: any;
+	private done_: (v: string[] | null) => void;
+	private items_: MultiSelectItem[];
+	private cursor_: number;
+	private title_: string;
+	private footer_: string;
+
+	constructor(opts: {
+		tui: { requestRender: () => void };
+		theme: any;
+		done: (v: string[] | null) => void;
+		title: string;
+		items: MultiSelectItem[];
+		cursor?: number;
+		footer?: string;
+	}) {
+		this.tui_ = opts.tui;
+		this.theme_ = opts.theme;
+		this.done_ = opts.done;
+		this.title_ = opts.title;
+		this.items_ = opts.items;
+		this.cursor_ = opts.cursor ?? 0;
+		this.footer_ = opts.footer ?? 'up/down navigate  Space toggle  Enter confirm  Esc cancel';
+	}
+
+	handleInput(data: string): void {
+		const kb = getKeybindings();
+
+		if (kb.matches(data, 'tui.select.up') || matchesKey(data, 'up')) {
+			this.cursor_ = Math.max(0, this.cursor_ - 1);
+			this.tui_.requestRender();
+			return;
+		}
+
+		if (kb.matches(data, 'tui.select.down') || matchesKey(data, 'down')) {
+			this.cursor_ = Math.min(this.items_.length - 1, this.cursor_ + 1);
+			this.tui_.requestRender();
+			return;
+		}
+
+		if (matchesKey(data, 'space')) {
+			this.items_[this.cursor_].selected = !this.items_[this.cursor_].selected;
+			this.tui_.requestRender();
+			return;
+		}
+
+		if (matchesKey(data, 'enter')) {
+			const selected = this.items_.filter((it) => it.selected).map((it) => it.id);
+			this.done_(selected.length > 0 ? selected : null);
+			return;
+		}
+
+		if (matchesKey(data, 'escape')) {
+			this.done_(null);
+		}
+	}
+
+	render(width: number): string[] {
+		const th = this.theme_;
+		const lines: string[] = [];
+
+		lines.push(truncateToWidth(th.fg('accent', th.bold(this.title_)), width));
+		lines.push(truncateToWidth(th.fg('dim', '\u2500'.repeat(width)), width));
+
+		for (let i = 0; i < this.items_.length; i++) {
+			const item = this.items_[i];
+			const arrow = i === this.cursor_ ? th.fg('accent', '>') : ' ';
+			const check = item.selected ? th.fg('accent', '[x]') : th.fg('dim', '[ ]');
+			const paddedLabel = item.label + ' '.repeat(Math.max(0, 17 - visibleWidth(item.label)));
+			const hintText = th.fg('dim', item.hint);
+
+			lines.push(truncateToWidth(` ${arrow} ${check} ${paddedLabel} ${hintText}`, width));
+		}
+
+		lines.push(truncateToWidth(th.fg('dim', '\u2500'.repeat(width)), width));
+		lines.push(truncateToWidth(th.fg('dim', this.footer_), width));
+
+		return lines;
+	}
+
+	invalidate(): void {}
+}
+
+// ═══════════════════════════════════════════
+// 自定义路径输入面板
+// ═══════════════════════════════════════════
+
+class CustomPathsInput {
+	private tui_: { requestRender: () => void };
+	private theme_: any;
+	private done_: (v: string | null) => void;
+	private input_: string;
+
+	constructor(opts: {
+		tui: { requestRender: () => void };
+		theme: any;
+		done: (v: string | null) => void;
+	}) {
+		this.tui_ = opts.tui;
+		this.theme_ = opts.theme;
+		this.done_ = opts.done;
+		this.input_ = '';
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, 'enter')) {
+			this.done_(this.input_.trim() || null);
+			return;
+		}
+		if (matchesKey(data, 'escape')) {
+			this.done_(null);
+			return;
+		}
+		if (data === '\x7F' || data === '\b') {
+			this.input_ = this.input_.slice(0, -1);
+			this.tui_.requestRender();
+		} else if (data.length === 1 && data >= ' ') {
+			this.input_ += data;
+			this.tui_.requestRender();
+		}
+	}
+
+	render(width: number): string[] {
+		const th = this.theme_;
+		const lines: string[] = [];
+
+		lines.push(truncateToWidth(th.fg('accent', th.bold('Custom symlink paths')), width));
+		lines.push(truncateToWidth(th.fg('dim', '\u2500'.repeat(width)), width));
+		lines.push(
+			truncateToWidth(
+				th.fg('dim', 'Enter paths relative to repo root. Separate multiple with ;'),
+				width,
+			),
+		);
+		lines.push(truncateToWidth(th.fg('dim', ''), width));
+		lines.push(truncateToWidth(th.fg('dim', 'Examples:'), width));
+		lines.push(truncateToWidth(th.fg('dim', '  .venv;public/assets'), width));
+		lines.push(truncateToWidth(th.fg('dim', '  .mypy_cache;.pytest_cache'), width));
+		lines.push(truncateToWidth(th.fg('dim', '  storage/cache;uploads'), width));
+		lines.push(truncateToWidth(th.fg('dim', '\u2500'.repeat(width)), width));
+		lines.push(truncateToWidth(` ${th.fg('accent', '>')} ${this.input_}`, width));
+		lines.push(truncateToWidth(th.fg('dim', '\u2500'.repeat(width)), width));
+		lines.push(truncateToWidth(th.fg('dim', '[Enter] confirm  [Esc] skip / cancel'), width));
+
+		return lines;
+	}
+
+	invalidate(): void {}
+}
+
+// ═══════════════════════════════════════════
+// node_modules 策略（内部）
 // ═══════════════════════════════════════════
 
 export async function askNodeModulesStrategy(
@@ -464,6 +635,113 @@ export async function askNodeModulesStrategy(
 			invalidate: () => selector.invalidate(),
 		};
 	});
+}
+
+// ═══════════════════════════════════════════
+// 软链接目标多选面板（顶层入口）
+// ═══════════════════════════════════════════
+
+/**
+ * 弹出软链接目标多选面板，返回用户选择或 null（取消）。
+ *
+ * 流程：
+ *  1. 多选面板（预设 + 「其他」）
+ *  2. 若「其他」选中 → 自定义路径输入
+ *  3. 若 node_modules 选中 → 策略选择
+ */
+export async function askSymlinkTargetsPanel(ctx: any): Promise<SymlinkSelections | null> {
+	if (!ctx.hasUI) {
+		// 非 TUI 模式：使用已保存的偏好
+		const lastIds = getLastSymlinkTargetIds();
+		const targets = PRESET_SYMLINK_TARGETS.filter((t) => lastIds.includes(t.id));
+		const nmStrat = getLastNodeModulesStrategy();
+		return {
+			targets,
+			customPaths: [],
+			nodeModulesStrategy: nmStrat,
+		};
+	}
+
+	// 恢复上次选择
+	const lastIds = getLastSymlinkTargetIds();
+
+	const items: MultiSelectItem[] = [
+		...PRESET_SYMLINK_TARGETS.map((t) => ({
+			id: t.id,
+			label: t.label,
+			hint: t.hint,
+			selected: lastIds.includes(t.id),
+		})),
+		{
+			id: '__other__',
+			label: 'Other...',
+			hint: 'Custom paths',
+			selected: lastIds.includes('__other__'),
+		},
+	];
+
+	// 步骤 1: 多选面板
+	const selectedIds = await (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<
+		string[] | null
+	>((tui, theme, _kb, done) => {
+		const panel = new MultiSelectPanel({
+			tui,
+			theme,
+			done,
+			title: 'Symlink to worktree',
+			items,
+		});
+		return {
+			render: (w: number) => panel.render(w),
+			handleInput: (d: string) => panel.handleInput(d),
+			invalidate: () => panel.invalidate(),
+		};
+	});
+
+	if (selectedIds === null) return null;
+
+	// 保存选择（不持久化 __other__—避免每次创建都弹自定义路径输入）
+	setLastSymlinkTargetIds(selectedIds.filter((id) => id !== '__other__'));
+
+	// 解析选中项
+	const presetTargets = PRESET_SYMLINK_TARGETS.filter((t) => selectedIds.includes(t.id));
+	const hasOther = selectedIds.includes('__other__');
+
+	// 步骤 2: 「其他」自定义路径
+	let customPaths: string[] = [];
+	if (hasOther) {
+		const rawInput = await (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<
+			string | null
+		>((tui, theme, _kb, done) => {
+			const input = new CustomPathsInput({ tui, theme, done });
+			return {
+				render: (w: number) => input.render(w),
+				handleInput: (d: string) => input.handleInput(d),
+				invalidate: () => input.invalidate(),
+			};
+		});
+
+		if (rawInput === null) return null; // 取消
+		customPaths = rawInput
+			.split(';')
+			.map((s) => s.trim())
+			.filter((s) => s.length > 0);
+	}
+
+	// 步骤 3: node_modules 策略
+	const hasNodeModules = presetTargets.some((t) => t.id === 'node_modules');
+	let nodeModulesStrategy: NodeModulesStrategy = getLastNodeModulesStrategy();
+	if (hasNodeModules) {
+		const strategy = await askNodeModulesStrategy(ctx, nodeModulesStrategy);
+		if (strategy === null) return null;
+		nodeModulesStrategy = strategy;
+	}
+
+	return {
+		targets: presetTargets,
+		customPaths,
+		nodeModulesStrategy,
+	};
 }
 
 // ═══════════════════════════════════════════
@@ -817,7 +1095,7 @@ export async function showOperationSubmenu(ctx: any, worktreeName: string): Prom
 export async function showConflictPanel(
 	ctx: any,
 	conflicts: Array<{ file: string; lines: string }>,
-	repoRoot: string,
+	_repoRoot: string,
 	stashMsg?: string,
 ): Promise<void> {
 	if (!ctx.hasUI) return;
@@ -907,7 +1185,7 @@ export async function showConflictPanel(
  */
 export async function showPostMergeGuide(
 	ctx: any,
-	repoRoot: string,
+	_repoRoot: string,
 	resultMsg: string,
 	type: 'merge' | 'rebase',
 ): Promise<void> {

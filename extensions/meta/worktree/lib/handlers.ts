@@ -32,7 +32,7 @@ import {
 	showWorktreeTui,
 	showOperationSubmenu,
 	askSessionStrategy,
-	askNodeModulesStrategy,
+	askSymlinkTargetsPanel,
 	promptWorktreeName,
 	confirmDelete,
 	confirmForceDelete,
@@ -48,7 +48,6 @@ import {
 	hasClonedSession,
 	findClonedSessionFile,
 } from './session.js';
-import { getLastNodeModulesStrategy } from '../state.js';
 
 const log = createLogger('pi-worktree');
 
@@ -324,18 +323,27 @@ async function handleCreate(
 	}
 	if (!name) name = pickAvailableName(repoRoot);
 
-	// 2. node_modules 策略
-	const lastStrat = getLastNodeModulesStrategy();
-	const nodeModulesStrategy = await askNodeModulesStrategy(ctx, lastStrat);
-	if (nodeModulesStrategy === null) {
+	// 2. 选择软链接目标
+	const selections = await askSymlinkTargetsPanel(ctx);
+	if (selections === null) {
 		ctx.ui.notify('Cancelled', 'warning');
 		return;
 	}
 
-	log.info('creating worktree', { name, nodeModulesStrategy });
+	log.info('creating worktree', {
+		name,
+		nodeModulesStrategy: selections.nodeModulesStrategy,
+		targetIds: selections.targets.map((t) => t.id).join(','),
+	});
 
 	// 3. 创建
-	const result = createWorktree(repoRoot, name, flags.branch, nodeModulesStrategy);
+	const result = createWorktree(
+		repoRoot,
+		name,
+		flags.branch,
+		selections.nodeModulesStrategy,
+		selections,
+	);
 	if (!result.ok) {
 		ctx.ui.notify(result.message, 'error');
 		return;

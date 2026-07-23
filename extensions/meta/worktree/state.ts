@@ -13,10 +13,12 @@ const log = createLogger('pi-worktree');
 
 interface WorktreePrefs {
 	lastNodeModulesStrategy: NodeModulesStrategy;
+	lastSymlinkTargetIds: string[];
 }
 
 const DEFAULT_PREFS: WorktreePrefs = {
 	lastNodeModulesStrategy: 'symlink',
+	lastSymlinkTargetIds: ['husky', 'pi', 'node_modules'],
 };
 
 let store: ConfigStore<WorktreePrefs> | null = null;
@@ -49,6 +51,10 @@ export function getLastNodeModulesStrategy(): NodeModulesStrategy {
 	return cached.lastNodeModulesStrategy;
 }
 
+export function getLastSymlinkTargetIds(): string[] {
+	return cached.lastSymlinkTargetIds;
+}
+
 // ── 写入 ──
 
 export function setLastNodeModulesStrategy(strategy: NodeModulesStrategy): void {
@@ -57,6 +63,17 @@ export function setLastNodeModulesStrategy(strategy: NodeModulesStrategy): void 
 		getStore().save(cached, 'user');
 	} catch (err) {
 		log.warn('failed to save lastNodeModulesStrategy pref', {
+			error: String(err),
+		});
+	}
+}
+
+export function setLastSymlinkTargetIds(ids: string[]): void {
+	cached.lastSymlinkTargetIds = ids;
+	try {
+		getStore().save(cached, 'user');
+	} catch (err) {
+		log.warn('failed to save lastSymlinkTargetIds pref', {
 			error: String(err),
 		});
 	}

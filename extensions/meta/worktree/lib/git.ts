@@ -223,7 +223,7 @@ export function getAheadBehind(
 ): { ahead: number; behind: number } {
 	try {
 		const ref = remote ? `${remote}/${branch}` : `origin/${branch}`;
-		const out = execSync(`git rev-list --left-right --count ${ref}...HEAD`, {
+		const out = execSync(`git rev-list --left-right --count ${ref}...HEAD 2>/dev/null`, {
 			cwd: repoPath,
 			encoding: 'utf-8',
 		}).trim();
