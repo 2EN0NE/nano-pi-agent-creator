@@ -69,9 +69,9 @@ test_it "inline mode syncs theme" <<'TEST'
   clean_test_dir
 TEST
 
-# ── 用例 6：Profile 模式同步（full-project dry-run） ──
-test_it "profile mode full-project dry-run lists all extensions" <<'TEST'
-  output=$(npx tsx "$SYNC_SCRIPT" --dry-run --profile full-project 2>&1)
+# ── 用例 6：Profile 模式同步（project dry-run） ──
+test_it "profile mode project dry-run lists resources" <<'TEST'
+  output=$(npx tsx "$SYNC_SCRIPT" --dry-run --profile project 2>&1)
   echo "$output" | grep -q "extensions/" || { echo "Missing extensions listing"; exit 1; }
   echo "$output" | grep -q "skills/" || { echo "Missing skills listing"; exit 1; }
   echo "$output" | grep -q "themes/" || { echo "Missing themes listing"; exit 1; }
@@ -115,17 +115,15 @@ TEST
 test_it "profile mode --all lists all profiles" <<'TEST'
   output=$(npx tsx "$SYNC_SCRIPT" --dry-run --all 2>&1)
   echo "$output" | grep -q "ALL (" || { echo "Missing ALL indicator"; exit 1; }
-  echo "$output" | grep -q "dev-test" || { echo "Missing dev-test"; exit 1; }
   echo "$output" | grep -q "user-install" || { echo "Missing user-install"; exit 1; }
-  echo "$output" | grep -q "full-project" || { echo "Missing full-project"; exit 1; }
+  echo "$output" | grep -q "project" || { echo "Missing project"; exit 1; }
 TEST
 
 # ── 用例 12：默认 Profile 为 full-project ──
-test_it "default profile is full-project" <<'TEST'
+test_it "default profile is user-install" <<'TEST'
   output=$(npx tsx "$SYNC_SCRIPT" --dry-run 2>&1)
-  echo "$output" | grep -q "full-project" || { echo "Default profile not full-project"; exit 1; }
-  echo "$output" | grep -q "No profile specified" || { echo "Missing default indicator"; exit 1; }
-  echo "$output" | grep -q 'Target:.*\.pi' || { echo "Default target not .pi"; exit 1; }
+  echo "$output" | grep -q "user-install" || { echo "Default profile not user-install"; exit 1; }
+  echo "$output" | grep -q 'Target:.*\.pi/agent' || { echo "Default target not .pi/agent"; exit 1; }
 TEST
 
 # ── 用例 13：内联模式 --exclude 未对外暴露（需通过 profile 使用） ──

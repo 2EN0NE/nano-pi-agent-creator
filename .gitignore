@@ -15,3 +15,8 @@ scripts/sync-to-local-pi.log
 
 .worktrees/
 **/dist/
+
+# Spurious self-referencing symlinks from npm link in extension packages
+extensions/meta/pi-logger/pi-logger
+extensions/meta/pi-config/pi-config
+extensions/meta/selector/selector
