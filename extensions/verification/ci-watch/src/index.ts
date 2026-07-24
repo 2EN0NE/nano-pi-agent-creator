@@ -572,7 +572,7 @@ async function startCiWatch(
 		ctx.ui.notify(`[ci-watch] ${refLabel} CI 通过！`, 'info');
 	} else if (result.outcome === 'fail') {
 		pi.sendUserMessage(
-			`[ci-watch] ${refLabel} CI 失败。\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n请修复代码，并在提交前先本地验证（tsc --noEmit 检查类型、运行 e2e 测试、格式化代码），再 commit 和 push，然后执行 /ci-watch ${refShort} 重新监控。`,
+			`[ci-watch] ${refLabel} CI 失败。\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n请修复代码，并在提交前先本地验证（如类型检查、测试、格式化等），再 commit 和 push，然后执行 /ci-watch ${refShort} 重新监控。`,
 			{ deliverAs: 'followUp' },
 		);
 	} else {
@@ -749,7 +749,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`[ci-watch] 自动：${refLabel} CI 通过！`, 'info');
 			} else if (result.outcome === 'fail') {
 				pi.sendUserMessage(
-					`[ci-watch] 自动：${refLabel} CI 失败。\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n请修复代码，并在提交前先本地验证（tsc --noEmit 检查类型、运行 e2e 测试、格式化代码），再 commit 和 push，然后 /ci-watch ${prOutput ?? branch} 重新监控。`,
+					`[ci-watch] 自动：${refLabel} CI 失败。\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n请修复代码，并在提交前先本地验证（如类型检查、测试、格式化等），再 commit 和 push，然后 /ci-watch ${prOutput ?? branch} 重新监控。`,
 					{ deliverAs: 'followUp' },
 				);
 			} else {
@@ -772,7 +772,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: '监控 PR 或分支的 CI 状态，等待完成，如有失败则返回失败日志',
 		promptGuidelines: [
 			'在推送分支或打开 PR 后使用 ci_watch。支持 PR 编号或分支名。',
-			'当 ci_watch 报告失败时：1) 读取失败日志并修复问题。2) 提交前必须先在本地运行验证：检查 TypeScript 错误（tsc --noEmit 或 npm run lint）、为变更的模块运行 e2e 测试（bash test/scripts/run-e2e.sh --ext <模块名>）、格式化代码（npx prettier --write .）。3) 确认本地验证通过后再 commit 和 push。4) 调用 ci_watch 再次检查（最多 3 次尝试）。',
+			'当 ci_watch 报告失败时：1) 读取失败日志并修复问题。2) 提交前必须先在本地运行验证（如类型检查、测试、格式化等），确认通过后再 commit 和 push。3) 调用 ci_watch 再次检查（最多 3 次尝试）。',
 			'不要主动调用 ci_watch——只有用户明确要求监控 CI 时才调用。',
 		],
 		parameters: Type.Object({
@@ -838,7 +838,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: 'text',
-							text: `${result.message}\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n修复后，先本地验证（tsc --noEmit 检查类型、运行 e2e 测试、格式化代码），再 commit 和 push，然后 ci_watch attempt=${attempt + 1}。`,
+							text: `${result.message}\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n修复后，先本地验证（如类型检查、测试、格式化等），再 commit 和 push，然后 ci_watch attempt=${attempt + 1}。`,
 						},
 					],
 					details: { status: 'fail', pr, attempt, failedChecks: result.failedRuns },
