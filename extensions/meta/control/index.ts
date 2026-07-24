@@ -1,36 +1,34 @@
 /**
- * Session Control Extension
+ * 会话控制扩展
  *
- * Enables inter-session communication via Unix domain sockets.  When enabled with
- * the `--session-control` flag, each pi session creates a control socket at
- * `~/.pi/session-control/<session-id>.sock` that accepts JSON-RPC commands.
+ * 通过 Unix domain socket 实现 pi 会话间的通信。启用 `--session-control` 标志后，
+ * 每个 pi 会话会在 `~/.pi/session-control/<session-id>.sock` 创建一个控制 socket，
+ * 接受 JSON-RPC 命令。
  *
- * Features:
- * - Send messages to other running pi sessions (steer or follow-up mode)
- *   via tool (`send_to_session`) or startup CLI flags (`--control-session`, `--send-session-message`)
- * - Retrieve the last assistant message from a session
- * - Get AI-generated summaries of session activity
- * - Clear/rewind sessions to their initial state
- * - Subscribe to turn_end events for async coordination
+ * 功能：
+ * - 向其他运行中的 pi 会话发送消息（steer 或 follow_up 模式）
+ *   可通过 tool（`send_to_session`）或启动 CLI 标志（`--control-session`, `--send-session-message`）
+ * - 获取某个会话的最后一条 assistant 消息
+ * - 获取 AI 生成的会话活动摘要
+ * - 清空/重置会话到初始状态
+ * - 订阅 turn_end 事件以实现异步协作
  *
- * Once loaded the extension registers a `send_to_session` tool that allows the AI to
- * communicate with other pi sessions programmatically.
+ * 加载后，扩展会注册一个 `send_to_session` tool，让 AI 可以编程式地与其他 pi 会话通信。
  *
- * Usage:
+ * 用法：
  *   pi --session-control
  *
- * One-shot startup send:
+ * 一次性启动发送：
  *   pi -p --session-control --control-session <session-name|session-id> --send-session-message <text>
  *     [--send-session-mode steer|follow_up] [--send-session-wait turn_end|message_processed]
  *     [--send-session-include-sender-info]
- *   (startup send is one-way by default; use --send-session-wait turn_end to capture response on stdout)
+ *   （启动发送默认是单向的；使用 --send-session-wait turn_end 可在 stdout 上捕获响应）
  *
- * Environment:
- *   Sets PI_SESSION_ID when enabled, allowing child processes to discover
- *   the current session.
+ * 环境变量：
+ *   启用时设置 PI_SESSION_ID，子进程可通过它发现当前会话。
  *
- * RPC Protocol:
- *   Commands are newline-delimited JSON objects with a `type` field:
+ * RPC 协议：
+ *   命令是以换行符分隔的 JSON 对象，包含 `type` 字段：
  *   - { type: "send", message: "...", mode?: "steer"|"follow_up" }
  *   - { type: "get_message" }
  *   - { type: "get_summary" }
@@ -38,8 +36,8 @@
  *   - { type: "abort" }
  *   - { type: "subscribe", event: "turn_end" }
  *
- *   Responses are JSON objects with { type: "response", command, success, data?, error? }
- *   Events are JSON objects with { type: "event", event, data?, subscriptionId? }
+ *   响应为 { type: "response", command, success, data?, error? }
+ *   事件为 { type: "event", event, data?, subscriptionId? }
  */
 
 import type {
@@ -1063,28 +1061,28 @@ function shouldRegisterControlTools(pi: ExtensionAPI): boolean {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag(CONTROL_FLAG, {
-		description: 'Enable per-session control socket under ~/.pi/session-control',
+		description: '启用 per-session 控制 socket，路径为 ~/.pi/session-control/<session-id>.sock',
 		type: 'boolean',
 	});
 	pi.registerFlag(CONTROL_TARGET_FLAG, {
-		description: 'Target session name or session id for startup control send',
+		description: '目标会话名称或会话 ID，用于启动时发送控制消息',
 		type: 'string',
 	});
 	pi.registerFlag(CONTROL_SEND_MESSAGE_FLAG, {
-		description: 'Message to send to --control-session at startup',
+		description: '启动时发送给 --control-session 的消息内容',
 		type: 'string',
 	});
 	pi.registerFlag(CONTROL_SEND_MODE_FLAG, {
-		description: 'Startup send mode: steer or follow_up',
+		description: '启动发送模式：steer（立刻处理）或 follow_up（当前任务完成后）',
 		type: 'string',
 		default: 'steer',
 	});
 	pi.registerFlag(CONTROL_SEND_WAIT_FLAG, {
-		description: 'Startup send wait mode: turn_end or message_processed',
+		description: '启动发送等待模式：turn_end（等待 AI 回复）或 message_processed（仅确认送达）',
 		type: 'string',
 	});
 	pi.registerFlag(CONTROL_SEND_INCLUDE_SENDER_FLAG, {
-		description: 'Include <sender_info> in startup messages (advanced; default: false)',
+		description: '在启动发送消息中包含 <sender_info>（高级选项，默认关闭）',
 		type: 'boolean',
 	});
 
@@ -1182,68 +1180,67 @@ function registerSessionTool(pi: ExtensionAPI, state: SocketState): void {
 	log.debug('registerTool');
 	pi.registerTool({
 		name: 'send_to_session',
-		label: 'Send To Session',
-		description: `Interact with another running pi session via its control socket.
+		label: 'Send To Session', // 发送到会话
+		description: `通过控制 socket 与另一个运行中的 pi 会话交互。
 
-Actions:
-- send: Send a message (default). Requires 'message' parameter.
-- get_message: Get the most recent assistant message.
-- get_summary: Get a summary of activity since the last user prompt.
-- clear: Rewind session to initial state.
+操作（Actions）：
+- send: 发送消息（默认）。需要 'message' 参数。
+- get_message: 获取最近一条 assistant 消息。
+- get_summary: 获取自上次用户输入以来的活动摘要（由 LLM 生成）。
+- clear: 将会话回滚到初始状态。
 
-Target selection:
-- sessionId: UUID of the session.
-- sessionName: session name (alias from /name).
+目标选择：
+- sessionId: 会话的 UUID。
+- sessionName: 会话名称（由 /name 命令设置的别名）。
 
-Wait behavior (only for action=send):
-- wait_until=turn_end: Wait for the turn to complete, returns last assistant message.
-- wait_until=message_processed: Returns immediately after message is queued.
+等待行为（仅适用于 action=send）：
+- wait_until=turn_end: 等待 AI 回复完成后，返回最后一条 assistant 消息。
+- wait_until=message_processed: 消息入队后立即返回，不等待 AI 处理。
 
-CLI bridge (for shell scripts/background jobs):
-- Current session id is available in shell/bash as $PI_SESSION_ID (set when --session-control is enabled).
-- Use $PI_SESSION_ID when you need the current session; do not call list_sessions just to discover your own id.
-- Target session must be running with --session-control.
-- One-shot startup send is available via extension flags:
+CLI 桥接（用于 shell 脚本/后台任务）：
+- 当前会话 ID 可通过环境变量 $PI_SESSION_ID 获取（启用 --session-control 后自动设置）。
+- 需要当前会话 ID 时直接用 $PI_SESSION_ID，无需调用 list_sessions。
+- 目标会话必须已启用 --session-control 运行。
+- 一次性启动发送可通过以下扩展标志完成：
   --session-control
   --control-session <session-name|session-id>
   --send-session-message <text>
-  --send-session-mode <steer|follow_up> (optional, default: steer)
-  --send-session-wait <turn_end|message_processed> (optional)
-  --send-session-include-sender-info (optional, advanced; default: off)
-- Startup sends are one-way by default (no sender_info), which avoids reply attempts to short-lived 'pi -p' sender sessions.
-- If a script needs a response, use --send-session-wait turn_end and read stdout.
-- Example script usage (one-way):
-  pi -p --session-control --control-session "$PI_SESSION_ID" --send-session-message "Background task finished" --send-session-mode follow_up --send-session-wait message_processed
-- Example request/response usage:
-  pi -p --session-control --control-session "$PI_SESSION_ID" --send-session-message "What is the current time?" --send-session-wait turn_end
+  --send-session-mode <steer|follow_up>（可选，默认: steer）
+  --send-session-wait <turn_end|message_processed>（可选）
+  --send-session-include-sender-info（可选，高级，默认关闭）
+- 启动发送默认是单向的（不包含 sender_info），避免短生命周期 'pi -p' 发送者会话试图回复。
+- 如果脚本需要响应，使用 --send-session-wait turn_end 并在 stdout 读取结果。
+- 示例脚本（单向）：
+  pi -p --session-control --control-session "$PI_SESSION_ID" --send-session-message "后台任务完成" --send-session-mode follow_up --send-session-wait message_processed
+- 示例请求/响应：
+  pi -p --session-control --control-session "$PI_SESSION_ID" --send-session-message "现在几点？" --send-session-wait turn_end
 
-Note: If you ask the target session to reply back via sender_info, do not use wait_until; waiting is redundant and can duplicate responses.
+注意：如果要求目标会话通过 sender_info 回复，不要使用 wait_until；等待会导致重复响应。
 
-Messages automatically include sender session info for replies. When you want a response, instruct the target session to reply directly to the sender by calling send_to_session with the sender_info reference (do not poll get_message).`,
+消息会自动附带发送者信息以便回复。如果希望目标会话回复，指示目标会话通过 send_to_session 工具直接回复发送者（不要轮询 get_message）。`,
 		parameters: Type.Object({
-			sessionId: Type.Optional(Type.String({ description: 'Target session id (UUID)' })),
-			sessionName: Type.Optional(Type.String({ description: 'Target session name (alias)' })),
+			sessionId: Type.Optional(Type.String({ description: '目标会话 ID (UUID)' })),
+			sessionName: Type.Optional(Type.String({ description: '目标会话名称（别名）' })),
 			action: Type.Optional(
 				StringEnum(['send', 'get_message', 'get_summary', 'clear'] as const, {
-					description: 'Action to perform (default: send)',
+					description: '执行的操作（默认: send）',
 					default: 'send',
 				}),
 			),
 			message: Type.Optional(
 				Type.String({
-					description: 'Message to send (required for action=send)',
+					description: '要发送的消息（action=send 时必须）',
 				}),
 			),
 			mode: Type.Optional(
 				StringEnum(['steer', 'follow_up'] as const, {
-					description:
-						'Delivery mode for send: steer (immediate) or follow_up (after task)',
+					description: '发送模式：steer（立即处理）或 follow_up（当前任务完成后）',
 					default: 'steer',
 				}),
 			),
 			wait_until: Type.Optional(
 				StringEnum(['turn_end', 'message_processed'] as const, {
-					description: 'Wait behavior for send action',
+					description: '发送操作的等待行为',
 				}),
 			),
 		}),
@@ -1258,9 +1255,9 @@ Messages automatically include sender session info for replies. When you want a 
 				targetSessionId = await resolveSessionIdFromAlias(sessionName);
 				if (!targetSessionId) {
 					return {
-						content: [{ type: 'text', text: 'Unknown session name' }],
+						content: [{ type: 'text', text: '未知的会话名称' }],
 						isError: true,
-						details: { error: 'Unknown session name' },
+						details: { error: '未知的会话名称' },
 					};
 				}
 			}
@@ -1268,16 +1265,16 @@ Messages automatically include sender session info for replies. When you want a 
 			if (sessionId) {
 				if (!isSafeSessionId(sessionId)) {
 					return {
-						content: [{ type: 'text', text: 'Invalid session id' }],
+						content: [{ type: 'text', text: '无效的会话 ID' }],
 						isError: true,
-						details: { error: 'Invalid session id' },
+						details: { error: '无效的会话 ID' },
 					};
 				}
 				if (targetSessionId && targetSessionId !== sessionId) {
 					return {
-						content: [{ type: 'text', text: 'Session name does not match session id' }],
+						content: [{ type: 'text', text: '会话名称与会话 ID 不匹配' }],
 						isError: true,
-						details: { error: 'Session name does not match session id' },
+						details: { error: '会话名称与会话 ID 不匹配' },
 					};
 				}
 				targetSessionId = sessionId;
@@ -1285,9 +1282,9 @@ Messages automatically include sender session info for replies. When you want a 
 
 			if (!targetSessionId) {
 				return {
-					content: [{ type: 'text', text: 'Missing session id or session name' }],
+					content: [{ type: 'text', text: '缺少会话 ID 或会话名称' }],
 					isError: true,
-					details: { error: 'Missing session id or session name' },
+					details: { error: '缺少会话 ID 或会话名称' },
 				};
 			}
 
@@ -1305,7 +1302,7 @@ Messages automatically include sender session info for replies. When you want a 
 							content: [
 								{
 									type: 'text',
-									text: `Failed: ${result.response.error ?? 'unknown error'}`,
+									text: `操作失败：${result.response.error ?? '未知错误'}`,
 								},
 							],
 							isError: true,
@@ -1315,9 +1312,7 @@ Messages automatically include sender session info for replies. When you want a 
 					const data = result.response.data as { message?: ExtractedMessage };
 					if (!data?.message) {
 						return {
-							content: [
-								{ type: 'text', text: 'No assistant message found in session' },
-							],
+							content: [{ type: 'text', text: '会话中未找到 assistant 消息' }],
 							details: result,
 						};
 					}
@@ -1338,7 +1333,7 @@ Messages automatically include sender session info for replies. When you want a 
 							content: [
 								{
 									type: 'text',
-									text: `Failed: ${result.response.error ?? 'unknown error'}`,
+									text: `操作失败：${result.response.error ?? '未知错误'}`,
 								},
 							],
 							isError: true,
@@ -1351,7 +1346,7 @@ Messages automatically include sender session info for replies. When you want a 
 					};
 					if (!data?.summary) {
 						return {
-							content: [{ type: 'text', text: 'No summary generated' }],
+							content: [{ type: 'text', text: '未生成摘要' }],
 							details: result,
 						};
 					}
@@ -1359,7 +1354,7 @@ Messages automatically include sender session info for replies. When you want a 
 						content: [
 							{
 								type: 'text',
-								text: `Summary (via ${data.model}):\n\n${data.summary}`,
+								text: `摘要（通过 ${data.model}）：\n\n${data.summary}`,
 							},
 						],
 						details: { summary: data.summary, model: data.model },
@@ -1377,7 +1372,7 @@ Messages automatically include sender session info for replies. When you want a 
 							content: [
 								{
 									type: 'text',
-									text: `Failed to clear: ${result.response.error ?? 'unknown error'}`,
+									text: `清除失败：${result.response.error ?? '未知错误'}`,
 								},
 							],
 							isError: true,
@@ -1388,7 +1383,7 @@ Messages automatically include sender session info for replies. When you want a 
 						cleared?: boolean;
 						alreadyAtRoot?: boolean;
 					};
-					const msg = data?.alreadyAtRoot ? 'Session already at root' : 'Session cleared';
+					const msg = data?.alreadyAtRoot ? '会话已在初始状态' : '会话已清除';
 					return {
 						content: [{ type: 'text', text: msg }],
 						details: data,
@@ -1398,7 +1393,7 @@ Messages automatically include sender session info for replies. When you want a 
 				// action === "send"
 				if (!params.message || params.message.trim().length === 0) {
 					return {
-						content: [{ type: 'text', text: 'Missing message for send action' }],
+						content: [{ type: 'text', text: '缺少要发送的消息' }],
 						isError: true,
 						details: { error: 'Missing message' },
 					};
@@ -1427,7 +1422,7 @@ Messages automatically include sender session info for replies. When you want a 
 							content: [
 								{
 									type: 'text',
-									text: `Failed: ${result.response.error ?? 'unknown error'}`,
+									text: `操作失败：${result.response.error ?? '未知错误'}`,
 								},
 							],
 							isError: true,
@@ -1435,7 +1430,7 @@ Messages automatically include sender session info for replies. When you want a 
 						};
 					}
 					return {
-						content: [{ type: 'text', text: 'Message delivered to session' }],
+						content: [{ type: 'text', text: '消息已送达会话' }],
 						details: result.response.data,
 					};
 				}
@@ -1452,7 +1447,7 @@ Messages automatically include sender session info for replies. When you want a 
 							content: [
 								{
 									type: 'text',
-									text: `Failed: ${result.response.error ?? 'unknown error'}`,
+									text: `操作失败：${result.response.error ?? '未知错误'}`,
 								},
 							],
 							isError: true,
@@ -1466,7 +1461,7 @@ Messages automatically include sender session info for replies. When you want a 
 							content: [
 								{
 									type: 'text',
-									text: 'Turn completed but no assistant message found',
+									text: 'AI 回复完成但未找到 assistant 消息',
 								},
 							],
 							details: { turnIndex: result.event?.turnIndex },
@@ -1489,7 +1484,7 @@ Messages automatically include sender session info for replies. When you want a 
 						content: [
 							{
 								type: 'text',
-								text: `Failed: ${result.response.error ?? 'unknown error'}`,
+								text: `操作失败：${result.response.error ?? '未知错误'}`,
 							},
 						],
 						isError: true,
@@ -1501,15 +1496,15 @@ Messages automatically include sender session info for replies. When you want a 
 					content: [
 						{
 							type: 'text',
-							text: `Message sent to session ${displayTarget || targetSessionId}`,
+							text: `消息已发送到会话 ${displayTarget || targetSessionId}`,
 						},
 					],
 					details: result.response.data,
 				};
 			} catch (error) {
-				const message = error instanceof Error ? error.message : 'Unknown error';
+				const message = error instanceof Error ? error.message : '未知错误';
 				return {
-					content: [{ type: 'text', text: `Failed: ${message}` }],
+					content: [{ type: 'text', text: `操作失败：${message}` }],
 					isError: true,
 					details: { error: message },
 				};
@@ -1523,7 +1518,7 @@ Messages automatically include sender session info for replies. When you want a 
 				sessionRef.length > 12 ? sessionRef.slice(0, 8) + '...' : sessionRef;
 
 			// Build the header line
-			let header = theme.fg('toolTitle', theme.bold('→ session '));
+			let header = theme.fg('toolTitle', theme.bold('→ 会话 '));
 			header += theme.fg('accent', shortSessionRef);
 
 			// Add action-specific info
@@ -1531,7 +1526,7 @@ Messages automatically include sender session info for replies. When you want a 
 				const mode = args.mode ?? 'steer';
 				const wait = args.wait_until;
 				let info = theme.fg('muted', ` (${mode}`);
-				if (wait) info += theme.fg('dim', `, wait: ${wait}`);
+				if (wait) info += theme.fg('dim', `, 等待: ${wait}`);
 				info += theme.fg('muted', ')');
 				header += info;
 			} else {
@@ -1564,7 +1559,7 @@ Messages automatically include sender session info for replies. When you want a 
 				const errorMsg =
 					(details?.error as string) || result.content[0]?.type === 'text'
 						? (result.content[0] as { type: 'text'; text: string }).text
-						: 'Unknown error';
+						: '未知错误';
 				return new Text(theme.fg('error', '✗ ') + theme.fg('error', errorMsg), 0, 0);
 			}
 
@@ -1581,15 +1576,13 @@ Messages automatically include sender session info for replies. When you want a 
 
 				if (expanded) {
 					const container = new Container();
-					container.addChild(
-						new Text(icon + theme.fg('muted', ' Message received'), 0, 0),
-					);
+					container.addChild(new Text(icon + theme.fg('muted', ' 消息已接收'), 0, 0));
 					container.addChild(new Spacer(1));
 					container.addChild(new Markdown(message.content, 0, 0, getMarkdownTheme()));
 					if (hasTurnIndex) {
 						container.addChild(new Spacer(1));
 						container.addChild(
-							new Text(theme.fg('dim', `Turn #${details.turnIndex}`), 0, 0),
+							new Text(theme.fg('dim', `轮次 #${details.turnIndex}`), 0, 0),
 						);
 					}
 					return container;
@@ -1601,11 +1594,11 @@ Messages automatically include sender session info for replies. When you want a 
 						? message.content.slice(0, 200) + '...'
 						: message.content;
 				const lines = preview.split('\n').slice(0, 5);
-				let text = icon + theme.fg('muted', ' Message received');
+				let text = icon + theme.fg('muted', ' 消息已接收');
 				if (hasTurnIndex) text += theme.fg('dim', ` (turn #${details.turnIndex})`);
 				text += '\n' + theme.fg('toolOutput', lines.join('\n'));
 				if (message.content.split('\n').length > 5 || message.content.length > 200) {
-					text += '\n' + theme.fg('dim', '(Ctrl+O to expand)');
+					text += '\n' + theme.fg('dim', '（Ctrl+O 展开）');
 				}
 				return new Text(text, 0, 0);
 			}
@@ -1618,7 +1611,7 @@ Messages automatically include sender session info for replies. When you want a 
 
 				if (expanded) {
 					const container = new Container();
-					let header = icon + theme.fg('muted', ' Summary');
+					let header = icon + theme.fg('muted', ' 摘要');
 					if (model) header += theme.fg('dim', ` via ${model}`);
 					container.addChild(new Text(header, 0, 0));
 					container.addChild(new Spacer(1));
@@ -1628,11 +1621,11 @@ Messages automatically include sender session info for replies. When you want a 
 
 				const preview = summary.length > 200 ? summary.slice(0, 200) + '...' : summary;
 				const lines = preview.split('\n').slice(0, 5);
-				let text = icon + theme.fg('muted', ' Summary');
+				let text = icon + theme.fg('muted', ' 摘要');
 				if (model) text += theme.fg('dim', ` via ${model}`);
 				text += '\n' + theme.fg('toolOutput', lines.join('\n'));
 				if (summary.split('\n').length > 5 || summary.length > 200) {
-					text += '\n' + theme.fg('dim', '(Ctrl+O to expand)');
+					text += '\n' + theme.fg('dim', '（Ctrl+O 展开）');
 				}
 				return new Text(text, 0, 0);
 			}
@@ -1641,7 +1634,7 @@ Messages automatically include sender session info for replies. When you want a 
 			if (hasCleared) {
 				const alreadyAtRoot = details.alreadyAtRoot as boolean | undefined;
 				const icon = theme.fg('success', '✓');
-				const msg = alreadyAtRoot ? 'Session already at root' : 'Session cleared';
+				const msg = alreadyAtRoot ? '会话已在初始状态' : '会话已清除';
 				return new Text(icon + ' ' + theme.fg('muted', msg), 0, 0);
 			}
 
@@ -1649,14 +1642,14 @@ Messages automatically include sender session info for replies. When you want a 
 			if (details && 'delivered' in details) {
 				const mode = details.mode as string | undefined;
 				const icon = theme.fg('success', '✓');
-				let text = icon + theme.fg('muted', ' Message delivered');
+				let text = icon + theme.fg('muted', ' 消息已送达');
 				if (mode) text += theme.fg('dim', ` (${mode})`);
 				return new Text(text, 0, 0);
 			}
 
 			// Fallback - just show the text content
 			const text = result.content[0];
-			const content = text?.type === 'text' ? text.text : '(no output)';
+			const content = text?.type === 'text' ? text.text : '（无输出）';
 			return new Text(theme.fg('success', '✓ ') + theme.fg('muted', content), 0, 0);
 		},
 	});
@@ -1670,16 +1663,16 @@ function registerListSessionsTool(pi: ExtensionAPI): void {
 	log.debug('registerTool');
 	pi.registerTool({
 		name: 'list_sessions',
-		label: 'List Sessions',
+		label: 'List Sessions', // 列出会话
 		description:
-			'List live sessions that expose a control socket (optionally with session names). Use this for discovery only; for the current session id in shell/bash use $PI_SESSION_ID.',
+			'列出暴露控制 socket 的活跃会话（可附带会话名称）。仅用于发现；在 shell/bash 中获取当前会话 ID 请使用 $PI_SESSION_ID。',
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
 			const sessions = await getLiveSessions();
 
 			if (sessions.length === 0) {
 				return {
-					content: [{ type: 'text', text: 'No live sessions found.' }],
+					content: [{ type: 'text', text: '未找到活跃的会话。' }],
 					details: { sessions: [] },
 				};
 			}
@@ -1690,7 +1683,7 @@ function registerListSessionsTool(pi: ExtensionAPI): void {
 			});
 
 			return {
-				content: [{ type: 'text', text: `Live sessions:\n${lines.join('\n')}` }],
+				content: [{ type: 'text', text: `活跃的会话：\n${lines.join('\n')}` }],
 				details: { sessions },
 			};
 		},
@@ -1738,12 +1731,12 @@ function parseStartupControlSendOptions(pi: ExtensionAPI): {
 	}
 	if (target && !message) {
 		return {
-			error: `Missing --${CONTROL_SEND_MESSAGE_FLAG} (required with --${CONTROL_TARGET_FLAG})`,
+			error: `缺少 --${CONTROL_SEND_MESSAGE_FLAG}（与 --${CONTROL_TARGET_FLAG} 同时使用）`,
 		};
 	}
 	if (!target && message) {
 		return {
-			error: `Missing --${CONTROL_TARGET_FLAG} (required with --${CONTROL_SEND_MESSAGE_FLAG})`,
+			error: `缺少 --${CONTROL_TARGET_FLAG}（与 --${CONTROL_SEND_MESSAGE_FLAG} 同时使用）`,
 		};
 	}
 
@@ -1751,7 +1744,7 @@ function parseStartupControlSendOptions(pi: ExtensionAPI): {
 	const mode = normalizeMode(rawMode);
 	if (!mode) {
 		return {
-			error: `Invalid --${CONTROL_SEND_MODE_FLAG}: ${rawMode}. Use steer|follow_up.`,
+			error: `无效的 --${CONTROL_SEND_MODE_FLAG}: ${rawMode}。请使用 steer|follow_up。`,
 		};
 	}
 
@@ -1761,7 +1754,7 @@ function parseStartupControlSendOptions(pi: ExtensionAPI): {
 		const normalized = normalizeWaitUntil(rawWait);
 		if (!normalized) {
 			return {
-				error: `Invalid --${CONTROL_SEND_WAIT_FLAG}: ${rawWait}. Use turn_end|message_processed.`,
+				error: `无效的 --${CONTROL_SEND_WAIT_FLAG}: ${rawWait}。请使用 turn_end|message_processed。`,
 			};
 		}
 		waitUntil = normalized;
@@ -1815,14 +1808,14 @@ async function maybeHandleStartupControlSend(
 	}
 
 	if (!targetSessionId) {
-		reportStartupControlSend(ctx, `Unknown target session: ${target}`, 'error');
+		reportStartupControlSend(ctx, `未知的目标会话：${target}`, 'error');
 		return;
 	}
 
 	const socketPath = getSocketPath(targetSessionId);
 	const alive = await isSocketAlive(socketPath);
 	if (!alive) {
-		reportStartupControlSend(ctx, `Target session not reachable: ${target}`, 'error');
+		reportStartupControlSend(ctx, `目标会话不可达：${target}`, 'error');
 		return;
 	}
 
@@ -1854,24 +1847,21 @@ async function maybeHandleStartupControlSend(
 			if (!result.response.success) {
 				reportStartupControlSend(
 					ctx,
-					`Failed to send: ${result.response.error ?? 'unknown error'}`,
+					`发送失败：${result.response.error ?? '未知错误'}`,
 					'error',
 				);
 				return;
 			}
 			const lastMessage = result.event?.message;
 			if (!lastMessage?.content) {
-				reportStartupControlSend(
-					ctx,
-					`Message delivered to ${target}; turn completed without assistant output.`,
-				);
+				reportStartupControlSend(ctx, `消息已送达 ${target}；AI 回复完成但无输出。`);
 				return;
 			}
 			if (ctx.hasUI) {
 				pi.sendMessage(
 					{
 						customType: 'control-send',
-						content: `Startup response from ${target}:\n\n${lastMessage.content}`,
+						content: `来自 ${target} 的启动响应：\n\n${lastMessage.content}`,
 						display: true,
 					},
 					{ triggerTurn: false },
@@ -1888,27 +1878,27 @@ async function maybeHandleStartupControlSend(
 		if (!result.response.success) {
 			reportStartupControlSend(
 				ctx,
-				`Failed to send: ${result.response.error ?? 'unknown error'}`,
+				`发送失败：${result.response.error ?? '未知错误'}`,
 				'error',
 			);
 			return;
 		}
 
-		const waitLabel = waitUntil === 'message_processed' ? ' (message processed)' : '';
-		reportStartupControlSend(ctx, `Message sent to ${target}${waitLabel}`);
+		const waitLabel = waitUntil === 'message_processed' ? ' (消息已处理)' : '';
+		reportStartupControlSend(ctx, `消息已发送到 ${target}${waitLabel}`);
 	} catch (error) {
-		const msg = error instanceof Error ? error.message : 'unknown error';
-		reportStartupControlSend(ctx, `Failed to send to ${target}: ${msg}`, 'error');
+		const msg = error instanceof Error ? error.message : '未知错误';
+		reportStartupControlSend(ctx, `发送到 ${target} 失败：${msg}`, 'error');
 	}
 }
 
 function registerControlSessionsCommand(pi: ExtensionAPI): void {
 	pi.registerCommand('control-sessions', {
-		description: 'List controllable sessions (from session-control sockets)',
+		description: '列出可控制的会话（通过 session-control socket）',
 		handler: async (_args, ctx) => {
 			if (pi.getFlag(CONTROL_FLAG) !== true) {
 				if (ctx.hasUI) {
-					ctx.ui.notify('Session control not enabled (use --session-control)', 'warning');
+					ctx.ui.notify('会话控制未启用（请使用 --session-control）', 'warning');
 				}
 				return;
 			}
@@ -1917,13 +1907,13 @@ function registerControlSessionsCommand(pi: ExtensionAPI): void {
 			const currentSessionId = ctx.sessionManager.getSessionId();
 			const lines = sessions.map((session) => {
 				const name = session.name ? ` (${session.name})` : '';
-				const current = session.sessionId === currentSessionId ? ' (current)' : '';
+				const current = session.sessionId === currentSessionId ? '（当前）' : '';
 				return `- ${session.sessionId}${name}${current}`;
 			});
 			const content =
 				sessions.length === 0
-					? 'No live sessions found.'
-					: `Controllable sessions:\n${lines.join('\n')}`;
+					? '未找到活跃的会话。'
+					: `可控制的会话：\n${lines.join('\n')}`;
 
 			pi.sendMessage(
 				{

@@ -167,7 +167,7 @@ profiles:
                 - ci-watch
                 # 以下插件为不常用或待观察
                 - unified-edit # ⚠ 待观察：上游实验性编辑工具，未替代 multi-edit
-                - control # 外部进程通过unix socket控制pi
+                # - control # 已迁移到 meta/ 分类，默认同步
                 - prompt-customizer # 演示性质
                 - project-trust # 演示性质
                 - catch-the-fox # 演示性质、趣味
