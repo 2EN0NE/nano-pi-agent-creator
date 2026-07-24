@@ -73,8 +73,11 @@ profiles:
             - mode-switcher # 一键切换模型预设
             - session-tree-label # 快捷键进行session-tree打标
             - worktree #TUI中操作worktree插件
+            - ci-watch
         # ── 全局通用技能（research/ 和分析类 analyze/） ──
         skills:
+            # 基础
+            - commit
             # research/ — 信息获取与研究
             - native-web-search
             - research
@@ -109,7 +112,6 @@ profiles:
         # 白名单：development/（开发流程）+ tooling/（工具链）
         skills:
             # development/ — 编码与开发流程
-            - commit
             - implement
             - prototype
             - tdd
@@ -162,6 +164,7 @@ profiles:
                 - quit
                 - session-tree-label
                 - worktree
+                - ci-watch
                 # 以下插件为不常用或待观察
                 - unified-edit # ⚠ 待观察：上游实验性编辑工具，未替代 multi-edit
                 - control # 外部进程通过unix socket控制pi
