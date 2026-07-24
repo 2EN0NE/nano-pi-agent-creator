@@ -23,18 +23,18 @@ clean_test_dir() {
 # ── 用例 1：--help 输出包含两种模式说明 ──
 test_it "--help shows both profile and inline modes" <<'TEST'
   output=$(npx tsx "$SYNC_SCRIPT" --help 2>&1)
-  echo "$output" | grep -q "Profile mode" || { echo "Missing 'Profile mode'"; exit 1; }
-  echo "$output" | grep -q "Inline mode" || { echo "Missing 'Inline mode'"; exit 1; }
-  echo "$output" | grep -q "\-\-ext" || { echo "Missing '--ext'"; exit 1; }
-  echo "$output" | grep -q "\-\-target" || { echo "Missing '--target'"; exit 1; }
+  [[ "$output" == *"Profile mode"* ]] || { echo "Missing 'Profile mode'"; exit 1; }
+  [[ "$output" == *"Inline mode"* ]] || { echo "Missing 'Inline mode'"; exit 1; }
+  [[ "$output" == *"--ext"* ]] || { echo "Missing '--ext'"; exit 1; }
+  [[ "$output" == *"--target"* ]] || { echo "Missing '--target'"; exit 1; }
 TEST
 
 # ── 用例 2：dry-run 内联模式同步单个扩展 ──
 test_it "dry-run inline mode syncs pi-logger extension" <<'TEST'
   clean_test_dir
   output=$(npx tsx "$SYNC_SCRIPT" --dry-run --ext pi-logger --target ./.pi/test 2>&1)
-  echo "$output" | grep -q "DRY RUN" || { echo "Missing dry run indicator"; exit 1; }
-  echo "$output" | grep -q "pi-logger" || { echo "Missing pi-logger in output"; exit 1; }
+  [[ "$output" == *"DRY RUN"* ]] || { echo "Missing dry run indicator"; exit 1; }
+  [[ "$output" == *"pi-logger"* ]] || { echo "Missing pi-logger in output"; exit 1; }
   # dry-run 不应创建文件
   [[ -d "$ROOT_DIR/.pi/test" ]] && { echo "Dry run created files"; exit 1; }
   echo "Verified: dry-run did not write files"
@@ -72,9 +72,9 @@ TEST
 # ── 用例 6：Profile 模式同步（project dry-run） ──
 test_it "profile mode project dry-run lists resources" <<'TEST'
   output=$(npx tsx "$SYNC_SCRIPT" --dry-run --profile project 2>&1)
-  echo "$output" | grep -q "extensions/" || { echo "Missing extensions listing"; exit 1; }
-  echo "$output" | grep -q "skills/" || { echo "Missing skills listing"; exit 1; }
-  echo "$output" | grep -q "themes/" || { echo "Missing themes listing"; exit 1; }
+  [[ "$output" == *"extensions/"* ]] || { echo "Missing extensions listing"; exit 1; }
+  [[ "$output" == *"skills/"* ]] || { echo "Missing skills listing"; exit 1; }
+  [[ "$output" == *"themes/"* ]] || { echo "Missing themes listing"; exit 1; }
 TEST
 
 # ── 用例 7：内联模式多资源同步 ──
@@ -91,13 +91,13 @@ TEST
 # ── 用例 8：内联模式 missing --target 应报错 ──
 test_it "inline mode without --target reports error" <<'TEST'
   output=$(npx tsx "$SYNC_SCRIPT" --dry-run --ext pi-logger 2>&1)
-  echo "$output" | grep -q "Error:.*--target" || { echo "Missing --target error"; exit 1; }
+  [[ "$output" == *"Error:"* && "$output" == *"--target"* ]] || { echo "Missing --target error"; exit 1; }
 TEST
 
 # ── 用例 9：内联模式 missing resource args 应报错 ──
 test_it "inline mode without --ext/--skill/--theme/--prompt reports error" <<'TEST'
   output=$(npx tsx "$SYNC_SCRIPT" --dry-run --target ./.pi/test 2>&1)
-  echo "$output" | grep -q "Error:" || { echo "Missing error for empty resources"; exit 1; }
+  [[ "$output" == *"Error:"* ]] || { echo "Missing error for empty resources"; exit 1; }
 TEST
 
 # ── 用例 10：日志文件生成 [REVIEW] ──
@@ -114,24 +114,25 @@ TEST
 # ── 用例 11：profile 模式 --all 列出所有 profile ──
 test_it "profile mode --all lists all profiles" <<'TEST'
   output=$(npx tsx "$SYNC_SCRIPT" --dry-run --all 2>&1)
-  echo "$output" | grep -q "ALL (" || { echo "Missing ALL indicator"; exit 1; }
-  echo "$output" | grep -q "user-install" || { echo "Missing user-install"; exit 1; }
-  echo "$output" | grep -q "project" || { echo "Missing project"; exit 1; }
+  [[ "$output" == *"ALL ("* ]] || { echo "Missing ALL indicator"; exit 1; }
+  [[ "$output" == *"user-install"* ]] || { echo "Missing user-install"; exit 1; }
+  [[ "$output" == *"project"* ]] || { echo "Missing project"; exit 1; }
 TEST
 
 # ── 用例 12：默认 Profile 为 full-project ──
 test_it "default profile is user-install" <<'TEST'
   output=$(npx tsx "$SYNC_SCRIPT" --dry-run 2>&1)
-  echo "$output" | grep -q "user-install" || { echo "Default profile not user-install"; exit 1; }
-  echo "$output" | grep -q 'Target:.*\.pi/agent' || { echo "Default target not .pi/agent"; exit 1; }
+  # 使用 bash 字符串匹配代替 echo|grep -q 管道，避免 pipefail 下 SIGPIPE 导致 141 退出码
+  [[ "$output" == *"user-install"* ]] || { echo "Default profile not user-install"; exit 1; }
+  [[ "$output" == *".pi/agent"* ]] || { echo "Default target not .pi/agent"; exit 1; }
 TEST
 
 # ── 用例 13：内联模式 --exclude 未对外暴露（需通过 profile 使用） ──
 test_it "profile mode exclude excludes specified resource" <<'TEST'
   # user-install 排除了 sandbox
   output=$(npx tsx "$SYNC_SCRIPT" --dry-run --profile user-install 2>&1)
-  echo "$output" | grep -q "extensions/ (" || { echo "Missing extensions count"; exit 1; }
+  [[ "$output" == *"extensions/ ("* ]] || { echo "Missing extensions count"; exit 1; }
   # sandbox 不应出现在 user-install 中
-  echo "$output" | grep -q "sandbox" && { echo "sandbox should be excluded from user-install"; exit 1; }
+  [[ "$output" == *"sandbox"* ]] && { echo "sandbox should be excluded from user-install"; exit 1; }
   echo "Verified: sandbox excluded"
 TEST
