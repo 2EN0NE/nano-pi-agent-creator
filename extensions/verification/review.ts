@@ -84,10 +84,10 @@ function setReviewWidget(ctx: ExtensionContext, active: boolean) {
 
 	ctx.ui.setWidget('review', (_tui, theme) => {
 		const message = reviewLoopInProgress
-			? 'Review session active (loop fixing running)'
+			? '审查会话进行中（循环修复运行中）'
 			: reviewLoopFixingEnabled
-				? 'Review session active (loop fixing enabled), return with /end-review'
-				: 'Review session active, return with /end-review';
+				? '审查会话进行中（循环修复已启用）'
+				: '审查会话进行中';
 		const text = new Text(theme.fg('warning', message), 0, 0);
 		return {
 			render(width: number) {
@@ -930,29 +930,29 @@ async function waitForLoopTurnToStart(
 const REVIEW_PRESETS = [
 	{
 		value: 'staged',
-		label: 'Review staged changes only',
-		description: '(index vs commit)',
+		label: '仅审查已暂存的变更',
+		description: '(暂存区 vs 提交)',
 	},
 	{
 		value: 'uncommitted',
-		label: 'Review uncommitted changes',
+		label: '审查所有未提交的变更',
 		description: '',
 	},
 	{
 		value: 'baseBranch',
-		label: 'Review against a base branch',
-		description: '(local)',
+		label: '对比基分支进行审查',
+		description: '(本地)',
 	},
-	{ value: 'commit', label: 'Review a commit', description: '' },
+	{ value: 'commit', label: '审查某个提交', description: '' },
 	{
 		value: 'pullRequest',
-		label: 'Review a pull request',
+		label: '审查拉取请求',
 		description: '(GitHub PR)',
 	},
 	{
 		value: 'folder',
-		label: 'Review a folder (or more)',
-		description: '(snapshot, not diff)',
+		label: '审查文件夹/文件',
+		description: '(快照模式，非差异对比)',
 	},
 ] as const;
 
@@ -1029,17 +1029,13 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 		while (true) {
 			const customInstructionsLabel = reviewCustomInstructions
-				? 'Remove custom review instructions'
-				: 'Add custom review instructions';
+				? '移除自定义审查指令'
+				: '添加自定义审查指令';
 			const customInstructionsDescription = reviewCustomInstructions
-				? '(currently set)'
-				: '(applies to all review modes)';
-			const loopToggleLabel = reviewLoopFixingEnabled
-				? 'Disable Loop Fixing'
-				: 'Enable Loop Fixing';
-			const loopToggleDescription = reviewLoopFixingEnabled
-				? '(currently on)'
-				: '(currently off)';
+				? '(当前已设置)'
+				: '(适用于所有审查模式)';
+			const loopToggleLabel = reviewLoopFixingEnabled ? '禁用循环修复' : '启用循环修复';
+			const loopToggleDescription = reviewLoopFixingEnabled ? '(当前已启用)' : '(当前已禁用)';
 			const items: SelectItem[] = [
 				...presetItems,
 				{
@@ -1058,9 +1054,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 				(tui, theme, _kb, done) => {
 					const container = new Container();
 					container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-					container.addChild(
-						new Text(theme.fg('accent', theme.bold('Select a review preset'))),
-					);
+					container.addChild(new Text(theme.fg('accent', theme.bold('选择审查预设'))));
 
 					const selectList = new SelectList(items, Math.min(items.length, 10), {
 						selectedPrefix: (text) => theme.fg('accent', text),
@@ -1079,9 +1073,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					selectList.onCancel = () => done(null);
 
 					container.addChild(selectList);
-					container.addChild(
-						new Text(theme.fg('dim', 'Press enter to confirm or esc to go back')),
-					);
+					container.addChild(new Text(theme.fg('dim', '按回车确认，按 ESC 返回')));
 					container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
 
 					return {
@@ -1104,29 +1096,29 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			if (result === TOGGLE_LOOP_FIXING_VALUE) {
 				const nextEnabled = !reviewLoopFixingEnabled;
 				setReviewLoopFixingEnabled(nextEnabled);
-				ctx.ui.notify(nextEnabled ? 'Loop fixing enabled' : 'Loop fixing disabled', 'info');
+				ctx.ui.notify(nextEnabled ? '循环修复已启用' : '循环修复已禁用', 'info');
 				continue;
 			}
 
 			if (result === TOGGLE_CUSTOM_INSTRUCTIONS_VALUE) {
 				if (reviewCustomInstructions) {
 					setReviewCustomInstructions(undefined);
-					ctx.ui.notify('Custom review instructions removed', 'info');
+					ctx.ui.notify('自定义审查指令已移除', 'info');
 					continue;
 				}
 
 				const customInstructions = await ctx.ui.editor(
-					'Enter custom review instructions (applies to all review modes):',
+					'输入自定义审查指令（适用于所有审查模式）：',
 					'',
 				);
 
 				if (!customInstructions?.trim()) {
-					ctx.ui.notify('Custom review instructions not changed', 'info');
+					ctx.ui.notify('自定义审查指令未更改', 'info');
 					continue;
 				}
 
 				setReviewCustomInstructions(customInstructions);
-				ctx.ui.notify('Custom review instructions saved', 'info');
+				ctx.ui.notify('自定义审查指令已保存', 'info');
 				continue;
 			}
 
@@ -1146,7 +1138,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 				case 'commit': {
 					if (reviewLoopFixingEnabled) {
-						ctx.ui.notify('Loop mode does not work with commit review.', 'error');
+						ctx.ui.notify('循环模式不适用于提交审查', 'error');
 						break;
 					}
 					const target = await showCommitSelector(ctx);
@@ -1187,9 +1179,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 		if (candidateBranches.length === 0) {
 			ctx.ui.notify(
-				currentBranch
-					? `No other branches found (current branch: ${currentBranch})`
-					: 'No branches found',
+				currentBranch ? `未找到其他分支（当前分支：${currentBranch}）` : '未找到分支',
 				'error',
 			);
 			return null;
@@ -1211,7 +1201,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		const result = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
 			const container = new Container();
 			container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-			container.addChild(new Text(theme.fg('accent', theme.bold('Select base branch'))));
+			container.addChild(new Text(theme.fg('accent', theme.bold('选择基分支'))));
 
 			const searchInput = new Input();
 			container.addChild(searchInput);
@@ -1219,9 +1209,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 			const listContainer = new Container();
 			container.addChild(listContainer);
-			container.addChild(
-				new Text(theme.fg('dim', 'Type to filter • enter to select • esc to cancel')),
-			);
+			container.addChild(new Text(theme.fg('dim', '输入筛选 • 回车选中 • ESC 取消')));
 			container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
 
 			let filteredItems = items;
@@ -1230,7 +1218,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			const updateList = () => {
 				listContainer.clear();
 				if (filteredItems.length === 0) {
-					listContainer.addChild(new Text(theme.fg('warning', '  No matching branches')));
+					listContainer.addChild(new Text(theme.fg('warning', '  没有匹配的分支')));
 					selectList = null;
 					return;
 				}
@@ -1303,7 +1291,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		const commits = await getRecentCommits(pi, 20);
 
 		if (commits.length === 0) {
-			ctx.ui.notify('No commits found', 'error');
+			ctx.ui.notify('未找到提交', 'error');
 			return null;
 		}
 
@@ -1317,9 +1305,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			(tui, theme, keybindings, done) => {
 				const container = new Container();
 				container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-				container.addChild(
-					new Text(theme.fg('accent', theme.bold('Select commit to review'))),
-				);
+				container.addChild(new Text(theme.fg('accent', theme.bold('选择要审查的提交'))));
 
 				const searchInput = new Input();
 				container.addChild(searchInput);
@@ -1327,9 +1313,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 				const listContainer = new Container();
 				container.addChild(listContainer);
-				container.addChild(
-					new Text(theme.fg('dim', 'Type to filter • enter to select • esc to cancel')),
-				);
+				container.addChild(new Text(theme.fg('dim', '输入筛选 • 回车选中 • ESC 取消')));
 				container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
 
 				let filteredItems = items;
@@ -1338,9 +1322,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 				const updateList = () => {
 					listContainer.clear();
 					if (filteredItems.length === 0) {
-						listContainer.addChild(
-							new Text(theme.fg('warning', '  No matching commits')),
-						);
+						listContainer.addChild(new Text(theme.fg('warning', '  没有匹配的提交')));
 						selectList = null;
 						return;
 					}
@@ -1425,10 +1407,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 	 * Show folder input
 	 */
 	async function showFolderInput(ctx: ExtensionContext): Promise<ReviewTarget | null> {
-		const result = await ctx.ui.editor(
-			'Enter folders/files to review (space-separated or one per line):',
-			'.',
-		);
+		const result = await ctx.ui.editor('输入要审查的文件夹/文件（空格分隔或每行一个）：', '.');
 
 		if (!result?.trim()) return null;
 		const paths = parseReviewPaths(result);
@@ -1443,16 +1422,13 @@ export default function reviewExtension(pi: ExtensionAPI) {
 	async function showPrInput(ctx: ExtensionContext): Promise<ReviewTarget | null> {
 		// First check for pending changes that would prevent branch switching
 		if (await hasPendingChanges(pi)) {
-			ctx.ui.notify(
-				'Cannot checkout PR: you have uncommitted changes. Please commit or stash them first.',
-				'error',
-			);
+			ctx.ui.notify('无法检出 PR：你有未提交的变更，请先提交或暂存', 'error');
 			return null;
 		}
 
 		// Get PR reference from user
 		const prRef = await ctx.ui.editor(
-			'Enter PR number or URL (e.g. 123 or https://github.com/owner/repo/pull/123):',
+			'输入 PR 编号或 URL（如 123 或 https://github.com/owner/repo/pull/123）：',
 			'',
 		);
 
@@ -1460,41 +1436,35 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 		const prNumber = parsePrReference(prRef);
 		if (!prNumber) {
-			ctx.ui.notify('Invalid PR reference. Enter a number or GitHub PR URL.', 'error');
+			ctx.ui.notify('无效的 PR 引用，请输入编号或 GitHub PR URL', 'error');
 			return null;
 		}
 
 		// Get PR info from GitHub
-		ctx.ui.notify(`Fetching PR #${prNumber} info...`, 'info');
+		ctx.ui.notify(`正在获取 PR #${prNumber} 信息...`, 'info');
 		const prInfo = await getPrInfo(pi, prNumber);
 
 		if (!prInfo) {
-			ctx.ui.notify(
-				`Could not find PR #${prNumber}. Make sure gh is authenticated and the PR exists.`,
-				'error',
-			);
+			ctx.ui.notify(`未找到 PR #${prNumber}，请确认 gh 已认证且 PR 存在`, 'error');
 			return null;
 		}
 
 		// Check again for pending changes (in case something changed)
 		if (await hasPendingChanges(pi)) {
-			ctx.ui.notify(
-				'Cannot checkout PR: you have uncommitted changes. Please commit or stash them first.',
-				'error',
-			);
+			ctx.ui.notify('无法检出 PR：你有未提交的变更，请先提交或暂存', 'error');
 			return null;
 		}
 
 		// Checkout the PR
-		ctx.ui.notify(`Checking out PR #${prNumber}...`, 'info');
+		ctx.ui.notify(`正在检出 PR #${prNumber}...`, 'info');
 		const checkoutResult = await checkoutPr(pi, prNumber);
 
 		if (!checkoutResult.success) {
-			ctx.ui.notify(`Failed to checkout PR: ${checkoutResult.error}`, 'error');
+			ctx.ui.notify(`检出 PR 失败：${checkoutResult.error}`, 'error');
 			return null;
 		}
 
-		ctx.ui.notify(`Checked out PR #${prNumber} (${prInfo.headBranch})`, 'info');
+		ctx.ui.notify(`已检出 PR #${prNumber}（${prInfo.headBranch}）`, 'info');
 
 		return {
 			type: 'pullRequest',
@@ -1516,7 +1486,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		// Check if we're already in a review
 		if (reviewOriginId) {
 			log.warn('executeReview blocked: review already in progress');
-			ctx.ui.notify('Already in a review. Use /end-review to finish first.', 'warning');
+			ctx.ui.notify('已在审查中，请先使用 /end-review 结束', 'warning');
 			return false;
 		}
 
@@ -1540,7 +1510,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 				originId = ctx.sessionManager.getLeafId() ?? undefined;
 			}
 			if (!originId) {
-				ctx.ui.notify('Failed to determine review origin.', 'error');
+				ctx.ui.notify('失败：无法确定审查起点', 'error');
 				return false;
 			}
 			reviewOriginId = originId;
@@ -1584,14 +1554,15 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			// Restore origin after navigation events (session_tree can reset it)
 			reviewOriginId = lockedOriginId;
 
-			// Show widget indicating review is active
+			// Show widget and persist state only when branch was actually created
 			setReviewWidget(ctx, true);
-
-			// Persist review state so tree navigation can restore/reset it
 			pi.appendEntry(REVIEW_STATE_TYPE, {
 				active: true,
 				originId: lockedOriginId,
 			});
+		} else {
+			// No user messages in session — no branch created, clear review state
+			reviewOriginId = undefined;
 		}
 
 		const prompt = await buildReviewPrompt(pi, target, {
@@ -1616,7 +1587,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		}
 
 		const modeHint = useFreshSession ? ' (fresh session)' : '';
-		ctx.ui.notify(`Starting review: ${hint}${modeHint}`, 'info');
+		ctx.ui.notify(`开始审查：${hint}${modeHint}`, 'info');
 		log.info(
 			'Review prompt sent: hint=%s, prompt_len=%d, guidelines=%s',
 			hint,
@@ -1763,41 +1734,35 @@ export default function reviewExtension(pi: ExtensionAPI) {
 	): Promise<ReviewTarget | null> {
 		// First check for pending changes
 		if (await hasPendingChanges(pi)) {
-			ctx.ui.notify(
-				'Cannot checkout PR: you have uncommitted changes. Please commit or stash them first.',
-				'error',
-			);
+			ctx.ui.notify('无法检出 PR：你有未提交的变更，请先提交或暂存', 'error');
 			return null;
 		}
 
 		const prNumber = parsePrReference(ref);
 		if (!prNumber) {
-			ctx.ui.notify('Invalid PR reference. Enter a number or GitHub PR URL.', 'error');
+			ctx.ui.notify('无效的 PR 引用，请输入编号或 GitHub PR URL', 'error');
 			return null;
 		}
 
 		// Get PR info
-		ctx.ui.notify(`Fetching PR #${prNumber} info...`, 'info');
+		ctx.ui.notify(`正在获取 PR #${prNumber} 信息...`, 'info');
 		const prInfo = await getPrInfo(pi, prNumber);
 
 		if (!prInfo) {
-			ctx.ui.notify(
-				`Could not find PR #${prNumber}. Make sure gh is authenticated and the PR exists.`,
-				'error',
-			);
+			ctx.ui.notify(`未找到 PR #${prNumber}，请确认 gh 已认证且 PR 存在`, 'error');
 			return null;
 		}
 
 		// Checkout the PR
-		ctx.ui.notify(`Checking out PR #${prNumber}...`, 'info');
+		ctx.ui.notify(`正在检出 PR #${prNumber}...`, 'info');
 		const checkoutResult = await checkoutPr(pi, prNumber);
 
 		if (!checkoutResult.success) {
-			ctx.ui.notify(`Failed to checkout PR: ${checkoutResult.error}`, 'error');
+			ctx.ui.notify(`检出 PR 失败：${checkoutResult.error}`, 'error');
 			return null;
 		}
 
-		ctx.ui.notify(`Checked out PR #${prNumber} (${prInfo.headBranch})`, 'info');
+		ctx.ui.notify(`已检出 PR #${prNumber}（${prInfo.headBranch}）`, 'info');
 
 		return {
 			type: 'pullRequest',
@@ -1822,7 +1787,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 	): Promise<void> {
 		if (reviewLoopInProgress) {
 			log.warn('runLoopFixingReview blocked: already running');
-			ctx.ui.notify('Loop fixing review is already running.', 'warning');
+			ctx.ui.notify('循环修复正在进行中', 'warning');
 			return;
 		}
 
@@ -1838,10 +1803,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		reviewLoopInProgress = true;
 		setReviewWidget(ctx, Boolean(reviewOriginId));
 		try {
-			ctx.ui.notify(
-				'Loop fixing enabled: using Empty branch mode and cycling until no blocking findings remain.',
-				'info',
-			);
+			ctx.ui.notify('循环修复已启用：使用新分支模式循环审查，直至无阻塞发现项。', 'info');
 
 			for (let pass = 1; pass <= REVIEW_LOOP_MAX_ITERATIONS; pass++) {
 				const reviewBaselineAssistantId = getLastAssistantSnapshot(ctx)?.id;
@@ -1986,25 +1948,25 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		description: 'Review code changes (PR, uncommitted, branch, commit, or folder)',
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
-				ctx.ui.notify('Review requires interactive mode', 'error');
+				ctx.ui.notify('审查需要交互模式', 'error');
 				return;
 			}
 
 			if (reviewLoopInProgress) {
-				ctx.ui.notify('Loop fixing review is already running.', 'warning');
+				ctx.ui.notify('循环修复正在进行中', 'warning');
 				return;
 			}
 
 			// Check if we're already in a review
 			if (reviewOriginId) {
-				ctx.ui.notify('Already in a review. Use /end-review to finish first.', 'warning');
+				ctx.ui.notify('已在审查中，请先使用 /end-review 结束', 'warning');
 				return;
 			}
 
 			// Check if we're in a git repository
 			const { code } = await pi.exec('git', ['rev-parse', '--git-dir']);
 			if (code !== 0) {
-				ctx.ui.notify('Not a git repository', 'error');
+				ctx.ui.notify('不是 git 仓库', 'error');
 				return;
 			}
 
@@ -2024,7 +1986,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					// Handle PR checkout (async operation)
 					target = await handlePrCheckout(ctx, parsed.target.ref);
 					if (!target) {
-						ctx.ui.notify('PR review failed. Returning to review menu.', 'warning');
+						ctx.ui.notify('PR 审查失败，返回审查菜单', 'warning');
 					}
 				} else {
 					target = parsed.target;
@@ -2042,12 +2004,12 @@ export default function reviewExtension(pi: ExtensionAPI) {
 				}
 
 				if (!target) {
-					ctx.ui.notify('Review cancelled', 'info');
+					ctx.ui.notify('已取消审查', 'info');
 					return;
 				}
 
 				if (reviewLoopFixingEnabled && !isLoopCompatibleTarget(target)) {
-					ctx.ui.notify('Loop mode does not work with commit review.', 'error');
+					ctx.ui.notify('循环模式不适用于提交审查', 'error');
 					if (fromSelector) {
 						target = null;
 						continue;
@@ -2070,10 +2032,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 				if (messageCount > 0) {
 					// Existing session - ask user which mode they want
-					const choice = await ctx.ui.select('Start review in:', [
-						'Empty branch',
-						'Current session',
-					]);
+					const choice = await ctx.ui.select('选择审查模式：', ['新分支', '当前会话']);
 
 					if (choice === undefined) {
 						if (fromSelector) {
@@ -2241,10 +2200,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		const originId = getActiveReviewOrigin(ctx);
 		if (!originId) {
 			if (!getReviewState(ctx)?.active) {
-				ctx.ui.notify(
-					'Not in a review branch (use /review first, or review was started in current session mode)',
-					'info',
-				);
+				ctx.ui.notify('不在审查分支中（未使用新分支，或审查在当前会话中进行）', 'info');
 			}
 			return 'error';
 		}
@@ -2255,12 +2211,12 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			try {
 				const result = await ctx.navigateTree(originId, { summarize: false });
 				if (result.cancelled) {
-					ctx.ui.notify('Navigation cancelled. Use /end-review to try again.', 'info');
+					ctx.ui.notify('导航已取消，如需重试请再次输入 /end-review', 'info');
 					return 'cancelled';
 				}
 			} catch (error) {
 				ctx.ui.notify(
-					`Failed to return: ${error instanceof Error ? error.message : String(error)}`,
+					`返回失败：${error instanceof Error ? error.message : String(error)}`,
 					'error',
 				);
 				return 'error';
@@ -2268,7 +2224,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 			clearReviewState(ctx);
 			if (notifySuccess) {
-				ctx.ui.notify('Review complete! Returned to original position.', 'info');
+				ctx.ui.notify('审查完成！已返回原位置。', 'info');
 			}
 			return 'ok';
 		}
@@ -2279,17 +2235,17 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			options.showSummaryLoader ?? false,
 		);
 		if (summaryResult === null) {
-			ctx.ui.notify('Summarization cancelled. Use /end-review to try again.', 'info');
+			ctx.ui.notify('总结已取消，如需重试请再次输入 /end-review', 'info');
 			return 'cancelled';
 		}
 
 		if (summaryResult.error) {
-			ctx.ui.notify(`Summarization failed: ${summaryResult.error}`, 'error');
+			ctx.ui.notify(`总结失败：${summaryResult.error}`, 'error');
 			return 'error';
 		}
 
 		if (summaryResult.cancelled) {
-			ctx.ui.notify('Navigation cancelled. Use /end-review to try again.', 'info');
+			ctx.ui.notify('导航已取消，如需重试请再次输入 /end-review', 'info');
 			return 'cancelled';
 		}
 
@@ -2297,57 +2253,60 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 		if (action === 'returnAndSummarize') {
 			if (!ctx.ui.getEditorText().trim()) {
-				ctx.ui.setEditorText('Act on the review findings');
+				ctx.ui.setEditorText('根据审查发现项执行修复');
 			}
 			if (notifySuccess) {
-				ctx.ui.notify('Review complete! Returned and summarized.', 'info');
+				ctx.ui.notify('审查完成！已返回并总结。', 'info');
 			}
 			return 'ok';
 		}
 
 		pi.sendUserMessage(REVIEW_FIX_FINDINGS_PROMPT, { deliverAs: 'followUp' });
 		if (notifySuccess) {
-			ctx.ui.notify(
-				'Review complete! Returned and queued a follow-up to fix findings.',
-				'info',
-			);
+			ctx.ui.notify('审查完成！已返回并安排了后续修复任务。', 'info');
 		}
 		return 'ok';
 	}
 
 	async function runEndReview(ctx: ExtensionCommandContext): Promise<void> {
 		if (!ctx.hasUI) {
-			ctx.ui.notify('End-review requires interactive mode', 'error');
+			ctx.ui.notify('/end-review 需要交互模式', 'error');
 			return;
 		}
 
 		if (reviewLoopInProgress) {
-			ctx.ui.notify('Loop fixing review is running. Wait for it to finish.', 'info');
+			ctx.ui.notify('循环修复正在运行，请等待完成', 'info');
 			return;
 		}
 
 		if (endReviewInProgress) {
-			ctx.ui.notify('/end-review is already running', 'info');
+			ctx.ui.notify('/end-review 正在运行中', 'info');
+			return;
+		}
+
+		// If no active review origin, just silently return (no branch to end)
+		if (!getActiveReviewOrigin(ctx)) {
+			ctx.ui.notify('当前没有活跃的审查会话，无需执行 /end-review', 'info');
 			return;
 		}
 
 		endReviewInProgress = true;
 		try {
-			const choice = await ctx.ui.select('Finish review:', [
-				'Return only',
-				'Return and fix findings',
-				'Return and summarize',
+			const choice = await ctx.ui.select('完成审查：', [
+				'仅返回',
+				'返回并修复发现项',
+				'返回并总结',
 			]);
 
 			if (choice === undefined) {
-				ctx.ui.notify('Cancelled. Use /end-review to try again.', 'info');
+				ctx.ui.notify('已取消。如需重试请再次输入 /end-review', 'info');
 				return;
 			}
 
 			const action: EndReviewAction =
-				choice === 'Return and fix findings'
+				choice === '返回并修复发现项'
 					? 'returnAndFix'
-					: choice === 'Return and summarize'
+					: choice === '返回并总结'
 						? 'returnAndSummarize'
 						: 'returnOnly';
 

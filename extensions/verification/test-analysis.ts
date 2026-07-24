@@ -90,10 +90,10 @@ function setAnalysisWidget(ctx: ExtensionContext, active: boolean) {
 
 	ctx.ui.setWidget('test_analysis', (_tui, theme) => {
 		const message = analysisLoopInProgress
-			? 'Analysis session active (loop running)'
+			? '分析会话进行中（循环分析运行中）'
 			: analysisLoopFixingEnabled
-				? 'Analysis session active (loop enabled), return with /end-analysis'
-				: 'Analysis session active, return with /end-analysis';
+				? '分析会话进行中（循环分析已启用）'
+				: '分析会话进行中';
 		const text = new Text(theme.fg('warning', message), 0, 0);
 		return {
 			render(width: number) {
@@ -1076,29 +1076,29 @@ async function waitForLoopTurnToStart(
 const ANALYSIS_PRESETS = [
 	{
 		value: 'staged',
-		label: 'Analyze tests for staged changes only',
-		description: '(index vs commit)',
+		label: '仅分析已暂存的测试覆盖',
+		description: '(暂存区 vs 提交)',
 	},
 	{
 		value: 'uncommitted',
-		label: 'Analyze tests for uncommitted changes',
+		label: '分析所有未提交的测试覆盖',
 		description: '',
 	},
 	{
 		value: 'baseBranch',
-		label: 'Analyze tests against a base branch',
-		description: '(local)',
+		label: '对比基分支分析测试覆盖',
+		description: '(本地)',
 	},
-	{ value: 'commit', label: 'Analyze tests for a commit', description: '' },
+	{ value: 'commit', label: '分析某个提交的测试覆盖', description: '' },
 	{
 		value: 'pullRequest',
-		label: 'Analyze tests for a PR',
+		label: '分析 PR 的测试覆盖',
 		description: '(GitHub PR)',
 	},
 	{
 		value: 'folder',
-		label: 'Analyze tests for a folder (or more)',
-		description: '(snapshot, not diff)',
+		label: '分析文件夹/文件的测试覆盖',
+		description: '(快照模式，非差异对比)',
 	},
 ] as const;
 
@@ -1175,17 +1175,15 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 		while (true) {
 			const customInstructionsLabel = analysisCustomInstructions
-				? 'Remove custom analysis instructions'
-				: 'Add custom analysis instructions';
+				? '移除自定义分析指令'
+				: '添加自定义分析指令';
 			const customInstructionsDescription = analysisCustomInstructions
-				? '(currently set)'
-				: '(applies to all analysis modes)';
-			const loopToggleLabel = analysisLoopFixingEnabled
-				? 'Disable Loop Fixing'
-				: 'Enable Loop Fixing';
+				? '(当前已设置)'
+				: '(适用于所有分析模式)';
+			const loopToggleLabel = analysisLoopFixingEnabled ? '禁用循环修复' : '启用循环修复';
 			const loopToggleDescription = analysisLoopFixingEnabled
-				? '(currently on)'
-				: '(currently off)';
+				? '(当前已启用)'
+				: '(当前已禁用)';
 			const items: SelectItem[] = [
 				...presetItems,
 				{
@@ -1204,9 +1202,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 				(tui, theme, _kb, done) => {
 					const container = new Container();
 					container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-					container.addChild(
-						new Text(theme.fg('accent', theme.bold('Select an analysis target'))),
-					);
+					container.addChild(new Text(theme.fg('accent', theme.bold('选择分析目标'))));
 
 					const selectList = new SelectList(items, Math.min(items.length, 10), {
 						selectedPrefix: (text) => theme.fg('accent', text),
@@ -1225,9 +1221,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 					selectList.onCancel = () => done(null);
 
 					container.addChild(selectList);
-					container.addChild(
-						new Text(theme.fg('dim', 'Press enter to confirm or esc to go back')),
-					);
+					container.addChild(new Text(theme.fg('dim', '按回车确认，按 ESC 返回')));
 					container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
 
 					return {
@@ -1250,29 +1244,29 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 			if (result === TOGGLE_LOOP_FIXING_VALUE) {
 				const nextEnabled = !analysisLoopFixingEnabled;
 				setAnalysisLoopFixingEnabled(nextEnabled);
-				ctx.ui.notify(nextEnabled ? 'Loop fixing enabled' : 'Loop fixing disabled', 'info');
+				ctx.ui.notify(nextEnabled ? '循环修复已启用' : '循环修复已禁用', 'info');
 				continue;
 			}
 
 			if (result === TOGGLE_CUSTOM_INSTRUCTIONS_VALUE) {
 				if (analysisCustomInstructions) {
 					setAnalysisCustomInstructions(undefined);
-					ctx.ui.notify('Custom analysis instructions removed', 'info');
+					ctx.ui.notify('自定义分析指令已移除', 'info');
 					continue;
 				}
 
 				const customInstructions = await ctx.ui.editor(
-					'Enter custom analysis instructions (applies to all modes):',
+					'输入自定义分析指令（适用于所有分析模式）：',
 					'',
 				);
 
 				if (!customInstructions?.trim()) {
-					ctx.ui.notify('Custom analysis instructions not changed', 'info');
+					ctx.ui.notify('自定义分析指令未更改', 'info');
 					continue;
 				}
 
 				setAnalysisCustomInstructions(customInstructions);
-				ctx.ui.notify('Custom analysis instructions saved', 'info');
+				ctx.ui.notify('自定义分析指令已保存', 'info');
 				continue;
 			}
 
@@ -1292,7 +1286,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 				case 'commit': {
 					if (analysisLoopFixingEnabled) {
-						ctx.ui.notify('Loop mode is not available for commit analysis.', 'error');
+						ctx.ui.notify('循环模式不适用于提交分析', 'error');
 						break;
 					}
 					const target = await showCommitSelector(ctx);
@@ -1333,9 +1327,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 		if (candidateBranches.length === 0) {
 			ctx.ui.notify(
-				currentBranch
-					? `No other branches found (current branch: ${currentBranch})`
-					: 'No branches found',
+				currentBranch ? `未找到其他分支（当前分支：${currentBranch}）` : '未找到分支',
 				'error',
 			);
 			return null;
@@ -1357,7 +1349,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 		const result = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
 			const container = new Container();
 			container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-			container.addChild(new Text(theme.fg('accent', theme.bold('Select base branch'))));
+			container.addChild(new Text(theme.fg('accent', theme.bold('选择基分支'))));
 
 			const searchInput = new Input();
 			container.addChild(searchInput);
@@ -1365,9 +1357,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 			const listContainer = new Container();
 			container.addChild(listContainer);
-			container.addChild(
-				new Text(theme.fg('dim', 'Type to filter • enter to select • esc to cancel')),
-			);
+			container.addChild(new Text(theme.fg('dim', '输入筛选 • 回车选中 • ESC 取消')));
 			container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
 
 			let filteredItems = items;
@@ -1376,7 +1366,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 			const updateList = () => {
 				listContainer.clear();
 				if (filteredItems.length === 0) {
-					listContainer.addChild(new Text(theme.fg('warning', '  No matching branches')));
+					listContainer.addChild(new Text(theme.fg('warning', '  没有匹配的分支')));
 					selectList = null;
 					return;
 				}
@@ -1449,7 +1439,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 		const commits = await getRecentCommits(pi, 20);
 
 		if (commits.length === 0) {
-			ctx.ui.notify('No commits found', 'error');
+			ctx.ui.notify('未找到提交', 'error');
 			return null;
 		}
 
@@ -1463,9 +1453,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 			(tui, theme, keybindings, done) => {
 				const container = new Container();
 				container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-				container.addChild(
-					new Text(theme.fg('accent', theme.bold('Select commit to analyze'))),
-				);
+				container.addChild(new Text(theme.fg('accent', theme.bold('选择要分析的提交'))));
 
 				const searchInput = new Input();
 				container.addChild(searchInput);
@@ -1473,9 +1461,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 				const listContainer = new Container();
 				container.addChild(listContainer);
-				container.addChild(
-					new Text(theme.fg('dim', 'Type to filter • enter to select • esc to cancel')),
-				);
+				container.addChild(new Text(theme.fg('dim', '输入筛选 • 回车选中 • ESC 取消')));
 				container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
 
 				let filteredItems = items;
@@ -1484,9 +1470,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 				const updateList = () => {
 					listContainer.clear();
 					if (filteredItems.length === 0) {
-						listContainer.addChild(
-							new Text(theme.fg('warning', '  No matching commits')),
-						);
+						listContainer.addChild(new Text(theme.fg('warning', '  没有匹配的提交')));
 						selectList = null;
 						return;
 					}
@@ -1571,10 +1555,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 	 * Show folder input for analysis
 	 */
 	async function showFolderInput(ctx: ExtensionContext): Promise<AnalysisTarget | null> {
-		const result = await ctx.ui.editor(
-			'Enter folders/files to analyze (space-separated or one per line):',
-			'.',
-		);
+		const result = await ctx.ui.editor('输入要分析的文件夹/文件（空格分隔或每行一个）：', '.');
 
 		if (!result?.trim()) return null;
 		const paths = parseAnalysisPaths(result);
@@ -1662,7 +1643,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 		// Check if we're already in an analysis
 		if (analysisOriginId) {
 			log.warn('executeAnalysis blocked: analysis already in progress');
-			ctx.ui.notify('Already in an analysis. Use /end-analysis to finish first.', 'warning');
+			ctx.ui.notify('已在分析中，请先使用 /end-analysis 结束', 'warning');
 			return false;
 		}
 
@@ -1686,7 +1667,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 				originId = ctx.sessionManager.getLeafId() ?? undefined;
 			}
 			if (!originId) {
-				ctx.ui.notify('Failed to determine analysis origin.', 'error');
+				ctx.ui.notify('失败：无法确定分析起点', 'error');
 				return false;
 			}
 			analysisOriginId = originId;
@@ -1730,14 +1711,15 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 			// Restore origin after navigation events (session_tree can reset it)
 			analysisOriginId = lockedOriginId;
 
-			// Show widget indicating analysis is active
+			// Show widget and persist state only when branch was actually created
 			setAnalysisWidget(ctx, true);
-
-			// Persist analysis state so tree navigation can restore/reset it
 			pi.appendEntry(ANALYSIS_STATE_TYPE, {
 				active: true,
 				originId: lockedOriginId,
 			});
+		} else {
+			// No user messages in session — no branch created, clear analysis state
+			analysisOriginId = undefined;
 		}
 
 		const prompt = await buildAnalysisPrompt(pi, target, {
@@ -1968,7 +1950,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 	): Promise<void> {
 		if (analysisLoopInProgress) {
 			log.warn('runLoopFixingAnalysis blocked: already running');
-			ctx.ui.notify('Loop analysis is already running.', 'warning');
+			ctx.ui.notify('循环分析正在进行中', 'warning');
 			return;
 		}
 
@@ -2133,28 +2115,25 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 			'Analyze test coverage and quality (staged, uncommitted, branch, commit, or folder)',
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
-				ctx.ui.notify('Test analysis requires interactive mode', 'error');
+				ctx.ui.notify('分析需要交互模式', 'error');
 				return;
 			}
 
 			if (analysisLoopInProgress) {
-				ctx.ui.notify('Loop analysis is already running.', 'warning');
+				ctx.ui.notify('循环分析正在进行中', 'warning');
 				return;
 			}
 
 			// Check if we're already in an analysis
 			if (analysisOriginId) {
-				ctx.ui.notify(
-					'Already in an analysis. Use /end-analysis to finish first.',
-					'warning',
-				);
+				ctx.ui.notify('已在分析中，请先使用 /end-analysis 结束', 'warning');
 				return;
 			}
 
 			// Check if we're in a git repository
 			const { code } = await pi.exec('git', ['rev-parse', '--git-dir']);
 			if (code !== 0) {
-				ctx.ui.notify('Not a git repository', 'error');
+				ctx.ui.notify('不是 git 仓库', 'error');
 				return;
 			}
 
@@ -2174,7 +2153,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 					// Handle PR checkout (async operation)
 					target = await handlePrCheckout(ctx, parsed.target.ref);
 					if (!target) {
-						ctx.ui.notify('PR analysis failed. Returning to analysis menu.', 'warning');
+						ctx.ui.notify('PR 分析失败，返回分析菜单', 'warning');
 					}
 				} else {
 					target = parsed.target;
@@ -2192,12 +2171,12 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 				}
 
 				if (!target) {
-					ctx.ui.notify('Analysis cancelled', 'info');
+					ctx.ui.notify('已取消分析', 'info');
 					return;
 				}
 
 				if (analysisLoopFixingEnabled && !isLoopCompatibleTarget(target)) {
-					ctx.ui.notify('Loop mode is not available for commit analysis.', 'error');
+					ctx.ui.notify('循环模式不适用于提交分析', 'error');
 					if (fromSelector) {
 						target = null;
 						continue;
@@ -2220,17 +2199,14 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 				if (messageCount > 0) {
 					// Existing session - ask user which mode they want
-					const choice = await ctx.ui.select('Start analysis in:', [
-						'Empty branch',
-						'Current session',
-					]);
+					const choice = await ctx.ui.select('选择分析模式：', ['新分支', '当前会话']);
 
 					if (choice === undefined) {
 						if (fromSelector) {
 							target = null;
 							continue;
 						}
-						ctx.ui.notify('Analysis cancelled', 'info');
+						ctx.ui.notify('已取消分析', 'info');
 						return;
 					}
 
@@ -2458,37 +2434,43 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 	async function runEndAnalysis(ctx: ExtensionCommandContext): Promise<void> {
 		if (!ctx.hasUI) {
-			ctx.ui.notify('/end-analysis requires interactive mode', 'error');
+			ctx.ui.notify('/end-analysis 需要交互模式', 'error');
 			return;
 		}
 
 		if (analysisLoopInProgress) {
-			ctx.ui.notify('Loop analysis is running. Wait for it to finish.', 'info');
+			ctx.ui.notify('循环分析正在运行，请等待完成', 'info');
 			return;
 		}
 
 		if (endAnalysisInProgress) {
-			ctx.ui.notify('/end-analysis is already running', 'info');
+			ctx.ui.notify('/end-analysis 正在运行中', 'info');
+			return;
+		}
+
+		// If no active analysis origin, just silently return (no branch to end)
+		if (!getActiveAnalysisOrigin(ctx)) {
+			ctx.ui.notify('当前没有活跃的分析会话，无需执行 /end-analysis', 'info');
 			return;
 		}
 
 		endAnalysisInProgress = true;
 		try {
-			const choice = await ctx.ui.select('Finish analysis:', [
-				'Return only',
-				'Return and fix findings',
-				'Return and summarize',
+			const choice = await ctx.ui.select('完成分析：', [
+				'仅返回',
+				'返回并修复发现项',
+				'返回并总结',
 			]);
 
 			if (choice === undefined) {
-				ctx.ui.notify('Cancelled. Use /end-analysis to try again.', 'info');
+				ctx.ui.notify('已取消。如需重试请再次输入 /end-analysis', 'info');
 				return;
 			}
 
 			const action: EndAnalysisAction =
-				choice === 'Return and fix findings'
+				choice === '返回并修复发现项'
 					? 'returnAndFix'
-					: choice === 'Return and summarize'
+					: choice === '返回并总结'
 						? 'returnAndSummarize'
 						: 'returnOnly';
 
