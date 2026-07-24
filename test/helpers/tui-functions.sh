@@ -135,7 +135,7 @@ tui_run_pi_test() {
 	# CI 模式检测：CI=true 时自动注入 mock-llm
 	local PI_CI_MODE=${CI:-false}
 
-	local slug="tui-test-$$"
+	local slug="tui-test-$$-$RANDOM"
 	local test_home="$ROOT_DIR/.pi/tmp/$slug"
 	mkdir -p "$test_home"
 	local output_file="$test_home/output.log"

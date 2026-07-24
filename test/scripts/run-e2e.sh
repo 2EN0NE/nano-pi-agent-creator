@@ -164,7 +164,7 @@ run_pi_and_check() {
 		return 1
 	}
 
-	local slug="e2e-test-$$"
+	local slug="e2e-test-$$-$RANDOM"
 	local test_home="$ROOT_DIR/.pi/tmp/$slug"
 	mkdir -p "$test_home/.pi/extensions" "$test_home/.pi/logs"
 
