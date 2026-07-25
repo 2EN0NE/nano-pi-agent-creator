@@ -21,7 +21,8 @@
 			"@zenone/pi-logger/types": ["./extensions/meta/pi-logger/types.ts"],
 			"@zenone/pi-selector": ["./extensions/meta/selector/index.ts"],
 			"@zenone/pi-config": ["./extensions/meta/pi-config/api.ts"],
-			"@zenone/pi-config/types": ["./extensions/meta/pi-config/types.ts"]
+			"@zenone/pi-config/types": ["./extensions/meta/pi-config/types.ts"],
+			"@zenone/pi-lab": ["./extensions/meta/pi-lab/api.ts"]
 		}
 	},
 	"include": ["extensions/**/*.ts", "scripts/**/*.ts"],

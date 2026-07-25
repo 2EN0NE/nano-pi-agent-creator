@@ -255,7 +255,7 @@ function buildEditList(
 	if (multi) {
 		for (const item of multi) {
 			edits.push({
-				path: item.path ?? path ?? '',
+				path: item.path ?? path ?? '' /* empty caught by !edits[i].path check below */,
 				oldText: item.oldText,
 				newText: item.newText,
 			});

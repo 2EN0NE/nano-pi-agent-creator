@@ -2043,7 +2043,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 						return;
 					}
 
-					useFreshSession = choice === 'Empty branch';
+					useFreshSession = choice === '新分支';
 				}
 
 				await executeReview(ctx, target, useFreshSession, { extraInstruction });

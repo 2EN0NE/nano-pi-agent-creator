@@ -2210,7 +2210,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 						return;
 					}
 
-					useFreshSession = choice === 'Empty branch';
+					useFreshSession = choice === '新分支';
 				}
 
 				await executeAnalysis(ctx, target, useFreshSession, { extraInstruction });
