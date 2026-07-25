@@ -162,33 +162,33 @@ export default function (pi: ExtensionAPI) {
 		const config = loadConfig();
 		const profile = config.profiles[config.activeProfileId];
 		if (!profile) {
-			ctx.ui.setStatus('custom-compaction', undefined);
+			ctx.ui.setStatus('custom-compact', undefined);
 			return;
 		}
 		const theme = ctx.ui.theme;
 		const contextUsage = ctx.getContextUsage?.() ?? null;
 		const tokens = contextUsage?.tokens ?? null;
 		const percent = contextUsage?.percent ?? null;
-		let display = profile.name;
+		const pid = profile.id;
+		let extra: string;
 		switch (profile.trigger.type) {
 			case 'context_percent': {
 				if (percent !== null) {
-					display += `: ${percent.toFixed(0)}%/${profile.trigger.threshold}%`;
+					extra = `${percent.toFixed(0)}%/${profile.trigger.threshold}%`;
 				} else {
-					display += ` @ ${profile.trigger.threshold}%`;
+					extra = `${profile.trigger.threshold}%`;
 				}
 				break;
 			}
 			case 'fixed': {
 				if (tokens !== null) {
-					display += `: ${fmtTokens(tokens)}/${fmtTokens(profile.trigger.threshold)}`;
+					extra = `${fmtTokens(tokens)}/${fmtTokens(profile.trigger.threshold)}`;
 				} else {
-					display += ` @ ${fmtTokens(profile.trigger.threshold)}`;
+					extra = `${fmtTokens(profile.trigger.threshold)}`;
 				}
 				break;
 			}
 			case 'reserve': {
-				let extra = ` 余额 ${fmtTokens(profile.trigger.threshold)}`;
 				let windowTokens: number | null = null;
 				let cw: number | undefined;
 				if (tokens !== null) {
@@ -199,15 +199,18 @@ export default function (pi: ExtensionAPI) {
 							: percent !== null && percent > 0
 								? Math.round(tokens / (percent / 100))
 								: null;
-					if (windowTokens !== null) {
-						extra = `: ${fmtTokens(windowTokens - tokens)}/${fmtTokens(profile.trigger.threshold)}`;
-					}
 				}
-				display += extra;
+				if (tokens !== null && windowTokens !== null) {
+					extra = `${fmtTokens(windowTokens - tokens)}/${fmtTokens(profile.trigger.threshold)}`;
+				} else {
+					extra = `${fmtTokens(profile.trigger.threshold)}`;
+				}
 				break;
 			}
+			default:
+				extra = `${fmtTokens(profile.trigger.threshold)}`;
 		}
-		ctx.ui.setStatus('custom-compaction', theme.fg('accent', `压缩: ${display}`));
+		ctx.ui.setStatus('custom-compact', theme.fg('accent', `|custom-compact:${pid}-${extra}`));
 	}
 
 	// ── On session start/reload: set session ID, load session-specific config ──
