@@ -133,6 +133,83 @@ export default function (pi: ExtensionAPI) {
 	// Load config on startup
 	loadConfig();
 
+	// ── Token 格式化辅助函数 ──────────────────────────────────
+	function fmtTokens(n: number): string {
+		const abs = Math.abs(n);
+		if (abs >= 1_000_000) {
+			const scaled = n / 1_000_000;
+			return `${Number.isInteger(scaled) ? scaled.toFixed(0) : scaled.toFixed(1)}M`;
+		}
+		if (abs >= 1_000) {
+			const scaled = n / 1_000;
+			return `${Number.isInteger(scaled) ? scaled.toFixed(0) : scaled.toFixed(1)}K`;
+		}
+		return String(n);
+	}
+
+	// ── 状态栏更新 ────────────────────────────────────────────
+	function updateStatus(ctx: {
+		hasUI: boolean;
+		ui: {
+			setStatus: (key: string, value: string | undefined) => void;
+			theme: { fg: (...args: any[]) => string };
+		};
+		getContextUsage?: () =>
+			{ tokens: number | null; percent: number | null } | null | undefined;
+		model?: { contextWindow?: number };
+	}): void {
+		if (!ctx.hasUI) return;
+		const config = loadConfig();
+		const profile = config.profiles[config.activeProfileId];
+		if (!profile) {
+			ctx.ui.setStatus('custom-compaction', undefined);
+			return;
+		}
+		const theme = ctx.ui.theme;
+		const contextUsage = ctx.getContextUsage?.() ?? null;
+		const tokens = contextUsage?.tokens ?? null;
+		const percent = contextUsage?.percent ?? null;
+		let display = profile.name;
+		switch (profile.trigger.type) {
+			case 'context_percent': {
+				if (percent !== null) {
+					display += `: ${percent.toFixed(0)}%/${profile.trigger.threshold}%`;
+				} else {
+					display += ` @ ${profile.trigger.threshold}%`;
+				}
+				break;
+			}
+			case 'fixed': {
+				if (tokens !== null) {
+					display += `: ${fmtTokens(tokens)}/${fmtTokens(profile.trigger.threshold)}`;
+				} else {
+					display += ` @ ${fmtTokens(profile.trigger.threshold)}`;
+				}
+				break;
+			}
+			case 'reserve': {
+				let extra = ` 余额 ${fmtTokens(profile.trigger.threshold)}`;
+				let windowTokens: number | null = null;
+				let cw: number | undefined;
+				if (tokens !== null) {
+					cw = ctx.model?.contextWindow;
+					windowTokens =
+						cw !== undefined && cw > 0
+							? cw
+							: percent !== null && percent > 0
+								? Math.round(tokens / (percent / 100))
+								: null;
+					if (windowTokens !== null) {
+						extra = `: ${fmtTokens(windowTokens - tokens)}/${fmtTokens(profile.trigger.threshold)}`;
+					}
+				}
+				display += extra;
+				break;
+			}
+		}
+		ctx.ui.setStatus('custom-compaction', theme.fg('accent', `压缩: ${display}`));
+	}
+
 	// ── On session start/reload: set session ID, load session-specific config ──
 	pi.on('session_start', async (_event, ctx) => {
 		const sid = ctx.sessionManager.getSessionId();
@@ -141,6 +218,7 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			reloadConfig();
 		}
+		updateStatus(ctx);
 	});
 
 	// ── Register /custom-compaction-setting command ───────────
@@ -149,6 +227,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			reloadConfig();
 			await openSettingsPanel(ctx);
+			updateStatus(ctx);
 		},
 	});
 
@@ -225,6 +304,7 @@ export default function (pi: ExtensionAPI) {
 	// flag is still true when agent_end fires (even though processing is done).
 	// The compactingInProgress flag prevents re-entry.
 	pi.on('agent_end', async (_event, ctx) => {
+		updateStatus(ctx);
 		if (compactingInProgress) return;
 
 		const config = loadConfig();
