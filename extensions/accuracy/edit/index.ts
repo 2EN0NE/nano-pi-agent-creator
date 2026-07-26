@@ -1,8 +1,9 @@
 /**
  * Edit 工具插件 — 支持经典精确匹配 + 行脚本模糊匹配
  *
- * 内部通过 globalThis.__labApi 获取 pi-lab 实验框架实例（鸭子类型解耦，
- * 类似 preset.ts → __toolsApi 模式）。
+ * 实验框架接入：方案 A（弱依赖），通过 globalThis.__labApi 桥接，
+ * 在 session_start 中延迟注册，消除加载顺序竞险。
+ * pi-lab 不可用时自然降级（回退 classic + 纯 exact match）。
  *
  * - classic: 精确 oldText 匹配（来自原 multi-edit.ts）
  * - row-script: 模糊行匹配 + @REPLACE/@DEL/@APPEND 等行操作（来自原 unified-edit.ts）
@@ -55,28 +56,38 @@ const classic = createClassicEditor();
 const rowScript = createRowScriptEditor();
 
 export default function editExtension(pi: ExtensionAPI) {
-	// 通过 globalThis 获取 pi-lab 单例（鸭子类型，类似 preset.ts → __toolsApi）
-	const piLabApi = (globalThis as any).__labApi?.getExperimentManager?.();
+	// labSelect/labRecord 在 session_start 中初始化（延迟注册消除加载顺序竞险）
 	let labSelect: (() => Promise<string>) | undefined;
 	let labRecord: ((armId: string, outcome: any) => Promise<void>) | undefined;
 
-	if (piLabApi) {
-		const editExp = piLabApi.registerExperiment({
-			name: 'edit-strategy',
-			contextKey: (ctx: ExtensionContext) =>
-				`${ctx.model?.provider ?? 'unknown'}:${ctx.model?.id ?? 'unknown'}`,
-			arms: [
-				{ id: 'classic', label: 'Exact text matching' },
-				{ id: 'row-script', label: 'Fuzzy line matching' },
-			],
-			strategy: 'thompson-sampling',
-		});
-		labSelect = () => editExp.select();
-		labRecord = (armId, outcome) => editExp.record(armId, outcome);
-		log.info('Edit experiment registered via pi-lab');
-	} else {
-		log.warn('pi-lab not available — edit running without experiment');
-	}
+	// 在 session_start 中通过 globalThis 桥接注册实验（方案 A — 弱依赖）
+	// pi-lab 不可用时自然降级
+	pi.on('session_start', async (_event, _ctx) => {
+		const mgr = (globalThis as any).__labApi?.getExperimentManager?.();
+		if (!mgr) {
+			log.warn('pi-lab not available — edit running without experiment');
+			return;
+		}
+		try {
+			const editExp = mgr.registerWeakExperiment({
+				name: 'edit-strategy',
+				contextKey: (ctx: ExtensionContext) =>
+					`${ctx.model?.provider ?? 'unknown'}:${ctx.model?.id ?? 'unknown'}`,
+				arms: [
+					{ id: 'classic', label: 'Exact text matching' },
+					{ id: 'row-script', label: 'Fuzzy line matching' },
+				],
+				strategy: 'thompson-sampling',
+			});
+			labSelect = () => editExp.select();
+			labRecord = (armId, outcome) => editExp.record(armId, outcome);
+			log.info('Edit experiment registered via pi-lab');
+		} catch (err) {
+			log.warn('Failed to register edit experiment', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	});
 
 	// ── 注册工具 ──
 
@@ -118,7 +129,7 @@ export default function editExtension(pi: ExtensionAPI) {
 			try {
 				if (hasPatch) {
 					armId = 'row-script';
-					const r = await rowScript.execute(patch, ctx.cwd);
+					const r = await rowScript.execute(patch, ctx.cwd, signal);
 					const summary = r.results
 						.map((res, i) => `${i + 1}. ${res.message}`)
 						.join('\n');
@@ -149,7 +160,7 @@ export default function editExtension(pi: ExtensionAPI) {
 							firstAttempt = false;
 							armId = 'row-script';
 							const fallbackOps = buildFallbackRows(r.results, edits);
-							const fr = await rowScript.execute(fallbackOps, ctx.cwd);
+							const fr = await rowScript.execute(fallbackOps, ctx.cwd, signal);
 							const summary = fr.results
 								.map((res, i) => `${i + 1}. ${res.message}`)
 								.join('\n');
@@ -198,7 +209,7 @@ export default function editExtension(pi: ExtensionAPI) {
 						firstAttempt = false;
 						const edits = buildEditList(path, oldText, newText, multi);
 						const rowText = editsToRowScript(edits);
-						const r = await rowScript.execute(rowText, ctx.cwd);
+						const r = await rowScript.execute(rowText, ctx.cwd, signal);
 						const summary = r.results
 							.map((res, i) => `${i + 1}. ${res.message}`)
 							.join('\n');
@@ -216,13 +227,21 @@ export default function editExtension(pi: ExtensionAPI) {
 				}
 			} catch (err: any) {
 				if (labRecord) {
-					await labRecord(armId, {
-						success: false,
-						firstAttempt: true,
-						latencyMs: Date.now() - startTime,
-						errorType: 'crash',
-						errorMessage: err.message ?? String(err),
-					});
+					try {
+						await labRecord(armId, {
+							success: false,
+							firstAttempt, // 使用外层变量：fallback 后 crash 不会误报 firstAttempt
+							latencyMs: Date.now() - startTime,
+							errorType: 'crash',
+							errorMessage: err.message ?? String(err),
+						});
+					} catch (recordErr) {
+						log.error('Failed to record experiment outcome', {
+							armId,
+							error:
+								recordErr instanceof Error ? recordErr.message : String(recordErr),
+						});
+					}
 				}
 				throw err;
 			}

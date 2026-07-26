@@ -1,0 +1,26 @@
+{
+	"name": "@zenone/pi-lab",
+	"version": "0.1.0",
+	"description": "实验框架 (A/B Testing / Multi-armed Bandit) — 注册实验、选择臂、收集反馈、贝叶斯决策。支持 Thompson Sampling 和 Epsilon-Greedy。",
+	"type": "module",
+	"main": "./api.ts",
+	"exports": {
+		".": {
+			"import": "./api.ts"
+		}
+	},
+	"keywords": [
+		"pi-extension",
+		"experiment",
+		"ab-testing",
+		"multi-armed-bandit",
+		"thompson-sampling"
+	],
+	"dependencies": {
+		"@zenone/pi-logger": "file:../pi-logger",
+		"@zenone/pi-config": "file:../pi-config"
+	},
+	"devDependencies": {
+		"typescript": "^7.0.2"
+	}
+}

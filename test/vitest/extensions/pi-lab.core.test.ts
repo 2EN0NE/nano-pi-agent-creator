@@ -218,6 +218,164 @@ describe('pi-lab: ExperimentManager', () => {
 		expect(all.length).toBe(2);
 		expect(all.map((e) => e.name).sort()).toEqual(['exp-a', 'exp-b']);
 	});
+
+	// ── 双轨 API + 冲突裁决 ──
+
+	it('registerWeakExperiment returns a valid ExperimentAPI', () => {
+		const exp = manager.registerWeakExperiment({
+			name: 'weak-exp',
+			contextKey: () => 'g',
+			arms: [{ id: 'a', label: 'A' }],
+			strategy: 'thompson-sampling',
+		});
+		expect(exp).toBeDefined();
+		expect(typeof exp.select).toBe('function');
+	});
+
+	it('registerStrongExperiment returns a valid ExperimentAPI', () => {
+		const exp = manager.registerStrongExperiment({
+			name: 'strong-exp',
+			contextKey: () => 'g',
+			arms: [{ id: 'b', label: 'B' }],
+			strategy: 'thompson-sampling',
+		});
+		expect(exp).toBeDefined();
+		expect(typeof exp.select).toBe('function');
+	});
+
+	it('strong experiment overwrites existing weak experiment', () => {
+		manager.registerWeakExperiment({
+			name: 'conflict-overwrite',
+			contextKey: () => 'g',
+			arms: [{ id: 'a', label: 'A' }],
+			strategy: 'thompson-sampling',
+		});
+
+		// Strong 覆盖已存在的 Weak
+		const exp = manager.registerStrongExperiment({
+			name: 'conflict-overwrite',
+			contextKey: () => 'g',
+			arms: [{ id: 'b', label: 'B' }],
+			strategy: 'thompson-sampling',
+		});
+
+		// 新实验的臂是 'b'（被覆盖了）
+		const info = exp.info();
+		expect(info.name).toBe('conflict-overwrite');
+
+		// 应该有冲突事件被缓存
+		const conflicts = manager.getConflicts();
+		expect(conflicts.length).toBeGreaterThan(0);
+		const overwrite = conflicts.find((c) => c.type === 'overwrite');
+		expect(overwrite).toBeDefined();
+		expect(overwrite!.existingSource).toBe('bridge');
+		expect(overwrite!.newSource).toBe('import');
+	});
+
+	it('weak experiment is blocked when strong already exists', () => {
+		// 清理冲突缓冲区
+		while (manager.getConflicts().length > 0) manager.flushConflicts();
+
+		manager.registerStrongExperiment({
+			name: 'conflict-block',
+			contextKey: () => 'g',
+			arms: [{ id: 'a', label: 'A' }],
+			strategy: 'thompson-sampling',
+		});
+
+		// Weak 尝试覆盖已有的 Strong → 阻断
+		const blockedExp = manager.registerWeakExperiment({
+			name: 'conflict-block',
+			contextKey: () => 'g',
+			arms: [{ id: 'b', label: 'B' }],
+			strategy: 'thompson-sampling',
+		});
+
+		// 返回的 API 应该引用原有的 strong 实验
+		// 验证：选择的臂应该还是 'a'（strong 原有的臂），而不是 'b'
+		// 先 force 到 'a' 验证确实是原有的臂
+		blockedExp.forceArm('a');
+		expect(blockedExp.info().forceArmId).toBe('a');
+
+		// 应该有冲突事件被缓存
+		const conflicts = manager.getConflicts();
+		const blocked = conflicts.find((c) => c.type === 'blocked');
+		expect(blocked).toBeDefined();
+		expect(blocked!.existingSource).toBe('import');
+		expect(blocked!.newSource).toBe('bridge');
+	});
+
+	it('same-source overwrites (last-wins) with conflict event', () => {
+		// 清理冲突缓冲区
+		while (manager.getConflicts().length > 0) manager.flushConflicts();
+
+		manager.registerStrongExperiment({
+			name: 'same-source-last-wins',
+			contextKey: () => 'g',
+			arms: [{ id: 'first', label: 'First' }],
+			strategy: 'thompson-sampling',
+		});
+
+		manager.registerStrongExperiment({
+			name: 'same-source-last-wins',
+			contextKey: () => 'g',
+			arms: [{ id: 'second', label: 'Second' }],
+			strategy: 'thompson-sampling',
+		});
+
+		const conflicts = manager.getConflicts();
+		const overwrite = conflicts.find(
+			(c) => c.type === 'overwrite' && c.experimentName === 'same-source-last-wins',
+		);
+		expect(overwrite).toBeDefined();
+		expect(overwrite!.newSource).toBe('import');
+		expect(overwrite!.existingSource).toBe('import');
+	});
+
+	it('getAllExperiments includes source info', () => {
+		manager.registerStrongExperiment({
+			name: 'exp-source-a',
+			contextKey: () => 'k',
+			arms: [{ id: 'a1', label: 'A1' }],
+			strategy: 'thompson-sampling',
+		});
+		manager.registerWeakExperiment({
+			name: 'exp-source-b',
+			contextKey: () => 'k',
+			arms: [{ id: 'b1', label: 'B1' }],
+			strategy: 'thompson-sampling',
+		});
+
+		const all = manager.getAllExperiments();
+		const a = all.find((e) => e.name === 'exp-source-a');
+		const b = all.find((e) => e.name === 'exp-source-b');
+
+		expect(a?.source).toBe('import');
+		expect(b?.source).toBe('bridge');
+	});
+
+	it('flushConflicts clears the buffer', () => {
+		// 清理冲突缓冲区
+		while (manager.getConflicts().length > 0) manager.flushConflicts();
+
+		manager.registerWeakExperiment({
+			name: 'flush-test',
+			contextKey: () => 'g',
+			arms: [{ id: 'x', label: 'X' }],
+			strategy: 'thompson-sampling',
+		});
+		manager.registerStrongExperiment({
+			name: 'flush-test',
+			contextKey: () => 'g',
+			arms: [{ id: 'y', label: 'Y' }],
+			strategy: 'thompson-sampling',
+		});
+
+		expect(manager.getConflicts().length).toBeGreaterThan(0);
+
+		manager.flushConflicts();
+		expect(manager.getConflicts().length).toBe(0);
+	});
 });
 
 describe('pi-lab: Experiment (standalone)', () => {

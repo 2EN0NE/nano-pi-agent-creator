@@ -1,5 +1,20 @@
 # 领域词汇表
 
+## pi-lab 实验框架
+
+| 术语                                           | 定义                                                                                         |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **Experiment / 实验**                          | 一个 A/B 测试实例，包含多个臂（arm）、决策策略（strategy）和反馈记录（outcome recording）    |
+| **Arm / 臂**                                   | 实验中的一种变体方案（如 `classic` 精确匹配 vs `row-script` 模糊行匹配）                     |
+| **Strategy / 决策策略**                        | 选择臂的算法（Thompson Sampling / Epsilon-Greedy）                                           |
+| **Outcome / 反馈信号**                         | 一次实验试次的执行结果，分层设计：Tier 1 success → 驱动贝叶斯更新；Tier 2-5 存入 metadata    |
+| **Consumer / 消费方**                          | 通过 pi-lab API 注册实验并在自身逻辑中调用 select/record 的插件（如 edit）                   |
+| **GlobalThis Bridge / globalThis 桥接**        | pi-lab 通过 `globalThis.__labApi` 暴露 API，消费方通过鸭子类型访问，不依赖模块导入的解耦模式 |
+| **Deferred Registration / 延迟注册**           | 消费方不在模块初始化时注册实验，而是推迟到 `session_start` 或首次 execute 的时序安全点再进行 |
+| **Degradation / 降级**                         | 当 pi-lab 不可用时，消费方静默回退到无实验模式的兜底行为                                     |
+| **Load-Order Hazard / 加载顺序竞险**           | 消费方在模块初始化时同步检查全局桥接，但 pi-lab 尚未加载导致注册错失的时序问题               |
+| **Fatal Registration Conflict / 致命注册冲突** | 两个实验同时注册同名实验，或被强制选择了冲突的策略时发生的竞争                               |
+
 ## Cloud Sessions
 
 | 术语                 | 定义                                                                                                                                                                                                     |
