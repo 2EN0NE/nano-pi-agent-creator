@@ -168,8 +168,7 @@ profiles:
                 - ci-watch
                 - goal
                 # 以下插件为不常用或待观察
-                - unified-edit # ⚠ 待观察：上游实验性编辑工具，未替代 multi-edit
-                # - control # 已迁移到 meta/ 分类，默认同步
+                - control # 适合多agent场景，平常不需要
                 - prompt-customizer # 演示性质
                 - project-trust # 演示性质
                 - catch-the-fox # 演示性质、趣味

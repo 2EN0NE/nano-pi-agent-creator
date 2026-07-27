@@ -457,23 +457,26 @@ export default function goalExtension(pi: ExtensionAPI) {
 					snapshot.tokenBudget === undefined
 						? ` (${formatElapsedSeconds(snapshot.timeUsedSeconds)})`
 						: ` (${formatTokensCompact(snapshot.tokensUsed)} / ${formatTokensCompact(snapshot.tokenBudget)})`;
-				ctx.ui.setStatus('goal', theme.fg('accent', `追求目标中${usage}`));
+				ctx.ui.setStatus('goal', theme.fg('accent', `|goal:追求目标中${usage}`));
 				break;
 			}
 			case 'paused':
-				ctx.ui.setStatus('goal', theme.fg('warning', '目标已暂停 (/goal resume)'));
+				ctx.ui.setStatus('goal', theme.fg('warning', '|goal:目标已暂停 (/goal resume)'));
 				break;
 			case 'blocked':
-				ctx.ui.setStatus('goal', theme.fg('warning', '目标已阻塞 (/goal resume)'));
+				ctx.ui.setStatus('goal', theme.fg('warning', '|goal:目标已阻塞 (/goal resume)'));
 				break;
 			case 'usageLimited':
-				ctx.ui.setStatus('goal', theme.fg('warning', '目标触达用量限制 (/goal resume)'));
+				ctx.ui.setStatus(
+					'goal',
+					theme.fg('warning', '|goal:目标触达用量限制 (/goal resume)'),
+				);
 				break;
 			case 'budgetLimited':
-				ctx.ui.setStatus('goal', theme.fg('warning', '目标预算已耗尽'));
+				ctx.ui.setStatus('goal', theme.fg('warning', '|goal:目标预算已耗尽'));
 				break;
 			case 'complete':
-				ctx.ui.setStatus('goal', theme.fg('success', '目标已完成'));
+				ctx.ui.setStatus('goal', theme.fg('success', '|goal:目标已完成'));
 				break;
 		}
 	}

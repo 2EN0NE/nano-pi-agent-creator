@@ -117,10 +117,10 @@ function buildWidgetText(): string {
 	// Check if in a merge
 	const hasMergeHead = _inMergeHead;
 	if (hasMergeHead) {
-		return `| git-merge:merge ${ref}`;
+		return `|git-merge:merge ${ref}`;
 	}
 
-	return `| git-merge:${ref}`;
+	return `|git-merge:${ref}`;
 }
 
 let _inMergeHead = false;

@@ -92,22 +92,22 @@ async function runSync(
 		try {
 			const config = await loadConfig();
 			if (!isProviderConfigured(config)) {
-				setStatus(STATUS_KEY, cs('| sessions: not configured', 'dim'));
+				setStatus(STATUS_KEY, cs('|sessions: not configured', 'dim'));
 				return null;
 			}
-			setStatus(STATUS_KEY, cs(`| sessions: syncing (${config.provider})`, 'accent'));
+			setStatus(STATUS_KEY, cs(`|sessions: syncing (${config.provider})`, 'accent'));
 			const sync = new Sync(config);
 			const pm = await loadProjectMatchConfig();
 			const result = await sync.run(pm);
 			setStatus(
 				STATUS_KEY,
-				cs(`| sessions: ${config.provider} ${summarize(result)}`, 'accent'),
+				cs(`|sessions: ${config.provider} ${summarize(result)}`, 'accent'),
 			);
 			lastSyncFailed = false;
 			return result;
 		} catch (error) {
 			const reason = shortReason(error);
-			setStatus(STATUS_KEY, cs(`| sessions: sync error (${reason})`, 'warning'));
+			setStatus(STATUS_KEY, cs(`|sessions: sync error (${reason})`, 'warning'));
 			if (!lastSyncFailed) {
 				notifyUser?.(`cloud-sessions sync failed: ${reason}`, 'warning');
 			}
@@ -198,10 +198,10 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 		const notifyUser: NotifyUser = (text, level) => ctx.ui.notify(text, level);
 
 		if (!isProviderConfigured(config)) {
-			ctx.ui.setStatus(STATUS_KEY, th.fg('dim', '| sessions: not configured'));
+			ctx.ui.setStatus(STATUS_KEY, th.fg('dim', '|sessions: not configured'));
 			return;
 		}
-		setStatus(STATUS_KEY, `| sessions: ${config.provider}`);
+		setStatus(STATUS_KEY, `|sessions: ${config.provider}`);
 
 		if (config.pullOnStart && (event.reason === 'startup' || event.reason === 'reload')) {
 			// Fire-and-forget: don't block session_start on network/git operations.
@@ -374,7 +374,7 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 					await writeConfig({ provider: 'icloud', icloud: { dir } });
 				}
 
-				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg('accent', `| sessions: ${provider}`));
+				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg('accent', `|sessions: ${provider}`));
 				ctx.ui.notify('Cloud sessions configured.', 'info');
 				return true;
 			}
