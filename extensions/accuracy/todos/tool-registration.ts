@@ -48,7 +48,13 @@ export function registerTool(pi: ExtensionAPI): void {
 			'Claim tasks before working on them to avoid conflicts, and close them when complete.',
 		parameters: TodoParams,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(
+			_toolCallId: string,
+			params: any,
+			_signal: AbortSignal | undefined,
+			_onUpdate: any,
+			ctx: any,
+		) {
 			const cwd = (ctx as any).cwd || process.cwd();
 			const todosDir = getTodosDir(cwd);
 			const action: TodoAction = params.action;
@@ -364,7 +370,7 @@ export function registerTool(pi: ExtensionAPI): void {
 			}
 		},
 
-		renderCall(args, theme) {
+		renderCall(args: any, theme: Theme) {
 			const action = typeof args.action === 'string' ? args.action : '';
 			const id = typeof args.id === 'string' ? args.id : '';
 			const normalizedId = id ? normalizeTodoId(id) : '';
@@ -379,7 +385,7 @@ export function registerTool(pi: ExtensionAPI): void {
 			return new Text(text, 0, 0);
 		},
 
-		renderResult(result, { expanded, isPartial }, theme) {
+		renderResult(result: any, { expanded, isPartial }: any, theme: Theme) {
 			const details = result.details as TodoToolDetails | undefined;
 			if (isPartial) {
 				return new Text(theme.fg('warning', 'Processing...'), 0, 0);

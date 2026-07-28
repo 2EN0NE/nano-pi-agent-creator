@@ -60,6 +60,17 @@ export default function todosExtension(pi: ExtensionAPI) {
 		const allTodos = await listAllTodos(ctx.cwd);
 		const currentSessionId = ctx.sessionManager.getSessionId();
 
+		// 当 scope 为 session 且没有分配给当前 session 的 todo 时，隐藏 widget
+		if (cfg.widgetScope === 'session') {
+			const sessionTodos = currentSessionId
+				? allTodos.filter((t) => t.assigned_to_session === currentSessionId)
+				: allTodos.filter((t) => t.assigned_to_session);
+			if (sessionTodos.length === 0) {
+				ctx.ui.setWidget(TUI_PANEL_WIDGET_KEY, undefined);
+				return;
+			}
+		}
+
 		ctx.ui.setWidget(TUI_PANEL_WIDGET_KEY, (_tui, theme) => {
 			const lines = buildWidgetContent(allTodos, theme, currentSessionId);
 			return {

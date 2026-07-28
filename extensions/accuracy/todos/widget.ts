@@ -29,7 +29,7 @@ export function buildWidgetContent(
 	}
 
 	if (scoped.length === 0) {
-		return [theme.fg('dim', '[Todos] none')];
+		return [theme.fg('text', '|Todos: none')];
 	}
 
 	if (cfg.widgetDisplay === 'details') {

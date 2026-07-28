@@ -210,7 +210,21 @@ export default function (pi: ExtensionAPI) {
 			default:
 				extra = `${fmtTokens(profile.trigger.threshold)}`;
 		}
-		ctx.ui.setStatus('custom-compact', theme.fg('accent', `|custom-compact:${pid}-${extra}`));
+		// 阈值是否已触发（需要用户关注）
+		const triggered =
+			contextUsage &&
+			contextUsage.tokens !== null &&
+			shouldTrigger(
+				profile.trigger,
+				contextUsage as { tokens: number; percent: number | null },
+				ctx.model?.contextWindow,
+			);
+		ctx.ui.setStatus(
+			'custom-compact',
+			compactingInProgress || triggered
+				? theme.fg('accent', `|custom-compact:${pid}-${extra}`)
+				: theme.fg('text', `|custom-compact:${pid}-${extra}`),
+		);
 	}
 
 	// ── On session start/reload: set session ID, load session-specific config ──
