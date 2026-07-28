@@ -133,6 +133,19 @@ describe('test-analysis.ts 模式选择', () => {
 // ============================================================================
 
 describe('整体验证', () => {
+	/**
+	 * 检查从第 i 行开始的 20 行窗口内是否存在 choice === 'X' 或 choice !== 'X' 精确比较。
+	 * 用于跳过动作选择器等无精确比较的 select 调用。
+	 */
+	function hasChoiceComparison(lines: string[], i: number): boolean {
+		for (let j = i; j < Math.min(i + 20, lines.length); j++) {
+			if (/choice\s*(===|!==)\s*'/.test(lines[j])) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	it('review.ts 的所有 ctx.ui.select 都有匹配的 choice 比较', () => {
 		const source = readSource('review.ts');
 		const lines = source.split('\n');
@@ -154,10 +167,8 @@ describe('整体验证', () => {
 				.map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
 				.filter(Boolean);
 
-			// 动作选择器 (如 ['仅返回', '返回并修复发现项', '返回并总结'])
-			// 使用三元表达式而不是 === 比较, 跳过它们
-			const isActionSelector = options.some((o) => o.includes('返回'));
-			if (isActionSelector) continue;
+			// 跳过动作选择器（无 choice === 'X' 精确比较的行）
+			if (!hasChoiceComparison(lines, i)) continue;
 
 			// 找 choice === 'X' 比较
 			let hasMatch = false;
@@ -193,8 +204,8 @@ describe('整体验证', () => {
 				.map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
 				.filter(Boolean);
 
-			const isActionSelector = options.some((o) => o.includes('返回'));
-			if (isActionSelector) continue;
+			// 跳过动作选择器（无 choice === 'X' 精确比较的行）
+			if (!hasChoiceComparison(lines, i)) continue;
 
 			let hasMatch = false;
 			for (let j = i; j < Math.min(i + 20, lines.length); j++) {
