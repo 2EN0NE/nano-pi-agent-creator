@@ -2,13 +2,14 @@
  * Git Merge and Resolve
  *
  * Keeps the working branch up to date with its upstream tracking ref.
- * After each agent turn, fetches and merges. Clean merges complete
- * silently. When conflicts arise, the working tree is left dirty and
- * the agent receives a follow-up message listing each conflict block
+ * After each agent turn, fetches and rebases (or merges). Clean rebases
+ * complete silently. When conflicts arise, the working tree is left dirty
+ * and the agent receives a follow-up message listing each conflict block
  * with file, line range, and ours/theirs sections so it can resolve them.
  *
  * /git-merge-and-resolve  command — TUI control panel for config.
  *   - enabled / disabled
+ *   - strategy: rebase (default, linear history) or merge
  *   - notifications on / off
  *   - widget on / off
  *
@@ -93,8 +94,13 @@ function formatRange(start: number, end: number): string {
 	return `${start}-${end}`;
 }
 
-function formatConflicts(ref: string, blocks: ConflictBlock[]): string {
-	const lines = [`Merged ${ref} with conflicts:`, ''];
+function formatConflicts(
+	ref: string,
+	blocks: ConflictBlock[],
+	strategy: 'merge' | 'rebase',
+): string {
+	const verb = strategy === 'rebase' ? 'Rebased' : 'Merged';
+	const lines = [`${verb} ${ref} with conflicts:`, ''];
 	for (const b of blocks) {
 		const ours = formatRange(b.startLine + 1, b.separatorLine - 1);
 		const theirs = formatRange(b.separatorLine + 1, b.endLine - 1);
@@ -109,21 +115,20 @@ function formatConflicts(ref: string, blocks: ConflictBlock[]): string {
 // ============================================================================
 
 function buildWidgetText(): string {
-	const status = _config.enabled ? 'on' : 'off';
 	const ref = _upstreamRef || '?';
+	const strat = _config.strategy;
+	const inProgress = _inOperation;
 
-	if (!_config.enabled) return `| git-merge:off`;
+	if (!_config.enabled) return `|git-${strat}:off`;
 
-	// Check if in a merge
-	const hasMergeHead = _inMergeHead;
-	if (hasMergeHead) {
-		return `|git-merge:merge ${ref}`;
+	if (inProgress) {
+		return `|git-${strat}:${strat} ${ref}`;
 	}
 
-	return `|git-merge:${ref}`;
+	return `|git-${strat}:${ref}`;
 }
 
-let _inMergeHead = false;
+let _inOperation = false;
 
 function updateWidget(ctx: ExtensionContext | ExtensionCommandContext): void {
 	if (!_config.showWidget || !ctx.hasUI) {
@@ -149,6 +154,7 @@ async function handleCommand(_args: string, ctx: ExtensionCommandContext): Promi
 		const lines = [
 			'Git Merge and Resolve Configuration:',
 			`  Enabled: ${_config.enabled}`,
+			`  Strategy: ${_config.strategy}`,
 			`  Notifications: ${_config.notifications}`,
 			`  Show Widget: ${_config.showWidget}`,
 			`  Upstream: ${_upstreamRef || '(none)'}`,
@@ -167,10 +173,18 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 		const items: SelectItem[] = [
 			{
 				value: '__toggle_enabled',
-				label: `Auto Merge  ${onOffLabel(_config.enabled)}`,
+				label: `Auto Sync  ${onOffLabel(_config.enabled)}`,
 				description: _config.enabled
-					? 'Enabled — fetch & merge on agent_end'
+					? `Enabled — fetch & ${_config.strategy} on agent_end`
 					: 'Disabled — no automatic action',
+			},
+			{
+				value: '__toggle_strategy',
+				label: `Strategy  [${_config.strategy.toUpperCase()}]`,
+				description:
+					_config.strategy === 'rebase'
+						? 'Rebase — linear history, no extra merge commits'
+						: 'Merge — preserve branch topology with merge commits',
 			},
 			{
 				value: '__toggle_notifications',
@@ -202,7 +216,14 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 			case '__toggle_enabled':
 				_config.enabled = !_config.enabled;
 				saveConfig(ctx.cwd, _config, 'project');
-				ctx.ui.notify(`Auto merge ${_config.enabled ? 'enabled' : 'disabled'}`, 'info');
+				ctx.ui.notify(`Auto sync ${_config.enabled ? 'enabled' : 'disabled'}`, 'info');
+				updateWidget(ctx);
+				break;
+
+			case '__toggle_strategy':
+				_config.strategy = _config.strategy === 'rebase' ? 'merge' : 'rebase';
+				saveConfig(ctx.cwd, _config, 'project');
+				ctx.ui.notify(`Strategy set to ${_config.strategy}`, 'info');
 				updateWidget(ctx);
 				break;
 
@@ -284,13 +305,14 @@ export default function (pi: ExtensionAPI) {
 		_upstreamRef = '';
 
 		log.info(
-			'Config loaded: enabled=%s, notifications=%s, showWidget=%s',
+			'Config loaded: enabled=%s, strategy=%s, notifications=%s, showWidget=%s',
 			_config.enabled,
+			_config.strategy,
 			_config.notifications,
 			_config.showWidget,
 		);
 
-		_inMergeHead = false;
+		_inOperation = false;
 
 		// Probe upstream ref for widget
 		const { stdout: upstream, code: uc } = await pi.exec('git', [
@@ -303,9 +325,10 @@ export default function (pi: ExtensionAPI) {
 			_upstreamRef = upstream.trim();
 		}
 
-		// Probe MERGE_HEAD
-		const { code: mhCode } = await pi.exec('git', ['rev-parse', 'MERGE_HEAD']);
-		_inMergeHead = mhCode === 0;
+		// Probe active operation (merge or rebase in progress)
+		const isMerge = await pi.exec('git', ['rev-parse', 'MERGE_HEAD']);
+		const isRebase = await pi.exec('git', ['rev-parse', 'REBASE_HEAD']);
+		_inOperation = isMerge.code === 0 || isRebase.code === 0;
 
 		updateWidget(ctx);
 	});
@@ -316,7 +339,7 @@ export default function (pi: ExtensionAPI) {
 		handler: handleCommand,
 	});
 
-	// Main logic: auto merge on agent_end
+	// Main logic: auto merge/rebase on agent_end
 	pi.on('agent_end', async (_event, ctx) => {
 		log.debug('event: agent_end');
 
@@ -328,14 +351,15 @@ export default function (pi: ExtensionAPI) {
 		const { code: revParseCode } = await pi.exec('git', ['rev-parse', '--git-dir']);
 		if (revParseCode !== 0) return;
 
-		let ref = 'MERGE_HEAD';
+		const strat = _config.strategy;
 
-		// If not already in a merge, attempt one
+		// Detect if an operation is already in progress
 		const { code: mergeHeadCode } = await pi.exec('git', ['rev-parse', 'MERGE_HEAD']);
-		_inMergeHead = mergeHeadCode === 0;
+		const { code: rebaseHeadCode } = await pi.exec('git', ['rev-parse', 'REBASE_HEAD']);
+		_inOperation = mergeHeadCode === 0 || rebaseHeadCode === 0;
 
-		if (!_inMergeHead) {
-			// Only attempt a new merge if the working tree is clean
+		if (!_inOperation) {
+			// Only attempt a new operation if the working tree is clean
 			const { stdout: status } = await pi.exec('git', ['status', '--porcelain']);
 			if (status.trim()) return;
 
@@ -347,12 +371,13 @@ export default function (pi: ExtensionAPI) {
 			]);
 			if (upstreamCode !== 0) return;
 
-			ref = upstream.trim();
+			const ref = upstream.trim();
 			_upstreamRef = ref;
 			const remote = ref.split('/')[0];
 
+			const verb = strat === 'rebase' ? 'fetching & rebasing' : 'fetching & merging';
 			if (_config.notifications) {
-				ctx.ui.notify(`git-merge-and-resolve: fetching ${remote}, merging ${ref}`, 'info');
+				ctx.ui.notify(`git-merge-and-resolve: ${verb}: ${remote} ${ref}`, 'info');
 			}
 
 			const { code: fetchCode, stderr: fetchErr } = await pi.exec('git', ['fetch', remote]);
@@ -366,25 +391,26 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// ⚠ No --no-ff: fast-forward when possible, merge only when needed
-			const { code: mergeCode } = await pi.exec('git', ['merge', ref]);
-			if (mergeCode === 0) {
-				// clean merge — update widget and return
-				_inMergeHead = false;
+			log.debug('Running git %s %s', strat, ref);
+			const opCode = await pi.exec('git', [strat, ref]);
+			if (opCode.code === 0) {
+				_inOperation = false;
 				updateWidget(ctx);
 				return;
 			}
 		}
 
-		// Either we just merged with conflicts, or we were already in an unfinished merge
-		_inMergeHead = true;
+		// Either we just started an operation with conflicts, or one was already in progress
+		_inOperation = true;
 		updateWidget(ctx);
 
 		const conflicts = await findConflicts(pi, ctx.cwd);
 		if (conflicts.length === 0) return;
 
 		if (_config.notifications) {
-			pi.sendUserMessage(formatConflicts(ref, conflicts), { deliverAs: 'followUp' });
+			pi.sendUserMessage(formatConflicts(_upstreamRef || 'upstream', conflicts, strat), {
+				deliverAs: 'followUp',
+			});
 		}
 	});
 }

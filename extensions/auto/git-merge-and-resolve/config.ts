@@ -20,12 +20,14 @@ import { deepMerge, resolveConfigPaths, readJsonFile, writeJsonAtomic } from '@z
 // ============================================================================
 
 export interface GitMergeConfig {
-	/** 是否启用自动 fetch+merge */
+	/** 是否启用自动 fetch+merge/rebase */
 	enabled: boolean;
 	/** 是否在对话中推送合并/冲突通知 */
 	notifications: boolean;
 	/** 是否在底部 widget 展示当前状态 */
 	showWidget: boolean;
+	/** 合并策略：'merge' 产生 merge commit，'rebase' 保持线性历史 */
+	strategy: 'merge' | 'rebase';
 }
 
 // ============================================================================
@@ -36,6 +38,7 @@ const DEFAULT_CONFIG: GitMergeConfig = {
 	enabled: false,
 	notifications: true,
 	showWidget: true,
+	strategy: 'rebase',
 };
 
 // ============================================================================
@@ -101,6 +104,7 @@ export function saveConfig(cwd: string, config: GitMergeConfig, scope: 'project'
 		enabled: config.enabled,
 		notifications: config.notifications,
 		showWidget: config.showWidget,
+		strategy: config.strategy,
 	};
 
 	writeJsonAtomic(filePath, output);
