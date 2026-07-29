@@ -15,6 +15,44 @@
 | **Load-Order Hazard / 加载顺序竞险**           | 消费方在模块初始化时同步检查全局桥接，但 pi-lab 尚未加载导致注册错失的时序问题               |
 | **Fatal Registration Conflict / 致命注册冲突** | 两个实验同时注册同名实验，或被强制选择了冲突的策略时发生的竞争                               |
 
+### pi-lab 职责边界（2025 年确认）
+
+pi-lab 是**纯基础设施**——提供测量、存储、统计分析。**不做决策。**
+
+| API        | 职责   | 说明                                                                                  |
+| ---------- | ------ | ------------------------------------------------------------------------------------- |
+| `select()` | 分配   | 按实验注册时声明的分配策略（均匀随机、分层等）返回 armId。不做 Thompson Sampling 选臂 |
+| `record()` | 写入   | 接收结构化多指标 outcome，写入时序。插件决定报什么值                                  |
+| `query()`  | 分析   | 返回各 arm 在某 metric 上的均值、置信区间、胜出概率。插件决定用不用                   |
+| `info()`   | 元数据 | 返回实验配置、arms、metrics 定义                                                      |
+
+**决策归属**：smart-context（或其他消费方）根据 `query()` 返回的分析结论，自己判断是否切换 arm、什么时候切换、按哪个指标判断。pi-lab 不替插件做决策。
+
+### Metric 定义
+
+| 术语                  | 定义                                                                        |
+| --------------------- | --------------------------------------------------------------------------- |
+| **Metric / 观测指标** | 插件在注册实验时声明的测量维度，含 id、type、direction（maximize/minimize） |
+| **Metric Type**       | `binary`（是/否）、`continuous`（数值）、`count`（次数）                    |
+| **Guardrail Metric**  | 非目标指标的副作用监测指标（如工具报错率），确保实验不损害基础体验          |
+| **Composite Score**   | 多个信号的加权综合评分 →1 到 +1，作为 Thompson Sampling 的单值 reward       |
+| **Outcome Recording** | 每轮记录 `{ armId, metrics: { metricId: number, ... }, metadata?: {...} }`  |
+
+### Outcome 信号评分模型
+
+| 信号               | 类型       | 评分                 | 时序         |
+| ------------------ | ---------- | -------------------- | ------------ |
+| 回退到之前节点     | binary     | →1（坏）             | 异步（事后） |
+| detectRetry        | binary     | →1（坏）             | 异步         |
+| fork 分支          | binary     | →1（坏）             | 异步         |
+| 纠偏（同分支修正） | count      | →0.5（坏）           | 异步         |
+| 继续 1-2次         | continuous | +1（好）             | 异步         |
+| 继续 3-5次         | continuous | 0（中性）            | 异步         |
+| 继续 >5次          | continuous | →1（坏，模型太啰嗦） | 异步         |
+| 工具报错率 > 10%   | binary     | →1（坏）             | 同步（本轮） |
+
+综合：`composite_score = Σ signals` → >0 success, <0 failure, =0 neutral
+
 ## pi-session-tree 会话树查询服务
 
 | 术语                                | 定义                                                                                                                                                           |

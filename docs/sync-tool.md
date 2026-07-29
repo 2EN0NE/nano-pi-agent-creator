@@ -136,7 +136,7 @@ profiles:
         extensions: '*'
         # npmBuild 是可选的显式声明，仅用于文档目的。
         # 脚本会自动检测所有 npm 包风格扩展，无需手动列出。
-        npmBuild: ['widget-wrangler', 'catch-the-fox']
+        npmBuild: ['_widget-wrangler', 'catch-the-fox']
 ```
 
 > **注意**：桥接文件指向 `src/index.ts` 而非编译后的 `dist/index.js`，

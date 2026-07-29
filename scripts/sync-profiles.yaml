@@ -56,6 +56,7 @@ profiles:
             - review # /review 代码审查
             - test-analysis # /test-analysis 测试覆盖分析
             # ── TUI 交互 ──
+            - _widget-wrangler # /wrangle 统一管理所有 widget/status 显示隐藏
             - questionnaire # 统一问答工具
             - files # 文件浏览器
             - session-breakdown # 会话分析日历
@@ -138,6 +139,7 @@ profiles:
                 - sandbox
                 - file-trigger
                 # 已放 user-install 的全局插件（避免冲突）
+                - _widget-wrangler
                 - selector
                 - pi-logger
                 - pi-config

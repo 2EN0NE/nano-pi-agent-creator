@@ -33,7 +33,7 @@ export function buildWidgetContent(
 	}
 
 	if (cfg.widgetDisplay === 'details') {
-		return buildDetailLines(scoped, theme, currentSessionId);
+		return buildDetailLines(scoped, theme);
 	}
 
 	return buildSummaryLines(scoped, theme);
@@ -60,11 +60,8 @@ function buildSummaryLines(todos: TodoFrontMatter[], theme: Theme): string[] {
 	// Show up to 3 most relevant items
 	const showItems = open.slice(0, 3);
 	for (const t of showItems) {
-		const prefix = t.assigned_to_session ? theme.fg('success', '*') : theme.fg('dim', '-');
-		const titleColor = t.assigned_to_session ? 'success' : 'text';
-		lines.push(
-			`${prefix} ${theme.fg('accent', `TODO-${t.id}`)} ${theme.fg(titleColor, t.title || '(untitled)')}`,
-		);
+		const suffix = t.assigned_to_session ? ' (in progress)' : '';
+		lines.push(theme.fg('accent', `[ ] TODO-${t.id} ${t.title || '(untitled)'}${suffix}`));
 	}
 
 	if (open.length > 3) {
@@ -76,11 +73,7 @@ function buildSummaryLines(todos: TodoFrontMatter[], theme: Theme): string[] {
 	return lines;
 }
 
-function buildDetailLines(
-	todos: TodoFrontMatter[],
-	theme: Theme,
-	currentSessionId?: string,
-): string[] {
+function buildDetailLines(todos: TodoFrontMatter[], theme: Theme): string[] {
 	const lines: string[] = [];
 	const title = theme.fg('accent', theme.bold('Todos'));
 	lines.push(title);
@@ -90,16 +83,10 @@ function buildDetailLines(
 
 	for (const t of shown) {
 		const closed = ['closed', 'done'].includes(t.status.toLowerCase());
-		const prefix = closed ? theme.fg('dim', 'x') : theme.fg('accent', '-');
-		const titleColor = closed ? 'dim' : 'text';
-		const statusSuffix = closed
-			? theme.fg('dim', ' (closed)')
-			: t.assigned_to_session
-				? theme.fg('success', ' (in progress)')
-				: '';
-		lines.push(
-			`${prefix} ${theme.fg('accent', `TODO-${t.id}`)} ${theme.fg(titleColor, t.title || '(untitled)')}${statusSuffix}`,
-		);
+		const checkbox = closed ? '[x]' : '[ ]';
+		const suffix = closed ? ' (closed)' : t.assigned_to_session ? ' (in progress)' : '';
+		const text = `${checkbox} TODO-${t.id} ${t.title || '(untitled)'}${suffix}`;
+		lines.push(theme.fg(closed ? 'dim' : 'accent', text));
 	}
 
 	if (todos.length > maxItems) {

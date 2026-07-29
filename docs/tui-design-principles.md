@@ -24,6 +24,7 @@
 4. **`truncateToWidth` 安全网** — 每个 `render()` 返回的每一行都必须用 `truncateToWidth(line, width)` 包裹，防止溢出终端宽度。
 5. **选中状态保持** — 用户操作后不要重置选中索引回第一项；删除/过滤等变更后，应将选中索引调整为合法值（`selectedIndex = Math.max(0, Math.min(selectedIndex, list.length - 1))`）。
 6. **缓存行** — 用 `cachedLines` + `cachedWidth` 缓存渲染结果，减少重复计算。通过 `invalidate()` 清除缓存。
+7. **必须接入 wrangle** — 所有持久化 widget/status 必须通过 `ctx.ui.setWidget()` 或 `ctx.ui.setStatus()` 设置，确保自动接入 widget-wrangler 管理体系。详见 [2.3 Widget 管理](#23-widget-管理)。
 
 ---
 
@@ -55,9 +56,43 @@
 - Widget key: `'cloud-sessions'`（在扩展中作为常量 `STATUS_KEY`）
 - 格式: `| sessions: syncing (git)` / `| sessions: git up to date` / `| sessions: not configured`
 
-### 2.3 Widget 管理
+**sandbox**（`index.ts:session_start`）：
 
-通过 [widget-wrangler](extensions/tui/widget-wrangler/) 统一管理所有 widget 的显示/隐藏，支持快捷键 `ctrl+shift+g` 打开管理面板。
+- Widget key: `'sandbox'`
+- 格式: `|sandbox: N domains, M write paths`
+
+### 2.3 Widget 管理（widget-wrangler）
+
+通过 [widget-wrangler](../extensions/meta/_widget-wrangler/) 统一管理所有 widget 和 status 的显示/隐藏，支持快捷键 `ctrl+shift+g` 打开管理面板。
+
+**工作原理：**
+
+- widget-wrangler 劫持共享的 `ctx.ui.setWidget()` 和 `ctx.ui.setStatus()` 方法
+- 所有通过这两个 API 调用的 widget/status 自动注册到 wrangle 管理面板
+- 用户在 `/wrangle` 面板中可逐个切换显示/隐藏，选择会全局持久化
+- 通过 `ctx.ui.custom()` 创建的交互式覆盖层不在 wrangle 管理范围内（正常设计）
+
+**接入要求（所有带 UI 的扩展必须遵守）：**
+
+1. **持久化 widget 使用 `ctx.ui.setWidget(key, content)`** — 传入唯一 key（如扩展名）和渲染函数
+2. **状态栏文本使用 `ctx.ui.setStatus(key, text)`** — key 应为扩展专属（避免与其他扩展冲突）
+3. **禁止绕过 API** — 不允许直接操作 TUI 内部对象来渲染持久化 UI
+4. **不在模块工厂中调用** — `setWidget`/`setStatus` 必须在事件处理器中调用（`session_start`、`turn_start` 等），不能放在扩展模块工厂函数的顶层执行
+5. **key 命名约定** — widget key 使用扩展名或功能名（如 `'catch-the-fox'`、`'review'`），status key 同样使用扩展前缀（如 `'permission-gate'`、`'pi-logger'`）
+
+**动态 widget 的特殊处理：**
+
+- 在 `session_start` 中首次设置 widget 后，应在后续事件（如 `turn_end`、`agent_start`）中重新设置以更新内容
+- widget-wrangler 通过这些重新设置维持对 widget 的跟踪
+- 如果 widget 只设置一次且永不更新，需确保 wrangle 的补丁已在设置前安装（当前通过 `_widget-wrangler` 目录名确保最先加载）
+
+**检查清单（新增 UI 插件时）：**
+
+- [ ] 所有持久化 UI 是否都通过 `ctx.ui.setWidget()` / `ctx.ui.setStatus()` 设置？
+- [ ] Widget/Status key 是否唯一（不会与其他扩展冲突）？
+- [ ] 是否在事件处理器中调用（而非模块顶层）？
+- [ ] 在 `/wrangle` 面板中能否看到该 widget/status？
+- [ ] 通过 `/wrangle` 切换显示/隐藏是否生效？
 
 ---
 
@@ -440,7 +475,7 @@ TEST
 | `extensions/security/permission-gate/two-tab-panel.ts` | 双 Tab 覆盖层面板 | 边框、Tab 导航、过滤、展开详情、删除操作、选中保持 |
 | `extensions/security/permission-gate/index.ts`         | Widget + 命令入口 | 状态栏 widget、命令注册、TUI overlay 入口          |
 | `extensions/tui/files/ui.ts`                           | 选择器面板        | Container + DynamicBorder + SelectList 组件化      |
-| `extensions/tui/widget-wrangler/src/index.ts`          | Widget 管理       | 劫持 setWidget/setStatus 实现 toggle               |
+| `extensions/meta/_widget-wrangler/src/index.ts`        | Widget 管理       | 劫持 setWidget/setStatus 实现 toggle               |
 | `extensions/tui/quit.ts`                               | 简单 TUI          | 基础命令注册                                       |
 | `extensions/auto/cloud-sessions/src/index.ts`          | 表单配置面板      | ctx.ui.custom() 表单编辑、字段聚焦、输入验证       |
 | `extensions/tui/btw.ts`                                | 侧边会话覆盖层    | 自定义 Focusable Container 组件                    |

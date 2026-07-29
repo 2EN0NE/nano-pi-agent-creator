@@ -246,19 +246,19 @@ export default function widgetWranglerExtension(pi: ExtensionAPI) {
 			applyWidget(key);
 		}
 		if (!persist()) {
-			ui?.notify(`保存小组件管理配置失败: ${configPath()} 🤠`, 'error');
+			ui?.notify(`保存小组件管理配置失败: ${configPath()}`, 'error');
 		}
 	}
 
 	async function openPanel(ctx: ExtensionContext) {
 		if ((ctx as any).mode !== 'tui') {
-			ctx.ui.notify('小组件管理需要 TUI 模式 🤠', 'error');
+			ctx.ui.notify('小组件管理需要 TUI 模式', 'error');
 			return;
 		}
 
 		const items = buildItems();
 		if (items.length === 0) {
-			ctx.ui.notify('还没有发现任何小组件 🤠 — 围栏是空的', 'info');
+			ctx.ui.notify('还没有发现任何小组件 — 围栏是空的', 'info');
 			return;
 		}
 
@@ -266,7 +266,7 @@ export default function widgetWranglerExtension(pi: ExtensionAPI) {
 			const container = new Container();
 			container.addChild(
 				new Text(
-					`${theme.fg('accent', theme.bold('🤠 小组件管理'))}  ${theme.fg('muted', '空格/回车切换 · Esc 关闭')}`,
+					`${theme.fg('accent', theme.bold('小组件管理'))}  ${theme.fg('muted', '空格/回车切换 · Esc 关闭')}`,
 					1,
 					1,
 				),
@@ -297,7 +297,7 @@ export default function widgetWranglerExtension(pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand('wrangle', {
-		description: '🤠 管理所有小组件和底部状态栏的显示/隐藏',
+		description: '管理所有小组件和底部状态栏的显示/隐藏',
 		handler: async (_args, ctx) => {
 			await openPanel(ctx);
 		},
@@ -312,7 +312,7 @@ export default function widgetWranglerExtension(pi: ExtensionAPI) {
 	const shortcutKey = String(pi.getFlag('widget-wrangler-key') ?? '').trim();
 	if (shortcutKey) {
 		pi.registerShortcut(shortcutKey as Parameters<ExtensionAPI['registerShortcut']>[0], {
-			description: '🤠 打开小组件管理面板',
+			description: '打开小组件管理面板',
 			handler: async (ctx) => {
 				await openPanel(ctx);
 			},
@@ -326,6 +326,13 @@ export default function widgetWranglerExtension(pi: ExtensionAPI) {
 		forceHideDisabled();
 		for (const key of registry.keys()) applyWidget(key);
 		for (const key of statusRegistry.keys()) applyStatus(key);
+		log.debug('session_start: managed', {
+			widgets: registry.size,
+			statuses: statusRegistry.size,
+			disabled: disabled.size,
+			widgetKeys: Array.from(registry.keys()),
+			statusKeys: Array.from(statusRegistry.keys()),
+		});
 	});
 
 	pi.on('session_tree', (_event, ctx) => {

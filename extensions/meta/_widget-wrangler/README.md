@@ -8,7 +8,7 @@
 
 - 拦截 `ctx.ui.setWidget`（所有扩展共享的 UI 接口），以小组件 id 为键维护一个实时注册表。
 - 面板（`/wrangle` 或 `Ctrl+Shift+W`）列出所有已发现的小组件，每个带 **显示**/**隐藏** 开关——体验与 Pi 的 `/mcp` 面板相同。
-- 隐藏的小组件在到达屏幕之前就被抑制。你的选择会**全局**持久化（保存到 `~/.pi/agent/widget-wrangler.json`），所以跨会话、重载和分支，相同的小组件都保持隐藏。一次设置，全局生效。
+- 隐藏的小组件在到达屏幕之前就被抑制。你的选择会**全局**持久化（保存到 `~/.pi/agent/extensions-data/widget-wrangler/config.json`），所以跨会话、重载和分支，相同的小组件都保持隐藏。一次设置，全局生效。
 - 它不会干扰 `ctx.ui.notify`，因此扩展的错误/信息通知仍然会正常弹出并自动消失——即使对于已隐藏的小组件也是如此。
 
 ## 用法
@@ -37,9 +37,15 @@ pi --widget-wrangler-key=
 
 将其添加到你的 Pi 扩展中（npm 包或本地文件）。它会注册一个命令和一个快捷键；无需其他配置。
 
-## 工作原理（以及一个注意事项）
+## 工作原理（以及注意事项）
 
-所有扩展共享同一个 `ctx.ui` 对象，因此只包装一次 `setWidget` 就能拦截所有扩展的小组件调用。小组件第一次出现在围栏中的时机是它的所有者扩展第一次设置它。大多数状态类小组件每轮对话都会重新设置，因此它们几乎立即出现；只设置一次且在本次扩展加载之前就已设置的小组件，需要等到下一次更新后才能被控制。
+所有扩展共享同一个 `ctx.ui` 对象，因此只包装一次 `setWidget` 就能拦截所有扩展的 widget/status 调用。
+
+**加载顺序保证**：widget-wrangler 放在 `extensions/meta/_widget-wrangler/`，利用目录名前缀 `_` 确保在所有 meta 扩展中最先加载（依赖 `fs.readdirSync` 的字母排序——这是 Node.js 在 Linux/macOS 上的实现行为，非跨平台保证），从而在 `session_start` 中最先安装 `ctx.ui` 补丁。扩展在 `security/`、`tui/`、`verification/` 目录下的 widget/status 设置调用均会被正确拦截。
+
+**`accuracy/`、`auto/`、`context/` 目录扩展**：这些目录的扩展在字母序上先于 `meta/` 加载，因此它们在 `session_start` 中的首次 `setWidget/setStatus` 可能绕过 wrangle 补丁。但由于这些扩展中的 UI 组件大多在后续事件（`turn_start`、`agent_start` 等）中重新设置，wrangle 会通过后续调用的拦截来完成注册。唯一初次设置不再更新的静态 widget 可能存在短暂的不受控窗口期。
+
+**配置持久化位置**：`~/.pi/agent/extensions-data/widget-wrangler/config.json`
 
 ## License
 

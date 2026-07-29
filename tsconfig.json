@@ -33,7 +33,7 @@
 		"extensions/*/node_modules",
 		"extensions/tui/recap",
 		"extensions/tui/catch-the-fox",
-		"extensions/tui/widget-wrangler",
+		"extensions/meta/_widget-wrangler",
 		"extensions/security/secret-firewall",
 		"extensions/context/smart-context",
 		"extensions/verification/ci-watch",
