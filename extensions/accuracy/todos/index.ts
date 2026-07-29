@@ -15,7 +15,7 @@ import {
 import { getConfig } from './config.js';
 import { truncateToWidth } from '@earendil-works/pi-tui';
 import { buildWidgetContent } from './widget.js';
-import { buildCompletionReminder } from './completion-detector.js';
+import { buildCompletionReminder, extractLastAssistantText } from './completion-detector.js';
 import { registerTool } from './tool-registration.js';
 import { TodoPanel } from './ui/panel.js';
 
@@ -80,21 +80,26 @@ export default function todosExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	// ── Turn-end completion detection (passive) ────────
+	// ── Agent-end completion detection (passive) ───────
+	// agent_end fires when the agent has completed its processing loop
+	// and is waiting for user input — the right moment to check if
+	// the model's response suggests task completion while todos remain open.
 
-	pi.on('turn_end', async (event, ctx) => {
+	let completionReminderSent = false;
+
+	pi.on('agent_start', () => {
+		completionReminderSent = false;
+	});
+
+	pi.on('agent_end', async (event, ctx) => {
 		updateWidget(ctx);
-		// Defensive: extract text content from turn_end event message
-		const msg =
-			event && typeof event === 'object' && 'message' in event
-				? (event as unknown as Record<string, unknown>).message
-				: undefined;
-		const response =
-			msg && typeof msg === 'object' && msg !== null && 'content' in msg
-				? typeof (msg as Record<string, unknown>).content === 'string'
-					? (msg as Record<string, string>).content
-					: ''
-				: '';
+		if (completionReminderSent) return;
+
+		// Extract last assistant text from agent_end event messages
+		const response = extractLastAssistantText(
+			(event as unknown as { messages?: Array<{ role?: string; content?: unknown }> })
+				.messages ?? [],
+		);
 		if (!response) return;
 
 		const allTodos = await listAllTodos(ctx.cwd);
@@ -103,7 +108,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 			allTodos.map((t: any) => ({ id: t.id, title: t.title, status: t.status })),
 		);
 		if (reminder) {
-			log.info('completion hint generated: %s', reminder.substring(0, 100));
+			completionReminderSent = true;
+			log.info('completion hint sent: %s', reminder.substring(0, 100));
+			await pi.sendUserMessage(reminder, { deliverAs: 'followUp' });
 		}
 	});
 

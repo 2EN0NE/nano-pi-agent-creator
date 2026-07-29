@@ -108,3 +108,46 @@ export function buildCompletionReminder(
 		`If any are done, please close them using the todo tool.]`
 	);
 }
+
+// ── Last assistant text extraction ─────────────────
+
+const isTextPart = (part: unknown): part is { type: 'text'; text: string } =>
+	Boolean(
+		part &&
+		typeof part === 'object' &&
+		'type' in part &&
+		(part as Record<string, unknown>).type === 'text' &&
+		'text' in part,
+	);
+
+/**
+ * Extract the last assistant message text from agent_end event messages.
+ * Handles both string content and ContentBlock[] (multi-modal) formats.
+ */
+export function extractLastAssistantText(
+	messages: Array<{ role?: string; content?: unknown }> | null | undefined,
+): string | null {
+	if (!messages) return null;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message?.role !== 'assistant') continue;
+
+		const content = message.content;
+		if (typeof content === 'string') {
+			return content.trim() || null;
+		}
+
+		if (Array.isArray(content)) {
+			const text = content
+				.filter(isTextPart)
+				.map((part) => part.text)
+				.join('\n')
+				.trim();
+			return text || null;
+		}
+
+		// content is neither string nor array (e.g. null for tool_calls) —
+		// continue scanning earlier assistant messages
+	}
+	return null;
+}
