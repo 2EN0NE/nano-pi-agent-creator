@@ -2,21 +2,25 @@
  * Settings persistence for custom-compaction extension.
  *
  * Config file precedence (highest first):
- * 1. <config-dir>/<sessionId>.json — session-specific config (created when user modifies profiles)
- * 2. <config-dir>/config.json — default config
+ * 1. <config-dir>/<sessionId>.json — per-session overrides (temporary, resets on new session)
+ * 2. <config-dir>/config.json       — user-level config (persists across sessions)
+ * 3. <project>/.pi/extensions-data/  — project-level config (optional)
  *
- * All files live under the deterministic path:
+ * All files live under:
  *   ~/.pi/agent/extensions-data/custom-compaction/
  *
- * This avoids depending on import.meta.url (which jiti may resolve differently
- * across reloads), ensuring session configs are always found after /reload.
- *
- * Uses @zenone/pi-config for layered loading (default → user → session).
+ * Uses @zenone/pi-config for layered loading (default < user < project < session).
+ * Save calls default to 'user' scope so profile edits persist across sessions.
  */
 
 import { createLogger } from '@zenone/pi-logger';
 import { createConfigStore, type ConfigStore } from '@zenone/pi-config';
-import { type CompactionConfig, type CompactionProfile, createDefaultConfig } from './types.js';
+import {
+	type CompactionConfig,
+	type CompactionProfile,
+	createDefaultConfig,
+	selectBestProfile,
+} from './types.js';
 
 const log = createLogger('custom-compaction:config');
 
@@ -54,10 +58,20 @@ export function isSessionConfig(): boolean {
  * Get the config label for display.
  */
 export function getConfigLabel(): string {
-	if (isSessionConfig()) return 'session级配置';
-	const config = store.get();
-	const profile = config.profiles[config.activeProfileId];
-	return profile?.name ?? 'Default';
+	const source = store.getActiveSource();
+	const profile = getActiveProfile();
+	const profileName = profile?.name ?? 'Default';
+
+	switch (source) {
+		case 'session':
+			return `${profileName} (session)`;
+		case 'project':
+			return `${profileName} (project)`;
+		case 'user':
+			return `${profileName} (user)`;
+		default:
+			return profileName;
+	}
 }
 
 // ── Config load / save ──────────────────────────────────────────
@@ -79,11 +93,18 @@ export function loadConfig(): CompactionConfig {
 }
 
 /**
- * Save config to disk as a session-specific file (<sessionId>.json).
- * Delegates to store.save with 'session' scope.
+ * Save config to disk.
+ *
+ * @param config  The config object to save.
+ * @param scope   Where to save. Default is 'user' (persists across sessions).
+ *                Use 'session' for per-session overrides (not persistent).
+ *                Use 'project' for project-level config (.pi/extensions-data/).
  */
-export function saveConfig(config: CompactionConfig): boolean {
-	return store.save(config, 'session');
+export function saveConfig(
+	config: CompactionConfig,
+	scope: 'user' | 'session' | 'project' = 'user',
+): boolean {
+	return store.save(config, scope);
 }
 
 /**
@@ -113,7 +134,15 @@ export function getActiveConfigPath(): string {
 
 // ── Profile helpers ─────────────────────────────────────────────
 
-export function getActiveProfile(): CompactionProfile {
+/**
+ * Get the stored "active" profile from config.activeProfileId.
+ * Pure read — returns undefined if no profile is found.
+ *
+ * The ConfigStore defaults (createDefaultConfig) ensure at least
+ * one 'default' profile always exists, so undefined is an edge case
+ * when all profiles were explicitly deleted.
+ */
+export function getActiveProfile(): CompactionProfile | undefined {
 	const config = store.get();
 	const profile = config.profiles[config.activeProfileId];
 	if (profile) return profile;
@@ -121,11 +150,21 @@ export function getActiveProfile(): CompactionProfile {
 	const firstKey = Object.keys(config.profiles)[0];
 	if (firstKey) return config.profiles[firstKey];
 
-	const defaultProfile = createDefaultConfig().profiles.default;
-	config.profiles.default = defaultProfile;
-	config.activeProfileId = 'default';
-	saveConfig(config);
-	return defaultProfile;
+	return undefined;
+}
+
+/**
+ * Get the effective profile for the given model spec.
+ *
+ * Uses model-aware matching: picks the profile whose matchModel best matches
+ * the given model spec. Falls back to getActiveProfile() if no match.
+ *
+ * @param modelSpec  Provider/model string (e.g. "openai/gpt-4o")
+ */
+export function getEffectiveProfile(modelSpec?: string): CompactionProfile | undefined {
+	const config = store.get();
+	const best = selectBestProfile(config, modelSpec);
+	return best ?? getActiveProfile();
 }
 
 export function setActiveProfile(profileId: string): boolean {

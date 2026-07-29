@@ -20,9 +20,9 @@ import {
 	type SessionBeforeCompactEvent,
 } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
-import { getActiveProfile } from './config.js';
+import { getEffectiveProfile } from './config.js';
 import type { CompactionProfile } from './types.js';
-import { DEFAULT_COMPACTION_PROMPT } from './types.js';
+import { DEFAULT_COMPACTION_PROMPT, toModelSpec } from './types.js';
 import { getAdapter } from './mechanisms/index.js';
 
 const log = createLogger('custom-compaction:compactor');
@@ -107,7 +107,14 @@ export function buildCompactionHandler() {
 	} | void> => {
 		log.debug('session_before_compact fired');
 
-		const profile = getActiveProfile();
+		// Compute current model spec for model-aware profile selection
+		const modelSpec = toModelSpec(ctx.model);
+		const profile = getEffectiveProfile(modelSpec);
+
+		if (!profile) {
+			log.warn('No effective profile found — falling back to default compaction');
+			return; // let Pi default handle it
+		}
 
 		// ── Dispatch by compaction mechanism ──────────
 		switch (profile.mechanism.type) {

@@ -96,6 +96,18 @@ pi-lab 是**纯基础设施**——提供测量、存储、统计分析。**不�
 | **Turn-Level Experiment / 轮次级实验** | 每次 agent turn 触发一次 arm 选择和 outcome 记录，而非 session 级。                                                                                                           |
 | **Delayed Outcome / 延迟反馈**         | outcome 中的 commit 部分无法在当前 turn 结束时立即判定，需要延迟到用户 commit 或 session 结束时补录。                                                                         |
 
+## TUI 设计
+
+| 术语                          | 定义                                                                                                                                                             |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Smart Context Panel**       | `/smart-context` 命令打开的 TUI 面板，含 3 个 Tab（决策、状态、配置）。状态 Tab 下设信号/分析二级子 Tab。详见 `docs/adr/0006-smart-context-pi-lab-tui-design.md` |
+| **pi-lab Panel**              | `/lab` 命令打开的 TUI 面板，两列命名空间分组设计，支持实验详情和 arm 详情（两级下钻）。                                                                          |
+| **Session Tree Panel**        | `/session-tree` 命令打开的 TUI 面板，含 4 个 Tab（标注、窗口、路径、快照），覆盖 pi-session-tree 的 19 个 API。                                                  |
+| **图例（Legend）**            | 按 `L` 键弹出的浮层，显示策略缩写→全名映射。数据从 StrategyRegistry 动态渲染。                                                                                   |
+| **Arm 锁定（Arm Lock）**      | 在 smart-context 配置 Tab 中，用户固定选择某个 arm（如 classifer），绕过 pi-lab 的自动分配。与 Profile 绑定。                                                    |
+| **指标切换（Metric Switch）** | `◀ metric ▶` 通过 `← →` 键切换分析的指标维度（composite_score / tool_error_rate / bounce_rate 等）。用于 smart-context 分析子 Tab 和 pi-lab 实验详情。           |
+| **二级子 Tab**                | 在一级 Tab 内嵌的子导航栏，用细线与一级 Tab 分开。smart-context 状态 Tab 的信號/分析各为一个二级子 Tab。                                                         |
+
 ## Cloud Sessions
 
 | 术语                 | 定义                                                                                                                                                                                                     |

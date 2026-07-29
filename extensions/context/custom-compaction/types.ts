@@ -99,6 +99,19 @@ export interface CompactionProfile {
 	 * - "provider/modelId": use a specific model (e.g. "anthropic/claude-sonnet-4-20250514")
 	 */
 	model: 'current' | `${string}/${string}`;
+	/**
+	 * Optional model pattern to auto-select this profile.
+	 * When set, this profile ONLY activates when the current Pi model matches the pattern.
+	 * When undefined, the profile acts as a universal fallback (matches any model).
+	 *
+	 * Matching is case-insensitive. Examples:
+	 *   "openai/gpt-4o"     → matches "openai/gpt-4o", "openai/gpt-4o-mini"
+	 *   "openai/"           → matches any OpenAI model
+	 *   "gpt-4o"            → matches any provider with "gpt-4o" in the model ID
+	 *
+	 * When multiple profiles match, the most specific (longest pattern) wins.
+	 */
+	matchModel?: string;
 	/** WHEN to compact */
 	trigger: TriggerCondition;
 	/** HOW to compact */
@@ -167,4 +180,86 @@ export function createDefaultConfig(): CompactionConfig {
 		},
 		activeProfileId: 'default',
 	};
+}
+
+// ── Model matching ──────────────────────────────────────────────
+
+/**
+ * Build a model spec string ("provider/id") from an object with provider and id fields.
+ * Returns undefined if either field is missing.
+ */
+export function toModelSpec(modelLike?: { provider?: string; id?: string }): string | undefined {
+	if (!modelLike?.provider || !modelLike?.id) return undefined;
+	return `${modelLike.provider}/${modelLike.id}`;
+}
+
+/**
+ * How well a profile's matchModel matches a given model spec (provider/id).
+ * Lower value = better match. undefined = no match.
+ */
+export function modelMatchScore(
+	matchModel: string | undefined,
+	modelSpec: string,
+): number | undefined {
+	if (!matchModel) return undefined; // universal fallback — scored separately
+	const pattern = matchModel.toLowerCase();
+	const target = modelSpec.toLowerCase();
+
+	if (pattern === target) return 0; // exact match, best
+	if (target.startsWith(pattern)) return 1; // prefix match (e.g. "openai/" matches "openai/gpt-4o")
+	if (target.includes(pattern)) return 2; // substring match (e.g. "gpt-4o" matches "openai/gpt-4o")
+	return undefined; // no match
+}
+
+/**
+ * Select the best-matching profile for a given model spec.
+ *
+ * Priority:
+ * 1. Exact model spec match (score 0)
+ * 2. Prefix match (score 1)
+ * 3. Substring match (score 2)
+ * 4. Universal fallback (matchModel undefined)
+ * 5. First profile in the list (last resort)
+ */
+export function selectBestProfile(
+	config: CompactionConfig,
+	modelSpec: string | undefined,
+): CompactionProfile | undefined {
+	const entries = Object.entries(config.profiles);
+	if (entries.length === 0) return undefined;
+
+	if (!modelSpec) {
+		// No model info — prefer a universal profile, fall back to first
+		const universal = entries.find(([, p]) => !p.matchModel);
+		if (universal) return universal[1];
+		return entries[0][1];
+	}
+
+	// Score all profiles against the model spec
+	let bestProfile: CompactionProfile | undefined;
+	let bestScore = Infinity;
+	let bestPatternLen = 0;
+
+	for (const [, p] of entries) {
+		if (!p.matchModel) {
+			// Universal fallback — lowest priority among matched
+			if (bestScore > 100) {
+				bestScore = 100;
+				bestProfile = p;
+				bestPatternLen = 0;
+			}
+			continue;
+		}
+		const score = modelMatchScore(p.matchModel, modelSpec);
+		if (score === undefined) continue;
+		const len = p.matchModel.length;
+		// Same score → longer pattern wins (more specific)
+		if (score < bestScore || (score === bestScore && len > bestPatternLen)) {
+			bestScore = score;
+			bestProfile = p;
+			bestPatternLen = len;
+		}
+	}
+
+	return bestProfile ?? entries[0][1];
 }

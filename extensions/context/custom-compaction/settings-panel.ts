@@ -2,11 +2,11 @@
  * Settings panel for /custom-compaction-setting command.
  *
  * Interaction flow:
- * 1. Main panel → top selection bar "▸ 配置: {label}" (press Enter)
+ * 1. Main panel > top selection bar "> 配置: {label}" (press Enter)
  * 2. Profile tree (level 1: profile names, level 2: details on navigate)
- * 3. Press Enter on a profile → field editor (key-value tree of all fields)
- * 4. Select any field → edit its value directly
- * 5. Save creates/updates session-level config
+ * 3. Press Enter on a profile > field editor (key-value tree of all fields)
+ * 4. Select any field > edit its value directly
+ * 5. Save creates/updates config (user-level by default, persists across sessions)
  */
 
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
@@ -21,32 +21,36 @@ import {
 	describeMechanism,
 	validateTriggerThreshold,
 	DEFAULT_AUTO_CONTINUE_MESSAGE,
+	toModelSpec,
 } from './types.js';
 import {
 	loadConfig,
 	reloadConfig,
 	getActiveConfigPath,
 	getConfigLabel,
+	getActiveProfile,
+	getEffectiveProfile,
 	setActiveProfile,
 	upsertProfile,
 } from './config.js';
 import { getAllAdapters } from './mechanisms/index.js';
 
-// ── Helpers ─────────────────────────────────────────────────────
+// ── Helpers ---------------------------------------------------──
 
-/** Safely describe a profile — handles partial/incomplete profiles */
+/** Safely describe a profile - handles partial/incomplete profiles */
 function safeDescribe(p: CompactionProfile): string {
 	const parts: string[] = [];
+	if (p.matchModel) parts.push(`Match: ${p.matchModel}`);
 	parts.push(`Model: ${p.model === 'current' ? 'Current' : p.model}`);
 	if (p.trigger) {
 		parts.push(`Trigger: ${describeTrigger(p.trigger)}`);
 	} else {
-		parts.push('Trigger: (not configured — edit profile to set)');
+		parts.push('Trigger: (not configured - edit profile to set)');
 	}
 	if (p.mechanism) {
 		parts.push(`Mechanism: ${describeMechanism(p.mechanism)}`);
 	} else {
-		parts.push('Mechanism: (not configured — edit profile to set)');
+		parts.push('Mechanism: (not configured - edit profile to set)');
 	}
 	parts.push(`Auto-continue: ${p.autoContinue ? 'Yes' : 'No'}`);
 	return parts.join(' | ');
@@ -55,7 +59,7 @@ function safeDescribe(p: CompactionProfile): string {
 /** Alias for backward compat */
 const profileDescription = safeDescribe;
 
-// ── Profile field editor (inline key-value tree) ────────────────
+// ── Profile field editor (inline key-value tree) ---------------─
 
 /**
  * Field definitions for a CompactionProfile.
@@ -88,7 +92,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 			// Build list of available models (only those with configured API keys)
 			const available = ctx.modelRegistry.getAvailable();
 			const modelOptions = [
-				`Current (use Pi's active model)${p.model === 'current' ? ' ✓' : ''}`,
+				`Current (use Pi's active model)${p.model === 'current' ? ' [X]' : ''}`,
 			];
 			// Track model labels for reliable reverse-lookup
 			const modelLabelToSpec = new Map<string, string>();
@@ -96,7 +100,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 				const spec = `${m.provider}/${m.id}`;
 				const label = `  ${spec}`;
 				modelLabelToSpec.set(label, spec);
-				modelOptions.push(`${label}${p.model === spec ? ' ✓' : ''}`);
+				modelOptions.push(`${label}${p.model === spec ? ' [X]' : ''}`);
 			}
 
 			const choice = await ctx.ui.select('Select model', modelOptions);
@@ -105,7 +109,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 				p.model = 'current';
 			} else {
 				// Look up by exact label match (no regex parsing needed)
-				const trimmed = choice.replace(/ ✓$/, '');
+				const trimmed = choice.replace(/ [X]$/, '');
 				const spec = modelLabelToSpec.get(trimmed);
 				if (spec) {
 					p.model = spec as 'current' | `${string}/${string}`;
@@ -116,6 +120,76 @@ const PROFILE_FIELDS: ProfileField[] = [
 		},
 	},
 	{
+		key: 'matchModel',
+		label: 'Match model pattern',
+		readValue: (p) => p.matchModel || '(any model - universal fallback)',
+		edit: async (ctx, p) => {
+			// Build list of suggested model patterns
+			const available = ctx.modelRegistry.getAvailable();
+			const seen = new Set<string>();
+			const suggestions: string[] = ['(clear - match any model)'];
+
+			for (const m of available) {
+				// Provider-level pattern
+				const providerPat = `${m.provider}/`;
+				if (!seen.has(providerPat)) {
+					seen.add(providerPat);
+					suggestions.push(providerPat);
+				}
+				// Full spec
+				const fullSpec = `${m.provider}/${m.id}`;
+				if (!seen.has(fullSpec)) {
+					seen.add(fullSpec);
+					suggestions.push(fullSpec);
+				}
+			}
+
+			// Mark current value
+			const currentVal = p.matchModel || '(any)';
+			const suggestionOptions = suggestions.map((s) => {
+				const label = s === '(clear - match any model)' ? 'Any model (universal)' : s;
+				const isCurrent =
+					s === '(clear - match any model)' ? !p.matchModel : s === p.matchModel;
+				return `${isCurrent ? '[X] ' : '  '}${label}`;
+			});
+			suggestionOptions.push('---', 'Custom input...');
+
+			const choice = await ctx.ui.select(
+				'Select model pattern (current: ' +
+					currentVal +
+					')\nThis profile auto-activates when current model matches this pattern.',
+				suggestionOptions,
+			);
+			if (choice === undefined) return false;
+
+			if (choice === '---') return false;
+
+			if (choice === 'Custom input...') {
+				const val = await ctx.ui.input(
+					'Model pattern (e.g. "openai/gpt-4o", "openai/", leave empty for any model):',
+					p.matchModel || '',
+				);
+				if (val === undefined) return false;
+				p.matchModel = val.trim() || undefined;
+				return true;
+			}
+
+			if (choice.includes('Any model')) {
+				p.matchModel = undefined;
+				return true;
+			}
+
+			// Extract the pattern from the choice
+			for (const s of suggestions) {
+				if (choice.includes(s)) {
+					p.matchModel = s === '(clear - match any model)' ? undefined : s;
+					return true;
+				}
+			}
+			return false;
+		},
+	},
+	{
 		key: 'triggerType',
 		label: 'Trigger type',
 		readValue: (p) => {
@@ -123,7 +197,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 			return TRIGGER_LABELS[p.trigger.type] || p.trigger.type;
 		},
 		edit: async (ctx, p) => {
-			// Ensure trigger object exists (defensive — migration should handle this)
+			// Ensure trigger object exists (defensive - migration should handle this)
 			if (!p.trigger) p.trigger = { type: 'context_percent', threshold: 20 };
 			const options = (['context_percent', 'fixed', 'reserve'] as const).map((t) => {
 				const label = TRIGGER_LABELS[t];
@@ -131,8 +205,8 @@ const PROFILE_FIELDS: ProfileField[] = [
 					type: t,
 					threshold: t === 'context_percent' ? 20 : t === 'fixed' ? 200000 : 10000,
 				});
-				const checked = t === p.trigger.type ? ' ✓' : '';
-				return `${label}${checked} — ${desc}`;
+				const checked = t === p.trigger.type ? ' [X]' : '';
+				return `${label}${checked} - ${desc}`;
 			});
 			const choice = await ctx.ui.select('Select trigger type', options);
 			if (choice === undefined) return false;
@@ -199,7 +273,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 			const mechTypes: MechanismType[] = ['summarize', 'pass_through', 'adapter'];
 			const baseOptions = mechTypes.map((t) => {
 				const label = MECHANISM_LABELS[t];
-				const checked = t === p.mechanism.type ? ' ✓' : '';
+				const checked = t === p.mechanism.type ? ' [X]' : '';
 				return `${label}${checked}`;
 			});
 			const choice = await ctx.ui.select('Select compression mechanism', baseOptions);
@@ -213,8 +287,8 @@ const PROFILE_FIELDS: ProfileField[] = [
 						if (adapters.length > 0) {
 							const adpOptions = adapters.map((a) =>
 								a.id === p.mechanism.adapterId
-									? `✓ ${a.name} — ${a.description}`
-									: `  ${a.name} — ${a.description}`,
+									? `[X] ${a.name} - ${a.description}`
+									: `  ${a.name} - ${a.description}`,
 							);
 							const adpChoice = await ctx.ui.select('Select adapter', adpOptions);
 							if (adpChoice) {
@@ -288,7 +362,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 /**
  * Inline field editor for a profile.
  * Changes are saved immediately when any field is edited.
- * No explicit save/cancel — just "← 返回" to go back.
+ * No explicit save/cancel - just "< 返回" to go back.
  */
 async function editProfileFieldsInPlace(
 	ctx: ExtensionCommandContext,
@@ -302,7 +376,7 @@ async function editProfileFieldsInPlace(
 		const fieldOptions = PROFILE_FIELDS.map(
 			(f) => `${f.label.padEnd(24)} ${f.readValue(profile)}`,
 		);
-		fieldOptions.push('───', '← 返回');
+		fieldOptions.push('---', '< 返回');
 
 		const title = [
 			`编辑 Profile: ${profile.name}`,
@@ -312,12 +386,12 @@ async function editProfileFieldsInPlace(
 
 		const choice = await ctx.ui.select(title, fieldOptions);
 
-		if (!choice || choice === '← 返回') {
+		if (!choice || choice === '< 返回') {
 			editing = false;
 			break;
 		}
 
-		if (choice === '───') continue;
+		if (choice === '---') continue;
 
 		// Find which field was selected
 		const idx = fieldOptions.indexOf(choice);
@@ -330,7 +404,7 @@ async function editProfileFieldsInPlace(
 			profile.id = profileId;
 			const ok = upsertProfile(profile);
 			if (ok) {
-				ctx.ui.notify(`"${field.label}" → 已保存`, 'info');
+				ctx.ui.notify(`"${field.label}" > 已保存`, 'info');
 			} else {
 				ctx.ui.notify(`"${field.label}" 保存失败`, 'error');
 			}
@@ -338,12 +412,12 @@ async function editProfileFieldsInPlace(
 	}
 }
 
-// ── Profile tree (level 1 + level 2 inline) ─────────────────────
+// ── Profile tree (level 1 + level 2 inline) ---------------------
 
 /**
  * Show the profile tree.
  * Level 1: profile names (navigate with ↑↓, details shown as description)
- * Press Enter → enter field-editing mode for the selected profile.
+ * Press Enter > enter field-editing mode for the selected profile.
  */
 async function openProfileTreeAndEdit(
 	ctx: ExtensionCommandContext,
@@ -358,7 +432,7 @@ async function openProfileTreeAndEdit(
 	// Show profiles with descriptions (this is the multi-level tree: level 1 = names, level 2 = details)
 	const profileOptions = entries.map(
 		([id, p]) =>
-			`${id === config.activeProfileId ? '⭐ ' : '  '}${p.name} — ${profileDescription(p)}`,
+			`${id === config.activeProfileId ? '* ' : '  '}${p.name} - ${profileDescription(p)}`,
 	);
 
 	const chosen = await ctx.ui.select(
@@ -371,7 +445,7 @@ async function openProfileTreeAndEdit(
 	// Extract the profile ID
 	let profileId: string | undefined;
 	for (const [id, p] of entries) {
-		const prefix = id === config.activeProfileId ? '⭐ ' : '  ';
+		const prefix = id === config.activeProfileId ? '* ' : '  ';
 		if (chosen.startsWith(`${prefix}${p.name}`)) {
 			profileId = id;
 			break;
@@ -406,17 +480,17 @@ async function openProfileTreeAndEdit(
 		return;
 	}
 
-	// Enter field editor — changes save immediately, no explicit save step
+	// Enter field editor - changes save immediately, no explicit save step
 	await editProfileFieldsInPlace(ctx, workingProfile, profileId);
 }
 
-// ── Main panel ──────────────────────────────────────────────────
+// ── Main panel ------------------------------------------------──
 
 /**
  * Open the custom-compaction settings panel.
  *
  * Layout:
- * - Top selection bar: "▸ 配置: {label}" — press Enter to open profile tree
+ * - Top selection bar: "> 配置: {label}" - press Enter to open profile tree
  * - Below: current config details
  * - Actions: 关闭
  */
@@ -428,19 +502,29 @@ export async function openSettingsPanel(ctx: ExtensionCommandContext): Promise<v
 		const config = loadConfig();
 		const activePath = getActiveConfigPath();
 		const configLabel = getConfigLabel();
-		const activeProfile = config.profiles[config.activeProfileId];
 
-		// Details lines
+		// Show model-aware profile selection
+		const modelSpec = toModelSpec(ctx.model);
+		const effectiveProfile = getEffectiveProfile(modelSpec);
+		const activeProfile = getActiveProfile();
+
+		// Details lines - show the active (stored) profile's details
 		const details = activeProfile
 			? PROFILE_FIELDS.map((f) => `  ${f.label}: ${f.readValue(activeProfile)}`)
 			: ['  (no profile)'];
 
+		// Model-aware info
+		const modelLine = modelSpec
+			? `  当前模型: ${modelSpec} > Profile: ${effectiveProfile?.name ?? '(none)'}`
+			: '  当前模型: (unknown)';
+
 		// Options: first is the selection bar (press Enter to open tree)
-		const options = [`▸ 配置: ${configLabel}`, '  关闭'];
+		const options = [`> 配置: ${configLabel}`, '  关闭'];
 
 		const titleLines = [
-			`⚙️  Custom Compaction Settings`,
+			` Custom Compaction Settings`,
 			`   ${activePath}`,
+			modelLine,
 			'',
 			'当前配置:',
 			...details,
@@ -454,8 +538,8 @@ export async function openSettingsPanel(ctx: ExtensionCommandContext): Promise<v
 			break;
 		}
 
-		if (choice.startsWith('▸ 配置:')) {
-			// Open profile tree → user selects a profile → field editor opens
+		if (choice.startsWith('> 配置:')) {
+			// Open profile tree > user selects a profile > field editor opens
 			await openProfileTreeAndEdit(ctx, config);
 		}
 	}

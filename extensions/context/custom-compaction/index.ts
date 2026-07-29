@@ -27,10 +27,10 @@
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
 import { showSelect } from '@zenone/pi-selector';
-import { loadConfig, reloadConfig, setSessionId } from './config.js';
+import { loadConfig, reloadConfig, setSessionId, getEffectiveProfile } from './config.js';
 import { buildCompactionHandler, setPendingSupplement } from './compactor.js';
 import { openSettingsPanel } from './settings-panel.js';
-import { type CompactionProfile, describeTrigger } from './types.js';
+import { type CompactionProfile, describeTrigger, toModelSpec } from './types.js';
 
 // Auto-register available compaction adapters
 import './mechanisms/smart-compact.js';
@@ -39,6 +39,9 @@ const log = createLogger('custom-compaction');
 
 /** Debounce flag: true while a compaction is in progress */
 let compactingInProgress = false;
+
+/** Track the current model spec (provider/id) to detect model changes */
+let currentModelSpec: string | undefined;
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -156,11 +159,13 @@ export default function (pi: ExtensionAPI) {
 		};
 		getContextUsage?: () =>
 			{ tokens: number | null; percent: number | null } | null | undefined;
-		model?: { contextWindow?: number };
+		model?: { provider: string; id: string; contextWindow?: number };
 	}): void {
 		if (!ctx.hasUI) return;
-		const config = loadConfig();
-		const profile = config.profiles[config.activeProfileId];
+
+		// Resolve current model spec and get the effective profile
+		const modelSpec = toModelSpec(ctx.model);
+		const profile = getEffectiveProfile(modelSpec);
 		if (!profile) {
 			ctx.ui.setStatus('custom-compact', undefined);
 			return;
@@ -222,12 +227,12 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus(
 			'custom-compact',
 			compactingInProgress || triggered
-				? theme.fg('accent', `|custom-compact:${pid}-${extra}`)
-				: theme.fg('text', `|custom-compact:${pid}-${extra}`),
+				? theme.fg('accent', `|compact:${pid}-${extra}`)
+				: theme.fg('text', `|compact:${pid}-${extra}`),
 		);
 	}
 
-	// ── On session start/reload: set session ID, load session-specific config ──
+	// ── On session start/reload: set session ID, track model, load session-specific config ──
 	pi.on('session_start', async (_event, ctx) => {
 		const sid = ctx.sessionManager.getSessionId();
 		if (sid) {
@@ -235,6 +240,16 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			reloadConfig();
 		}
+		// Track current model spec for model-aware profile selection
+		currentModelSpec = toModelSpec(ctx.model);
+		const modelSpec = currentModelSpec;
+		const profile = getEffectiveProfile(modelSpec);
+		log.info(
+			'Session start — model:',
+			modelSpec ?? 'unknown',
+			'profile:',
+			profile?.id ?? 'none',
+		);
 		updateStatus(ctx);
 	});
 
@@ -324,8 +339,34 @@ export default function (pi: ExtensionAPI) {
 		updateStatus(ctx);
 		if (compactingInProgress) return;
 
-		const config = loadConfig();
-		const profile = config.profiles[config.activeProfileId];
+		// Track model changes for model-aware profile selection
+		const newSpec = toModelSpec(ctx.model);
+		if (newSpec && newSpec !== currentModelSpec) {
+			const oldProfile = getEffectiveProfile(currentModelSpec);
+			const newProfile = getEffectiveProfile(newSpec);
+			if (oldProfile && newProfile && oldProfile.id !== newProfile.id) {
+				log.info(
+					'Model changed, profile switched:',
+					currentModelSpec,
+					'>',
+					newSpec,
+					'| profile:',
+					oldProfile.id,
+					'>',
+					newProfile.id,
+				);
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						`Compaction profile switched: ${oldProfile.name} > ${newProfile.name}`,
+						'info',
+					);
+				}
+			}
+			currentModelSpec = newSpec;
+		}
+
+		const modelSpec = currentModelSpec;
+		const profile = getEffectiveProfile(modelSpec);
 		if (!profile) return;
 
 		const contextUsage = ctx.getContextUsage();
@@ -347,6 +388,8 @@ export default function (pi: ExtensionAPI) {
 			profile.trigger.type,
 			'threshold:',
 			profile.trigger.threshold,
+			'profile:',
+			profile.id,
 		);
 
 		if (
@@ -361,6 +404,7 @@ export default function (pi: ExtensionAPI) {
 				threshold: profile.trigger.threshold,
 				tokens: contextUsage.tokens,
 				percent: contextUsage.percent,
+				profile: profile.id,
 			});
 			doCompact(pi, ctx, profile);
 		}
