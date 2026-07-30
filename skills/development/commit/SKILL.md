@@ -32,4 +32,16 @@ description: '在创建 git 提交前阅读此技能'
 3. （可选）运行 `git log -n 50 --pretty=format:%s` 查看常用的 scope。
 4. 如果有歧义的额外文件，在提交前请用户澄清。
 5. 仅暂存目标文件（如果未指定文件则暂存所有变更）。
-6. 运行 `git commit -m "<subject>"`（如有需要再加上 `-m "<body>"`）。
+6. **提交前验证**：运行 `git diff --cached --stat` 确认暂存区确实包含预期变更，防止空提交。
+7. 运行 `git commit -m "<subject>"`（如有需要再加上 `-m "<body>"`）。
+
+## 暂存注意事项
+
+**lint-staged / pre-commit hook 与部分暂存冲突**：当文件有 `MM`（部分暂存）状态时，`lint-staged` 的 stash → format → restore 流程可能丢失 staging 状态，导致空提交。
+
+避免方法：
+
+- `git add` 紧邻 `git commit` 执行，减少中间状态窗口。
+- 如果 `git status` 显示 `MM`，说明文件有部分暂存，应在 commit 前全量 `git add` 该文件。
+- `--amend` 时尤其注意：原 commit 的 snapshot 和当前 working tree 可能不同步，amend 前务必 `git add` 目标文件。
+- 提交后立即 `git show --stat` 确认变更量非零。
