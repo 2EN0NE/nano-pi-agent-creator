@@ -14,6 +14,7 @@ import {
 } from './storage.js';
 import { getConfig } from './config.js';
 import { truncateToWidth } from '@earendil-works/pi-tui';
+import type { TodoFrontMatter } from './types.js';
 import { buildWidgetContent } from './widget.js';
 import { buildCompletionReminder, extractLastAssistantText } from './completion-detector.js';
 import { registerTool } from './tool-registration.js';
@@ -52,12 +53,21 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 	async function updateWidget(ctx: ExtensionContext) {
 		if (!ctx.hasUI) return;
+		const allTodos = await listAllTodos(ctx.cwd);
+		renderWidget(ctx, allTodos);
+	}
+
+	function updateWidgetWithTodos(ctx: ExtensionContext, allTodos: TodoFrontMatter[]) {
+		if (!ctx.hasUI) return;
+		renderWidget(ctx, allTodos);
+	}
+
+	function renderWidget(ctx: ExtensionContext, allTodos: TodoFrontMatter[]) {
 		const cfg = getConfig();
 		if (!cfg.widgetShow) {
 			ctx.ui.setWidget(TUI_PANEL_WIDGET_KEY, undefined);
 			return;
 		}
-		const allTodos = await listAllTodos(ctx.cwd);
 		const currentSessionId = ctx.sessionManager.getSessionId();
 
 		// 当 scope 为 session 且没有分配给当前 session 的 todo 时，隐藏 widget
@@ -86,14 +96,21 @@ export default function todosExtension(pi: ExtensionAPI) {
 	// the model's response suggests task completion while todos remain open.
 
 	let completionReminderSent = false;
+	let sessionShuttingDown = false;
 
 	pi.on('agent_start', () => {
 		completionReminderSent = false;
 	});
 
+	pi.on('session_shutdown', () => {
+		sessionShuttingDown = true;
+	});
+
 	pi.on('agent_end', async (event, ctx) => {
-		updateWidget(ctx);
-		if (completionReminderSent) return;
+		// Read todos once, use for both widget update and completion check
+		const allTodos = await listAllTodos(ctx.cwd);
+		updateWidgetWithTodos(ctx, allTodos);
+		if (completionReminderSent || sessionShuttingDown) return;
 
 		// Extract last assistant text from agent_end event messages
 		const response = extractLastAssistantText(
@@ -102,7 +119,6 @@ export default function todosExtension(pi: ExtensionAPI) {
 		);
 		if (!response) return;
 
-		const allTodos = await listAllTodos(ctx.cwd);
 		const reminder = buildCompletionReminder(
 			response,
 			allTodos.map((t: any) => ({ id: t.id, title: t.title, status: t.status })),
@@ -156,6 +172,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						},
 						onClose: () => done(),
 						onConfigChanged: () => updateWidget(ctx),
+						onDataChanged: () => updateWidget(ctx),
 					},
 					filteredTodos,
 					currentSessionId,

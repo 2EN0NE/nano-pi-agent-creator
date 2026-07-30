@@ -28,6 +28,7 @@ export interface PanelHandlers {
 	onRefineTodo: (todoId: string, title: string) => void;
 	onClose: () => void;
 	onConfigChanged?: () => void;
+	onDataChanged?: () => void;
 }
 
 type PanelMode = 'list' | 'action-menu' | 'delete-confirm' | 'settings';
@@ -255,6 +256,7 @@ export class TodoPanel implements Component {
 			}
 			await this.refreshData();
 			this.mode = 'list';
+			this.handlers.onDataChanged?.();
 			this.tui.requestRender();
 			return;
 		}
@@ -268,6 +270,7 @@ export class TodoPanel implements Component {
 			}
 			await this.refreshData();
 			this.mode = 'list';
+			this.handlers.onDataChanged?.();
 			this.tui.requestRender();
 			return;
 		}
@@ -291,6 +294,7 @@ export class TodoPanel implements Component {
 						}
 						await this.refreshData();
 						this.mode = 'list';
+						this.handlers.onDataChanged?.();
 						this.tui.requestRender();
 					},
 				},

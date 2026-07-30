@@ -173,8 +173,10 @@ export async function garbageCollectTodos(todosDir: string, settings: TodoSettin
 
 // ── File format helpers ───────────────────────────────
 
+const CLOSED_STATUSES = ['closed', 'done', 'complete', 'completed'];
+
 export function isTodoClosed(status: string): boolean {
-	return ['closed', 'done'].includes(status.toLowerCase());
+	return CLOSED_STATUSES.includes(status.toLowerCase());
 }
 
 export function getTodoStatus(todo: TodoFrontMatter): string {

@@ -88,9 +88,8 @@ export function buildCompletionReminder(
 
 	if (matchScore === 0) return null;
 
-	const pendingTodos = openTodos.filter(
-		(t) => !['closed', 'done'].includes(t.status.toLowerCase()),
-	);
+	const CLOSED_STATUSES = ['closed', 'done', 'complete', 'completed'];
+	const pendingTodos = openTodos.filter((t) => !CLOSED_STATUSES.includes(t.status.toLowerCase()));
 
 	if (pendingTodos.length === 0) return null;
 
