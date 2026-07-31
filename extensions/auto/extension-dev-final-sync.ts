@@ -26,6 +26,7 @@ import {
 	readdirSync,
 	readFileSync,
 	writeFileSync,
+	statSync,
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -428,37 +429,98 @@ function resolveSyncTargets(
 // Git 变更检测
 // ══════════════════════════════════════════════════════════════════════════════
 
-async function getChangedExtensions(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string[]> {
-	const extNames = new Set<string>();
-	const { stdout: diffOut, code: diffCode } = await execCmd(
-		'git',
-		['diff', '--name-only', 'HEAD', '--', 'extensions/'],
-		pi,
-		ctx,
-	);
-	if (diffCode === 0 && diffOut.trim()) extractExtNames(diffOut, extNames);
+// ══════════════════════════════════════════════════════════════════════════════
+// Mtime-based turn-level change detection (v3)
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// 替代原有的 git diff 检测机制。每次 agent_end 对比当前 extensions/ 文件 mtime
+// 与上一轮结束时的快照，只检出本轮对话中实际发生变更的扩展。
+// 这避免了“每次 git 差异必同步所有已修改插件”的痛点——如果上一轮只改了 loop.ts，
+// 即使 fzf.ts 有未提交的旧变更，本轮也只会同步 loop。
+//
 
-	const { stdout: statusOut, code: statusCode } = await execCmd(
-		'git',
-		['status', '--porcelain', '--', 'extensions/'],
-		pi,
-		ctx,
-	);
-	if (statusCode === 0 && statusOut.trim()) {
-		const newFiles = statusOut
-			.split('\n')
-			.filter((l) => l.startsWith('?? '))
-			.map((l) => l.slice(3).trim())
-			.concat(
-				statusOut
-					.split('\n')
-					.filter((l) => /^A./.test(l))
-					.map((l) => l.slice(2).trim()),
-			)
-			.filter(Boolean);
-		extractExtNames(newFiles.join('\n'), extNames);
+/** 上一轮同步结束时的 extensions/ 文件 mtime 快照（相对路径 → mtimeMs） */
+let mtimeSnapshot: Map<string, number> | null = null;
+
+/** 本轮检测到的当前文件快照，等待同步成功后提交 */
+let pendingSnapshot: Map<string, number> | null = null;
+
+// 被 collectMtimes 和 copyDirRecursive 共用
+const IGNORE_DIRS = new Set(['node_modules', '.git', '.svn', '.hg']);
+
+/** 递归收集目录下所有文件的 mtime（相对 baseDir 的路径 → mtimeMs） */
+function collectMtimes(dir: string, baseDir: string, result: Map<string, number>): void {
+	if (!existsSync(dir)) return;
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		if (entry.isDirectory() && IGNORE_DIRS.has(entry.name)) continue;
+		const fullPath = join(dir, entry.name);
+		if (entry.isDirectory()) {
+			collectMtimes(fullPath, baseDir, result);
+		} else {
+			const relPath = fullPath.slice(baseDir.length + 1);
+			try {
+				result.set(relPath, statSync(fullPath).mtimeMs);
+			} catch {
+				// 文件可能在遍历期间被删除，忽略
+			}
+		}
+	}
+}
+
+/** 获取本轮对话中变更的扩展名列表（基于 mtime 比对）。快照提交由调用方在同步成功后调用 commitMtimeSnapshot() 完成。 */
+function getChangedExtensionsByMtime(ctx: ExtensionContext): string[] {
+	const extDir = join(ctx.cwd, 'extensions');
+	const current = new Map<string, number>();
+	collectMtimes(extDir, extDir, current);
+
+	if (!mtimeSnapshot) {
+		// 首轮：直接提交快照作为基线（首轮不执行同步，无失败风险）
+		mtimeSnapshot = current;
+		return [];
+	}
+
+	const changedFiles: string[] = [];
+
+	// 检查新增/修改的文件
+	for (const [relPath, mtime] of current) {
+		const prev = mtimeSnapshot.get(relPath);
+		if (prev === undefined || prev < mtime) {
+			changedFiles.push(relPath);
+		}
+	}
+
+	// 检查已删除的文件（存在于快照但不在当前文件系统中）
+	for (const relPath of mtimeSnapshot.keys()) {
+		if (!current.has(relPath)) {
+			changedFiles.push(relPath);
+		}
+	}
+
+	// 暂存当前快照，等待同步成功后由 commitMtimeSnapshot() 提交
+	pendingSnapshot = current;
+
+	const extNames = new Set<string>();
+	if (changedFiles.length > 0) {
+		extractExtNames(changedFiles.join('\n'), extNames);
 	}
 	return [...extNames].sort();
+}
+
+/** 提交暂存的 mtime 快照。仅在同步成功后调用，确保失败时下一轮可重试。 */
+function commitMtimeSnapshot(): void {
+	if (pendingSnapshot) {
+		mtimeSnapshot = pendingSnapshot;
+		pendingSnapshot = null;
+	}
+}
+
+/**
+ * 兼容旧调用签名的 getChangedExtensions（已废弃）。
+ * 保留仅用于被旧引用调用时回退，新代码应直接使用 getChangedExtensionsByMtime。
+ * @deprecated 使用 getChangedExtensionsByMtime 替代
+ */
+async function getChangedExtensions(_pi: ExtensionAPI, ctx: ExtensionContext): Promise<string[]> {
+	return getChangedExtensionsByMtime(ctx);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -510,8 +572,6 @@ function checkExtensionForErrors(
 // ══════════════════════════════════════════════════════════════════════════════
 // 文件同步
 // ══════════════════════════════════════════════════════════════════════════════
-
-const IGNORE_DIRS = new Set(['node_modules', '.git', '.svn', '.hg']);
 
 function resolveExtensionSource(
 	extName: string,
@@ -695,6 +755,13 @@ export default function (api: ExtensionAPI): void {
 	pi = api;
 	log.info('Extension v2 loaded');
 
+	// session_start: 建立 mtime 基线快照，确保首轮 agent_end 之前已有参照
+	pi.on('session_start', async (_event, ctx) => {
+		const extDir = join(ctx.cwd, 'extensions');
+		mtimeSnapshot = new Map();
+		collectMtimes(extDir, extDir, mtimeSnapshot);
+	});
+
 	pi.on('agent_end', async (_event, ctx) => {
 		const syncResult = await syncGate.run(async () => {
 			await performSync(ctx);
@@ -725,6 +792,7 @@ async function performSync(ctx: ExtensionContext): Promise<void> {
 		const changed = await getChangedExtensions(pi, ctx);
 		if (changed.length === 0) {
 			log.info('No extensions changed, skipping');
+			commitMtimeSnapshot();
 			notifyTitle = '无扩展变更，无需同步';
 		} else {
 			log.info('Changed extensions:', changed.join(', '));
@@ -763,6 +831,9 @@ async function performSync(ctx: ExtensionContext): Promise<void> {
 						}
 						pendingPiRootDirs.clear();
 					}
+
+					// 有成功同步的扩展时提交快照；全部失败时保留旧快照以便下轮重试
+					if (synced.length > 0) commitMtimeSnapshot();
 
 					const parts: string[] = [];
 					if (synced.length > 0) {
