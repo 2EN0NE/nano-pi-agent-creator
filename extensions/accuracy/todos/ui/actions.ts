@@ -11,7 +11,7 @@ import {
 } from '@earendil-works/pi-tui';
 import { matchesKey, Key } from '@earendil-works/pi-tui';
 import type { TodoRecord, TodoMenuAction, TodoOverlayAction } from '../types.js';
-import { formatTodoId, isTodoClosed } from '../storage.js';
+import { formatTodoId, isTodoDone, isTodoClosed } from '../storage.js';
 
 // ── Action Menu ──────────────────────────────────────
 
@@ -25,16 +25,31 @@ export class TodoActionMenuComponent extends Container {
 
 	constructor(theme: Theme, todo: TodoRecord, handlers: TodoMenuHandlers) {
 		super();
+		const done = isTodoDone(todo.status);
 		const closed = isTodoClosed(todo.status);
+		const resolved = done || closed;
 		const title = todo.title || '(untitled)';
 		const options: SelectItem[] = [
 			{ value: 'view', label: 'view', description: 'View todo' },
-			{ value: 'work', label: 'work', description: 'Work on todo' },
-			{ value: 'refine', label: 'refine', description: 'Refine task' },
+			...(resolved
+				? []
+				: [
+						{ value: 'work', label: 'work', description: 'Work on todo' },
+						{ value: 'refine', label: 'refine', description: 'Refine task' },
+					]),
+			// Status transitions
 			...(closed
-				? [{ value: 'reopen', label: 'reopen', description: 'Reopen todo' }]
-				: [{ value: 'close', label: 'close', description: 'Close todo' }]),
-			...(todo.assigned_to_session
+				? [{ value: 'reopen', label: 'reopen', description: 'Restore todo' }]
+				: done
+					? [
+							{ value: 'reopen', label: 'reopen', description: 'Reopen todo' },
+							{ value: 'close', label: 'close', description: 'Hide todo' },
+						]
+					: [
+							{ value: 'done', label: 'done', description: 'Mark as completed' },
+							{ value: 'close', label: 'close', description: 'Hide todo' },
+						]),
+			...(todo.assigned_to_session && !resolved
 				? [{ value: 'release', label: 'release', description: 'Release assignment' }]
 				: []),
 			{
@@ -47,7 +62,7 @@ export class TodoActionMenuComponent extends Container {
 				label: 'copy text',
 				description: 'Copy title and body to clipboard',
 			},
-			{ value: 'delete', label: 'delete', description: 'Delete todo' },
+			{ value: 'delete', label: 'delete', description: 'Delete todo (hard delete)' },
 		];
 
 		this.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
@@ -261,7 +276,8 @@ export class TodoDetailOverlayComponent implements Component {
 
 	private buildMetaLine(width: number): string {
 		const status = this.todo.status || 'open';
-		const statusColor = isTodoClosed(status) ? 'dim' : 'success';
+		const resolved = isTodoDone(status) || isTodoClosed(status);
+		const statusColor = resolved ? 'dim' : 'success';
 		const tagText = this.todo.tags.length ? this.todo.tags.join(', ') : 'no tags';
 		const line =
 			this.theme.fg('accent', formatTodoId(this.todo.id)) +

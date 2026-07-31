@@ -15,10 +15,11 @@ import {
 	generateTodoId,
 	ensureTodoExists,
 	writeTodoFile,
-	listTodos,
 	listAllTodos,
 	filterTodosByScope,
+	isTodoDone,
 	isTodoClosed,
+	validateTodoStatus,
 	splitTodosByAssignment,
 	serializeTodoForAgent,
 	serializeTodoListForAgent,
@@ -135,6 +136,16 @@ export function registerTool(pi: ExtensionAPI): void {
 							details: { action: 'create', error: 'title required' } as any,
 						};
 					}
+					// Validate status if provided
+					if (params.status !== undefined) {
+						const statusCheck = validateTodoStatus(params.status);
+						if ('error' in statusCheck) {
+							return {
+								content: [{ type: 'text', text: statusCheck.error }],
+								details: { action: 'create', error: statusCheck.error } as any,
+							};
+						}
+					}
 					await ensureTodosDir(todosDir);
 					const id = await generateTodoId(todosDir);
 					const filePath = getTodoPath(todosDir, id);
@@ -192,6 +203,16 @@ export function registerTool(pi: ExtensionAPI): void {
 							],
 							details: { action: 'update', error: 'not found' } as any,
 						};
+					}
+					// Validate status if provided
+					if (params.status !== undefined) {
+						const statusCheck = validateTodoStatus(params.status);
+						if ('error' in statusCheck) {
+							return {
+								content: [{ type: 'text', text: statusCheck.error }],
+								details: { action: 'update', error: statusCheck.error } as any,
+							};
+						}
 					}
 					const result = await withTodoLock(todosDir, validated.id, ctx, async () => {
 						const existing = await ensureTodoExists(filePath, validated.id);
@@ -486,16 +507,20 @@ function renderTodoList(
 }
 
 function renderTodoHeading(theme: Theme, todo: TodoFrontMatter, currentSessionId?: string): string {
+	const done = isTodoDone(getTodoStatus(todo));
 	const closed = isTodoClosed(getTodoStatus(todo));
-	const titleColor = closed ? 'dim' : 'text';
+	const resolved = done || closed;
+	const titleColor = resolved ? 'dim' : 'text';
 	const tagText = todo.tags.length ? theme.fg('dim', ` [${todo.tags.join(', ')}]`) : '';
 	const assignmentText = renderAssignmentSuffix(theme, todo, currentSessionId);
+	const statusLabel = done ? ' (done)' : closed ? ' (closed)' : '';
 	return (
 		theme.fg('accent', formatTodoId(todo.id)) +
 		' ' +
 		theme.fg(titleColor, getTodoTitle(todo)) +
 		tagText +
-		assignmentText
+		assignmentText +
+		statusLabel
 	);
 }
 

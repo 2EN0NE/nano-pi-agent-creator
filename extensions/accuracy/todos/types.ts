@@ -43,8 +43,6 @@ export interface TodoPluginConfig {
 	widgetScope: 'session' | 'project' | 'global';
 	/** Widget display style. */
 	widgetDisplay: 'summary' | 'details';
-	/** Widget filter. */
-	widgetFilter: 'all' | 'pending-only';
 	/** Sort field for todo lists. */
 	sortField: 'created-at' | 'title';
 	/** Sort direction. */
@@ -57,7 +55,6 @@ export const DEFAULT_PLUGIN_CONFIG: TodoPluginConfig = {
 	widgetShow: true,
 	widgetScope: 'session',
 	widgetDisplay: 'summary',
-	widgetFilter: 'pending-only',
 	sortField: 'created-at',
 	sortDirection: 'desc',
 	compactView: true,
@@ -101,6 +98,7 @@ export type TodoMenuAction =
 	| 'work'
 	| 'refine'
 	| 'close'
+	| 'done'
 	| 'reopen'
 	| 'release'
 	| 'delete'

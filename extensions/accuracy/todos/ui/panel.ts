@@ -10,6 +10,7 @@ import { TodoActionMenuComponent, TodoDeleteConfirmComponent } from './actions.j
 import type { TabId, TodoFrontMatter, TodoRecord, TodoMenuAction, SortConfig } from '../types.js';
 import {
 	formatTodoId,
+	isTodoDone,
 	isTodoClosed,
 	renderAssignmentSuffix,
 	sortTodos,
@@ -242,17 +243,16 @@ export class TodoPanel implements Component {
 			this.tui.requestRender();
 			return;
 		}
-		if (action === 'close' || action === 'reopen') {
+		if (action === 'close' || action === 'reopen' || action === 'done') {
 			const todosDir = getTodosDir(this.ctx.cwd);
-			const nextStatus = action === 'close' ? 'closed' : 'open';
+			const nextStatus = action === 'done' ? 'done' : action === 'close' ? 'close' : 'open';
 			const result = await updateTodoStatus(todosDir, record.id, nextStatus, this.ctx);
 			if ('error' in result) {
 				this.ctx.ui.notify(result.error, 'error');
 			} else {
-				this.ctx.ui.notify(
-					`${action === 'close' ? 'Closed' : 'Reopened'} todo ${formatTodoId(record.id)}`,
-					'info',
-				);
+				const label =
+					action === 'done' ? 'Completed' : action === 'close' ? 'Closed' : 'Reopened';
+				this.ctx.ui.notify(`${label} todo ${formatTodoId(record.id)}`, 'info');
 			}
 			await this.refreshData();
 			this.mode = 'list';
@@ -447,7 +447,9 @@ export class TodoPanel implements Component {
 		const lines: string[] = [];
 		const scope = this.getCurrentScopeLabel();
 		const allTodos = this.getCurrentScopeTodos();
-		const openCount = allTodos.filter((t) => !isTodoClosed(t.status)).length;
+		const openCount = allTodos.filter(
+			(t) => !isTodoDone(t.status) && !isTodoClosed(t.status),
+		).length;
 		const totalCount = allTodos.length;
 		const scopeInfo = this.theme.fg(
 			'accent',
@@ -489,21 +491,23 @@ export class TodoPanel implements Component {
 			const todo = this.filteredTodos[i];
 			if (!todo) continue;
 			const isSelected = i === this.selectedIndex;
+			const done = isTodoDone(todo.status);
 			const closed = isTodoClosed(todo.status);
+			const resolved = done || closed;
 			const prefix = isSelected ? this.theme.fg('accent', '> ') : '  ';
-			const titleColor = isSelected ? 'accent' : closed ? 'dim' : 'text';
-			const statusColor = closed ? 'dim' : 'success';
+			const titleColor = isSelected ? 'accent' : resolved ? 'dim' : 'text';
+			const statusColor = resolved ? 'dim' : 'success';
 			const tagText = todo.tags.length ? ` [${todo.tags.join(', ')}]` : '';
 			const assignmentText = renderAssignmentSuffix(this.theme, todo, this.currentSessionId);
 			const line =
 				prefix +
-				this.theme.fg('accent', formatTodoId(todo.id)) +
+				this.theme.fg('accent', todo.id) +
+				' ' +
+				this.theme.fg(statusColor, todo.status || 'open') +
 				' ' +
 				this.theme.fg(titleColor, todo.title || '(untitled)') +
 				this.theme.fg('muted', tagText) +
-				assignmentText +
-				' ' +
-				this.theme.fg(statusColor, `(${todo.status || 'open'})`);
+				assignmentText;
 			lines.push(truncateToWidth(line, width));
 		}
 

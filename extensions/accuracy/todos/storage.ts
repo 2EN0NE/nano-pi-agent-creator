@@ -135,7 +135,7 @@ export async function garbageCollectTodos(todosDir: string, settings: TodoSettin
 				const content = await fs.readFile(filePath, 'utf8');
 				const { frontMatter } = splitFrontMatter(content);
 				const parsed = parseFrontMatter(frontMatter, id);
-				if (!isTodoClosed(parsed.status)) return 'skipped';
+				if (!isTodoResolved(parsed.status)) return 'skipped';
 				const createdAt = Date.parse(parsed.created_at);
 				if (!Number.isFinite(createdAt)) return 'invalid-date';
 				if (createdAt < cutoff) {
@@ -173,10 +173,41 @@ export async function garbageCollectTodos(todosDir: string, settings: TodoSettin
 
 // ── File format helpers ───────────────────────────────
 
-const CLOSED_STATUSES = ['closed', 'done', 'complete', 'completed'];
+/** Valid todo status values. */
+export const VALID_TODO_STATUSES = ['open', 'done', 'close'] as const;
 
+/** Validate a status string against the canonical enum. */
+export function validateTodoStatus(status: string): { status: string } | { error: string } {
+	const normalized = status.toLowerCase().trim();
+	if (!VALID_TODO_STATUSES.includes(normalized as any)) {
+		return {
+			error: `Invalid status "${status}". Must be one of: ${VALID_TODO_STATUSES.join(', ')}`,
+		};
+	}
+	return { status: normalized };
+}
+
+/**
+ * Check if a status represents a completed (done) todo.
+ * Only matches the canonical 'done' status.
+ */
+export function isTodoDone(status: string): boolean {
+	return status.toLowerCase() === 'done';
+}
+
+/**
+ * Check if a status represents a soft-deleted (closed/hidden) todo.
+ * Only matches the canonical 'close' status.
+ * Note: this is DIFFERENT from the old `isTodoClosed` which bundled done+closed+complete+completed.
+ * For "is this todo no longer open?" use `isTodoDone(status) || isTodoClosed(status)`.
+ */
 export function isTodoClosed(status: string): boolean {
-	return CLOSED_STATUSES.includes(status.toLowerCase());
+	return status.toLowerCase() === 'close';
+}
+
+/** Is this todo in a resolved (non-open) state? (done or close) */
+export function isTodoResolved(status: string): boolean {
+	return isTodoDone(status) || isTodoClosed(status);
 }
 
 export function getTodoStatus(todo: TodoFrontMatter): string {
@@ -448,8 +479,8 @@ export function sortTodos(
 	sortDirection?: 'asc' | 'desc',
 ): TodoFrontMatter[] {
 	return [...todos].sort((a, b) => {
-		const aClosed = isTodoClosed(a.status);
-		const bClosed = isTodoClosed(b.status);
+		const aClosed = isTodoResolved(a.status);
+		const bClosed = isTodoResolved(b.status);
 		if (aClosed !== bClosed) return aClosed ? 1 : -1;
 
 		if (sortField === 'title') {
@@ -491,8 +522,8 @@ export async function filterTodosAsync(
 
 	return matches
 		.sort((a, b) => {
-			const aClosed = isTodoClosed(a.todo.status);
-			const bClosed = isTodoClosed(b.todo.status);
+			const aClosed = isTodoResolved(a.todo.status);
+			const bClosed = isTodoResolved(b.todo.status);
 			if (aClosed !== bClosed) return aClosed ? 1 : -1;
 			return a.score - b.score;
 		})
@@ -591,7 +622,7 @@ export async function withTodoLock<T>(
 // ── Business operations ───────────────────────────────
 
 export function clearAssignmentIfClosed(todo: TodoFrontMatter): void {
-	if (isTodoClosed(todo.status)) {
+	if (isTodoResolved(todo.status)) {
 		todo.assigned_to_session = undefined;
 	}
 }
@@ -625,7 +656,7 @@ export function splitTodosByAssignment(todos: TodoFrontMatter[]): {
 	const openTodos: TodoFrontMatter[] = [];
 	const closedTodos: TodoFrontMatter[] = [];
 	for (const todo of todos) {
-		if (isTodoClosed(todo.status)) {
+		if (isTodoResolved(todo.status)) {
 			closedTodos.push(todo);
 			continue;
 		}
@@ -722,7 +753,9 @@ export async function updateTodoStatus(
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
 		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
-		existing.status = status;
+		const statusValidation = validateTodoStatus(status);
+		if ('error' in statusValidation) return statusValidation;
+		existing.status = statusValidation.status;
 		clearAssignmentIfClosed(existing);
 		await writeTodoFile(filePath, existing);
 		return existing;
@@ -748,8 +781,8 @@ export async function claimTodoAssignment(
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
 		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
-		if (isTodoClosed(existing.status))
-			return { error: `Todo ${displayTodoId(id)} is closed` } as const;
+		if (isTodoResolved(existing.status))
+			return { error: `Todo ${displayTodoId(id)} is already resolved` } as const;
 		const assigned = existing.assigned_to_session;
 		if (assigned && assigned !== sessionId && !force) {
 			return {

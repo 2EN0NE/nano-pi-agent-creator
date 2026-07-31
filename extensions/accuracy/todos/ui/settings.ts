@@ -107,7 +107,7 @@ export class SettingsPanel implements Component {
 				id: 'widget',
 				label: 'Widget settings',
 				currentValue: '>',
-				submenu: (_value: string, done: (v?: string) => void) => {
+				submenu: (_value: string, _done: (v?: string) => void) => {
 					this.mode = 'widget-sub';
 					this.widgetSettings = null;
 					return this;
@@ -169,25 +169,18 @@ export class SettingsPanel implements Component {
 				label: `Display: ${cfg.widgetDisplay}`,
 				description: 'Summary | Details',
 			},
-			{
-				value: 'widgetFilter',
-				label: `Filter: ${cfg.widgetFilter === 'pending-only' ? 'Pending only' : 'All'}`,
-				description: 'Show all items or only pending',
-			},
 		];
 
 		const cycleValues: Record<string, string[]> = {
 			widgetShow: ['true', 'false'],
 			widgetScope: ['session', 'project', 'global'],
 			widgetDisplay: ['summary', 'details'],
-			widgetFilter: ['pending-only', 'all'],
 		};
 
 		const displayLabels: Record<string, (val: string) => string> = {
 			widgetShow: (v: string) => (v === 'true' ? 'Show widget' : 'Hide widget'),
 			widgetScope: (v: string) => `Scope: ${v}`,
 			widgetDisplay: (v: string) => `Display: ${v}`,
-			widgetFilter: (v: string) => `Filter: ${v === 'pending-only' ? 'Pending only' : 'All'}`,
 		};
 
 		const updateWidgetConfig = (key: string, newValue: string) => {
@@ -202,10 +195,6 @@ export class SettingsPanel implements Component {
 					key === 'widgetDisplay'
 						? (newValue as TodoPluginConfig['widgetDisplay'])
 						: cur.widgetDisplay,
-				widgetFilter:
-					key === 'widgetFilter'
-						? (newValue as TodoPluginConfig['widgetFilter'])
-						: cur.widgetFilter,
 			});
 		};
 

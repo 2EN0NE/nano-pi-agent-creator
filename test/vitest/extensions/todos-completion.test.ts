@@ -128,7 +128,14 @@ describe('buildCompletionReminder', () => {
 
 	it('returns null when completion detected but no pending todos', () => {
 		const result = buildCompletionReminder('All done!', [
-			{ id: 'ccc', title: 'Old task', status: 'closed' },
+			{ id: 'ccc', title: 'Old task', status: 'done' },
+		]);
+		expect(result).toBeNull();
+	});
+
+	it('returns null when all todos are soft-deleted', () => {
+		const result = buildCompletionReminder('All done!', [
+			{ id: 'eee', title: 'Hidden task', status: 'close' },
 		]);
 		expect(result).toBeNull();
 	});
@@ -150,10 +157,10 @@ describe('buildCompletionReminder', () => {
 		expect(result).toContain('close them using the todo tool');
 	});
 
-	it('filters out closed todos from reminder', () => {
+	it('filters out close todos from reminder', () => {
 		const mixedTodos = [
 			{ id: 'aaa', title: 'Add login page', status: 'open' },
-			{ id: 'bbb', title: 'Fix navbar bug', status: 'closed' },
+			{ id: 'bbb', title: 'Fix navbar bug', status: 'close' },
 		];
 		const result = buildCompletionReminder('All done!', mixedTodos);
 		expect(result).not.toBeNull();

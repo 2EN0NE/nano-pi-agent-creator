@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '@zenone/pi-logger';
+import { isTodoDone, isTodoClosed } from './storage.js';
 
 const log = createLogger('todos:completion');
 
@@ -88,8 +89,7 @@ export function buildCompletionReminder(
 
 	if (matchScore === 0) return null;
 
-	const CLOSED_STATUSES = ['closed', 'done', 'complete', 'completed'];
-	const pendingTodos = openTodos.filter((t) => !CLOSED_STATUSES.includes(t.status.toLowerCase()));
+	const pendingTodos = openTodos.filter((t) => !isTodoDone(t.status) && !isTodoClosed(t.status));
 
 	if (pendingTodos.length === 0) return null;
 
