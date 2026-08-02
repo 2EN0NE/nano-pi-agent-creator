@@ -31,6 +31,7 @@ import { loadConfig, reloadConfig, setSessionId, getEffectiveProfile } from './c
 import { buildCompactionHandler, setPendingSupplement } from './compactor.js';
 import { openSettingsPanel } from './settings-panel.js';
 import { type CompactionProfile, describeTrigger, toModelSpec } from './types.js';
+import { shouldTrigger, isApproaching } from './trigger.js';
 
 // Auto-register available compaction adapters
 import './mechanisms/smart-compact.js';
@@ -44,41 +45,6 @@ let compactingInProgress = false;
 let currentModelSpec: string | undefined;
 
 // ── Helpers ─────────────────────────────────────────────────────
-
-/**
- * Check whether a trigger threshold has been crossed based on current context usage.
- */
-function shouldTrigger(
-	trigger: CompactionProfile['trigger'],
-	contextUsage: { tokens: number; percent: number | null },
-	contextWindow: number | undefined,
-): boolean {
-	const { type, threshold } = trigger;
-
-	switch (type) {
-		case 'context_percent':
-			if (contextUsage.percent === null) return false;
-			return contextUsage.percent >= threshold;
-
-		case 'fixed':
-			return contextUsage.tokens >= threshold;
-
-		case 'reserve': {
-			if (contextWindow === undefined || contextWindow <= 0) {
-				// Fallback: derive window from percent if available
-				if (contextUsage.percent === null || contextUsage.percent <= 0) return false;
-				return (
-					Math.round((contextUsage.tokens / contextUsage.percent) * 100) -
-						contextUsage.tokens <=
-					threshold
-				);
-			}
-			return contextWindow - contextUsage.tokens <= threshold;
-		}
-		default:
-			return false;
-	}
-}
 
 /**
  * Execute compaction with the active profile's settings.
@@ -224,12 +190,29 @@ export default function (pi: ExtensionAPI) {
 				contextUsage as { tokens: number; percent: number | null },
 				ctx.model?.contextWindow,
 			);
-		ctx.ui.setStatus(
-			'custom-compact',
-			compactingInProgress || triggered
-				? theme.fg('accent', `|compact:${pid}-${extra}`)
-				: theme.fg('text', `|compact:${pid}-${extra}`),
-		);
+		// 是否接近阈值（>=80% 但未触发）
+		const approaching =
+			!compactingInProgress &&
+			contextUsage &&
+			contextUsage.tokens !== null &&
+			!triggered &&
+			isApproaching(
+				profile.trigger,
+				contextUsage as { tokens: number; percent: number | null },
+				ctx.model?.contextWindow,
+			);
+
+		let statusText: string;
+		if (compactingInProgress) {
+			statusText = theme.fg('accent', `|compact:${pid}-${extra}`);
+		} else if (triggered) {
+			statusText = theme.fg('error', `|compact:${pid}-${extra}`);
+		} else if (approaching) {
+			statusText = theme.fg('warning', `|compact:${pid}-${extra}`);
+		} else {
+			statusText = theme.fg('text', `|compact:${pid}-${extra}`);
+		}
+		ctx.ui.setStatus('custom-compact', statusText);
 	}
 
 	// ── On session start/reload: set session ID, track model, load session-specific config ──
