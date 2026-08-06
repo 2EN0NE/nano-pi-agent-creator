@@ -66,13 +66,13 @@ pi
 
 ```bash
 # 运行指定扩展的 e2e 测试
-bash test/scripts/run-e2e.sh --ext pi-logger
+bash test/e2e/scripts/run-e2e.sh --ext pi-logger
 
 # 运行指定技能的 e2e 测试
-bash test/scripts/run-e2e.sh --skill e2e-test
+bash test/e2e/scripts/run-e2e.sh --skill e2e-test
 
 # CI 模式（自动注入 mock-llm，无需 API Key）
-CI=true bash test/scripts/run-e2e.sh --ext btw
+CI=true bash test/e2e/scripts/run-e2e.sh --ext btw
 ```
 
 ### Vitest 结构化测试（推荐新扩展）
@@ -84,6 +84,23 @@ npm run test:ci    # CI 模式（输出 JUnit XML）
 ```
 
 测试结果统一存放于 `test/results/`，CI 中自动上传为 artifact。
+
+### TUI Headless 测试（组件级）
+
+对 TUI 组件的渲染输出和交互逻辑进行 **headless snapshot 测试**，无需启动真实终端。通过 MockTerminal + any 桥接技术，在 Node.js 进程内获取含完整 ANSI 颜色的渲染结果。
+
+```typescript
+import {
+	MockTerminal,
+	InteractiveMockTerminal,
+	renderToSnapshot,
+	stripAnsi,
+	assertWithinWidth,
+	diffSnapshots,
+} from './src/tui-testing/index.js';
+```
+
+**所有涉及 TUI 渲染的开发必须使用此框架验证。** 详见 [`AGENTS.md#tui-测试强制要求`](AGENTS.md#tui-测试强制要求) 和 [`docs/tui-headless-testing.md`](docs/tui-headless-testing.md)。
 
 ## 🔄 CI 与 Git Hooks
 
@@ -106,7 +123,7 @@ npm run test:ci    # CI 模式（输出 JUnit XML）
 - **TypeScript** — `npm run typecheck`
 - **ESLint** — `npm run lint`
 - **Vitest** — `npm test`（单元测试）
-- **E2E Tests** — `bash test/scripts/run-e2e.sh`（集成测试，使用 mock-llm 自动注入，无需 API Key）
+- **E2E Tests** — `bash test/e2e/scripts/run-e2e.sh`（集成测试，使用 mock-llm 自动注入，无需 API Key）
 - **Semgrep** — ERROR 级别阻塞，WARNING 参考
 
 ### Git Hooks（husky v9）

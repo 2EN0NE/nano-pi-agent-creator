@@ -11,33 +11,31 @@
 
 详见技能 [`e2e-test`](skills/e2e-test/SKILL.md)，测试基础设施在 [`test/`](test/)。
 
-测试框架有两个途径：
+#### 测试分层原则
 
-#### 路径 A：bash e2e 测试（run-e2e.sh）
+所有扩展测试分两层，按 mock 边界严格区分：
 
-传统 bash 测试，涵盖所有扩展和技能。
+```
+test/vitest/  — 单元 + 组件测试（headless）
+    Mock:  MockTerminal, 内存 sessionManager, 手造 annotate, mock keybindings
+    目标:  快速验证逻辑正确性（渲染布局、API 生命周期、handleInput 调用）
+    时长:  <30s，每次 commit 运行
+    约束:  不测 Pi runtime 行为（pi.appendEntry / pi.setLabel / 真实 key dispatch）
 
-```bash
-# 运行测试
-bash test/scripts/run-e2e.sh --ext pi-logger
-bash test/scripts/run-e2e.sh --skill e2e-test
-bash test/scripts/run-e2e.sh              # 全部模块
-
-# CI 模式（自动注入 mock-llm，无需 API Key）
-CI=true bash test/scripts/run-e2e.sh --ext pi-logger
-
-# 查看最新结果
-LATEST=$(ls -1t test/results/ | head -1)
-cat test/results/$LATEST/summary.md
-cat test/results/$LATEST/cases/*.log
-
-# 快速手动验证
-pi -a --no-session -e ./extensions/foo.ts -p "test prompt"
+test/e2e/     — 集成端到端测试（真实 Pi）
+    Mock:  仅 LLM API（mock-llm）
+    目标:  验证扩展在真实 Pi 进程中的行为
+    时长:  ~2min/module，CI + 提交前手动运行
+    约束:  每个测试只 mock 大模型服务商，其他 Pi API 均走真实路径
 ```
 
-#### 路径 B：Vitest 结构化测试（推荐用于新扩展）
+> **铁律**：`test/e2e/` 下的所有测试，如果 mock 了 LLM 以外的任何 Pi API（sessionManager、annotate、keybinding），视为不合规。
 
-基于 TypeScript 的结构化测试，速度更快，可并行。
+详见 ADR：[`docs/adr/0004-tui-e2e-layered-testing.md`](docs/adr/0004-tui-e2e-layered-testing.md)。
+
+#### 路径 A：Vitest 单元/组件测试（test/vitest/）
+
+基于 TypeScript 的快速测试，mock 所有 Pi API。
 
 ```bash
 # 运行全部 Vitest 测试
@@ -45,24 +43,33 @@ npm test
 
 # 监听模式（开发使用）
 npm run test:watch
-
-# CI 模式下输出 JUnit XML
-npm run test:ci
 ```
 
-Vitest 测试文件在 `test/vitest/extensions/<name>.test.ts` 中。编写示例见 [`test/vitest/extensions/pi-logger.test.ts`](test/vitest/extensions/pi-logger.test.ts)。
+编写示例见 `test/vitest/extensions/pi-logger.test.ts`。
+
+#### 路径 B：bash/expect 集成 e2e 测试（test/e2e/）
+
+真实 Pi 进程，仅 mock LLM。传统 bash（print 模式）+ `expect` 脚本（TUI 按键交互）。
+
+```bash
+# 运行指定扩展
+bash test/e2e/scripts/run-e2e.sh --ext pi-logger
+bash test/e2e/scripts/run-e2e.sh --ext pi-session-tree
+
+# CI 模式（自动注入 mock-llm，无需 API Key）
+CI=true bash test/e2e/scripts/run-e2e.sh --ext pi-logger
+
+# 查看结果
+LATEST=$(ls -1t test/results/ | head -1)
+cat test/results/$LATEST/summary.md
+```
 
 #### 验证流程
 
 1. 确定变更影响范围（扩展/技能/基础设施）
-2. 运行对应测试（`run-e2e.sh` 或 `npm test`）
+2. 运行 Vitest（`npm test`）+ 受影响模块的 e2e（`run-e2e.sh`）
 3. 查看结果汇总，对 `[REVIEW]` 用例逐条 AI 衡量（≤20 条全量，>20 条建议手动）
 4. 确认所有用例通过后，同步到用户目录，再告知完成
-
-正例：运行 run-e2e.sh → 查看 summary → 衡量 REVIEW 用例 → 确认通过后告知完成。
-反例：修改完代码直接告知完成，无真实测试验证。
-
-详情和完整流程见 [`skills/e2e-test/SKILL.md`](skills/e2e-test/SKILL.md)。
 
 #### Husky Hook 体系
 
@@ -309,33 +316,33 @@ HOME="$test_home/home" pi -a --no-session -p "hi"
 
 **和普通测试的区别：**
 
-| 维度     | 普通测试 (smoke.test.sh)     | TUI 测试 (tui.smoke.test.sh)    |
-| -------- | ---------------------------- | ------------------------------- |
-| Pi 模式  | `pi -a --no-session` (print) | `pi -a` (TUI 交互)              |
-| 测试手段 | 发送 prompt，检查 stdout     | 通过 PTY 发送按键，捕获屏幕输出 |
-| 验证方式 | exit code + 日志 grep        | ANSI 输出剥离后文本匹配         |
-| 适用场景 | 加载、工具调用、日志         | 覆盖层渲染、键盘交互、快捷键    |
+| 维度     | 普通测试 (smoke.test.sh)     | TUI 测试 (tui-expect.smoke.test.sh) |
+| -------- | ---------------------------- | ----------------------------------- |
+| Pi 模式  | `pi -a --no-session` (print) | `pi -a` (TUI 交互)                  |
+| 测试手段 | 发送 prompt，检查 stdout     | 通过 PTY 发送按键，捕获屏幕输出     |
+| 验证方式 | exit code + 日志 grep        | ANSI 输出剥离后文本匹配             |
+| 适用场景 | 加载、工具调用、日志         | 覆盖层渲染、键盘交互、快捷键        |
 
 **快速参考：**
 
 ```bash
 # 运行 TUI 测试
-bash test/scripts/run-e2e.sh --ext quit --tui
+bash test/e2e/scripts/run-e2e.sh --ext quit --tui
 
-# 不指定 --tui 时会自动补充运行 tui.smoke.test.sh
-bash test/scripts/run-e2e.sh --ext quit    # 同时跑 smoke + tui
+# 不指定 --tui 时会自动补充运行 tui-expect.smoke.test.sh
+bash test/e2e/scripts/run-e2e.sh --ext quit    # 同时跑 smoke + tui
 ```
 
-**TUI 测试文件命名：** `test/extensions/<name>/tui.smoke.test.sh`
+**TUI 测试文件命名：** `test/e2e/extensions/<name>/tui-expect.smoke.test.sh`
 
-**核心 API（定义在 `test/helpers/tui-functions.sh`）：**
+**核心 API（定义在 `test/e2e/helpers/tui-functions.sh`）：**
 
-| 函数                                       | 用途                                 |
-| ------------------------------------------ | ------------------------------------ |
-| `tui_run_pi_test <exts> <input> <timeout>` | 在 PTY 中启动 TUI 模式 pi 并发送输入 |
-| `tui_assert_contains <text>`               | 断言 TUI 输出包含文本                |
-| `tui_assert_matches <regex>`               | 断言 TUI 输出匹配正则                |
-| `tui_cleanup`                              | 清理临时文件                         |
+| 函数                                          | 用途                   |
+| --------------------------------------------- | ---------------------- |
+| `tui_expect_test <exts> <commands> <timeout>` | expect 驱动的 TUI 测试 |
+| `tui_assert_contains <text>`                  | 断言 TUI 输出包含文本  |
+| `tui_assert_matches <regex>`                  | 断言 TUI 输出匹配正则  |
+| `tui_cleanup`                                 | 清理临时文件           |
 
 **注意事项：**
 
@@ -344,7 +351,7 @@ bash test/scripts/run-e2e.sh --ext quit    # 同时跑 smoke + tui
 - `session_shutdown` 中的输出可能因 PTY 关闭而丢失
 - 退出码 124（timeout）在 LLM 未返回时是预期的
 
-**已有样例：** `test/extensions/quit/tui.smoke.test.sh`
+**已有样例：** `test/e2e/extensions/quit/tui-expect.smoke.test.sh` 和 `test/e2e/extensions/quit/tui-integration.test.exp`
 
 完整文档见 [`test/README.md`](test/README.md) 和 [`skills/e2e-test/SKILL.md`](skills/e2e-test/SKILL.md)。
 
@@ -414,6 +421,67 @@ export default function (pi: ExtensionAPI) {
 #### 完整 TUI 设计规范
 
 完整的设计规范、颜色使用、键盘交互、边框布局和 TUI 测试方法见 [`docs/tui-design-principles.md`](docs/tui-design-principles.md)。开发扩展 TUI 前请先阅读。
+
+### TUI 测试强制要求 【强制】
+
+**所有涉及 TUI 渲染的开发（新增组件、修改 render()、新增 overlay、修改交互逻辑），必须使用 headless snapshot 测试框架验证，禁止仅依赖人工肉眼检查。**
+
+#### 最低要求
+
+| 场景          | 必须验证                             | 使用工具                                        |
+| ------------- | ------------------------------------ | ----------------------------------------------- |
+| 新增 TUI 组件 | 渲染输出在 2+ 种宽度下不超宽、不崩溃 | `renderToSnapshot()` + `assertWithinWidth()`    |
+| 修改 render() | 变更前后 snapshot diff 符合预期      | `renderToSnapshot()` + `diffSnapshots()`        |
+| 新增 overlay  | overlay 可见/hidden 状态均正确合成   | `renderToSnapshot()` + overlay 相关断言         |
+| 键盘交互      | 按键后 UI 状态切换正确               | `dispatchInput()` → `renderToSnapshot()` → diff |
+| 颜色/主题     | ANSI 颜色代码存在于预期行            | 含 ANSI 的 snapshot 断言                        |
+
+#### 快速模板
+
+```typescript
+import {
+	MockTerminal,
+	renderToSnapshot,
+	dispatchInput,
+	stripAnsi,
+	assertWithinWidth,
+	diffSnapshots,
+} from '../../src/tui-testing/index.js';
+import { TUI } from '@earendil-works/pi-tui';
+
+// 基础 snapshot 测试
+describe('MyPanel TUI', () => {
+	it('不超宽', () => {
+		const tui = new TUI(new MockTerminal(80, 24));
+		tui.addChild(new MyPanel(/* ... */));
+		const snapshot = renderToSnapshot(tui, 80, 24);
+		assertWithinWidth(snapshot, 80);
+	});
+
+	it('按键切换状态', () => {
+		const tui = new TUI(new MockTerminal(80, 24));
+		const panel = new MyPanel(/* ... */);
+		tui.addChild(panel);
+		tui.setFocus(panel);
+		// dispatchInput 通过 any 桥接直达 handleInput
+		// 无需 tui.start()、无需特殊 Terminal 类
+
+		const before = renderToSnapshot(tui).map(stripAnsi);
+		dispatchInput(tui, '\t');
+		const after = renderToSnapshot(tui).map(stripAnsi);
+		expect(after).not.toEqual(before);
+	});
+});
+```
+
+#### 例外
+
+以下场景可豁免 headless snapshot 测试，但需在 PR 中说明理由：
+
+- 组件渲染依赖 `pi` 扩展生命周期（如 `ctx.ui.custom()` 内部状态），无法在纯 TUI 环境中复现 → 使用 TuiRunner (node-pty) 替代
+- 组件渲染依赖 `@earendil-works/pi-coding-agent` 专有类型，无法在 vitest 中导入 → 使用 TuiRunner 替代
+
+详细用法和 API 参考见 [`docs/tui-headless-testing.md`](docs/tui-headless-testing.md)。框架源码位于 [`src/tui-testing/`](src/tui-testing/)。
 
 ---
 

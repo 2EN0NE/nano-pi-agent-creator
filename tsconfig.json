@@ -22,10 +22,11 @@
 			"@zenone/pi-selector": ["./extensions/meta/selector/index.ts"],
 			"@zenone/pi-config": ["./extensions/meta/pi-config/api.ts"],
 			"@zenone/pi-config/types": ["./extensions/meta/pi-config/types.ts"],
-			"@zenone/pi-lab": ["./extensions/meta/pi-lab/api.ts"]
+			"@zenone/pi-lab": ["./extensions/meta/pi-lab/api.ts"],
+			"@zenone/pi-session-tree/ui/panel": ["./extensions/meta/pi-session-tree/ui/panel.ts"]
 		}
 	},
-	"include": ["extensions/**/*.ts", "scripts/**/*.ts"],
+	"include": ["extensions/**/*.ts", "scripts/**/*.ts", "src/**/*.ts"],
 	"exclude": [
 		"node_modules",
 		"dist",

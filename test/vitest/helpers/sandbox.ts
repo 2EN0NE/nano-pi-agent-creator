@@ -120,14 +120,14 @@ function findExtension(name: string): { path: string; isDir: boolean } | null {
 		}
 	}
 
-	// test/helpers/ 共享辅助扩展
-	const testHelperDir = resolve(ROOT_DIR, `test/helpers/${name}`);
-	const testHelperFile = resolve(ROOT_DIR, `test/helpers/${name}.ts`);
+	// test/e2e/helpers/ 共享辅助扩展
+	const testHelperDir = resolve(ROOT_DIR, `test/e2e/helpers/${name}`);
+	const testHelperFile = resolve(ROOT_DIR, `test/e2e/helpers/${name}.ts`);
 	if (existsSync(testHelperDir)) return { path: testHelperDir, isDir: true };
 	if (existsSync(testHelperFile)) return { path: testHelperFile, isDir: false };
 
-	// test/extensions/<target>/helpers/<name> 按约定放置的测试辅助扩展
-	const testExtHelperDir = resolve(ROOT_DIR, 'test/extensions');
+	// test/e2e/extensions/<target>/helpers/<name> 按约定放置的测试辅助扩展
+	const testExtHelperDir = resolve(ROOT_DIR, 'test/e2e/extensions');
 	if (existsSync(testExtHelperDir)) {
 		const entries = readdirSync(testExtHelperDir);
 		for (const entry of entries) {

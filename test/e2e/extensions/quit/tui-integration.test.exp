@@ -1,0 +1,57 @@
+#!/usr/bin/env expect
+# ──────────────────────────────────────────────────────────────────────────────
+# quit 扩展 — expect 交互测试
+#
+# 验证 expect 基础设施能正确：
+#   1. 等待 TUI 就绪（检测版本号或扩展列表）
+#   2. 发送命令
+#   3. 断言输出包含预期文本
+#   4. 正常退出
+#
+# 运行方式：由 run-e2e.sh 自动发现并执行
+# 直接调试：cd /tmp/sandbox && HOME=./home expect test.exp
+# ──────────────────────────────────────────────────────────────────────────────
+
+set timeout 15
+
+# ── 启动 pi ──
+spawn pi -a
+
+# ── 等待 TUI 就绪（`(auto)` 或 `0.0%/0` 在状态栏中连续出现，不会被 ANSI 打断）──
+expect {
+	-re {\(auto\)|0\.0%/0} {
+		# TUI 就绪
+	}
+	timeout {
+		send_error "FAIL: TUI did not become ready within ${timeout}s\n"
+		exit 1
+	}
+}
+
+# 额外等待渲染稳定
+sleep 1
+
+# ── 验证扩展列表包含 quit ──
+expect {
+	-re {\[Extensions\]} {
+		# 找到了扩展区
+	}
+	timeout {
+		send_error "FAIL: Extensions section not found\n"
+		exit 1
+	}
+}
+
+# ── 发送 /quit 并等待退出 ──
+send "/quit\r"
+expect {
+	eof {
+		# 正常退出
+	}
+	timeout {
+		send_error "FAIL: pi did not exit after /quit\n"
+		exit 1
+	}
+}
+
+exit 0

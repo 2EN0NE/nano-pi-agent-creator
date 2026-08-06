@@ -122,7 +122,7 @@ jobs:
             - name: Run bash e2e tests (auto-pool)
               env:
                   E2E_POOL_SIZE: 4
-              run: bash test/scripts/run-e2e.sh
+              run: bash test/e2e/scripts/run-e2e.sh
             - name: Upload test results
               if: always()
               uses: actions/upload-artifact@v4
@@ -168,4 +168,4 @@ jobs:
                     test/vitest/extensions/worktree.test.ts \
                     test/vitest/extensions/worktree.operations.test.ts
             - name: Run bash e2e worktree tests
-              run: bash test/scripts/run-e2e.sh --ext worktree
+              run: bash test/e2e/scripts/run-e2e.sh --ext worktree

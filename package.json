@@ -74,7 +74,7 @@
 		"test": "vitest run --pool forks",
 		"test:watch": "vitest",
 		"test:ci": "CI=true vitest run --pool forks --reporter default --reporter junit",
-		"e2e": "bash test/scripts/run-e2e.sh",
+		"e2e": "bash test/e2e/scripts/run-e2e.sh",
 		"check": "npm run format:check && npm run typecheck && npm run semgrep:ci && npm run lint"
 	},
 	"lint-staged": {

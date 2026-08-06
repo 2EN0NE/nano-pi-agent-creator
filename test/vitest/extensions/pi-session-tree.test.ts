@@ -7,7 +7,7 @@
  *   - A. Node queries: findByType, findByLabel, findAncestor
  *   - B. Path queries: pathToLeaf, pathBetween, distance, LCA, entriesBetween
  *   - C. Structure: branchCount, maxDepth, pathLength, treeComplexity
- *   - D. Aggregation: countByType, toolCallDistribution, compactionHistory, entryTypeTimeline
+ *   - D. analyze (range analysis)
  */
 import { describe, it, expect } from 'vitest';
 import { createSessionTree } from '@zenone/pi-session-tree';
@@ -48,6 +48,7 @@ interface MockEntry {
 	label?: string;
 	message?: { role: string; content: string | Array<{ type: string; text: string }> };
 	details?: any;
+	tokensBefore?: number;
 }
 
 function toSessionEntry(e: MockEntry): any {
@@ -59,6 +60,7 @@ function toSessionEntry(e: MockEntry): any {
 		label: e.label,
 		message: e.message,
 		details: e.details,
+		tokensBefore: e.tokensBefore,
 	};
 }
 
@@ -285,22 +287,20 @@ describe('LCA', () => {
 	});
 });
 
-describe('countByType', () => {
-	it('counts entries of a given type on path', () => {
+describe('analyze', () => {
+	it('counts entry types correctly', () => {
 		const sm = mockSessionManager([
 			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
 			{ id: '2', parentId: '1', type: 'message', timestamp: 't2' },
 			{ id: '3', parentId: '2', type: 'compaction', timestamp: 't3' },
 		]);
 		const tree = createSessionTree(sm);
-		const path = tree.pathToLeaf();
-		expect(tree.countByType(path, 'message')).toBe(2);
-		expect(tree.countByType(path, 'compaction')).toBe(1);
+		const report = tree.analyze('1', '3');
+		expect(report.byType['message']).toBe(2);
+		expect(report.byType['compaction']).toBe(1);
 	});
-});
 
-describe('compactionHistory', () => {
-	it('extracts compaction entries from path', () => {
+	it('extracts compaction history', () => {
 		const sm = mockSessionManager([
 			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
 			{
@@ -308,34 +308,36 @@ describe('compactionHistory', () => {
 				parentId: '1',
 				type: 'compaction',
 				timestamp: 't2',
-				details: { tokensBefore: 100000 },
+				tokensBefore: 100000,
 			},
 		]);
 		const tree = createSessionTree(sm);
-		const path = tree.pathToLeaf();
-		const history = tree.compactionHistory(path);
-		expect(history).toHaveLength(1);
-		expect(history[0].timestamp).toBe('t2');
+		const report = tree.analyze('1', '2');
+		expect(report.compactions).toHaveLength(1);
+		expect(report.compactions[0].tokensBefore).toBe(100000);
 	});
-});
 
-describe('entryTypeTimeline', () => {
-	it('segments path by entry type', () => {
+	it('extracts user questions', () => {
 		const sm = mockSessionManager([
-			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
-			{ id: '2', parentId: '1', type: 'message', timestamp: 't2' },
-			{ id: '3', parentId: '2', type: 'model_change', timestamp: 't3' },
-			{ id: '4', parentId: '3', type: 'message', timestamp: 't4' },
+			{
+				id: '1',
+				parentId: null,
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'user', content: 'hello world' },
+			},
+			{
+				id: '2',
+				parentId: '1',
+				type: 'message',
+				timestamp: 't2',
+				message: { role: 'user', content: 'fix bug' },
+			},
 		]);
 		const tree = createSessionTree(sm);
-		const timeline = tree.entryTypeTimeline(tree.pathToLeaf());
-		expect(timeline).toHaveLength(3);
-		expect(timeline[0].type).toBe('message');
-		expect(timeline[0].count).toBe(2);
-		expect(timeline[1].type).toBe('model_change');
-		expect(timeline[1].count).toBe(1);
-		expect(timeline[2].type).toBe('message');
-		expect(timeline[2].count).toBe(1);
+		const report = tree.analyze('1', '2');
+		expect(report.userQuestions).toHaveLength(2);
+		expect(report.userQuestions[0]).toBe('hello world');
 	});
 });
 
@@ -357,102 +359,6 @@ describe('treeComplexity', () => {
 		]);
 		const tree = createSessionTree(sm);
 		expect(tree.treeComplexity()).toBeGreaterThan(0);
-	});
-});
-
-// ── E. Content ──────────────────────────────────────────────
-
-describe('extractUserMessages', () => {
-	it('extracts user message texts from path', () => {
-		const sm = mockSessionManager([
-			{
-				id: '1',
-				parentId: null,
-				type: 'message',
-				timestamp: 't1',
-				message: { role: 'user', content: 'hello world' },
-			},
-			{
-				id: '2',
-				parentId: '1',
-				type: 'message',
-				timestamp: 't2',
-				message: { role: 'assistant', content: 'hi there' },
-			},
-			{
-				id: '3',
-				parentId: '2',
-				type: 'message',
-				timestamp: 't3',
-				message: { role: 'user', content: 'fix bug' },
-			},
-		]);
-		const tree = createSessionTree(sm);
-		const msgs = tree.extractUserMessages(tree.pathToLeaf());
-		expect(msgs).toHaveLength(2);
-		expect(msgs[0]).toBe('hello world');
-		expect(msgs[1]).toBe('fix bug');
-	});
-
-	it('handles array content', () => {
-		const sm = mockSessionManager([
-			{
-				id: '1',
-				parentId: null,
-				type: 'message',
-				timestamp: 't1',
-				message: {
-					role: 'user',
-					content: [
-						{ type: 'text', text: 'part one' },
-						{ type: 'text', text: 'part two' },
-					],
-				},
-			},
-		]);
-		const tree = createSessionTree(sm);
-		const msgs = tree.extractUserMessages(tree.pathToLeaf());
-		expect(msgs).toHaveLength(1);
-		expect(msgs[0]).toBe('part one part two');
-	});
-});
-
-describe('detectKeywords', () => {
-	it('finds entries containing keywords', () => {
-		const sm = mockSessionManager([
-			{
-				id: '1',
-				parentId: null,
-				type: 'message',
-				timestamp: 't1',
-				message: { role: 'user', content: 'please commit the changes' },
-			},
-			{
-				id: '2',
-				parentId: '1',
-				type: 'message',
-				timestamp: 't2',
-				message: { role: 'user', content: 'fix the typo' },
-			},
-		]);
-		const tree = createSessionTree(sm);
-		const found = tree.detectKeywords(tree.pathToLeaf(), ['commit', '提交']);
-		expect(found).toHaveLength(1);
-		expect(found[0].id).toBe('1');
-	});
-
-	it('case-insensitive matching', () => {
-		const sm = mockSessionManager([
-			{
-				id: '1',
-				parentId: null,
-				type: 'message',
-				timestamp: 't1',
-				message: { role: 'user', content: 'COMMIT NOW' },
-			},
-		]);
-		const tree = createSessionTree(sm);
-		expect(tree.detectKeywords(tree.pathToLeaf(), ['commit'])).toHaveLength(1);
 	});
 });
 
@@ -485,30 +391,6 @@ describe('lastN', () => {
 		expect(last).toHaveLength(2);
 		expect(last[0].id).toBe('2');
 		expect(last[1].id).toBe('3');
-	});
-});
-
-describe('entriesSinceLastCompaction', () => {
-	it('returns entries since last compaction', () => {
-		const sm = mockSessionManager([
-			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
-			{ id: '2', parentId: '1', type: 'compaction', timestamp: 't2' },
-			{ id: '3', parentId: '2', type: 'message', timestamp: 't3' },
-			{ id: '4', parentId: '3', type: 'message', timestamp: 't4' },
-		]);
-		const tree = createSessionTree(sm);
-		const recent = tree.entriesSinceLastCompaction();
-		expect(recent.length).toBeGreaterThanOrEqual(2);
-		expect(recent.some((n) => n.type === 'compaction')).toBe(true);
-	});
-
-	it('returns full path when no compaction', () => {
-		const sm = mockSessionManager([
-			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
-		]);
-		const tree = createSessionTree(sm);
-		const recent = tree.entriesSinceLastCompaction();
-		expect(recent).toHaveLength(1);
 	});
 });
 

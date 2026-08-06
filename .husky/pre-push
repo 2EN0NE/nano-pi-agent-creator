@@ -97,7 +97,7 @@ ALL_PASS=true
 
 for ext in $EXTS; do
   echo "   → Testing extension: $ext"
-  CI=true bash test/scripts/run-e2e.sh --ext "$ext" >/dev/null 2>&1
+  CI=true bash test/e2e/scripts/run-e2e.sh --ext "$ext" >/dev/null 2>&1
   if [ $? -eq 0 ] || [ $? -eq 124 ]; then
     echo "      ✅ $ext passed"
   else
@@ -108,7 +108,7 @@ done
 
 for skill in $SKILLS; do
   echo "   → Testing skill: $skill"
-  CI=true bash test/scripts/run-e2e.sh --skill "$skill" >/dev/null 2>&1
+  CI=true bash test/e2e/scripts/run-e2e.sh --skill "$skill" >/dev/null 2>&1
   if [ $? -eq 0 ] || [ $? -eq 124 ]; then
     echo "      ✅ $skill passed"
   else

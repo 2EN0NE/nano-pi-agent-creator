@@ -369,23 +369,37 @@ for (let i = 0; i < padCount; i++) {
 }
 ```
 
+### 7.4 公共 TUI 辅助模块
+
+项目提供了 `src/tui/helpers.ts` 供各 TUI 面板复用，包含：
+
+| 导出                              | 用途                                                      |
+| --------------------------------- | --------------------------------------------------------- |
+| `colLayout(opts)`                 | 两列布局描述（列宽计算 + 行渲染），替代手动 `padEnd` 拼接 |
+| `divider(width, fn)`              | accent 色全宽分隔线                                       |
+| `dimDivider(width, fn)`           | dim 色全宽分隔线                                          |
+| `checkAlignment(lines, sep, tol)` | 离线对齐检测（测试用）                                    |
+
+详细 API 文档与使用示例见 [`docs/tui-helpers.md`](tui-helpers.md)。  
+新建 TUI 面板时优先使用上述工具，避免重复实现。
+
 ---
 
 ## 8. TUI 集成测试
 
 ### 8.1 测试框架
 
-使用 `test/scripts/run-e2e.sh` 的 `--tui` 模式，通过 PTY（`script` 命令）捕获 TUI 输出。
+使用 `test/e2e/scripts/run-e2e.sh` 的 `--tui` 模式，通过 PTY（`script` 命令）捕获 TUI 输出。
 
 ### 8.2 测试文件命名
 
 ```
-test/extensions/<name>/tui.smoke.test.sh
+test/e2e/extensions/<name>/tui-expect.smoke.test.sh
 ```
 
 ### 8.3 测试 API
 
-在 `test/helpers/tui-functions.sh` 中定义：
+在 `test/e2e/helpers/tui-functions.sh` 中定义：
 
 ```bash
 # 启动测试
@@ -405,7 +419,7 @@ mark_for_review "检查 xxx 渲染"
 
 ### 8.4 测试示例
 
-参考 [`test/extensions/permission-gate/tui.smoke.test.sh`](../test/extensions/permission-gate/tui.smoke.test.sh)：
+参考 [`test/e2e/extensions/permission-gate/tui-expect.smoke.test.sh`](../test/e2e/extensions/permission-gate/tui-expect.smoke.test.sh)：
 
 - 验证扩展加载（不 crash）
 - 验证 widget 内容出现
@@ -429,6 +443,8 @@ TUI 测试中**必须**关注右侧列边框是否对齐。常见的对齐错误
 1. **ANSI 转义序列宽度污染**：`theme.fg()` 生成的 ANSI 序列本身不可见，但 `String.length` 会计入，导致 `' '.repeat(padding)` 计算偏少，右侧边框 `│` 缺失或错位。必须使用 `visibleWidth()` 而非 `String.length` 计算字符宽度。
 2. **动态内容变化导致错位**：展开详情、切换标签、内容截断等操作后，行内容宽度变化可能破坏右侧边框对齐。测试应验证展开前后右侧 `│` 是否连续。
 3. **选中/非选中行不同着色**：不同颜色标记（`theme.fg('accent', ...)` vs `theme.fg('dim', ...)`) 的 ANSI 序列长度不同，padding 计算必须基于**纯文本宽度**。
+
+**测试工具：** 可使用 [`checkAlignment()`](tui-helpers.md#3-checkalignment--对齐检测)（来自 `src/tui/helpers.ts`）在 JS 侧做竖线位置检测，替代 bash 中的手动 awk 拼接。bash 中使用时，配合 `strip_ansi` 去掉 ANSI 后传入行数组。
 
 **测试验证方法：**
 
@@ -479,3 +495,5 @@ TEST
 | `extensions/tui/quit.ts`                               | 简单 TUI          | 基础命令注册                                       |
 | `extensions/auto/cloud-sessions/src/index.ts`          | 表单配置面板      | ctx.ui.custom() 表单编辑、字段聚焦、输入验证       |
 | `extensions/tui/btw.ts`                                | 侧边会话覆盖层    | 自定义 Focusable Container 组件                    |
+| `src/tui/helpers.ts`                                   | 公共工具          | colLayout / divider / checkAlignment               |
+| `docs/tui-helpers.md`                                  | 文档              | 公共 TUI 辅助模块 API 说明与示例                   |

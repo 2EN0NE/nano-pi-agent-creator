@@ -22,12 +22,12 @@ describe('e2e-test skill', () => {
 	});
 
 	it('run-e2e.sh is executable', () => {
-		const runner = resolve(ROOT_DIR, 'test/scripts/run-e2e.sh');
+		const runner = resolve(ROOT_DIR, 'test/e2e/scripts/run-e2e.sh');
 		expect(() => accessSync(runner, constants.X_OK)).not.toThrow();
 	});
 
 	it('test infrastructure directories exist', () => {
-		const dirs = ['test/extensions', 'test/skills', 'test/scripts', 'test/results'];
+		const dirs = ['test/e2e/extensions', 'test/e2e/skills', 'test/e2e/scripts', 'test/results'];
 		for (const dir of dirs) {
 			expect(existsSync(resolve(ROOT_DIR, dir))).toBe(true);
 		}
@@ -35,7 +35,7 @@ describe('e2e-test skill', () => {
 
 	it('run-e2e.sh --help prints usage', async () => {
 		const execAsync = promisify(exec);
-		const { stdout } = await execAsync('bash test/scripts/run-e2e.sh --help', {
+		const { stdout } = await execAsync('bash test/e2e/scripts/run-e2e.sh --help', {
 			cwd: ROOT_DIR,
 		});
 		expect(stdout).toContain('Usage');
