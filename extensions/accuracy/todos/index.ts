@@ -91,36 +91,45 @@ export default function todosExtension(pi: ExtensionAPI) {
 	}
 
 	// ── Agent-end completion detection (passive) ───────
-	// agent_end fires when the agent has completed its processing loop
-	// and is waiting for user input — the right moment to check if
-	// the model's response suggests task completion while todos remain open.
+	// Cache the last assistant text on agent_end, then check on agent_settled
+	// (agent_settled is the only event that guarantees the agent is truly idle,
+	//  unlike agent_end which may fire mid tool-calling loop).
 
 	let completionReminderSent = false;
 	let sessionShuttingDown = false;
+	let lastAssistantText: string | null = null;
 
 	pi.on('agent_start', () => {
 		completionReminderSent = false;
+		lastAssistantText = null;
 	});
 
 	pi.on('session_shutdown', () => {
 		sessionShuttingDown = true;
 	});
 
+	// Cache the last assistant response text from agent_end for use in agent_settled
 	pi.on('agent_end', async (event, ctx) => {
-		// Read todos once, use for both widget update and completion check
+		// Update widget with current todos
 		const allTodos = await listAllTodos(ctx.cwd);
 		updateWidgetWithTodos(ctx, allTodos);
+
 		if (completionReminderSent || sessionShuttingDown) return;
 
-		// Extract last assistant text from agent_end event messages
 		const response = extractLastAssistantText(
 			(event as unknown as { messages?: Array<{ role?: string; content?: unknown }> })
 				.messages ?? [],
 		);
-		if (!response) return;
+		if (response) lastAssistantText = response;
+	});
 
+	// On agent_settled (truly idle), check if completion reminder should be sent
+	pi.on('agent_settled', async (_event, ctx) => {
+		if (completionReminderSent || sessionShuttingDown || !lastAssistantText) return;
+
+		const allTodos = await listAllTodos(ctx.cwd);
 		const reminder = buildCompletionReminder(
-			response,
+			lastAssistantText,
 			allTodos.map((t: any) => ({ id: t.id, title: t.title, status: t.status })),
 		);
 		if (reminder) {

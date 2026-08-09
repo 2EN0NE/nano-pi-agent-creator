@@ -99,12 +99,13 @@ export function buildCompletionReminder(
 		pendingTodos.length,
 	);
 
-	const todoRefs = pendingTodos.map((t) => `${t.id} "${t.title}"`).join(', ');
+	const displayTodos = pendingTodos.slice(0, 3);
+	const todoRefs = displayTodos.map((t) => `TODO-${t.id} "${t.title}"`).join(', ');
+	const suffix = pendingTodos.length > 3 ? ` 等${pendingTodos.length - 3}个` : '';
 
 	return (
-		`[Note: It looks like you may have completed some tasks. ` +
-		`The following todos are still open: ${todoRefs}. ` +
-		`If any are done, please close them using the todo tool.]`
+		`你提到完成了一些工作，但还有 ${pendingTodos.length} 个 todo 未关闭：${todoRefs}${suffix}。` +
+		`如果其中确实有已完成的，请用 todo 工具标记为完成。`
 	);
 }
 

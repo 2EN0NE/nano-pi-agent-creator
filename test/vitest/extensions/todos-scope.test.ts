@@ -61,17 +61,13 @@ describe('filterTodosByScope', () => {
 		}),
 	];
 
-	it('session scope returns assigned + unassigned project todos', () => {
+	it('session scope returns only explicitly assigned todos', () => {
 		const result = filterTodosByScope(todos, 'session', sessionId);
 		// aaa, fff: explicitly assigned to sessionId
-		// bbb, ccc: unassigned project-level → included
-		// eee: unassigned, no project_id → treated as project → included
+		// bbb, ccc, eee: unassigned → excluded
 		// ddd: unassigned global → excluded
-		expect(result).toHaveLength(5);
-		expect(result.map((t) => t.id)).toEqual(
-			expect.arrayContaining(['aaa', 'bbb', 'ccc', 'eee', 'fff']),
-		);
-		expect(result.map((t) => t.id)).not.toContain('ddd');
+		expect(result).toHaveLength(2);
+		expect(result.map((t) => t.id)).toEqual(expect.arrayContaining(['aaa', 'fff']));
 	});
 
 	it('project scope returns only project todos', () => {
@@ -92,6 +88,32 @@ describe('filterTodosByScope', () => {
 
 	it('session scope with no session id returns empty array', () => {
 		const result = filterTodosByScope(todos, 'session');
+		expect(result).toHaveLength(0);
+	});
+
+	it('session scope excludes unassigned project-level todos', () => {
+		// After the fix, session scope should NOT include unassigned todos
+		const sample: TodoFrontMatter[] = [
+			makeTodo({
+				id: 'aaa',
+				title: 'My task',
+				assigned_to_session: sessionId,
+				project_id: 'project',
+			}),
+			makeTodo({ id: 'bbb', title: 'Unassigned project', project_id: 'project' }),
+			makeTodo({ id: 'ccc', title: 'Unassigned no project_id', project_id: undefined }),
+		];
+		const result = filterTodosByScope(sample, 'session', sessionId);
+		expect(result).toHaveLength(1);
+		expect(result[0].id).toBe('aaa');
+	});
+
+	it('session scope with undefined sessionId returns empty', () => {
+		const sample: TodoFrontMatter[] = [
+			makeTodo({ id: 'aaa', title: 'Assigned to undefined', assigned_to_session: undefined }),
+			makeTodo({ id: 'bbb', title: 'No assignment' }),
+		];
+		const result = filterTodosByScope(sample, 'session', undefined);
 		expect(result).toHaveLength(0);
 	});
 });

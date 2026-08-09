@@ -458,12 +458,7 @@ export function filterTodosByScope(
 ): TodoFrontMatter[] {
 	if (scope === 'session') {
 		if (!currentSessionId) return [];
-		// Explicitly assigned to this session, OR unassigned project-level todos
-		return todos.filter(
-			(t) =>
-				t.assigned_to_session === currentSessionId ||
-				(!t.assigned_to_session && (t.project_id === 'project' || !t.project_id)),
-		);
+		return todos.filter((t) => t.assigned_to_session === currentSessionId);
 	}
 	if (scope === 'project') {
 		return todos.filter((t) => t.project_id === 'project' || !t.project_id);

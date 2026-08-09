@@ -99,12 +99,8 @@ export class TodoPanel implements Component {
 
 	private getCurrentScopeTodos(): TodoFrontMatter[] {
 		if (this.activeTab === 'session') {
-			// Explicitly assigned to this session, OR unassigned project-level todos
-			return this.projectTodos.filter(
-				(t) =>
-					t.assigned_to_session === this.currentSessionId ||
-					(!t.assigned_to_session && (t.project_id === 'project' || !t.project_id)),
-			);
+			if (!this.currentSessionId) return [];
+			return this.projectTodos.filter((t) => t.assigned_to_session === this.currentSessionId);
 		}
 		if (this.activeTab === 'global') {
 			// Global shows ALL todos from both project and global dirs, deduped by id

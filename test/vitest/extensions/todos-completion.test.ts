@@ -150,11 +150,11 @@ describe('buildCompletionReminder', () => {
 	it('generates reminder with pending todo references', () => {
 		const result = buildCompletionReminder('All done! Ready for review.', pendingTodos);
 		expect(result).not.toBeNull();
-		expect(result).toContain('aaa');
-		expect(result).toContain('bbb');
+		expect(result).toContain('TODO-aaa');
+		expect(result).toContain('TODO-bbb');
 		expect(result).toContain('Add login page');
 		expect(result).toContain('Fix navbar bug');
-		expect(result).toContain('close them using the todo tool');
+		expect(result).toContain('todo 工具标记为完成');
 	});
 
 	it('filters out close todos from reminder', () => {
@@ -164,8 +164,8 @@ describe('buildCompletionReminder', () => {
 		];
 		const result = buildCompletionReminder('All done!', mixedTodos);
 		expect(result).not.toBeNull();
-		expect(result).toContain('aaa');
-		expect(result).not.toContain('bbb');
+		expect(result).toContain('TODO-aaa');
+		expect(result).not.toContain('TODO-bbb');
 	});
 
 	it('handles empty todo list', () => {
@@ -177,6 +177,33 @@ describe('buildCompletionReminder', () => {
 		const result = buildCompletionReminder('全部完成了。', pendingTodos);
 		expect(result).not.toBeNull();
 		expect(result).toContain('Add login page');
+	});
+
+	it('limits displayed todos to 3 with "and N more" suffix', () => {
+		const manyTodos = [
+			{ id: 'aaa', title: 'Task 1', status: 'open' },
+			{ id: 'bbb', title: 'Task 2', status: 'open' },
+			{ id: 'ccc', title: 'Task 3', status: 'open' },
+			{ id: 'ddd', title: 'Task 4', status: 'open' },
+			{ id: 'eee', title: 'Task 5', status: 'open' },
+		];
+		const result = buildCompletionReminder('All done!', manyTodos);
+		expect(result).not.toBeNull();
+		// Should only mention first 3 by title
+		expect(result).toContain('Task 1');
+		expect(result).toContain('Task 2');
+		expect(result).toContain('Task 3');
+		expect(result).not.toContain('Task 4');
+		expect(result).not.toContain('Task 5');
+		// Should mention count and "more"
+		expect(result).toContain('5 个 todo 未关闭');
+		expect(result).toContain('等2个');
+	});
+
+	it('does not add "等N个" when todos <= 3', () => {
+		const result = buildCompletionReminder('All done! Ready for review.', pendingTodos);
+		expect(result).not.toBeNull();
+		expect(result).not.toContain('等');
 	});
 });
 
