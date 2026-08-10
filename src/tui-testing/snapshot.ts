@@ -8,7 +8,8 @@
  * @module tui-testing/snapshot
  */
 
-import { TUI, visibleWidth } from '@earendil-works/pi-tui';
+import type { TUI } from '@earendil-works/pi-tui';
+import { visibleWidth } from '@earendil-works/pi-tui';
 // eslint-disable-next-line no-control-regex
 const ANSI_CSI_REGEX = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const ANSI_OSC_REGEX = /\x1b\][^\x07]*\x07/g;
@@ -35,7 +36,7 @@ const ANSI_APC_REGEX = /\x1b_[^\x07]*\x07/g;
  * @example
  * ```typescript
  * const term = new MockTerminal(80, 24);
- * const tui = new TUI(term);
+ * const tui = new TuiMainScreen(term);
  * tui.addChild(myComponent);
  *
  * const snapshot = renderToSnapshot(tui, 80, 24);

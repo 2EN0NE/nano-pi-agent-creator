@@ -1,5 +1,5 @@
 import { Type } from 'typebox';
-import { StringEnum } from '@earendil-works/pi-ai';
+import { StringEnum } from '@earendil-works/pi-ai/compat';
 
 export const TODO_ID_PREFIX = 'TODO-';
 export const TODO_ID_PATTERN = /^[a-f0-9]{8}$/i;

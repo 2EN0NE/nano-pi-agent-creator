@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import type { TextContent, ImageContent } from '@earendil-works/pi-ai';
+import type { TextContent, ImageContent } from '@earendil-works/pi-ai/compat';
 import { discoverSecrets, type SecretEntry } from './secrets.js';
 import { createRedactor } from './redact.js';
 

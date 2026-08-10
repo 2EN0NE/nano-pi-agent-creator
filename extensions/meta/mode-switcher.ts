@@ -979,7 +979,15 @@ async function pickModelForModeUI(
 			? ctx.modelRegistry.find(spec.provider, spec.modelId)
 			: ctx.model;
 
-	const scopedModels: Array<{ model: any; thinkingLevel: string }> = [];
+	// Use the session's resolved model scope (pi >= 0.83) so the selector
+	// shows only models allowed by the current scope; falls back to empty
+	// (all models usable) when no scoping is configured. `?? []` guards the
+	// runtime: ModelSelectorComponent reads scopedModels.length in its
+	// constructor, and the SDK type declares scopedModels optional.
+	const scopedModels = (ctx.scopedModels ?? []) as unknown as Array<{
+		model: any;
+		thinkingLevel: string;
+	}>;
 
 	return ctx.ui.custom<{ provider: string; modelId: string } | undefined>(
 		(tui, _theme, _keybindings, done) => {

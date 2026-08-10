@@ -25,7 +25,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { StringEnum } from '@earendil-works/pi-ai';
+import { StringEnum } from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { createLogger } from '@zenone/pi-logger';

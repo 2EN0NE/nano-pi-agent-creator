@@ -12,7 +12,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-	TUI,
+	TuiMainScreen,
+	type TUI,
 	type Component,
 	type Terminal,
 	type Focusable,
@@ -202,7 +203,7 @@ describe('Headless Snapshot POC', () => {
 
 		it('snapshot 包含 ANSI 颜色和 SGR reset', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			const panel = new SimplePanel('Test', ['Item 1']);
 			tui.addChild(panel);
 
@@ -221,7 +222,7 @@ describe('Headless Snapshot POC', () => {
 
 		it('strip_ansi 后得到纯文本', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			tui.addChild(new SimplePanel('Test', ['Item 1', 'Item 2']));
 
 			const snapshot = renderToSnapshot(tui, 80, 24);
@@ -234,7 +235,7 @@ describe('Headless Snapshot POC', () => {
 
 		it('不同 width 产生不同输出', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			tui.addChild(
 				new SimplePanel('Test', [
 					'A very long item that should be truncated differently at different widths',
@@ -253,7 +254,7 @@ describe('Headless Snapshot POC', () => {
 	describe('Q2: Overlay 合成', () => {
 		it('compositeOverlays 将 overlay 叠加到基础行上', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			tui.addChild(new SimplePanel('Base', ['base line 1', 'base line 2']));
 
 			const overlay = new ConfirmOverlay('Delete file?');
@@ -272,7 +273,7 @@ describe('Headless Snapshot POC', () => {
 
 		it('overlay 在 hidden 状态下不出现', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			tui.addChild(new SimplePanel('Base', ['content']));
 
 			const overlay = new ConfirmOverlay('Hidden overlay');
@@ -286,7 +287,7 @@ describe('Headless Snapshot POC', () => {
 
 		it('CURSOR_MARKER 在 overlay 聚焦时出现', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			tui.addChild(new SimplePanel('Base', ['content']));
 
 			const overlay = new ConfirmOverlay('Focus me');
@@ -304,7 +305,7 @@ describe('Headless Snapshot POC', () => {
 	describe('Q3: Snapshot 稳定性和可 diff 性', () => {
 		it('相同输入产生相同输出（幂等）', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			tui.addChild(new SimplePanel('Stable', ['A', 'B', 'C']));
 
 			const snap1 = renderToSnapshot(tui, 80, 24);
@@ -315,7 +316,7 @@ describe('Headless Snapshot POC', () => {
 
 		it('内容变更能被精确检测（逐行 diff）', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			const panel = new SimplePanel('Test', ['Item A', 'Item B']);
 			tui.addChild(panel);
 
@@ -338,7 +339,7 @@ describe('Headless Snapshot POC', () => {
 
 		it('ANSI 颜色变更也能被 diff 检测', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 
 			// 用 plain text item（无内嵌 ANSI），通过组件的颜色逻辑来区分
 			// SimplePanel 用 \x1b[36m 渲染 bullet，所以 snapshot 自带颜色
@@ -361,14 +362,14 @@ describe('Headless Snapshot POC', () => {
 	describe('边界情况', () => {
 		it('空 TUI 不崩溃', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 
 			expect(() => renderToSnapshot(tui, 80, 24)).not.toThrow();
 		});
 
 		it('极端宽度不崩溃', () => {
 			const term = new MockTerminal(10, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			// 极小宽度下，组件内部的 minWidth 逻辑可能导致某些行超宽。
 			// 这是组件设计问题，不是 snapshot 方案问题——
 			// 真实 TUI 在宽度不足时也会抛 'Rendered line exceeds terminal width'。
@@ -380,7 +381,7 @@ describe('Headless Snapshot POC', () => {
 
 		it('超宽内容被 truncate', () => {
 			const term = new MockTerminal(30, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			tui.addChild(
 				new SimplePanel('Test', [
 					'This is a very very very very very very very long item that should be truncated',
@@ -395,7 +396,7 @@ describe('Headless Snapshot POC', () => {
 
 		it('多个 overlay 正确层叠', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 			tui.addChild(new SimplePanel('Base', ['base-line-1', 'base-line-2']));
 
 			// 不同锚点避免完全重叠 ➔ 两个 overlay 都应可见
@@ -416,7 +417,7 @@ describe('Headless Snapshot POC', () => {
 
 		it('container 嵌套子组件', () => {
 			const term = new MockTerminal(80, 24);
-			const tui = new TUI(term);
+			const tui = new TuiMainScreen(term);
 
 			const child1 = new SimplePanel('Child 1', ['A', 'B']);
 			const child2 = new SimplePanel('Child 2', ['C', 'D']);

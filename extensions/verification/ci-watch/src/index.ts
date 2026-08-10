@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
-import { Type } from '@earendil-works/pi-ai';
+import { Type } from '@earendil-works/pi-ai/compat';
 import { execSync } from 'node:child_process';
 import { createLogger } from '@zenone/pi-logger';
 import { createConfigStore } from '@zenone/pi-config';

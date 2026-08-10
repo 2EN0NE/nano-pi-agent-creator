@@ -34,7 +34,7 @@
  * Or add to models.json extensions list for auto-load.
  */
 
-import type { AssistantMessage } from '@earendil-works/pi-ai';
+import type { AssistantMessage } from '@earendil-works/pi-ai/compat';
 import type {
 	ExtensionAPI,
 	ExtensionContext,

@@ -38,12 +38,36 @@ const GLOBAL_EVENTBUS_KEY = '__pi_logger_eventbus__';
 
 const GLOBAL_BUFFER_KEY = '__pi_logger_pending_events__';
 
+// Upper bound for buffered events. The buffer exists to absorb log calls made
+// (a) before initEventBus() and (b) while the globalThis bus still points at a
+// stale extension runtime right after a session replacement. Bounding it keeps
+// an unbounded flush from growing the process memory.
+const MAX_BUFFERED_EVENTS = 2000;
+
+// 缓冲满丢弃的限频告警标志（每个 runtime 只告警一次）
+let BUFFER_DROP_WARNED = false;
+
 function getPendingEvents(): LogEvent[] {
 	const g = globalThis as Record<string, unknown>;
 	if (!g[GLOBAL_BUFFER_KEY]) {
 		g[GLOBAL_BUFFER_KEY] = [] as LogEvent[];
 	}
 	return g[GLOBAL_BUFFER_KEY] as LogEvent[];
+}
+
+/**
+ * True when the error indicates the EventBus points at an invalidated
+ * extension runtime (session replacement or reload).
+ *
+ * 匹配 pi 的稳定错误措辞（runner.js `invalidate()` / `assertActive()` 抛出的
+ * staleMessage 固定以 "This extension ctx is stale after session replacement
+ * or reload" 开头），避免用宽泛正则误吞无关错误消息。
+ */
+function isStaleBusError(err: unknown): boolean {
+	return (
+		err instanceof Error &&
+		err.message.startsWith('This extension ctx is stale after session replacement or reload')
+	);
 }
 
 /**
@@ -140,6 +164,29 @@ function formatMessage(template: string, args: unknown[]): { message: string; de
 // Internal: emit a structured LogEvent onto the EventBus
 // ============================================================================
 
+/**
+ * Buffer a log event with an upper bound. Shared by both buffering windows:
+ * (a) before initEventBus() has run, and (b) while the globalThis bus points
+ * at a stale extension runtime right after a session replacement. Bounding
+ * keeps an unbounded flush from growing the process memory; when full, later
+ * events are dropped with a once-per-runtime warning instead of silently.
+ */
+function bufferEvent(event: LogEvent): void {
+	const pending = getPendingEvents();
+	if (pending.length < MAX_BUFFERED_EVENTS) {
+		pending.push(event);
+	} else if (!BUFFER_DROP_WARNED) {
+		// 缓冲满后丢弃后续事件：有界设计防内存膨胀，但静默丢弃会让日志
+		// 缺失无从排查——限频告警一次。
+		BUFFER_DROP_WARNED = true;
+		console.error(
+			'[pi-logger] event buffer full (' +
+				MAX_BUFFERED_EVENTS +
+				'), dropping log events until initEventBus() re-points the bus',
+		);
+	}
+}
+
 function emitLogEvent(level: LogLevel, source: string, message: string, details?: unknown): void {
 	const bus = getEventBus();
 	const event: LogEvent = {
@@ -150,10 +197,31 @@ function emitLogEvent(level: LogLevel, source: string, message: string, details?
 		timestamp: Date.now(),
 	};
 	if (bus) {
-		bus.emit(LOG_EVENT_CHANNEL, event);
+		try {
+			bus.emit(LOG_EVENT_CHANNEL, event);
+		} catch (err) {
+			// The globalThis bus may still point at a stale extension runtime
+			// right after a session replacement (resume/newSession/fork/
+			// switchSession/reload), before pi-logger's factory re-runs and
+			// re-points it at the current runtime's events. Buffer instead of
+			// throwing so a single stale reference cannot take down unrelated
+			// extensions; buffered events flush on the next initEventBus().
+			if (isStaleBusError(err)) {
+				bufferEvent(event);
+				return;
+			}
+			// Not a stale-bus error: log the throw for diagnosis (e.g. if pi
+			// ever rewords the stale message, this surfaces the mismatch)
+			// before propagating — a failing log call must not be silently
+			// absorbed, but the caller should see why it happened.
+			console.error('[pi-logger] bus.emit failed (non-stale error)', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+			throw err;
+		}
 	} else {
 		// Buffer until pi-logger's initEventBus() is called
-		getPendingEvents().push(event);
+		bufferEvent(event);
 	}
 }
 

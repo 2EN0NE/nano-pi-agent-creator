@@ -590,17 +590,30 @@ export default function loggerExtension(pi: ExtensionAPI) {
 	// Track lifecycle unsubscribe for cleanup
 	let lifecycleUnsubscribe: (() => void) | null = null;
 
-	// 0. Early EventBus initialization — idempotent via globalThis guard.
-	//    jiti loads extensions with moduleCache:false, which can cause this
-	//    factory to run multiple times if the module is loaded through different
-	//    jiti instances.  The guard ensures initEventBus + listener registration
-	//    happens at most once per Node process, preventing duplicate log entries.
+	// 0. EventBus initialization — follows the current extension runtime.
+	//    Pi replaces the extension runtime (and its EventBus) on session
+	//    replacement — resume/newSession/fork/switchSession/reload — so the
+	//    globalThis bus reference must be re-pointed at the current runtime's
+	//    events on every factory execution. Otherwise all later log calls hit
+	//    an invalidated runner and throw a stale-ctx error (pi >= 0.84).
+	//
+	//    The listener itself must be attached at most once per EventBus.
+	//    A WeakSet keyed by the events object (which is created once per
+	//    loadExtension call) replaces the old process-global boolean: it still
+	//    prevents duplicate listeners across jiti module instances, while
+	//    letting a replaced runtime's events be re-registered and its bus be
+	//    GC-collected.
 	const _G = globalThis as Record<string, unknown>;
-	const FACTORY_GUARD = '__pi_logger_factory_init_guard__';
+	const REGISTERED_BUSES_KEY = '__pi_logger_registered_buses__';
+	const registeredBuses =
+		(_G[REGISTERED_BUSES_KEY] as WeakSet<object> | undefined) ?? new WeakSet<object>();
+	_G[REGISTERED_BUSES_KEY] = registeredBuses;
 
-	if (!_G[FACTORY_GUARD]) {
-		_G[FACTORY_GUARD] = true;
-		initEventBus(pi.events);
+	// Re-point the bus at the current runtime's events every factory run.
+	initEventBus(pi.events);
+
+	if (!registeredBuses.has(pi.events)) {
+		registeredBuses.add(pi.events);
 		pi.events.on(LOG_EVENT_CHANNEL, (data: unknown) => {
 			const event = data as LogEvent;
 			if (event && typeof event === 'object' && 'level' in event && 'source' in event) {

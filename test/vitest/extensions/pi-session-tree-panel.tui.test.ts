@@ -9,7 +9,7 @@
  *   - Colors present in output (ANSI escape sequences)
  */
 import { describe, it, expect } from 'vitest';
-import { TUI } from '@earendil-works/pi-tui';
+import { TuiMainScreen, type TUI } from '@earendil-works/pi-tui';
 import { createPanel } from '../../../extensions/meta/pi-session-tree/ui/panel.js';
 import { createSessionTree } from '../../../extensions/meta/pi-session-tree/index.js';
 import {
@@ -161,7 +161,7 @@ function mockSm(entries: any[]) {
 describe('pi-session-tree panel — headless snapshot', () => {
 	it('renders without crashing', () => {
 		const term = new MockTerminal(80, 24);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const tree = createSessionTree(
 			mockSm([
 				{
@@ -190,7 +190,7 @@ describe('pi-session-tree panel — headless snapshot', () => {
 
 	it('renders session ID in header', () => {
 		const term = new MockTerminal(80, 24);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const tree = createSessionTree(
 			mockSm([
 				{
@@ -221,7 +221,7 @@ describe('pi-session-tree panel — headless snapshot', () => {
 
 	it('renders jump/hint line with g/m/~ keys', () => {
 		const term = new MockTerminal(80, 24);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const tree = createSessionTree(
 			mockSm([
 				{
@@ -270,7 +270,7 @@ describe('pi-session-tree panel — headless snapshot', () => {
 			},
 		];
 		const term = new MockTerminal(80, 24);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const tree = createSessionTree(mockSm(entries));
 		const component = createPanel(tui, mockTheme(), mockKeybindings(), () => {}, tree, 'sid');
 		tui.addChild(component);
@@ -284,7 +284,7 @@ describe('pi-session-tree panel — headless snapshot', () => {
 
 	it('no line exceeds terminal width', () => {
 		const term = new MockTerminal(80, 24);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const tree = createSessionTree(
 			mockSm([
 				{
@@ -305,7 +305,7 @@ describe('pi-session-tree panel — headless snapshot', () => {
 
 	it('renders with ANSI color codes', () => {
 		const term = new MockTerminal(80, 24);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const tree = createSessionTree(
 			mockSm([
 				{
@@ -327,7 +327,7 @@ describe('pi-session-tree panel — headless snapshot', () => {
 
 	it('footer contains help text', () => {
 		const term = new MockTerminal(80, 24);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const tree = createSessionTree(
 			mockSm([
 				{
@@ -366,7 +366,7 @@ describe('pi-session-tree panel — headless snapshot', () => {
 			},
 		];
 		const term = new MockTerminal(80, 24);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const tree = createSessionTree(mockSm(entries));
 		const component = createPanel(tui, mockTheme(), mockKeybindings(), () => {}, tree, 'sid');
 		tui.addChild(component);
@@ -416,7 +416,7 @@ describe('pi-session-tree panel — headless snapshot', () => {
 			},
 		];
 		const term = new MockTerminal(80, 24);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const tree = createSessionTree(mockSm(entries));
 		const component = createPanel(tui, mockTheme(), mockKeybindings(), () => {}, tree, 'sid');
 		tui.addChild(component);
@@ -452,7 +452,7 @@ describe('pi-session-tree panel — headless snapshot', () => {
 			prevId = id;
 		}
 		const term = new MockTerminal(80, 30);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const tree = createSessionTree(mockSm(entries));
 		const component = createPanel(tui, mockTheme(), mockKeybindings(), () => {}, tree, 'deep');
 		tui.addChild(component);

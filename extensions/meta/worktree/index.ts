@@ -57,17 +57,21 @@ export default function worktreeExtension(pi: ExtensionAPI): void {
 
 	// ── project_trust 自动批准 worktree 路径 ──
 	// 注：project_trust 事件不在 ExtensionAPI 的公开类型中，故使用 as any
-	(pi as any).on('project_trust', async (event: any, ctx: any) => {
-		if (!event || !event.cwd) return;
+	// handler 必须返回 ProjectTrustEventResult（{ trusted, remember }），
+	// 旧版调用 ctx.setTrusted() 的写法在 pi 0.84 下报错（无该方法且返回
+	// undefined 导致 emitProjectTrustEvent 读 .trusted 崩溃）。
+	(pi as any).on('project_trust', async (event: any, _ctx: any) => {
+		if (!event || !event.cwd) return { trusted: 'undecided' as const };
 		const cwd = event.cwd;
 		// 尝试找主仓库：从 candidate cwd 往上找
 		const repoRoot = getRepoRoot(cwd);
-		if (!repoRoot) return;
+		if (!repoRoot) return { trusted: 'undecided' as const };
 
 		if (autoApproveProjectTrust(repoRoot, cwd)) {
 			log.info('auto-trusting worktree path', { cwd });
-			await ctx.setTrusted(true, 'auto-trusted worktree path');
+			return { trusted: 'yes' as const, remember: true };
 		}
+		return { trusted: 'undecided' as const };
 	});
 
 	// ── 命令 ──

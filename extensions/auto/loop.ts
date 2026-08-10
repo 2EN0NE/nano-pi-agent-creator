@@ -100,14 +100,34 @@ async function selectSummaryModel(
 		if (haikuModel) {
 			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(haikuModel);
 			if (auth.ok) {
-				return { model: haikuModel, apiKey: auth.apiKey, headers: auth.headers };
+				return {
+					model: haikuModel,
+					apiKey: auth.apiKey,
+					headers: filterHeaders(auth.headers),
+				};
 			}
 		}
 	}
 
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
 	if (!auth.ok) return null;
-	return { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers };
+	return { model: ctx.model, apiKey: auth.apiKey, headers: filterHeaders(auth.headers) };
+}
+
+/**
+ * getApiKeyAndHeaders() returns ProviderHeaders whose values are
+ * `string | null` (null marks header deletion). Complete/compact accept plain
+ * `Record<string, string>`, so strip nulls before forwarding (pi >= 0.84).
+ */
+function filterHeaders(
+	headers: Record<string, string | null> | undefined,
+): Record<string, string> | undefined {
+	if (!headers) return undefined;
+	const out: Record<string, string> = {};
+	for (const [key, value] of Object.entries(headers)) {
+		if (value != null) out[key] = value;
+	}
+	return out;
 }
 
 async function summarizeBreakoutCondition(
@@ -445,7 +465,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 				event.preparation,
 				ctx.model,
 				auth.apiKey ?? '',
-				auth.headers,
+				filterHeaders(auth.headers),
 				instructionParts,
 				event.signal,
 			);

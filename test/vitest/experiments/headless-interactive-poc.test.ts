@@ -9,7 +9,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-	TUI,
+	TuiMainScreen,
+	type TUI,
 	type Component,
 	type Terminal,
 	type Focusable,
@@ -175,7 +176,7 @@ describe('交互流程 headless 测试', () => {
 	/** 创建完整交互环境 */
 	function setup() {
 		const term = new InteractiveMockTerminal(80, 24);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const panel = new CounterPanel();
 		tui.addChild(panel);
 		tui.setFocus(panel); // 同步设置 focus，让 panel.handleInput 被调用

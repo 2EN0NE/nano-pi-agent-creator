@@ -19,7 +19,7 @@
  * @module tui-testing
  */
 
-import { TUI } from '@earendil-works/pi-tui';
+import type { TUI } from '@earendil-works/pi-tui';
 
 export { MockTerminal, InteractiveMockTerminal } from './mock-terminal.js';
 export {
@@ -29,6 +29,21 @@ export {
 	diffSnapshots,
 	type SnapshotDiff,
 } from './snapshot.js';
+
+/**
+ * Headless TUI 实例的构造入口。
+ *
+ * pi-tui >= 0.84 将运行时 `TUI` 类拆分为 `TuiMainScreen`（主屏）/`TuiAltScreen`
+ * （全屏），`TUI` 仅剩类型。headless 测试场景渲染进 mock 终端，使用
+ * `TuiMainScreen` 即可：
+ *
+ * ```typescript
+ * const term = new MockTerminal(80, 24);
+ * const tui = new TuiMainScreen(term);
+ * tui.addChild(myComponent);
+ * ```
+ */
+export { TuiMainScreen } from '@earendil-works/pi-tui';
 
 /**
  * 直接向 TUI 注入按键事件（通过 any 桥接调用私有 handleInput）。
@@ -45,7 +60,7 @@ export {
  *
  * @example
  * ```typescript
- * const tui = new TUI(new MockTerminal(80, 24));
+ * const tui = new TuiMainScreen(new MockTerminal(80, 24));
  * tui.addChild(myComponent);
  * tui.setFocus(myComponent);
  * dispatchInput(tui, '\t');  // 注入 Tab

@@ -34,12 +34,16 @@ renderToSnapshot(tui, width, height) → string[]  ← 完整渲染结果（含 
 ### 基础用法：快照渲染
 
 ```typescript
-import { MockTerminal, renderToSnapshot, stripAnsi } from '../../src/tui-testing/index.js';
-import { TUI } from '@earendil-works/pi-tui';
+import {
+	MockTerminal,
+	renderToSnapshot,
+	stripAnsi,
+	TuiMainScreen,
+} from '../../src/tui-testing/index.js';
 
 // 1. 创建 headless TUI
 const term = new MockTerminal(80, 24);
-const tui = new TUI(term);
+const tui = new TuiMainScreen(term);
 
 // 2. 挂载组件
 tui.addChild(myComponent);
@@ -61,11 +65,11 @@ import {
 	renderToSnapshot,
 	dispatchInput,
 	stripAnsi,
+	TuiMainScreen,
 } from '../../src/tui-testing/index.js';
-import { TUI } from '@earendil-works/pi-tui';
 
 // 1. 创建 headless TUI
-const tui = new TUI(new MockTerminal(80, 24));
+const tui = new TuiMainScreen(new MockTerminal(80, 24));
 const panel = new MyComponent();
 tui.addChild(panel);
 tui.setFocus(panel);
@@ -94,10 +98,11 @@ import {
 	InteractiveMockTerminal,
 	renderToSnapshot,
 	stripAnsi,
+	TuiMainScreen,
 } from '../../src/tui-testing/index.js';
 
 const term = new InteractiveMockTerminal(80, 24);
-const tui = new TUI(term);
+const tui = new TuiMainScreen(term);
 tui.addChild(myComponent);
 tui.setFocus(myComponent);
 tui.start(); // 必须：建立 terminal → handleInput 链路
@@ -154,7 +159,7 @@ class MockTerminal implements Terminal {
 - 链路：`dispatchInput` → `TUI.handleInput` → `focusedComponent.handleInput` → 状态变化
 
 ```typescript
-const tui = new TUI(new MockTerminal(80, 24));
+const tui = new TuiMainScreen(new MockTerminal(80, 24));
 tui.addChild(myComponent);
 tui.setFocus(myComponent);
 dispatchInput(tui, '\t');

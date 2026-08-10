@@ -11,7 +11,7 @@
  * production TUI mode.
  */
 import { describe, it, expect } from 'vitest';
-import { TUI } from '@earendil-works/pi-tui';
+import { TuiMainScreen, type TUI } from '@earendil-works/pi-tui';
 import { createPanel } from '../../../extensions/meta/pi-session-tree/ui/panel.js';
 import { createSessionTree } from '../../../extensions/meta/pi-session-tree/index.js';
 import { MockTerminal, renderToSnapshot, stripAnsi } from '../../../src/tui-testing/index.js';
@@ -184,7 +184,7 @@ function setup30NodePanel() {
 		});
 	};
 	const term = new MockTerminal(80, 30);
-	const tui = new TUI(term);
+	const tui = new TuiMainScreen(term);
 	const component = createPanel(tui, mockTheme(), mockKeybindings(), () => {}, tree, 'test-sess');
 	tui.addChild(component);
 	tui.setFocus(component);
@@ -358,7 +358,7 @@ describe('pi-session-tree panel — keyboard interaction (30 nodes)', () => {
 		const tree = createSessionTree(sm);
 		(tree as any).annotate = async () => {};
 		const term = new MockTerminal(80, 30);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const component = createPanel(
 			tui,
 			mockTheme(),
@@ -425,7 +425,7 @@ describe('pi-session-tree panel — keyboard interaction (30 nodes)', () => {
 		const tree = createSessionTree(sm);
 		(tree as any).annotate = async () => {};
 		const term = new MockTerminal(80, 30);
-		const tui = new TUI(term);
+		const tui = new TuiMainScreen(term);
 		const component = createPanel(tui, mockTheme(), mockKeybindings(), () => {}, tree, 'tags');
 		tui.addChild(component);
 		tui.setFocus(component);

@@ -157,6 +157,10 @@ export function buildCompactionHandler() {
 
 		const modelInfo = resolveModel(profile, ctx);
 
+		// Distinguish compaction flows (pi >= 0.79.10): manual /compact, context
+		// threshold auto-compaction, and overflow recovery (aborted turn retried).
+		log.debug('session_before_compact reason=%s willRetry=%s', event.reason, event.willRetry);
+
 		if (!modelInfo) {
 			ctx.ui.notify(
 				'Custom compaction: no model available, using default compaction',
@@ -232,8 +236,13 @@ ${conversationText}
 			// settings.json, models.json). Without explicit resolution, the call fails
 			// with an auth error.
 			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(modelInfo);
+			// Overflow recovery retries an aborted turn right after compacting:
+			// the model context is already near capacity, so a shorter summary
+			// (2048 vs 8192 tokens) gets the retry going sooner with less risk of
+			// a second overflow.
+			const overflowRecovery = event.reason === 'overflow' || event.willRetry;
 			const completeOptions: Record<string, unknown> = {
-				maxTokens: 8192,
+				maxTokens: overflowRecovery ? 2048 : 8192,
 				signal,
 			};
 			if (auth.ok) {

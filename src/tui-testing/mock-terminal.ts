@@ -20,7 +20,7 @@ import type { Terminal } from '@earendil-works/pi-tui';
  * 用法：
  * ```typescript
  * const term = new MockTerminal(80, 24);
- * const tui = new TUI(term);
+ * const tui = new TuiMainScreen(term);
  * ```
  */
 export class MockTerminal implements Terminal {
@@ -72,7 +72,7 @@ export class MockTerminal implements Terminal {
  * 用法：
  * ```typescript
  * const term = new InteractiveMockTerminal(80, 24);
- * const tui = new TUI(term);
+ * const tui = new TuiMainScreen(term);
  * tui.start();                 // 建立 terminal → handleInput 链路
  * term.sendInput('\t');        // 模拟 Tab 键
  * term.sendInput('\x1b');      // 模拟 Escape

@@ -15,7 +15,7 @@ import {
 	type AssistantMessage,
 	type Message,
 	type ThinkingLevel as AiThinkingLevel,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import {
 	Container,
 	Input,
@@ -104,7 +104,9 @@ function createBtwResourceLoader(
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
 		getSystemPrompt: () => systemPrompt,
+		getSystemPromptSource: () => undefined,
 		getAppendSystemPrompt: () => appendSystemPrompt,
+		getAppendSystemPromptSources: () => [],
 		extendResources: () => {},
 		reload: async () => {},
 	};

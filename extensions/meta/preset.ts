@@ -33,7 +33,7 @@
  * CLI flags always override preset values.
  */
 
-import type { Api, Model } from '@earendil-works/pi-ai';
+import type { Api, Model } from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
