@@ -95,12 +95,16 @@ export default function todosExtension(pi: ExtensionAPI) {
 	// (agent_settled is the only event that guarantees the agent is truly idle,
 	//  unlike agent_end which may fire mid tool-calling loop).
 
-	let completionReminderSent = false;
+	let reminderCooldown = false; // 上一轮已提醒 → 本轮冷却跳过（至少隔一轮）
 	let sessionShuttingDown = false;
 	let lastAssistantText: string | null = null;
 
+	// 新 session 重置冷却
+	pi.on('session_start', () => {
+		reminderCooldown = false;
+	});
+
 	pi.on('agent_start', () => {
-		completionReminderSent = false;
 		lastAssistantText = null;
 	});
 
@@ -114,7 +118,13 @@ export default function todosExtension(pi: ExtensionAPI) {
 		const allTodos = await listAllTodos(ctx.cwd);
 		updateWidgetWithTodos(ctx, allTodos);
 
-		if (completionReminderSent || sessionShuttingDown) return;
+		if (sessionShuttingDown) return;
+
+		if (reminderCooldown) {
+			// 上一轮已提醒：本轮跳过检测（不缓存文本），并解除冷却 → 下一轮可再问
+			reminderCooldown = false;
+			return;
+		}
 
 		const response = extractLastAssistantText(
 			(event as unknown as { messages?: Array<{ role?: string; content?: unknown }> })
@@ -125,15 +135,22 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 	// On agent_settled (truly idle), check if completion reminder should be sent
 	pi.on('agent_settled', async (_event, ctx) => {
-		if (completionReminderSent || sessionShuttingDown || !lastAssistantText) return;
+		if (sessionShuttingDown || !lastAssistantText) return;
 
 		const allTodos = await listAllTodos(ctx.cwd);
+		const sessionId = ctx.sessionManager.getSessionId();
+		// Only consider todos assigned to the current session
+		const sessionTodos = sessionId
+			? allTodos.filter((t) => t.assigned_to_session === sessionId)
+			: [];
+		if (sessionTodos.length === 0) return;
+
 		const reminder = buildCompletionReminder(
 			lastAssistantText,
-			allTodos.map((t: any) => ({ id: t.id, title: t.title, status: t.status })),
+			sessionTodos.map((t: any) => ({ id: t.id, title: t.title, status: t.status })),
 		);
 		if (reminder) {
-			completionReminderSent = true;
+			reminderCooldown = true; // 本轮已提醒 → 下一轮冷却
 			log.info('completion hint sent: %s', reminder.substring(0, 100));
 			await pi.sendUserMessage(reminder, { deliverAs: 'followUp' });
 		}
