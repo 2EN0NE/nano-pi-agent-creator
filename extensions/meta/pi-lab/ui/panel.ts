@@ -14,8 +14,7 @@
  *
  * 键盘约定：
  *   Tab / Shift+Tab  — 切换 Current Session / Global 标签
- *   ← →              — 切换不同实验的选项菜单
- *   ↑↓               — 在当前实验的菜单行之间导航
+ *   ↑↓               — 在菜单行之间导航（由 SelectList 管理）
  *   ⏎                — 选择当前项
  *   Esc              — 关闭面板
  */
@@ -71,9 +70,9 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 
 		function renderMenu() {
 			activeSelectLists = [];
-			// Clamp focus index to valid range
+			activeSelectListIndex = 0;
+
 			const experiments = manager.getAllExperiments();
-			if (activeSelectListIndex >= experiments.length) activeSelectListIndex = 0;
 
 			if (experiments.length === 0) {
 				container.addChild(new Spacer(1));
@@ -84,21 +83,14 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 				return;
 			}
 
-			let expIdx = 0;
 			for (const { name, info } of experiments) {
-				const isFocused = expIdx === activeSelectListIndex;
 				const armLabels = info.arms.map((a: any) => a.label ?? a.id).join(' vs ');
 				const statusBadge = info.forceArmId
 					? accent(` [forced:${info.forceArmId}]`)
 					: dim(` (${info.strategy})`);
 
 				container.addChild(new Spacer(1));
-
-				// 实验标题（聚焦时加 → 标记）
-				const titlePrefix = isFocused ? accent('> ') : '  ';
-				container.addChild(
-					new Text(`${titlePrefix}${accent(bold(name))}${statusBadge}`, 0, 0),
-				);
+				container.addChild(new Text(`  ${accent(bold(name))}${statusBadge}`, 0, 0));
 				container.addChild(new Text(`    ${dim(armLabels)}`, 0, 0));
 
 				// 操作菜单
@@ -148,24 +140,10 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 					rebuild();
 					tui.requestRender();
 				};
+				list.onCancel = () => safeDone();
 
 				activeSelectLists.push(list);
 				container.addChild(list);
-				expIdx++;
-			}
-
-			// 多实验提示
-			if (experiments.length > 1) {
-				container.addChild(new Spacer(1));
-				container.addChild(
-					new Text(
-						dim(
-							`  ${activeSelectListIndex + 1}/${experiments.length} experiments — \u2190\u2192 to switch`,
-						),
-						0,
-						0,
-					),
-				);
 			}
 		}
 
@@ -301,7 +279,7 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 				new Text(
 					dim(
 						currentView.kind === 'menu'
-							? '  Tab/\u21E7Tab \u00B7 \u2190\u2192 switch \u00B7 \u2191\u2193 \u00B7 \u23CE enter \u00B7 esc close'
+							? '  Tab/\u21E7Tab \u00B7 \u2191\u2193 \u00B7 \u23CE enter \u00B7 esc close'
 							: '  [\u2190] Back \u00B7 esc close',
 					),
 					0,
@@ -370,22 +348,6 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 			// 在菜单视图中：将键盘输入委派给当前活跃的 SelectList
 			if (currentView.kind === 'menu') {
 				if (activeSelectLists.length > 0) {
-					// ← → 切换实验焦点
-					if (data === '\x1b[D') {
-						activeSelectListIndex =
-							(activeSelectListIndex - 1 + activeSelectLists.length) %
-							activeSelectLists.length;
-						rebuild();
-						tui.requestRender();
-						return;
-					}
-					if (data === '\x1b[C') {
-						activeSelectListIndex =
-							(activeSelectListIndex + 1) % activeSelectLists.length;
-						rebuild();
-						tui.requestRender();
-						return;
-					}
 					activeSelectLists[activeSelectListIndex % activeSelectLists.length].handleInput(
 						data,
 					);

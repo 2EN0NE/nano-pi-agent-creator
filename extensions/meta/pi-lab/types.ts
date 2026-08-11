@@ -98,8 +98,6 @@ export type ContextKeyFn<TCtx> = (ctx: TCtx) => string;
 export interface ExperimentDef {
 	/** 实验名称，全局唯一 */
 	name: string;
-	/** 命名空间（弱依赖消费方传入，内部变为 "namespace::name"） */
-	namespace?: string;
 	/** 上下文键提取函数 */
 	contextKey: string | ContextKeyFn<any>;
 	/** 实验臂定义 */
