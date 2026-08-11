@@ -8,7 +8,7 @@ const log = createLogger('smart-context:router');
 /** 路由决策的完整元数据 */
 export interface PickDecision {
 	model: ModelRef;
-	reason: 'classifier' | 'largeContext';
+	reason: 'classifier' | 'largeContext' | 'heuristic';
 	detail: string;
 	classifierResult?: {
 		complexity: Complexity;

@@ -1,0 +1,23 @@
+{
+	"name": "@zenone/pi-session-tree",
+	"version": "0.1.0",
+	"description": "Session tree query service for pi — structural metrics, path analysis, content extraction, retry detection, and TUI inspection over Pi's append-only session tree",
+	"type": "module",
+	"exports": {
+		".": {
+			"import": "./index.ts"
+		},
+		"./types": {
+			"import": "./types.ts"
+		}
+	},
+	"keywords": [
+		"pi-extension",
+		"session-tree",
+		"query",
+		"analytics"
+	],
+	"devDependencies": {
+		"typescript": "^7.0.2"
+	}
+}

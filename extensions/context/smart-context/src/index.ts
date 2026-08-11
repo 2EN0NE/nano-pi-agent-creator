@@ -13,6 +13,14 @@ import {
 	clearCache,
 	type ModelProfile,
 } from './config.js';
+import { setupSessionInit } from './session-init.js';
+import { StrategyRegistry } from './strategies/registry.js';
+import { classifierStrategy } from './strategies/classifier.js';
+import { treeEscalationStrategy } from './strategies/tree-escalation.js';
+import { pureSignalsStrategy } from './strategies/pure-signals.js';
+import { conservativeStrategy } from './strategies/conservative.js';
+import { projectFirstStrategy } from './strategies/project-first.js';
+import { collectAllSignals } from './signals.js';
 
 const log = createLogger('smart-context');
 
@@ -25,37 +33,155 @@ export default function (pi: ExtensionAPI) {
 	let enabled = true;
 	const debug = process.env.SMART_CONTEXT_DEBUG === '1';
 
+	// ── 策略注册表 ──
+	const registry = new StrategyRegistry();
+	registry.register(classifierStrategy);
+	registry.register(treeEscalationStrategy);
+	registry.register(pureSignalsStrategy);
+	registry.register(conservativeStrategy);
+	registry.register(projectFirstStrategy);
+
+	// ── pi-lab turn-routing 桥接 ──
+	let labSelect: (() => Promise<string>) | undefined;
+	let labRecord: ((armId: string, success: boolean) => Promise<void>) | undefined;
+	const pendingOutcomes = new Map<number, { armId: string }>();
+	let turnIndex = 0;
+
 	// ── 首次安装：输出默认配置文件，让用户可以看到完整策略并可编辑 ──
+	// ── 子任务检测：pi-lab session-init 实验 ──
 	pi.on('session_start', async (_event, ctx) => {
+		// 默认配置初始化
 		const cfgPath = configFilePath(ctx.cwd);
-		if (!cfgPath) return;
-		try {
-			const [fs, path] = await Promise.all([import('node:fs'), import('node:path')]);
-			if (!fs.existsSync(cfgPath)) {
-				const defaultCfg = {
-					activeProfile: 'balanced',
-					profiles: {
-						balanced: {
-							classifier: { provider: 'deepseek', model: 'deepseek-v4-flash' },
-							routing: {
-								trivial: { provider: 'deepseek', model: 'deepseek-v4-flash' },
-								simple: { provider: 'deepseek', model: 'deepseek-v4-flash' },
-								medium: { provider: 'deepseek', model: 'deepseek-v4-pro' },
-								complex: { provider: 'deepseek', model: 'deepseek-v4-pro' },
-							},
-							largeContext: {
-								thresholdTokens: 500_000,
-								model: { provider: 'deepseek', model: 'deepseek-v4-pro' },
+		if (cfgPath) {
+			try {
+				const [fs, path] = await Promise.all([import('node:fs'), import('node:path')]);
+				if (!fs.existsSync(cfgPath)) {
+					const defaultCfg = {
+						activeProfile: 'balanced',
+						profiles: {
+							balanced: {
+								classifier: { provider: 'deepseek', model: 'deepseek-v4-flash' },
+								routing: {
+									trivial: {
+										provider: 'litellm',
+										model: 'leihuo-deepseek-v4-pro',
+									},
+									simple: {
+										provider: 'litellm',
+										model: 'leihuo-deepseek-v4-pro',
+									},
+									medium: { provider: 'litellm', model: 'leihuo-gpt-5.3-codex' },
+									complex: {
+										provider: 'litellm',
+										model: 'leihuo-claude-sonnet-5',
+									},
+								},
+								largeContext: {
+									thresholdTokens: 500_000,
+									model: { provider: 'litellm', model: 'leihuo-claude-sonnet-5' },
+								},
 							},
 						},
-					},
-				};
-				fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-				fs.writeFileSync(cfgPath, JSON.stringify(defaultCfg, null, 2) + '\n');
-				log.info('Default config written | path=%s', cfgPath);
+						strategies: {
+							'tree-escalation': {
+								branchThreshold: 3,
+								checkpointThreshold: 3,
+								compactionThreshold: 2,
+								contextPercentThreshold: 70,
+							},
+							'pure-signals': {
+								branchWeight: 15,
+								checkpointWeight: 10,
+								compactionWeight: 20,
+								mediumThreshold: 20,
+								complexThreshold: 50,
+							},
+							conservative: {
+								minTriggers: 2,
+								branchThreshold: 4,
+								checkpointThreshold: 3,
+								compactionThreshold: 2,
+								contextPercentThreshold: 80,
+							},
+							'project-first': {
+								sparseDocThreshold: 20,
+								goodDocThreshold: 50,
+								extremeBranchThreshold: 5,
+							},
+						},
+					};
+					fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+					fs.writeFileSync(cfgPath, JSON.stringify(defaultCfg, null, 2) + '\n');
+					log.info('Default config written | path=%s', cfgPath);
+				}
+			} catch (err) {
+				log.warn('Failed to write default config', { error: String(err) });
 			}
+		}
+
+		// 子任务检测 + session-init 实验
+		try {
+			await setupSessionInit(pi, ctx);
 		} catch (err) {
-			log.warn('Failed to write default config', { error: String(err) });
+			log.warn('session-init setup failed', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+
+		// pi-lab turn-routing 实验注册
+		const labApi = (globalThis as any).__labApi;
+		if (labApi) {
+			try {
+				const mgr = labApi.getExperimentManager();
+				if (mgr) {
+					const exp = mgr.registerWeakExperiment({
+						name: 'turn-routing',
+						namespace: 'smart-context',
+						contextKey: 'global',
+						arms: registry.getArmIds().map((id) => ({ id, label: `${id} strategy` })),
+						strategy: 'thompson-sampling',
+					});
+					labSelect = () => exp.select();
+					labRecord = async (armId: string, success: boolean) => {
+						await exp.record(armId, {
+							success,
+							metadata: { strategy: armId },
+						});
+					};
+					log.info(
+						'turn-routing experiment registered | arms=%s',
+						registry.getArmIds().join(','),
+					);
+				}
+			} catch (err) {
+				log.warn('Failed to register turn-routing experiment', {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		} else {
+			log.info('pi-lab not available — turn-routing without experiment');
+		}
+	});
+
+	// ── Turn 追踪（outcome 记录）──
+	pi.on('turn_start', async (event) => {
+		turnIndex = event.turnIndex;
+	});
+
+	pi.on('turn_end', async () => {
+		const pending = pendingOutcomes.get(turnIndex);
+		if (pending && labRecord) {
+			// 默认 success=true（用户未主动回滚即成功）
+			// 回滚检测由 session_tree 事件处理
+			try {
+				await labRecord(pending.armId, true);
+				log.debug('Outcome recorded | turn=%s arm=%s', turnIndex, pending.armId);
+			} catch (err) {
+				log.warn('Failed to record outcome', {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+			pendingOutcomes.delete(turnIndex);
 		}
 	});
 
@@ -66,7 +192,26 @@ export default function (pi: ExtensionAPI) {
 		}
 		try {
 			ctx.ui.setWorkingMessage('Routing...');
-			const decision = await router.pick(event.prompt, ctx);
+
+			// 尝试 pi-lab 实验路由
+			let decision = null;
+			const labAvailable = !!labSelect && !!labRecord;
+
+			if (labAvailable) {
+				const armId = await labSelect!();
+				const strategy = registry.get(armId);
+				if (strategy) {
+					const signals = await collectAllSignals(event.prompt, ctx);
+					decision = await strategy.decide(event.prompt, ctx, signals);
+					pendingOutcomes.set(turnIndex, { armId });
+				}
+			}
+
+			// 回退到原 router（classifier 策略返回 null 时由 router 处理）
+			if (!decision) {
+				decision = await router.pick(event.prompt, ctx);
+			}
+
 			if (!decision) {
 				log.info('No route — keeping current model');
 				if (debug) ctx.ui.notify('smart-context: no route (keeping current model)', 'info');

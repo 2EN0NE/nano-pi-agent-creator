@@ -42,6 +42,9 @@ export interface SmartContextConfig {
 	/** Named profiles keyed by name */
 	profiles?: Record<string, ModelProfile>;
 
+	/** 各策略的可调参数（覆盖内建默认值） */
+	strategies?: StrategyConfig;
+
 	// ── Legacy flat config (backward compatible) ──
 	classifier?: ModelRef;
 	routing?: Partial<Record<Complexity, ModelRef>>;
@@ -51,60 +54,158 @@ export interface SmartContextConfig {
 	};
 }
 
+/** 各策略的可配置参数 */
+export interface StrategyConfig {
+	'tree-escalation'?: {
+		/** 分支数达到此值升级（默认 3） */
+		branchThreshold?: number;
+		/** checkpoint 数达到此值升级（默认 3） */
+		checkpointThreshold?: number;
+		/** compaction 数达到此值升级（默认 2） */
+		compactionThreshold?: number;
+		/** 上下文使用率超过此百分比升级（默认 70） */
+		contextPercentThreshold?: number;
+	};
+	'pure-signals'?: {
+		branchWeight?: number;
+		checkpointWeight?: number;
+		compactionWeight?: number;
+		mediumThreshold?: number;
+		complexThreshold?: number;
+	};
+	conservative?: {
+		/** 至少 N 个信号同时触发才升级（默认 2） */
+		minTriggers?: number;
+		branchThreshold?: number;
+		checkpointThreshold?: number;
+		compactionThreshold?: number;
+		contextPercentThreshold?: number;
+	};
+	'project-first'?: {
+		/** docScore 低于此值 → medium 基线（默认 20） */
+		sparseDocThreshold?: number;
+		/** docScore 高于此值 → trivial 基线（默认 50） */
+		goodDocThreshold?: number;
+		/** 分支数达到此值强制 complex（默认 5） */
+		extremeBranchThreshold?: number;
+	};
+}
+
+// ── Strategy defaults ──────────────────────────────────────────────
+
+const DEFAULT_STRATEGY_CONFIG: Required<StrategyConfig> = {
+	'tree-escalation': {
+		branchThreshold: 3,
+		checkpointThreshold: 3,
+		compactionThreshold: 2,
+		contextPercentThreshold: 70,
+	},
+	'pure-signals': {
+		branchWeight: 15,
+		checkpointWeight: 10,
+		compactionWeight: 20,
+		mediumThreshold: 20,
+		complexThreshold: 50,
+	},
+	conservative: {
+		minTriggers: 2,
+		branchThreshold: 4,
+		checkpointThreshold: 3,
+		compactionThreshold: 2,
+		contextPercentThreshold: 80,
+	},
+	'project-first': {
+		sparseDocThreshold: 20,
+		goodDocThreshold: 50,
+		extremeBranchThreshold: 5,
+	},
+};
+
+/** 策略配置的完全解析形式（所有字段已填充默认值） */
+export type ResolvedStrategyConfig = {
+	[K in keyof Required<StrategyConfig>]: {
+		[F in keyof Required<Required<StrategyConfig>[K]>]: number;
+	};
+};
+
+/** 获取策略配置（用户配置覆盖内建默认值） */
+export function getStrategyConfig(cwd?: string): ResolvedStrategyConfig {
+	const raw = loadConfigRaw(cwd ?? process.cwd()).raw;
+	const userStrategies = (raw.strategies ?? {}) as Partial<StrategyConfig>;
+
+	const merged: Required<StrategyConfig> = { ...DEFAULT_STRATEGY_CONFIG };
+
+	for (const key of Object.keys(DEFAULT_STRATEGY_CONFIG) as (keyof StrategyConfig)[]) {
+		const def = DEFAULT_STRATEGY_CONFIG[key];
+		const user = userStrategies[key] ?? {};
+		merged[key] = { ...def, ...user } as any;
+	}
+
+	return merged as unknown as ResolvedStrategyConfig;
+}
+
 // ── Built-in profiles ──────────────────────────────────────────────
 
 const DEEPSEEK_FLASH: ModelRef = {
 	provider: 'deepseek',
 	model: 'deepseek-v4-flash',
 };
-const DEEPSEEK_PRO: ModelRef = {
-	provider: 'deepseek',
-	model: 'deepseek-v4-pro',
+const LEIHUO_DEEPSEEK: ModelRef = {
+	provider: 'litellm',
+	model: 'leihuo-deepseek-v4-pro',
+};
+const LEIHUO_GPT: ModelRef = {
+	provider: 'litellm',
+	model: 'leihuo-gpt-5.3-codex',
+};
+const LEIHUO_CLAUDE: ModelRef = {
+	provider: 'litellm',
+	model: 'leihuo-claude-sonnet-5',
 };
 
 const BUILTIN_PROFILES: Record<string, ModelProfile> = {
-	/** 平衡模式（默认）：分类用 flash，trivial/simple 用 flash，medium/complex 用 pro */
+	/** 平衡模式（默认）：分类用 flash，trivial/simple 用 leihuo-deepseek，medium 用 leihuo-gpt，complex 用 leihuo-claude */
 	balanced: {
 		classifier: DEEPSEEK_FLASH,
 		routing: {
-			trivial: DEEPSEEK_FLASH,
-			simple: DEEPSEEK_FLASH,
-			medium: DEEPSEEK_PRO,
-			complex: DEEPSEEK_PRO,
+			trivial: LEIHUO_DEEPSEEK,
+			simple: LEIHUO_DEEPSEEK,
+			medium: LEIHUO_GPT,
+			complex: LEIHUO_CLAUDE,
 		},
 		largeContext: {
 			thresholdTokens: 500_000,
-			model: DEEPSEEK_PRO,
+			model: LEIHUO_CLAUDE,
 		},
 	},
 
-	/** 快速模式：全部用 flash，适合简单/快速迭代场景 */
+	/** 快速模式：全部用 leihuo-deepseek（最快） */
 	fast: {
 		classifier: DEEPSEEK_FLASH,
 		routing: {
-			trivial: DEEPSEEK_FLASH,
-			simple: DEEPSEEK_FLASH,
-			medium: DEEPSEEK_FLASH,
-			complex: DEEPSEEK_FLASH,
+			trivial: LEIHUO_DEEPSEEK,
+			simple: LEIHUO_DEEPSEEK,
+			medium: LEIHUO_DEEPSEEK,
+			complex: LEIHUO_DEEPSEEK,
 		},
 		largeContext: {
 			thresholdTokens: 500_000,
-			model: DEEPSEEK_FLASH,
+			model: LEIHUO_DEEPSEEK,
 		},
 	},
 
-	/** 高质量模式：全部用 pro，适合关键/复杂任务 */
+	/** 高质量模式：全部用 leihuo-claude（最强） */
 	quality: {
 		classifier: DEEPSEEK_FLASH,
 		routing: {
-			trivial: DEEPSEEK_PRO,
-			simple: DEEPSEEK_PRO,
-			medium: DEEPSEEK_PRO,
-			complex: DEEPSEEK_PRO,
+			trivial: LEIHUO_CLAUDE,
+			simple: LEIHUO_CLAUDE,
+			medium: LEIHUO_CLAUDE,
+			complex: LEIHUO_CLAUDE,
 		},
 		largeContext: {
 			thresholdTokens: 500_000,
-			model: DEEPSEEK_PRO,
+			model: LEIHUO_CLAUDE,
 		},
 	},
 };

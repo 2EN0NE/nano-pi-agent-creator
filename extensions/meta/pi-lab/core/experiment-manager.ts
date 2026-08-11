@@ -152,32 +152,29 @@ export class ExperimentManager {
 	 * | bridge    | bridge   | 覆盖（last-wins，日志+缓冲） |
 	 */
 	private _registerExperiment(def: ExperimentDef, newSource: RegistrationSource): ExperimentAPI {
-		const existing = this._experiments.get(def.name);
-		const existingSource = this._sources.get(def.name);
+		const fullName = def.namespace ? `${def.namespace}::${def.name}` : def.name;
+		const existing = this._experiments.get(fullName);
+		const existingSource = this._sources.get(fullName);
 
 		if (existing && existingSource !== undefined) {
-			// 检查是否需要阻断
 			const newPri = REGISTRATION_PRIORITY[newSource];
 			const existingPri = REGISTRATION_PRIORITY[existingSource];
 
 			if (newPri < existingPri) {
-				// 低优先级想覆盖高优先级 → 阻断
 				this._bufferConflict({
 					type: 'blocked',
-					experimentName: def.name,
+					experimentName: fullName,
 					newSource,
 					existingSource,
 					timestamp: new Date().toISOString(),
 				});
-				// 返回已存在的实验 API（让调用方有一个可用的 API，但不会被记录）
 				return this._createAPI(existing);
 			}
 
-			// 同级或高优先级 → 覆盖
 			if (newPri >= existingPri) {
 				this._bufferConflict({
 					type: 'overwrite',
-					experimentName: def.name,
+					experimentName: fullName,
 					newSource,
 					existingSource,
 					timestamp: new Date().toISOString(),
@@ -185,14 +182,14 @@ export class ExperimentManager {
 			}
 		}
 
-		const experiment = new Experiment(def.name, def.strategy, def.arms, def.contextKey);
+		const experiment = new Experiment(fullName, def.strategy, def.arms, def.contextKey);
 
-		this._experiments.set(def.name, experiment);
-		this._sources.set(def.name, newSource);
+		this._experiments.set(fullName, experiment);
+		this._sources.set(fullName, newSource);
 		this.setStatus('collecting');
 
 		log.info('Experiment registered', {
-			name: def.name,
+			name: fullName,
 			source: newSource,
 			arms: def.arms.map((a) => a.id),
 			strategy: def.strategy,

@@ -110,6 +110,45 @@ classicImpl() / rowScriptImpl()
 | **弱依赖（方案 A）** | `registerWeakExperiment()` — 通过 `globalThis.__labApi` 桥接                                | 不引入包依赖 | 不需要                                    | 低     |
 | **强依赖（方案 B）** | `registerStrongExperiment()` — 直接 `import { getExperimentManager } from '@zenone/pi-lab'` | 引入包依赖   | `"@zenone/pi-lab": "file:../meta/pi-lab"` | 高     |
 
+### 强弱依赖选择指南
+
+**强依赖（方案 B）适用场景：**
+
+- 插件的核心功能本身就是实验驱动的——没有实验，功能无意义或严重降级
+- 实验不可用时的退化方案会显著劣化用户体验
+- 需要保证优先级不被其他弱依赖插件覆盖
+
+> 例：如果 smart-context 的路由决策完全依赖实验选臂，没有实验时无法做任何路由 → 强依赖
+
+**弱依赖（方案 A）适用场景：**
+
+- 实验是对现有功能的增强/优化，而非前提条件
+- 实验不可用时插件有合理的兜底行为（如固定使用默认策略）
+- 希望降低用户安装门槛（pi-lab 是可选的）
+- 插件的主要价值不依赖于实验结果
+
+> 例：edit 插件的 AB 测试是对 edit 策略的优化——没有实验时固定用 classic 策略，edit 功能完全不受影响 → 弱依赖
+> 例：smart-context 的 AB 测试——没有实验时固定用 classifier 策略，模型路由功能仍然工作 → 弱依赖
+
+**降级行为：** 无论强弱依赖，消费方都必须自行处理 pi-lab 不可用的情况。弱依赖可显式通知用户（`ctx.ui.notify('pi-lab not available, routing fixed to classifier', 'warning')`），而非静默。
+
+### 命名空间
+
+弱依赖消费方可通过 `namespace` 字段避免与其他插件的同名实验冲突：
+
+```typescript
+mgr.registerWeakExperiment({
+  name: 'routing-strategy',
+  namespace: 'smart-context',  // 内部变为 "smart-context::routing-strategy"
+  arms: [...],
+  strategy: 'thompson-sampling',
+});
+```
+
+- `namespace` 为可选字段，仅弱依赖消费方使用
+- 不同 namespace 的同名实验互不冲突
+- 强依赖消费方通常不需要 namespace（直接 import，优先级高）
+
 ### 两条铁律
 
 #### ① 注册必须在 `session_start` 中
