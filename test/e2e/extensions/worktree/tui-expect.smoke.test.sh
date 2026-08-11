@@ -16,8 +16,6 @@ test_it "expect: loads in TUI mode without crash" <<'TEST'
     sleep 1
     send "\033"
     sleep 0.5
-    send "/quit\r"
-    expect eof
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -35,8 +33,6 @@ test_it "expect: list shows worktree command in TUI" <<'TEST'
   tui_expect_test "pi-logger,worktree" '
     send "/worktree list\r"
     sleep 2
-    send "/quit\r"
-    expect eof
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -56,8 +52,6 @@ test_it "expect: pi continues working after worktree commands" <<'TEST'
     sleep 2
     send "/help\r"
     sleep 1
-    send "/quit\r"
-    expect eof
   ' 20
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -94,8 +88,6 @@ test_it "expect: default merge via /worktree command" <<'TEST'
   tui_expect_test "pi-logger,worktree" "
     send \"/worktree merge --source $wt_name --strategy merge\r\"
     sleep 3
-    send \"/quit\r\"
-    expect eof
   " 20 "" "$test_repo"
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -134,8 +126,6 @@ test_it "expect: squash merge via /worktree command" <<'TEST'
   tui_expect_test "pi-logger,worktree" "
     send \"/worktree merge --source $wt_name --strategy squash\r\"
     sleep 3
-    send \"/quit\r\"
-    expect eof
   " 20 "" "$test_repo"
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -174,8 +164,6 @@ test_it "expect: rebase+ff via /worktree command" <<'TEST'
   tui_expect_test "pi-logger,worktree" "
     send \"/worktree merge --source $wt_name --strategy rebase-ff\r\"
     sleep 3
-    send \"/quit\r\"
-    expect eof
   " 20 "" "$test_repo"
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then

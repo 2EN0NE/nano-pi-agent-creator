@@ -9,8 +9,6 @@ test_describe "extension-dev-final-sync extension (expect TUI mode)"
 
 test_it "expect: loads extension in TUI mode without crash" <<'TEST'
   tui_expect_test "quit,extension-dev-final-sync" '
-    send "/quit\r"
-    expect eof
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -25,8 +23,6 @@ TEST
 
 test_it "expect: loads without errors in TUI (log check) [REVIEW]" <<'TEST'
   tui_expect_test "quit,extension-dev-final-sync" '
-    send "/quit\r"
-    expect eof
   ' 15
 
   if tui_output_contains "$TUI_OUTPUT_FILE" "Error"; then
@@ -41,8 +37,6 @@ TEST
 
 test_it "expect: extension logs captured in TUI mode" <<'TEST'
   tui_expect_test "pi-logger,quit,extension-dev-final-sync" '
-    send "/quit\r"
-    expect eof
   ' 15
 
   padded=$(printf '%03d' "$CASE_INDEX")
@@ -69,8 +63,6 @@ TEST
 
 test_it "expect: TUI infra detects sync notification text" <<'TEST'
   tui_expect_test "pi-logger,quit,extension-dev-final-sync" '
-    send "/quit\r"
-    expect eof
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then

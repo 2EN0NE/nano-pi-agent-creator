@@ -11,8 +11,6 @@ test_describe "todos extension (expect TUI mode)"
 
 test_it "expect: loads in TUI mode without crash" <<'TEST'
   tui_expect_test "pi-logger,pi-config,todos" '
-    send "/quit\r"
-    expect eof
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -42,8 +40,6 @@ test_it "expect: handles /todos command without crash" <<'TEST'
     sleep 1
     send "\033"
     sleep 0.5
-    send "/quit\r"
-    expect eof
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -68,8 +64,6 @@ test_it "expect: arrow key tab switching does not crash" <<'TEST'
     sleep 0.3
     send "\033\[D"
     sleep 0.3
-    send "/quit\r"
-    expect eof
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -92,8 +86,6 @@ test_it "expect: settings tab Esc does not crash" <<'TEST'
     sleep 0.3
     send "\033\[C"
     sleep 0.3
-    send "/quit\r"
-    expect eof
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -118,8 +110,6 @@ test_it "expect: settings tab arrow key exit does not crash" <<'TEST'
     sleep 0.3
     send "\033\[D"
     sleep 0.3
-    send "/quit\r"
-    expect eof
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -138,8 +128,6 @@ test_it "expect: logs store extension activity [REVIEW]" <<'TEST'
     sleep 1
     send "\033\[C"
     sleep 0.3
-    send "/quit\r"
-    expect eof
   ' 15
 
   padded=$(printf '%03d' "$CASE_INDEX")

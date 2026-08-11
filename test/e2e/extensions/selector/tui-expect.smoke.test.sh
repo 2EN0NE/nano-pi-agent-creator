@@ -8,8 +8,6 @@ test_describe "selector extension (expect TUI mode)"
 
 test_it "expect: loads in TUI mode without crash" <<'TEST'
   tui_expect_test "selector" '
-    send "/quit\r"
-    expect eof
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
@@ -25,8 +23,6 @@ TEST
 
 test_it "expect: renders TUI welcome screen" <<'TEST'
   tui_expect_test "selector" '
-    send "/quit\r"
-    expect eof
   ' 15
 
   tui_assert_matches "pi v[0-9]+\.[0-9]+\.[0-9]+" "TUI welcome banner should show pi version"
@@ -36,8 +32,6 @@ TEST
 
 test_it "expect: works with pi-logger in TUI mode" <<'TEST'
   tui_expect_test "pi-logger,selector" '
-    send "/quit\r"
-    expect eof
   ' 15
 
   tui_assert_contains "pi-logger" "pi-logger should be in extension list"

@@ -295,7 +295,12 @@ tui_run_pi_test() {
 		expect {
 			eof {
 				catch { wait result }
-				set exit_code [lindex \$result 3]
+				# wait 失败时 result 未定义（见 tui_expect_test 同名容错说明）
+				if {[info exists result]} {
+					set exit_code [lindex \$result 3]
+				} else {
+					set exit_code 0
+				}
 				exec echo "\$exit_code" > "$ec_file"
 			}
 			timeout {
@@ -592,7 +597,14 @@ tui_expect_test() {
 		expect {
 			eof {
 				catch { wait result }
-				set exit_code [lindex \$result 3]
+				# wait 可能失败（如 PTY 关闭时进程状态已不可得），此时无 result 变量；
+				# eof 匹配本身说明 pi 已退出，默认退出码 0 而非崩溃（崩溃会让 ec_file
+				# 缺失 → bash 层误用 expect 退出码 → 假 FAIL）。
+				if {[info exists result]} {
+					set exit_code [lindex \$result 3]
+				} else {
+					set exit_code 0
+				}
 				exec echo "\$exit_code" > "$ec_file"
 			}
 			timeout {
@@ -607,8 +619,18 @@ tui_expect_test() {
 	# ── 运行 expect ──
 	set +e
 	expect "$exp_file" >"$output_file" 2>&1
-	local pi_exit=$(cat "$ec_file" 2>/dev/null || echo 0)
+	local expect_exit=$?
 	set -e
+
+	# ec_file 缺失 = 用户命令内 exit N 提前终止（断言失败），此时 pi 未正常退出、
+	# eof 收尾未执行。若此处默认 0 会把断言失败误判为 PASS（假阳性）。
+	# 用 expect 自身的退出码（= 用户 exit 的 N）兜底。
+	local pi_exit
+	if [[ -f "$ec_file" ]]; then
+		pi_exit=$(cat "$ec_file")
+	else
+		pi_exit=$expect_exit
+	fi
 
 	# ── 收集日志 ──
 	local logs_dir="$test_home/.pi/logs"

@@ -18,7 +18,7 @@
  *   使 ctx.modelRegistry.find() 和 pi.setModel() 可以正常工作。
  */
 
-import { registerFauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai';
+import { registerFauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-agent';
 
 const MOCK_PROVIDER = 'mock-llm';
@@ -30,8 +30,37 @@ export default function (pi: ExtensionAPI) {
 		models: [{ id: MOCK_MODEL_ID, name: 'Mock Model' }],
 	});
 
-	// 默认回复
-	faux.setResponses([fauxAssistantMessage('Mock LLM is ready.')]);
+	// MOCK_LLM_TOOL_CALLS=N：注入 N 个 bash 工具调用（长命令路径），
+	// 使 chat 区渲染超长工具行（>91 列 → wrap），复现窄终端行定位错位。
+	const toolCalls = Number.parseInt(process.env.MOCK_LLM_TOOL_CALLS ?? '0', 10);
+	// MOCK_LLM_REPEAT=N：补足 N 个相同响应，用于多条消息构造稳定长树
+	// （>20 节点触发面板滚动路径的 e2e 测试，避免 tool call 异步写入的时序不稳定）
+	const repeat = Number.parseInt(process.env.MOCK_LLM_REPEAT ?? '0', 10);
+	if (toolCalls > 0) {
+		const blocks: Parameters<typeof fauxAssistantMessage>[0] = [];
+		for (let i = 0; i < toolCalls; i++) {
+			blocks.push(
+				fauxToolCall('bash', {
+					command: `cat /var/folders/h3/k2s6vqq91nvgbvmxrvdrhlx00000gn/T/pi-session-tree-handoff-${i}.md`,
+				}),
+			);
+		}
+		blocks.push({ type: 'text', text: 'Tool calls done.' });
+		// 无限响应（函数自追加）：工具结果处理后的 agent 后续请求永远返回继续，
+		// 避免 "No more faux responses queued" 导致 agent 卡住
+		const loop = async () => {
+			faux.appendResponses([loop]);
+			return fauxAssistantMessage('Continuing.');
+		};
+		faux.setResponses([fauxAssistantMessage(blocks), loop]);
+	} else if (repeat > 0) {
+		// 超长回复（>91 列）：复现窄终端 chat 区 wrap 行定位错位
+		const LONG_REPLY =
+			'This is a very long assistant reply that exceeds the ninety one column terminal width and wraps onto a second physical line in the chat area.';
+		faux.setResponses(Array.from({ length: repeat }, () => fauxAssistantMessage(LONG_REPLY)));
+	} else {
+		faux.setResponses([fauxAssistantMessage('Mock LLM is ready.')]);
+	}
 
 	// 注册到 ModelRegistry，使 ctx.modelRegistry 能通过 find() 找到 mock 模型
 	// faux.api 是 registerFauxProvider 内部生成的 UUID（如 faux:1234567890:xxxx），

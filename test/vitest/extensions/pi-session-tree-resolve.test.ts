@@ -4,7 +4,7 @@
  * Covers: @, @^, @~N, @~N:type, @^^type, mN, id prefix, a..b range
  */
 import { describe, it, expect } from 'vitest';
-import { createSessionTree } from '@zenone/pi-session-tree';
+import { createSessionTree } from '../../../extensions/meta/pi-session-tree/index.js';
 
 // ============================================================================
 // Test helpers
@@ -66,10 +66,8 @@ function buildTree(entries: MockEntry[]): any[] {
 
 function mockSessionManager(
 	entries: MockEntry[],
-	opts?: { marks?: Array<{ n: number; nodeId: string }> },
+	_opts?: { marks?: Array<{ n: number; nodeId: string }> },
 ) {
-	// pi-lens-ignore: pi-lens/no-unused-vars
-	const marks = opts?.marks ?? [];
 	return {
 		getTree: () => buildTree(entries),
 		getLeafId: () => (entries.length > 0 ? entries[entries.length - 1].id : null),
@@ -185,6 +183,44 @@ describe('resolve — single node', () => {
 		expect(result).toHaveProperty('id', 't000000001');
 	});
 
+	it('@~N skips no-text assistant (invisible in panel render)', () => {
+		const entries: MockEntry[] = [
+			{
+				id: 'r000000001',
+				parentId: null,
+				type: 'message',
+				timestamp: 't0',
+				message: { role: 'user', content: 'root' },
+			},
+			{
+				id: 'a000000001',
+				parentId: 'r000000001',
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'assistant', content: '' }, // 无文本 assistant，渲染时被跳过
+			},
+			{
+				id: 't000000001',
+				parentId: 'a000000001',
+				type: 'message',
+				timestamp: 't2',
+				message: { role: 'toolResult', content: 'out' },
+				toolName: 'bash',
+			},
+			{
+				id: 'a000000002',
+				parentId: 't000000001',
+				type: 'message',
+				timestamp: 't3',
+				message: { role: 'assistant', content: 'final' },
+			},
+		];
+		const tree = createSessionTree(mockSessionManager(entries));
+		// leaf=a000000002, 父链: t1(toolResult) → a1(无文本 assistant) → root(user)
+		expect(tree.resolve('@~1')).toHaveProperty('id', 't000000001');
+		expect(tree.resolve('@~2')).toHaveProperty('id', 'r000000001'); // 跳过 a1
+	});
+
 	it('@~1:user — 1st user msg back from leaf', () => {
 		const tree = createSessionTree(mockSessionManager(standardTree()));
 		// leaf=c3(user), walk back counting user: g1(user) is 1st, r1(user) is 2nd
@@ -292,48 +328,406 @@ describe('resolve — range', () => {
 	});
 });
 
-describe('resolve — mN marks', () => {
-	it('m1 returns marked node when mark exists', () => {
-		const entries = standardTree();
-		const leafIdx = entries.length - 1;
-		// Add mark annotation BEFORE the leaf so leaf stays last
-		entries.splice(leafIdx, 0, {
-			id: 'mark_ann_1',
-			parentId: 'g000000001',
-			type: 'custom',
-			timestamp: 't-ann',
-			message: { role: 'assistant', content: '' },
-			customType: 'mark',
-			data: { index: 1 },
-		});
-		const tree = createSessionTree(mockSessionManager(entries));
-		const result = tree.resolve('m1');
-		expect(result).not.toBeNull();
-		expect(result).toHaveProperty('id', 'g000000001');
-	});
-
-	it('m1 returns null when mark does not exist', () => {
+describe('resolve — mN marks (removed — mark is in-memory only)', () => {
+	it('mN is no longer supported — resolves to null', () => {
 		const tree = createSessionTree(mockSessionManager(standardTree()));
 		expect(tree.resolve('m1')).toBeNull();
 	});
+});
 
-	it('m1..@ returns range from mark to leaf', () => {
-		const entries = standardTree();
-		const leafIdx = entries.length - 1;
-		entries.splice(leafIdx, 0, {
-			id: 'mark_ann_2',
-			parentId: 'g000000001',
-			type: 'custom',
-			timestamp: 't-ann',
-			message: { role: 'assistant', content: '' },
-			customType: 'mark',
-			data: { index: 1 },
-		});
-		const tree = createSessionTree(mockSessionManager(entries));
-		const result = tree.resolve('m1..@');
+describe('resolve — offset (+N / -N)', () => {
+	it('standalone +1 from context', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		const result = tree.resolve('+1', { from: 't000000001' });
 		expect(result).not.toBeNull();
-		const r = result as any;
-		expect(r.from.id).toBe('g000000001');
-		expect(r.to.id).toBe('c000000003');
+		expect((result as any).id).toBe('c000000002');
+	});
+
+	it('standalone +2 from context', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		const result = tree.resolve('+2', { from: 't000000001' });
+		expect(result).not.toBeNull();
+		expect((result as any).id).toBe('cp00000001');
+	});
+
+	it('standalone -1 from context', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		const result = tree.resolve('-1', { from: 'c000000002' });
+		expect(result).not.toBeNull();
+		expect((result as any).id).toBe('t000000001');
+	});
+
+	it('standalone +N without from returns null', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		expect(tree.resolve('+3')).toBeNull();
+	});
+
+	it('standalone -N without from returns null', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		expect(tree.resolve('-1')).toBeNull();
+	});
+
+	it('out of bounds forward returns null', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		// leaf is the last node, +1 is out of bounds
+		expect(tree.resolve('+1', { from: 'c000000003' })).toBeNull();
+	});
+
+	it('out of bounds backward returns null', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		// root is the first node, -1 is out of bounds
+		expect(tree.resolve('-1', { from: 'r000000001' })).toBeNull();
+	});
+
+	it('combo @~2 +1 — from 2nd ancestor forward 1', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		// leaf=c3, @~2=c2(assistant), then +1=cp1(compaction)
+		const result = tree.resolve('@~2 +1');
+		expect(result).not.toBeNull();
+		expect((result as any).id).toBe('cp00000001');
+	});
+
+	it('combo @~3 +3 — from 3rd ancestor forward 3', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		// leaf=c3, @~3=t1, +3: t1→c2→cp1→c3
+		const result = tree.resolve('@~3 +3');
+		expect(result).not.toBeNull();
+		expect((result as any).id).toBe('c000000003');
+	});
+
+	it('combo @~1 -1 — from parent back 1', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		// leaf=c3, @~1=cp1, -1=c2
+		const result = tree.resolve('@~1 -1');
+		expect(result).not.toBeNull();
+		expect((result as any).id).toBe('c000000002');
+	});
+
+	it('@ +1 — from leaf forward 1 (out of bounds)', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		expect(tree.resolve('@ +1')).toBeNull();
+	});
+
+	it('@ -1 — from leaf back 1 (=parent)', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		const result = tree.resolve('@ -1');
+		expect(result).not.toBeNull();
+		expect((result as any).id).toBe('cp00000001');
+	});
+
+	it('-N skips no-text assistant (aligned with @~N)', () => {
+		const entries: MockEntry[] = [
+			{
+				id: 'r000000001',
+				parentId: null,
+				type: 'message',
+				timestamp: 't0',
+				message: { role: 'user', content: 'root' },
+			},
+			{
+				id: 'a000000001',
+				parentId: 'r000000001',
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'assistant', content: '' }, // 无文本 assistant，渲染时被跳过
+			},
+			{
+				id: 't000000001',
+				parentId: 'a000000001',
+				type: 'message',
+				timestamp: 't2',
+				message: { role: 'toolResult', content: 'out' },
+				toolName: 'bash',
+			},
+			{
+				id: 'a000000002',
+				parentId: 't000000001',
+				type: 'message',
+				timestamp: 't3',
+				message: { role: 'assistant', content: 'final' },
+			},
+		];
+		const tree = createSessionTree(mockSessionManager(entries));
+		// DFS 可见序（跳过无文本 assistant a1）: r1 → t1 → a2(leaf)
+		expect(tree.resolve('-1', { from: 'a000000002' })).toHaveProperty('id', 't000000001');
+		expect(tree.resolve('-2', { from: 'a000000002' })).toHaveProperty('id', 'r000000001'); // 跳过 a1
+	});
+
+	it('-1 from a no-text assistant leaf keeps the from anchor (regression: silent no-op)', () => {
+		const entries: MockEntry[] = [
+			{
+				id: 'r000000001',
+				parentId: null,
+				type: 'message',
+				timestamp: 't0',
+				message: { role: 'user', content: 'root' },
+			},
+			{
+				id: 't000000001',
+				parentId: 'r000000001',
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'toolResult', content: 'out' },
+				toolName: 'bash',
+			},
+			{
+				id: 'a000000001',
+				parentId: 't000000001',
+				type: 'message',
+				timestamp: 't2',
+				message: { role: 'assistant', content: '' }, // leaf = 无文本 assistant（渲染层对当前 leaf 有例外，仍显示）
+			},
+		];
+		const tree = createSessionTree(mockSessionManager(entries));
+		// leaf a1 是无文本 assistant；offsetNode 若把 from 也过滤掉会导致 findIndex=-1 → -1 静默返回 null（回归）。
+		// 修复后 from 锚点始终保留，-1 应正确落到可见父节点 t1。
+		expect(tree.resolve('-1', { from: 'a000000001' })).toHaveProperty('id', 't000000001');
+	});
+});
+
+// ── Label flow integration tests ───────────────────────────────────
+
+import {
+	entryMatchesField,
+	type FieldTagRule,
+} from '../../../extensions/meta/pi-session-tree/tag-engine.js';
+
+/** Mock session manager with label support (for label flow tests) */
+function mockSessionManagerWithLabels(entries: MockEntry[]) {
+	const base = mockSessionManager(entries);
+	const labels = new Map<string, string>();
+	return {
+		...base,
+		getLabel: (id: string) => labels.get(id),
+		appendLabelChange: (id: string, label: string | undefined) => {
+			if (label !== undefined) labels.set(id, label);
+			else labels.delete(id);
+			return id;
+		},
+	};
+}
+
+describe('label flow — add → rescan → verify', () => {
+	const entries: MockEntry[] = [
+		{
+			id: 'a1',
+			parentId: null,
+			type: 'message',
+			timestamp: 't1',
+			message: { role: 'user', content: '请帮我修复 timeout 问题' },
+		},
+		{
+			id: 'a2',
+			parentId: 'a1',
+			type: 'message',
+			timestamp: 't2',
+			message: { role: 'assistant', content: '好的，我来分析' },
+		},
+		{
+			id: 'a3',
+			parentId: 'a2',
+			type: 'compaction',
+			timestamp: 't3',
+			tokensBefore: 4000,
+		},
+		{
+			id: 'a4',
+			parentId: 'a3',
+			type: 'message',
+			timestamp: 't4',
+			message: { role: 'user', content: '继续' },
+		},
+	];
+
+	/** Create a tree with real setLabels wired to the mock session manager */
+	function makeTree(sm: ReturnType<typeof mockSessionManagerWithLabels>) {
+		const tree = createSessionTree(sm as any);
+		// Override stub — replicate createSessionTreeWithPi logic
+		(tree as any).setLabels = (entryId: string, labels: string[]) => {
+			const existing = sm.getLabel(entryId) ?? '';
+			const existingParts = existing
+				.split(',')
+				.map((s: string) => s.trim())
+				.filter(Boolean);
+			const nonTagParts = existingParts.filter((s: string) => !s.startsWith('#'));
+			const newTagParts = labels.map((l: string) => (l.startsWith('#') ? l : `#${l}`));
+			const merged = [...nonTagParts, ...newTagParts].join(',');
+			if (merged !== existing) {
+				if (merged) {
+					sm.appendLabelChange(entryId, merged);
+				} else {
+					sm.appendLabelChange(entryId, undefined);
+				}
+			}
+		};
+		return tree;
+	}
+
+	it('adds one rule and labels match', () => {
+		const sm = mockSessionManagerWithLabels(entries);
+		const tree = makeTree(sm);
+		const allEntries = tree.getAllEntries();
+
+		const rule: FieldTagRule = {
+			typeIndex: 0,
+			matchText: 'timeout',
+			label: '超时',
+			source: 'session',
+		};
+
+		// Simulate rescanLabels
+		for (const entry of allEntries) {
+			const labels: string[] = [];
+			for (const r of [rule]) {
+				if (entryMatchesField(r, entry)) labels.push(r.label);
+			}
+			tree.setLabels(entry.id, labels);
+		}
+
+		// Verify: entry a1 contains 'timeout'
+		expect(sm.getLabel('a1')).toBe('#超时');
+
+		// Entry a2 (no timeout) should be empty
+		expect(sm.getLabel('a2') ?? '').toBe('');
+	});
+
+	it('adds multiple rules with different labels', () => {
+		const sm = mockSessionManagerWithLabels(entries);
+		const tree = makeTree(sm);
+		const allEntries = tree.getAllEntries();
+
+		const rules: FieldTagRule[] = [
+			{ typeIndex: 0, matchText: 'timeout', label: '超时', source: 'session' },
+			{ typeIndex: 3, matchText: '', label: '用户发言', source: 'session' },
+		];
+
+		for (const entry of allEntries) {
+			const labels: string[] = [];
+			for (const r of rules) {
+				if (entryMatchesField(r, entry)) labels.push(r.label);
+			}
+			tree.setLabels(entry.id, labels);
+		}
+
+		expect(sm.getLabel('a1')).toBe('#超时,#用户发言');
+		expect(sm.getLabel('a4')).toBe('#用户发言');
+		expect(sm.getLabel('a3') ?? '').toBe('');
+	});
+
+	it('removes a rule and clears affected labels', () => {
+		const sm = mockSessionManagerWithLabels(entries);
+		const tree = makeTree(sm);
+		const allEntries = tree.getAllEntries();
+
+		const rule: FieldTagRule = {
+			typeIndex: 0,
+			matchText: 'timeout',
+			label: '超时',
+			source: 'session',
+		};
+
+		for (const entry of allEntries) {
+			const labels: string[] = [];
+			if (entryMatchesField(rule, entry)) labels.push(rule.label);
+			tree.setLabels(entry.id, labels);
+		}
+
+		expect(sm.getLabel('a1')).toBe('#超时');
+
+		// Now remove the rule (re-scan with empty rules)
+		for (const entry of allEntries) {
+			tree.setLabels(entry.id, []);
+		}
+
+		expect(sm.getLabel('a1') ?? '').toBe('');
+	});
+
+	it('does NOT create label entries for entries that never had labels', () => {
+		const sm = mockSessionManagerWithLabels(entries);
+		const tree = makeTree(sm);
+		const allEntries = tree.getAllEntries();
+		let appendCalls = 0;
+		const orig = sm.appendLabelChange as (id: string, l: string | undefined) => string;
+		sm.appendLabelChange = (id: string, label: string | undefined) => {
+			appendCalls++;
+			return orig(id, label);
+		};
+
+		for (const entry of allEntries) {
+			tree.setLabels(entry.id, []);
+		}
+
+		expect(appendCalls).toBe(0);
+	});
+
+	it('setLabels is idempotent: re-applying same labels does nothing', () => {
+		const sm = mockSessionManagerWithLabels(entries);
+		const tree = makeTree(sm);
+		const allEntries = tree.getAllEntries();
+		const rule: FieldTagRule = {
+			typeIndex: 0,
+			matchText: 'timeout',
+			label: '超时',
+			source: 'session',
+		};
+
+		// First pass
+		for (const entry of allEntries) {
+			const labels: string[] = [];
+			if (entryMatchesField(rule, entry)) labels.push(rule.label);
+			tree.setLabels(entry.id, labels);
+		}
+		expect(sm.getLabel('a1')).toBe('#超时');
+
+		// Second pass — same labels, should be no-op
+		let appendCalls = 0;
+		const orig = sm.appendLabelChange as (id: string, l: string | undefined) => string;
+		sm.appendLabelChange = (id: string, label: string | undefined) => {
+			appendCalls++;
+			return orig(id, label);
+		};
+
+		for (const entry of allEntries) {
+			const labels: string[] = [];
+			if (entryMatchesField(rule, entry)) labels.push(rule.label);
+			tree.setLabels(entry.id, labels);
+		}
+		expect(appendCalls).toBe(0); // idempotent
+		expect(sm.getLabel('a1')).toBe('#超时'); // unchanged
+	});
+
+	it('replaces rule: old label removed, new label added', () => {
+		const sm = mockSessionManagerWithLabels(entries);
+		const tree = makeTree(sm);
+		const allEntries = tree.getAllEntries();
+
+		// Rule 1: 'timeout' → '超时'
+		for (const entry of allEntries) {
+			const labels: string[] = [];
+			if (
+				entryMatchesField(
+					{ typeIndex: 0, matchText: 'timeout', label: '超时', source: 'session' },
+					entry,
+				)
+			)
+				labels.push('超时');
+			tree.setLabels(entry.id, labels);
+		}
+		expect(sm.getLabel('a1')).toBe('#超时');
+
+		// Rule 2 (replaces): 'timeout' → '重试'
+		for (const entry of allEntries) {
+			const labels: string[] = [];
+			if (
+				entryMatchesField(
+					{ typeIndex: 0, matchText: 'timeout', label: '重试', source: 'session' },
+					entry,
+				)
+			)
+				labels.push('重试');
+			tree.setLabels(entry.id, labels);
+		}
+		expect(sm.getLabel('a1')).toBe('#重试');
+		expect(sm.getLabel('a1')).not.toContain('#超时');
 	});
 });

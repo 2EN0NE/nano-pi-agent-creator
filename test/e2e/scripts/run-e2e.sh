@@ -40,6 +40,7 @@ MODULE_RESULTS=() # "type|name|pass|fail|review|total"
 TARGET_EXT=""
 TARGET_SKILL=""
 TUI_ONLY=false
+TARGET_CASE=""
 
 usage() {
 	cat <<'EOF'
@@ -49,6 +50,9 @@ Options:
   --ext <name>        Run tests for a specific extension (e.g., pi-logger)
   --skill <name>      Run tests for a specific skill (e.g., e2e-test)
   --tui               Run TUI tests (tui-expect.smoke.test.sh or .exp) for the target
+  --case <substring>  Only run test_it cases whose name contains this substring
+                       (case-insensitive). Requires --ext or --skill. Speeds up
+                       iterating on a single case instead of the whole file.
   --pool <N>          Parallel worker count (default: CPU×2, auto-detected)
   -h, --help          Show this help
 
@@ -93,6 +97,10 @@ while [[ $# -gt 0 ]]; do
 	--tui)
 		TUI_ONLY=true
 		shift
+		;;
+	--case)
+		TARGET_CASE="$2"
+		shift 2
 		;;
 	--pool)
 		POOL_SIZE="$2"
@@ -544,6 +552,25 @@ run_test_file() {
 		echo "  → No test cases, skipping."
 		return
 	}
+
+	# ── 用例过滤（--case <substring>）：只保留 name 包含该子串（大小写不敏感）的用例，
+	# 用于单独迭代验证一个用例，避免每次都要跑整个文件（bash 3.2 兼容，不用 ${x,,}）──
+	if [[ -n "$TARGET_CASE" ]]; then
+		local filtered=()
+		for case_entry in "${TEST_CASES[@]}"; do
+			local cname="${case_entry%%|*}"
+			if grep -Fiq -- "$TARGET_CASE" <<<"$cname"; then
+				filtered+=("$case_entry")
+			fi
+		done
+		if [[ ${#filtered[@]} -eq 0 ]]; then
+			echo "  → --case '$TARGET_CASE' matched 0 of $count cases, skipping."
+			return
+		fi
+		TEST_CASES=("${filtered[@]}")
+		count=${#filtered[@]}
+		echo "  Filter: --case '$TARGET_CASE' → $count case(s)"
+	fi
 	echo "  Cases: $count"
 
 	local mpass=0 mfail=0 mreview=0
@@ -847,11 +874,6 @@ run_target() {
 			if [[ -f "$tf_exp" ]]; then
 				add_task "$type_dir" "$target_name" "$tf_exp"
 			fi
-			# expect-based bash 测试
-			local tf_ebt="$TEST_DIR/$type_dir/$target_name/tui-expect.smoke.test.sh"
-			if [[ -f "$tf_ebt" ]]; then
-				add_task "$type_dir" "$target_name" "$tf_ebt"
-			fi
 		fi
 	else
 		for d in "$TEST_DIR/$type_dir"/*/; do
@@ -1044,7 +1066,7 @@ GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 
 	# 按类型分组显示
 	for type_dir in "extensions" "skills"; do
-		for mr in "${MODULE_RESULTS[@]}"; do
+		for mr in "${MODULE_RESULTS[@]+"${MODULE_RESULTS[@]}"}"; do
 			IFS='|' read -r mt mn mp mf mr_count mtot <<<"$mr"
 			[[ "$mt" != "$type_dir" ]] && continue
 			echo "| $type_dir/$mn | $mp | $mf | $mr_count | $mtot | [summary]($type_dir/$mn/summary.md) |"
@@ -1060,7 +1082,7 @@ GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 		echo ""
 		echo "## Modules with Review-Required Cases"
 		echo ""
-		for mr in "${MODULE_RESULTS[@]}"; do
+		for mr in "${MODULE_RESULTS[@]+"${MODULE_RESULTS[@]}"}"; do
 			IFS='|' read -r mt mn mp mf mr_count mtot <<<"$mr"
 			[[ $mr_count -eq 0 ]] && continue
 			type_display="$mt"
@@ -1089,7 +1111,7 @@ GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 	echo "  \"warning\": $([[ $TOTAL_REVIEW -gt 20 ]] && echo true || echo false),"
 	echo "  \"modules\": ["
 	first=true
-	for mr in "${MODULE_RESULTS[@]}"; do
+	for mr in "${MODULE_RESULTS[@]+"${MODULE_RESULTS[@]}"}"; do
 		$first || echo ","
 		first=false
 		IFS='|' read -r mt mn mp mf mr_count mtot <<<"$mr"
@@ -1117,7 +1139,7 @@ echo "════════════════════════�
 echo ""
 echo "Global summary: $RUN_DIR/summary.md"
 echo "Module reports:"
-for mr in "${MODULE_RESULTS[@]}"; do
+for mr in "${MODULE_RESULTS[@]+"${MODULE_RESULTS[@]}"}"; do
 	IFS='|' read -r mt mn mp mf mr_count mtot <<<"$mr"
 	echo "  - $RUN_DIR/$mt/$mn/summary.md"
 done

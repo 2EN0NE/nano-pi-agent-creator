@@ -8,8 +8,8 @@
  *   - Key elements present (session ID, g/jump hint, tree nodes)
  *   - Colors present in output (ANSI escape sequences)
  */
-import { describe, it, expect } from 'vitest';
-import { TuiMainScreen, type TUI } from '@earendil-works/pi-tui';
+import { describe, it, expect, vi } from 'vitest';
+import { TuiMainScreen } from '@earendil-works/pi-tui';
 import { createPanel } from '../../../extensions/meta/pi-session-tree/ui/panel.js';
 import { createSessionTree } from '../../../extensions/meta/pi-session-tree/index.js';
 import {
@@ -18,6 +18,11 @@ import {
 	stripAnsi,
 	assertWithinWidth,
 } from '../../../src/tui-testing/index.js';
+
+vi.mock('@earendil-works/pi-coding-agent', () => ({
+	copyToClipboard: () => {},
+	rawKeyHint: (key: string, description: string) => `${key} ${description}`,
+}));
 
 // ═══ Mock Theme ════════════════════════════════════════════════════
 
@@ -72,14 +77,6 @@ function mockTheme(): any {
 	];
 	const fg: Record<string, string | number> = {};
 	for (const s of slots) fg[s] = 7;
-	const _bg: Record<string, string | number> = {
-		selectedBg: 0,
-		userMessageBg: 0,
-		customMessageBg: 0,
-		toolPendingBg: 0,
-		toolSuccessBg: 0,
-		toolErrorBg: 0,
-	};
 	return {
 		fg: (_color: string, text: string) => `\x1b[37m${text}\x1b[0m`,
 		bg: (_c: string, text: string) => text,
@@ -153,6 +150,39 @@ function mockSm(entries: any[]) {
 		getEntries: () => entries.map(toSessionEntry),
 		getLeafEntry: () => toSessionEntry(entries[entries.length - 1]),
 		getSessionName: () => undefined,
+	};
+}
+
+/** mockSm + 带状态的标签存储（验证 setLabels → getLabel 持久化） */
+function mockSmWithLabels(entries: any[]) {
+	const base = mockSm(entries);
+	const labels = new Map<string, string>();
+	return {
+		...base,
+		getLabel: (id: string) => labels.get(id),
+		appendLabelChange: (id: string, label: string | undefined) => {
+			if (label !== undefined) labels.set(id, label);
+			else labels.delete(id);
+			return id;
+		},
+	};
+}
+
+/** 复刻 createSessionTreeWithPi 的 setLabels（面板实际写入路径） */
+function wireSetLabels(tree: any, sm: ReturnType<typeof mockSmWithLabels>) {
+	tree.setLabels = (entryId: string, labels: string[]) => {
+		const existing = sm.getLabel(entryId) ?? '';
+		const existingParts = existing
+			.split(',')
+			.map((s: string) => s.trim())
+			.filter(Boolean);
+		const nonTagParts = existingParts.filter((s: string) => !s.startsWith('#'));
+		const newTagParts = labels.map((l: string) => (l.startsWith('#') ? l : `#${l}`));
+		const merged = [...nonTagParts, ...newTagParts].join(',');
+		if (merged !== existing) {
+			if (merged) sm.appendLabelChange(entryId, merged);
+			else sm.appendLabelChange(entryId, undefined);
+		}
 	};
 }
 
@@ -466,5 +496,189 @@ describe('pi-session-tree panel — headless snapshot', () => {
 		expect(maxIndent).toBeLessThanOrEqual(6);
 		const indentSet = new Set(leadingSpaces);
 		expect(indentSet.size).toBeLessThanOrEqual(3);
+	});
+
+	// ── Tag mode ─────────────────────────────────────────
+
+	it('ctrl+l — tag panel opens with type/match/label fields', () => {
+		const term = new MockTerminal(80, 24);
+		const tui = new TuiMainScreen(term);
+		const tree = createSessionTree(
+			mockSm([
+				{
+					id: 'r001',
+					parentId: null,
+					type: 'message',
+					timestamp: 't0',
+					message: { role: 'user', content: 'hi' },
+				},
+			]),
+		);
+		const component = createPanel(tui, mockTheme(), mockKeybindings(), () => {}, tree, 'sid');
+		tui.addChild(component);
+		tui.setFocus(component);
+		tui.start();
+		(component as any).handleInput('L'); // shift+l opens tag panel
+		const plain = renderToSnapshot(tui, 80, 24).map(stripAnsi);
+		expect(plain.some((l) => l.includes('类型:') && l.includes('全部类型'))).toBe(true);
+		expect(plain.some((l) => l.includes('匹配:'))).toBe(true);
+		expect(plain.some((l) => l.includes('打标:'))).toBe(true);
+		expect(plain.some((l) => l.includes('添加规则'))).toBe(true);
+	});
+
+	it('session rule add → rescanLabels writes #labels and tag summary shows counts', () => {
+		const entries = [
+			{
+				id: 'u1',
+				parentId: null,
+				type: 'message',
+				timestamp: 't0',
+				message: { role: 'user', content: 'Q' },
+			},
+			{
+				id: 'a1',
+				parentId: 'u1',
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'assistant', content: 'A' },
+			},
+		];
+		const sm = mockSmWithLabels(entries);
+		const tree = createSessionTree(sm);
+		wireSetLabels(tree, sm);
+		const term = new MockTerminal(80, 24);
+		const tui = new TuiMainScreen(term);
+		const component = createPanel(tui, mockTheme(), mockKeybindings(), () => {}, tree, 'sid');
+		tui.addChild(component);
+		tui.setFocus(component);
+		tui.start();
+		(component as any).handleInput('L'); // shift+l open tag panel
+		(component as any).handleInput('\x1b[B'); // down → match field
+		(component as any).handleInput('\x1b[B'); // down → label field
+		(component as any).handleInput('超时'); // label text
+		(component as any).handleInput('\r'); // enter → add rule + rescanLabels
+		// typeIndex=0（全部类型）+ 空 matchText → 所有条目打标
+		expect(sm.getLabel('u1')).toBe('#超时');
+		expect(sm.getLabel('a1')).toBe('#超时');
+		const plain = renderToSnapshot(tui, 80, 24).map(stripAnsi);
+		expect(plain.some((l) => l.includes('标签:') && l.includes('超时'))).toBe(true);
+	});
+
+	it('config rule labels survive rescanLabels (regression: matchesRule semantics)', () => {
+		const entries = [
+			{
+				id: 'u1',
+				parentId: null,
+				type: 'message',
+				timestamp: 't0',
+				message: { role: 'user', content: 'Q' },
+			},
+			{
+				id: 'a1',
+				parentId: 'u1',
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'toolResult', content: 'file updated' },
+				toolName: 'edit',
+			},
+		];
+		const sm = mockSmWithLabels(entries);
+		const tree = createSessionTree(sm);
+		// config 规则：仅 tool_call + toolName=edit 匹配（旧版面板子串语义会匹配不到）
+		tree.setTagRules([
+			{ on: 'tool_call', match: { toolName: 'edit' }, label: '修改', source: 'config' },
+		]);
+		wireSetLabels(tree, sm);
+		// 模拟 turn_end 自动打标已写入 config 标签
+		(tree as any).setLabels('a1', ['修改']);
+		expect(sm.getLabel('a1')).toBe('#修改');
+
+		const term = new MockTerminal(80, 24);
+		const tui = new TuiMainScreen(term);
+		const component = createPanel(tui, mockTheme(), mockKeybindings(), () => {}, tree, 'sid');
+		tui.addChild(component);
+		tui.setFocus(component);
+		tui.start();
+		(component as any).handleInput('L'); // shift+l open tag panel（加载 config 规则）
+		(component as any).handleInput('\x1b[B'); // down → match field
+		(component as any).handleInput('\x1b[B'); // down → label field
+		(component as any).handleInput('测试'); // 添加 session 规则触发 rescanLabels
+		(component as any).handleInput('\r');
+		// 回归断言：rescanLabels 后 config 规则标签仍保留（未被子串语义清除）
+		expect(sm.getLabel('a1')).toBe('#修改,#测试');
+		// 非 tool_call 条目只被 session 规则打标
+		expect(sm.getLabel('u1')).toBe('#测试');
+	});
+});
+
+// ═══ Ghosting fix: page size adapts to terminal height ════════════
+
+function buildLongSession(n: number): any[] {
+	const entries: any[] = [];
+	let parentId: string | null = null;
+	for (let i = 1; i <= n; i++) {
+		const uid = `u${String(i).padStart(3, '0')}`;
+		entries.push({
+			id: uid,
+			parentId,
+			type: 'message',
+			timestamp: `t${i}`,
+			message: { role: 'user', content: `msg ${i}` },
+		});
+		const aid = `a${String(i).padStart(3, '0')}`;
+		entries.push({
+			id: aid,
+			parentId: uid,
+			type: 'message',
+			timestamp: `t${i}.5`,
+			message: { role: 'assistant', content: 'reply' },
+		});
+		parentId = aid;
+	}
+	return entries;
+}
+
+describe('panel — page size adapts to terminal height (ghosting fix)', () => {
+	// 组件总高必须 ≤ 终端视口高度：否则树行起始落在视口上方，
+	// 滚动时 firstChanged < viewportTop → pi 触发 fullRender(true) → 同步输出失效时重影
+	const heights = [16, 20, 24, 28, 30];
+	for (const h of heights) {
+		it(`panel total height <= ${h} terminal rows`, () => {
+			const term = new MockTerminal(80, h);
+			const tui = new TuiMainScreen(term);
+			const tree = createSessionTree(mockSm(buildLongSession(30)));
+			const component = createPanel(
+				tui,
+				mockTheme(),
+				mockKeybindings(),
+				() => {},
+				tree,
+				'sid',
+			);
+			tui.addChild(component);
+			tui.setFocus(component);
+			tui.start();
+			const snapshot = renderToSnapshot(tui, 80, h).map(stripAnsi);
+			const nonEmpty = snapshot.filter((l) => l.trim().length > 0).length;
+			expect(nonEmpty).toBeLessThanOrEqual(h);
+		});
+	}
+
+	it('cursor centers in viewport after scrolling (long tree)', () => {
+		const term = new MockTerminal(80, 24);
+		const tui = new TuiMainScreen(term);
+		const tree = createSessionTree(mockSm(buildLongSession(30)));
+		const component = createPanel(tui, mockTheme(), mockKeybindings(), () => {}, tree, 'sid');
+		tui.addChild(component);
+		tui.setFocus(component);
+		tui.start();
+		// buildLongSession(30) = 60 节点（30 user + 30 assistant），叶子 = a030（index 59）
+		// 初始光标定位到叶子（D2）→ cursorLine=59
+		// pageSize = 24 - 8 = 16，居中偏移 floor(16/2) = 8
+		// 按 10 次 down → cursorLine = (59+10) % 60 = 9 → scrollOffset = clamp(9-8, 0, 60-16) = 1 → pageInfo = (2-17/60)
+		for (let i = 0; i < 10; i++) (component as any).handleInput('\x1b[B');
+		const plain = renderToSnapshot(tui, 80, 24).map(stripAnsi);
+		const pageInfo = plain.find((l) => l.includes('(2-17/60)'));
+		expect(pageInfo).toBeTruthy();
 	});
 });

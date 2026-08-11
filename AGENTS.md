@@ -684,42 +684,24 @@ if (live) tracker.importRawState(live);
 
 pi-lab（`extensions/meta/pi-lab/`）是实验框架，不自带实验。消费方插件通过它注册 A/B 实验、选臂、录反馈。
 
-**接入方式（两种，按耦合强度分）：**
+**接入方式（按耦合强度）：** 弱依赖 A = `registerWeakExperiment()`（`globalThis.__labApi` 桥接，不 import 包，pi-lab 缺失时自然降级）；强依赖 B = `registerStrongExperiment()`（import `@zenone/pi-lab`，声明依赖）。
 
-| 方式                 | API                                                                      | 耦合                     | 适用场景                                         |
-| -------------------- | ------------------------------------------------------------------------ | ------------------------ | ------------------------------------------------ |
-| **弱依赖（方案 A）** | `registerWeakExperiment()` 通过 `globalThis.__labApi` 桥接               | 不 import 包             | 插件只想"顺便做实验"，pi-lab 不存在时自然降级    |
-| **强依赖（方案 B）** | `registerStrongExperiment()` 通过 `import { ... } from '@zenone/pi-lab'` | 在 package.json 声明依赖 | 插件的核心逻辑就是实验驱动的，明确和 pi-lab 绑定 |
+**两条铁律：** ① 注册必须在 `session_start` 事件中做，绝不在模块工厂函数中做（消除加载顺序竞险）；② 消费方必须自己处理降级——pi-lab 不阻塞插件启动。
 
-**两条铁律：**
+**冲突裁决：** 同名实验冲突时强依赖者（B）优先于弱依赖者（A）；同级后注册覆盖先注册（last-wins）。
 
-1. **注册必须在 `session_start` 事件中做**，绝不在模块工厂函数中做。这是为了消除加载顺序竞险，确保 `globalThis.__labApi` 已就绪、`ctx` 可用（冲突时可推 UI 通知）。
-2. **消费方必须自己处理降级**——pi-lab 不阻塞插件的启动。如果 lab 不可用，消费方要自行提供兜底方案。
+> 完整规范（含代码示例）见 `docs/pi-ext-knowledge/pi-lab-consumer-integration.md`；设计见 `docs/adr/0003-pi-lab-extension-registration-mechanism.md`。
 
-```typescript
-// ✅ 正确：方案 A（弱依赖）— 在 session_start 中注册
-pi.on('session_start', async (_event, ctx) => {
-  const lab = (globalThis as any).__labApi?.getExperimentManager?.();
-  if (!lab) { log.warn('pi-lab not available — no experiment'); return; }
-  const exp = lab.registerWeakExperiment({ name: 'foo', arms: [...], strategy: 'thompson-sampling' });
-  ctx.ui.notify('Experiment foo active', 'info');
-});
+### 13. pi-tui doRender 的 fullRender 机制与自定义组件高度铁律
 
-// ✅ 正确：方案 B（强依赖）— 在 session_start 中注册
-import { getExperimentManager } from '@zenone/pi-lab';
+`doRender()` 的 diff：`firstChanged` 从渲染树行 0 逐行对比 previousLines/newLines；**`firstChanged < prevViewportTop` → fullRender(true)**（`\x1b[2J\x1b[H\x1b[3J` 清屏+清 scrollback + 整树重绘，依赖 `\x1b[?2026h` 同步输出原子性）。
 
-export default function (pi: ExtensionAPI) {
-  pi.on('session_start', async (_event, ctx) => {
-    const mgr = getExperimentManager();
-    const exp = mgr.registerStrongExperiment({ name: 'foo', arms: [...], strategy: 'thompson-sampling' });
-    ctx.ui.notify('Experiment foo active', 'info');
-  });
-}
-```
-
-**冲突裁决**：同名实验冲突时，强依赖者（B）始终优先于弱依赖者（A）。同一级别内后注册覆盖先注册（last-wins）。冲突时框架自动打 pi-logger 日志 + `ctx.ui.notify()` 推送通知。
-
-> 详细设计见 `docs/adr/0003-pi-lab-extension-registration-mechanism.md`。
+- **铁律**：任何替换 editorContainer 的自定义组件，**总高必须 ≤ 终端视口高度（rows）**。否则组件顶部（树行/光标行）落在视口上方，滚动时 `firstChanged < viewportTop` 恒触发 fullRender → 同步输出失效链路（tmux/SSH/Windows Terminal）上表现为**重影/错位**。
+- **铁律 2（header 动态内容）**：渲染树**第 0 行（header）不得放随光标/滚动变化的动态内容**（当前节点 ID、计数等）——第 0 行一变，`firstChanged=0 < viewportTop`（总高略超视口即触发）就 fullRender 重影。动态状态信息应放**底部 footer**（最后一行的 firstChanged 被树内更靠前的光标行变化「掩盖」，不触发 fullRender）。
+- **参考原生 `/tree`**（pi-mono tree-selector.js）：`maxVisibleLines = floor(terminalHeight/2)` 自适应 + 选中行居中（`startIndex = selected - floor(maxVisibleLines/2)`），组件总高 ≤ 视口 → 滚动纯 diff。
+- **观测工具**：`PI_TUI_DEBUG=1` → diff 渲染日志 `/tmp/tui/render-*.log`（含完整 newLines JSON）；`PI_DEBUG_REDRAW=1` → fullRender 原因 `~/.pi/agent/pi-debug.log`。
+- **e2e 盲区**：固定 80 列 + 短树（< pageSize 行）时滚动路径零覆盖——滚动类 bug 必须用长树用例（mock-llm 的 `MOCK_LLM_REPEAT` 发多条消息造 50+ 稳定节点树）。
+- 附带：扩展运行时 `setInterval`/`setTimeout` 回调不执行——需要定时器的逻辑改用事件驱动（与 #8 的 /reload 定时器失效不同，这里是运行时根本不触发）。
 
 ---
 

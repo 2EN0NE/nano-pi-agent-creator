@@ -66,13 +66,22 @@ pi-lab 是**纯基础设施**——提供测量、存储、统计分析。**不�
 | **Annotation / 标注**               | pi-session-tree 通过 `Pi.appendEntry()` 将计算结果（如复杂度分、上下文快照）以 CustomEntry 写回会话树，跨 `/reload` 持久化。                                   |
 | **Snapshot / 快照**                 | 轻量快照（leafId + entry 计数），供 diff() 检测自上次查询以来的增量变化。                                                                                      |
 
+### pi-session-tree TUI 渲染层
+
+| 术语                                 | 定义                                                                                                                                   |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **会话当前节点（Leaf / 叶子）**      | 会话树的活跃叶子节点（`getLeafId()` 返回）。`@`/`@~N`/`@^`/`@^^type` 表达式的解析锚点，不随面板光标移动。                              |
+| **光标节点（Cursor Node）**          | 面板当前高亮选中的节点。footer 显示其 ID；`+N`/`-N` 跳转的解析基准。与「会话当前节点」是不同概念，在筛选视图下二者常不一致。           |
+| **筛选视图（Filter View）**          | `filterMode ≠ default` 时的节点过滤视图（no-tools / user-only / labeled-only / all）。过滤改变可见节点集合，是「割裂」的来源。         |
+| **割裂（Cursor-Target Divergence）** | 筛选/搜索视图下，「光标节点」与「@~ 所选节点」不一致的现象。footer 以「筛选视图(光标≠@~所选)」提示，而非改变 @ 锚点（详见 ADR-0007）。 |
+
 ## TUI 设计
 
 | 术语                          | 定义                                                                                                                                                             |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Smart Context Panel**       | `/smart-context` 命令打开的 TUI 面板，含 3 个 Tab（决策、状态、配置）。状态 Tab 下设信号/分析二级子 Tab。详见 `docs/adr/0006-smart-context-pi-lab-tui-design.md` |
 | **pi-lab Panel**              | `/lab` 命令打开的 TUI 面板，两列命名空间分组设计，支持实验详情和 arm 详情（两级下钻）。                                                                          |
-| **Session Tree Panel**        | `/session-tree` 命令打开的 TUI 面板，含 4 个 Tab（标注、窗口、路径、快照），覆盖 pi-session-tree 的 19 个 API。                                                  |
+| **Session Tree Panel**        | `/session-tree` 命令打开的 TUI 面板，单树视图展示会话树，支持节点跳转（`@` 表达式）、范围标记统计、标签标注、视图过滤。                                          |
 | **图例（Legend）**            | 按 `L` 键弹出的浮层，显示策略缩写→全名映射。数据从 StrategyRegistry 动态渲染。                                                                                   |
 | **Arm 锁定（Arm Lock）**      | 在 smart-context 配置 Tab 中，用户固定选择某个 arm（如 classifer），绕过 pi-lab 的自动分配。与 Profile 绑定。                                                    |
 | **指标切换（Metric Switch）** | `◀ metric ▶` 通过 `← →` 键切换分析的指标维度（composite_score / tool_error_rate / bounce_rate 等）。用于 smart-context 分析子 Tab 和 pi-lab 实验详情。           |

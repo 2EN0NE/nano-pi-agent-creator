@@ -178,6 +178,12 @@ describe('analyze — RangeReport', () => {
 		expect(report.toolCalls).toEqual({ edit: 1 });
 	});
 
+	it('counts agent messages', () => {
+		const tree = createSessionTree(mockSessionManager(standardTree()));
+		const report = tree.analyze('r001', 'c003');
+		expect(report.agentMessages).toBe(2); // c001, c002
+	});
+
 	it('extracts labels from labeled nodes', () => {
 		const entries = standardTree();
 		entries.find((e) => e.id === 'c001')!.label = '#bugfix';

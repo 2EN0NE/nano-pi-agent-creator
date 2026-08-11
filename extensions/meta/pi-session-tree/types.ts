@@ -69,6 +69,28 @@ export interface PathSegment {
 	entries: TreeNode[];
 }
 
+// ── Tag rules ──────────────────────────────────────────────────────
+// 统一使用 tag-engine 的 TagRule 定义（纯逻辑引擎；source 可选，
+// 历史 config 规则可能缺失该字段，缺省视为 config 规则）
+
+export type { TagRule } from './tag-engine.js';
+
+// ── Range analysis ──────────────────────────────────────────────────
+
+/** 两个节点之间的结构化范围报告 */
+export interface RangeReport {
+	segmentCount: number;
+	byType: Record<string, number>;
+	userQuestions: string[];
+	agentMessages: number;
+	branchPoints: { id: string; depth: number }[];
+	compactions: { tokensBefore: number; summary: string }[];
+	toolCalls: Record<string, number>;
+	labels: { label: string; targetId: string }[];
+	retryPatterns: RetryResult[];
+	timeSpan: { start: string; end: string };
+}
+
 // ── Retry detection ────────────────────────────────────────────────
 
 export interface RetryResult {

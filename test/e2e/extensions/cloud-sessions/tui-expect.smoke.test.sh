@@ -28,8 +28,6 @@ test_it "expect: extension logs captured correctly [REVIEW]" <<'TEST'
   tui_expect_test "pi-logger" '
     send "/cloud-sessions\r"
     sleep 2
-    send "/quit\r"
-    expect eof
   ' 15
 
   local padded

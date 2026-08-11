@@ -9,12 +9,11 @@
 test_describe "quit extension (expect TUI mode)"
 
 test_it "expect: sends /quit and exits cleanly" <<'TEST'
+  # 用户命令不处理 eof/退出——模板收尾统一 send /quit + 等待退出。
+  # 旧版在用户命令内 expect eof 会消耗 eof 事件，模板再次 send /quit 报
+  # "spawn id not open" → ec_file 缺失 → exit 误判（tui-functions 兜底后现形）。
   tui_expect_test "pi-logger,quit" '
-    send "/quit\r"
-    expect {
-      eof { }
-      timeout { exit 124 }
-    }
+    sleep 1
   ' 15
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]]; then
@@ -36,9 +35,6 @@ test_it "expect: verifies extension loaded in TUI" <<'TEST'
 
     # Check output contains quit extension
     set output [expect_output]
-
-    send "/quit\r"
-    expect eof
   ' 15
 
   # Check captured output for quit extension

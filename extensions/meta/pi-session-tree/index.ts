@@ -6,11 +6,20 @@
  *
  * 双重模式：
  *   - 库模式：import { createSessionTree } from '@zenone/pi-session-tree'
- *   - 扩展模式：pi 自动加载 default export，注册 /tree-stats 命令
+ *   - 扩展模式：pi 自动加载 default export，注册 /tree-stats（结构统计）
+ *     与 /custom-session-tree（TUI 面板：树渲染 + 过滤 + 搜索 + 跳转 + 标记 + tag 打标）
  */
 
-import type { ExtensionAPI, SessionEntry, SessionTreeNode } from '@earendil-works/pi-coding-agent';
-import { createLogger } from '@zenone/pi-logger';
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	SessionEntry,
+	SessionTreeNode,
+} from '@earendil-works/pi-coding-agent';
+// pi-lens-ignore: pi-lens/no-unused-vars
+import { createConfigStore } from '@zenone/pi-config';
+import type { TagRule } from './types.js';
+import { applyRules, computeScanWindow, type MatchableEntry } from './tag-engine.js';
 import type {
 	TreeNode,
 	EntryType,
@@ -18,7 +27,11 @@ import type {
 	TreeDiff,
 	PathSegment,
 	RetryResult,
+	RangeReport,
 } from './types.js';
+// 说明：.semgrep.yml 的 pi.logger-imported-but-unused 规则存在误报（import 节点上 pattern-not const 声明恒成立），
+// 下方 nosemgrep 注释用于抑制该误报；const log = createLogger(...) 在下方实例化并被 log.info/error 实际使用。
+import { createLogger } from '@zenone/pi-logger'; // nosemgrep: pi.logger-imported-but-unused
 
 const log = createLogger('pi-session-tree');
 
@@ -130,9 +143,47 @@ function findPath(roots: TreeNode[], targetId: string): TreeNode[] {
 	return search(roots, []) ?? [];
 }
 
+/** DFS 偏移：从 fromId 向前/后 offset 步（负=后），跳过无文本 assistant。
+ *  from 节点本身始终保留（即使是无文本 assistant 的当前 leaf），否则 findIndex 落空、跳转静默失效。
+ *  注意：仅跳过无文本 assistant——面板的 filterMode/搜索/折叠等动态过滤是 resolve 无法感知的 UI 状态，
+ *  落点被动态隐藏时由面板 revealNode + 切 all 兜底揭示。 */
+function offsetNode(roots: TreeNode[], fromId: string, offset: number): TreeNode | null {
+	const all = collectNodes(roots).filter((n) => !isNoTextAssistant(n, fromId));
+	const idx = all.findIndex((n) => n.id === fromId);
+	if (idx < 0) return null;
+	const tgt = idx + offset;
+	return tgt >= 0 && tgt < all.length ? all[tgt] : null;
+}
+
+/** 判断「无文本且非 error/aborted 的 assistant 消息」（与 panel 渲染 shouldShow 的跳过规则一致）
+ *  @param exceptId 例外节点：该节点即使是无文本 assistant 也视为可见——
+ *        panel 对「当前 leaf」的例外，以及 offsetNode 保留 from 锚点，避免跳转静默失效。 */
+export function isNoTextAssistant(node: TreeNode, exceptId?: string | null): boolean {
+	if (node.type !== 'message') return false;
+	if (exceptId != null && node.id === exceptId) return false;
+	const msg = (node.raw as any)?.message;
+	if (msg?.role !== 'assistant') return false;
+	const hasText =
+		typeof msg.content === 'string'
+			? msg.content.trim().length > 0
+			: Array.isArray(msg.content)
+				? msg.content.some((c: any) => c.type === 'text' && c.text)
+				: false;
+	const isErrorOrAborted =
+		msg.stopReason && msg.stopReason !== 'stop' && msg.stopReason !== 'toolUse';
+	return !hasText && !isErrorOrAborted;
+}
+
 // ── Public API ─────────────────────────────────────────────────────
 
 export interface SessionTreeAPI {
+	// ① Locate
+	/** 解析表达式 → 单个节点 或 范围 { from, to } */
+	resolve(
+		expr: string,
+		opts?: { from?: string },
+	): TreeNode | { from: TreeNode; to: TreeNode } | null;
+
 	// A. Node
 	findByType(type: EntryType): TreeNode[];
 	findByLabel(label: string): TreeNode | undefined;
@@ -151,24 +202,26 @@ export interface SessionTreeAPI {
 	pathLength(id?: string): number;
 	treeComplexity(): number;
 
-	// D. Aggregation
-	countByType(path: TreeNode[], type: EntryType): number;
-	toolCallDistribution(path: TreeNode[]): Record<string, number>;
-	compactionHistory(path: TreeNode[]): { tokensBefore?: number; timestamp: string }[];
-	entryTypeTimeline(path: TreeNode[]): PathSegment[];
-
-	// E. Content
-	extractUserMessages(path: TreeNode[]): string[];
-	detectKeywords(path: TreeNode[], keywords: string[]): TreeNode[];
+	// ② Analyze
+	/** 从 fromId 到 toId 之间的结构化范围报告 */
+	analyze(fromId: string, toId: string): RangeReport;
+	/** DFS 全序中两点之间的节点（含端点，自动排序，顺序无关） */
+	rangeNodes(fromId: string, toId: string): TreeNode[];
+	/** 获取所有标签 */
 	extractLabels(): { label: string; targetId: string }[];
+
+	// Tag rules
+	/** 获取自动标注规则 */
+	getTagRules(): TagRule[];
+	/** 设置自动标注规则 */
+	setTagRules(rules: TagRule[]): void;
+	/** 给多个节点批量打标签（自动加 # 前缀，合并已有非 # 标签） */
+	setLabels(entryId: string, labels: string[]): void;
+	/** 获取所有原始 entries（用于 tag 引擎全量扫描） */
+	getAllEntries(): MatchableEntry[];
 
 	// F. Window
 	lastN(n: number, fromId?: string): TreeNode[];
-	entriesSinceLastCompaction(): TreeNode[];
-
-	// G. Annotation
-	annotate(entryId: string, customType: string, data: unknown): Promise<void>;
-	getAnnotations(customType: string): TreeNode[];
 
 	// H. Snapshot
 	snapshot(): TreeSnapshot;
@@ -176,6 +229,11 @@ export interface SessionTreeAPI {
 
 	// Retry detection
 	detectRetry(fromEntryId: string, toEntryId: string): Promise<RetryResult>;
+
+	// Tree access
+	getRootNodes(): TreeNode[];
+	/** 当前 leaf 节点 id（无文本 assistant 跳过规则的例外） */
+	getLeafId(): string | null;
 }
 
 /**
@@ -211,7 +269,142 @@ export function createSessionTree(sessionManager: {
 		return findPath(roots, leafId);
 	}
 
+	let tagRules: TagRule[] = [];
+
 	const api: SessionTreeAPI = {
+		// ── ① Locate ──────────────────────────────────────────
+
+		resolve(
+			expr: string,
+			opts?: { from?: string },
+		): TreeNode | { from: TreeNode; to: TreeNode } | null {
+			if (!expr) return null;
+
+			// Range: split on ".."
+			const dotIdx = expr.indexOf('..');
+			if (dotIdx >= 0) {
+				const left = expr.slice(0, dotIdx);
+				const right = expr.slice(dotIdx + 2);
+				const from = left ? api.resolve(left, opts) : null;
+				const to = right ? api.resolve(right, opts) : null;
+				if (from && to && !('from' in from) && !('from' in to)) {
+					const fromN = from as TreeNode;
+					const toN = to as TreeNode;
+					// Ensure from is before to in the leaf path
+					const leafPath = getLeafPath();
+					const fromIdx = leafPath.findIndex((n) => n.id === fromN.id);
+					const toIdx = leafPath.findIndex((n) => n.id === toN.id);
+					if (fromIdx >= 0 && toIdx >= 0) {
+						return fromIdx <= toIdx
+							? { from: fromN, to: toN }
+							: { from: toN, to: fromN };
+					}
+					return { from: fromN, to: toN };
+				}
+				return null;
+			}
+
+			// @^ — parent
+			if (expr === '@^') {
+				const leafPath = getLeafPath();
+				return leafPath.length >= 2 ? leafPath[leafPath.length - 2] : null;
+			}
+
+			// @~N:type — walk back N steps of type
+			const backTypeMatch = expr.match(/^@~(\d+):(\w+)$/);
+			if (backTypeMatch) {
+				const n = parseInt(backTypeMatch[1], 10);
+				const type = backTypeMatch[2];
+				const leafPath = getLeafPath();
+				let count = 0;
+				// Walk from parent backward (don't count the leaf itself)
+				for (let i = leafPath.length - 2; i >= 0; i--) {
+					if (type === 'user' || type === 'assistant') {
+						const raw = leafPath[i].raw as any;
+						const msg = raw?.message;
+						if (msg && msg.role === type) {
+							count++;
+							if (count === n) return leafPath[i];
+						}
+					} else if (leafPath[i].type === type) {
+						count++;
+						if (count === n) return leafPath[i];
+					}
+				}
+				return null;
+			}
+
+			// @~N — walk back N steps (any type, skipping no-text assistant)
+			const backMatch = expr.match(/^@~(\d+)$/);
+			if (backMatch) {
+				const n = parseInt(backMatch[1], 10);
+				const leafPath = getLeafPath();
+				// 从父节点往回数 N 步（仅跳过无文本 assistant；filterMode/搜索等动态过滤见 ADR-0007，由面板 revealNode+切 all 兜底）
+				let count = 0;
+				for (let i = leafPath.length - 2; i >= 0; i--) {
+					if (isNoTextAssistant(leafPath[i])) continue;
+					count++;
+					if (count === n) return leafPath[i];
+				}
+				return null;
+			}
+
+			// @ — current leaf
+			if (expr === '@') {
+				const leafId = sessionManager.getLeafId();
+				if (!leafId) return null;
+				const roots = getRoots();
+				const path = findPath(roots, leafId);
+				return path.length > 0 ? path[path.length - 1] : null;
+			}
+
+			// @^^type — nearest ancestor of type
+			const ancMatch = expr.match(/^@\^\^(\w+)$/);
+			if (ancMatch) {
+				const type = ancMatch[1];
+				const leafId = sessionManager.getLeafId();
+				if (!leafId) return null;
+				return api.findAncestor(leafId, type as EntryType) ?? null;
+			}
+
+			// ID prefix (≥1 alphanumeric chars, unambiguous)
+			if (/^[0-9a-zA-Z]+$/.test(expr)) {
+				const allNodes = collectNodes(getRoots());
+				const matches = allNodes.filter((n) => n.id.startsWith(expr));
+				return matches.length === 1 ? matches[0] : null;
+			}
+
+			// ── Forward/backward offset (+N / -N) ────────────────
+
+			// combo: baseExpr +N  or  baseExpr -N
+			const comboMatch = expr.match(/^(.+?)\s+([+-])(\d+)$/);
+			if (comboMatch) {
+				const base = api.resolve(comboMatch[1], opts);
+				if (!base || 'from' in base) return null;
+				return offsetNode(
+					getRoots(),
+					base.id,
+					comboMatch[2] === '+'
+						? parseInt(comboMatch[3], 10)
+						: -parseInt(comboMatch[3], 10),
+				);
+			}
+
+			// standalone: +N  or  -N (needs opts.from)
+			const soloMatch = expr.match(/^([+-])(\d+)$/);
+			if (soloMatch) {
+				const fromId = opts?.from;
+				if (!fromId) return null;
+				return offsetNode(
+					getRoots(),
+					fromId,
+					soloMatch[1] === '+' ? parseInt(soloMatch[2], 10) : -parseInt(soloMatch[2], 10),
+				);
+			}
+
+			return null;
+		},
+
 		// ── A. Node ──────────────────────────────────────────
 
 		findByType(type: EntryType): TreeNode[] {
@@ -296,77 +489,120 @@ export function createSessionTree(sessionManager: {
 			return bc * 10 + md;
 		},
 
-		// ── D. Aggregation ───────────────────────────────────
+		// ── ② Analyze ──────────────────────────────────────────
 
-		countByType(path: TreeNode[], type: EntryType): number {
-			return path.filter((n) => n.type === type).length;
-		},
+		analyze(fromId: string, toId: string): RangeReport {
+			// DFS 全序中两点之间的节点（含端点，自动排序）——
+			// 标记顺序无关，任意两节点（含祖先-后代/兄弟/跨分支）都能得到范围。
+			const path = api.rangeNodes(fromId, toId);
 
-		toolCallDistribution(_path: TreeNode[]): Record<string, number> {
-			// Placeholder — will be implemented when tool_result entries are parsed
-			return {};
-		},
-
-		compactionHistory(path: TreeNode[]): { tokensBefore?: number; timestamp: string }[] {
-			return path
-				.filter((n) => n.type === 'compaction')
-				.map((n) => ({
-					tokensBefore: (n.raw as any).tokensBefore,
-					timestamp: n.timestamp,
-				}));
-		},
-
-		entryTypeTimeline(path: TreeNode[]): PathSegment[] {
-			const segments: PathSegment[] = [];
+			// byType
+			const byType: Record<string, number> = {};
 			for (const n of path) {
-				const last = segments[segments.length - 1];
-				if (last && last.type === n.type) {
-					last.count++;
-					last.entries.push(n);
-				} else {
-					segments.push({ type: n.type, count: 1, entries: [n] });
-				}
+				byType[n.type] = (byType[n.type] ?? 0) + 1;
 			}
-			return segments;
-		},
 
-		// ── E. Content ───────────────────────────────────────
-
-		extractUserMessages(path: TreeNode[]): string[] {
-			return path
-				.filter((n) => n.type === 'message' && (n.raw as any).message?.role === 'user')
-				.map((n) => {
-					const content = (n.raw as any).message?.content;
-					if (typeof content === 'string') return content;
-					if (Array.isArray(content))
-						return content
-							.filter((c: any) => c.type === 'text')
-							.map((c: any) => c.text)
-							.join(' ');
-					return '';
-				});
-		},
-
-		detectKeywords(path: TreeNode[], keywords: string[]): TreeNode[] {
-			return path.filter((n) => {
-				const content = (n.raw as any).message?.content;
-				const text =
-					typeof content === 'string'
-						? content
-						: Array.isArray(content)
-							? content
+			// userQuestions
+			const userQuestions: string[] = [];
+			let agentMessages = 0;
+			for (const n of path) {
+				if (n.type === 'message') {
+					const msg = (n.raw as any).message;
+					if (msg?.role === 'user') {
+						const content = msg.content;
+						if (typeof content === 'string') userQuestions.push(content);
+						else if (Array.isArray(content))
+							userQuestions.push(
+								content
 									.filter((c: any) => c.type === 'text')
 									.map((c: any) => c.text)
-									.join(' ')
-							: '';
-				return keywords.some((kw) => text.toLowerCase().includes(kw.toLowerCase()));
-			});
+									.join(' '),
+							);
+					} else if (msg?.role === 'assistant') {
+						agentMessages++;
+					}
+				}
+			}
+
+			// branchPoints: nodes with children.length > 1
+			const branchPoints = path
+				.filter((n) => n.children.length > 1)
+				.map((n) => ({ id: n.id, depth: n.depth }));
+
+			// compactions
+			const compactions = path
+				.filter((n) => n.type === 'compaction')
+				.map((n) => ({
+					tokensBefore: (n.raw as any).tokensBefore ?? 0,
+					summary: (n.raw as any).summary ?? '',
+				}));
+
+			// toolCalls
+			const toolCalls: Record<string, number> = {};
+			for (const n of path) {
+				if (n.type === 'message') {
+					const msg = (n.raw as any).message;
+					if (msg?.role === 'toolResult' && msg.toolName) {
+						toolCalls[msg.toolName] = (toolCalls[msg.toolName] ?? 0) + 1;
+					}
+				}
+			}
+
+			// labels
+			const labels = path
+				.filter((n) => n.label)
+				.map((n) => ({ label: n.label!, targetId: n.id }));
+
+			// retryPatterns — placeholder, detectRetry is async
+			const retryPatterns: RetryResult[] = [];
+
+			// timeSpan
+			const timeSpan = {
+				start: path.length > 0 ? path[0].timestamp : '',
+				end: path.length > 0 ? path[path.length - 1].timestamp : '',
+			};
+
+			return {
+				segmentCount: path.length,
+				byType,
+				userQuestions,
+				agentMessages,
+				branchPoints,
+				compactions,
+				toolCalls,
+				labels,
+				retryPatterns,
+				timeSpan,
+			};
+		},
+
+		rangeNodes(fromId: string, toId: string): TreeNode[] {
+			// DFS 全序中两点之间的节点（含端点），自动排序（lo/hi），顺序无关。
+			const all = collectNodes(getRoots());
+			const fromIdx = all.findIndex((n) => n.id === fromId);
+			const toIdx = all.findIndex((n) => n.id === toId);
+			if (fromIdx < 0 || toIdx < 0) return [];
+			const lo = Math.min(fromIdx, toIdx);
+			const hi = Math.max(fromIdx, toIdx);
+			return all.slice(lo, hi + 1);
 		},
 
 		extractLabels(): { label: string; targetId: string }[] {
 			return collectNodes(getRoots())
 				.filter((n) => n.label)
 				.map((n) => ({ label: n.label!, targetId: n.id }));
+		},
+
+		// Tag rules
+		getTagRules(): TagRule[] {
+			return tagRules;
+		},
+		setTagRules(rules: TagRule[]): void {
+			tagRules = rules;
+		},
+
+		getAllEntries(): MatchableEntry[] {
+			return sessionManager.getEntries() as MatchableEntry[];
 		},
 
 		// ── F. Window ────────────────────────────────────────
@@ -376,31 +612,8 @@ export function createSessionTree(sessionManager: {
 			return path.slice(-n);
 		},
 
-		entriesSinceLastCompaction(): TreeNode[] {
-			const path = getLeafPath();
-			let lastCompactionIdx = -1;
-			for (let i = path.length - 1; i >= 0; i--) {
-				if (path[i].type === 'compaction') {
-					lastCompactionIdx = i;
-					break;
-				}
-			}
-			return lastCompactionIdx >= 0 ? path.slice(lastCompactionIdx) : path;
-		},
-
-		// ── G. Annotation ────────────────────────────────────
-
-		async annotate(_entryId: string, _customType: string, _data: unknown): Promise<void> {
-			// Stub — for annotation support use createSessionTreeWithPi(sm, pi)
-			log.warn(
-				'annotate() called without Pi ExtensionAPI — annotation discarded. Use createSessionTreeWithPi() instead.',
-			);
-		},
-
-		getAnnotations(_customType: string): TreeNode[] {
-			return collectNodes(getRoots()).filter(
-				(n) => n.type === 'custom' && (n.raw as any).customType === _customType,
-			);
+		setLabels(_entryId: string, _labels: string[]): void {
+			// Stub — for real label persistence use createSessionTreeWithPi(sm)
 		},
 
 		// ── H. Snapshot ──────────────────────────────────────
@@ -459,6 +672,14 @@ export function createSessionTree(sessionManager: {
 				method: 'bm25',
 			};
 		},
+
+		getRootNodes(): TreeNode[] {
+			return getRoots();
+		},
+
+		getLeafId(): string | null {
+			return sessionManager.getLeafId();
+		},
 	};
 
 	return api;
@@ -467,59 +688,252 @@ export function createSessionTree(sessionManager: {
 // ── Extension ──────────────────────────────────────────────────────
 
 /**
- * Pi 扩展入口 — 注册 /tree-stats 命令和 TUI 面板。
+ * Pi 扩展入口 — 注册命令和 TUI 面板。
  */
 export default function piSessionTreeExtension(pi: ExtensionAPI) {
 	log.info('Extension loaded');
 
+	const treeStatsHandler = async (_args: unknown, ctx: ExtensionCommandContext) => {
+		const sm = ctx.sessionManager as Parameters<typeof createSessionTree>[0];
+		const tree = createSessionTreeWithPi(sm);
+		const branchCount = tree.branchCount();
+		const depth = tree.maxDepth();
+		const complexity = tree.treeComplexity();
+		const path = tree.pathToLeaf();
+		const report = tree.analyze(path[0].id, path[path.length - 1].id);
+		const labels = tree.extractLabels();
+
+		const lines = [
+			`Branch points: ${branchCount}`,
+			`Max depth: ${depth}`,
+			`Path length: ${path.length}`,
+			`Complexity score: ${complexity}`,
+			`Labels: ${labels.map((l) => l.label).join(', ') || '(none)'}`,
+			`Compactions: ${report.byType['compaction'] ?? 0}`,
+			`Model changes: ${report.byType['model_change'] ?? 0}`,
+		];
+		ctx.ui.notify(lines.join('  |  '), 'info');
+	};
+
+	const sessionTreeHandler = async (_args: unknown, ctx: ExtensionCommandContext) => {
+		if (!ctx.hasUI) {
+			// TUI 模式下才打开面板，print 模式走 tree-stats
+			treeStatsHandler(_args, ctx);
+			return;
+		}
+		const sm = ctx.sessionManager as Parameters<typeof createSessionTree>[0];
+		const tree = createSessionTreeWithPi(sm);
+		// 面板需要读到 config 规则（ctrl+l 的规则列表/tag summary/rescanLabels），
+		// 该实例独立于 session_start 实例，须单独注入
+		tree.setTagRules(tagStore.get().rules);
+		const sessionId = sm.getSessionId();
+		const { openPanel } = await import('./ui/panel.js');
+		await openPanel(ctx, tree, sessionId);
+	};
+
 	pi.registerCommand('tree-stats', {
-		description: 'Show session tree structure metrics and query results',
-		handler: async (_args, ctx) => {
+		description: 'Show session tree structure metrics',
+		handler: treeStatsHandler,
+	});
+
+	pi.registerCommand('custom-session-tree', {
+		description: 'Open session tree inspector TUI panel',
+		handler: sessionTreeHandler,
+	});
+
+	// ── Agent tools ──────────────────────────────────────────
+
+	pi.registerTool({
+		name: 'session_tree_resolve',
+		label: 'Resolve Session Tree Expression',
+		description:
+			'Resolve a session tree expression (like "@~3:user" or "m1..@") to node info. Returns the node id, type, role, and summary.',
+		parameters: {
+			type: 'object',
+			properties: {
+				expr: {
+					type: 'string',
+					description: 'Session tree expression, e.g. @, @~3:user, @^^compaction, m1',
+				},
+			},
+			required: ['expr'],
+		},
+		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
 			const sm = ctx.sessionManager as Parameters<typeof createSessionTree>[0];
-			const tree = createSessionTreeWithPi(sm, pi);
-			const branchCount = tree.branchCount();
-			const depth = tree.maxDepth();
-			const complexity = tree.treeComplexity();
-			const path = tree.pathToLeaf();
-			const labels = tree.extractLabels();
-
-			const lines = [
-				`Branch points: ${branchCount}`,
-				`Max depth: ${depth}`,
-				`Path length: ${path.length}`,
-				`Complexity score: ${complexity}`,
-				`Labels: ${labels.map((l) => l.label).join(', ') || '(none)'}`,
-				`Compactions: ${tree.countByType(path, 'compaction')}`,
-				`Model changes: ${tree.countByType(path, 'model_change')}`,
-			];
-
-			if (ctx.hasUI) {
-				ctx.ui.notify(lines.join('  |  '), 'info');
+			const tree = createSessionTreeWithPi(sm);
+			const result = tree.resolve(params.expr as string);
+			if (!result)
+				return {
+					content: [{ type: 'text', text: 'Expression resolved to nothing.' }],
+					details: {},
+				};
+			if ('from' in result) {
+				return {
+					content: [
+						{ type: 'text', text: `Range from ${result.from.id} to ${result.to.id}` },
+					],
+					details: {},
+				};
 			}
+			const node = result;
+			const raw = node.raw as any;
+			const msg = raw?.message;
+			const summary = msg?.content
+				? typeof msg.content === 'string'
+					? msg.content.slice(0, 200)
+					: JSON.stringify(msg.content).slice(0, 200)
+				: '';
+			return {
+				content: [
+					{
+						type: 'text',
+						text: JSON.stringify({
+							id: node.id,
+							type: node.type,
+							role: msg?.role,
+							summary,
+						}),
+					},
+				],
+				details: {},
+			};
 		},
 	});
 
-	log.info('Commands registered');
+	pi.registerTool({
+		name: 'session_tree_query',
+		label: 'Query Session Tree Range',
+		description:
+			'Resolve a range expression (like "@~3:user..@" or "m1..@") and return the nodes plus a structured analysis (counts, user questions, tool calls, compactions, branch points).',
+		parameters: {
+			type: 'object',
+			properties: {
+				expr: {
+					type: 'string',
+					description: 'Range expression, e.g. @~3..@, m1..@, @^^compaction..@',
+				},
+			},
+			required: ['expr'],
+		},
+		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+			const sm = ctx.sessionManager as Parameters<typeof createSessionTree>[0];
+			const tree = createSessionTreeWithPi(sm);
+			const result = tree.resolve(params.expr as string);
+			if (!result || !('from' in result)) {
+				return {
+					content: [{ type: 'text', text: 'Expression must be a range (use ..).' }],
+					details: {},
+				};
+			}
+			const analysis = tree.analyze(result.from.id, result.to.id);
+			const nodes = tree.entriesBetween(result.from.id, result.to.id).map((n) => {
+				const msg = (n.raw as any)?.message;
+				return {
+					id: n.id,
+					type: n.type,
+					role: msg?.role,
+					toolName: msg?.toolName,
+					summary: typeof msg?.content === 'string' ? msg.content.slice(0, 100) : '',
+				};
+			});
+			return {
+				content: [{ type: 'text', text: JSON.stringify({ nodes, analysis }) }],
+				details: {},
+			};
+		},
+	});
+
+	log.info('Commands and tools registered');
+
+	// ── Tag rules engine ─────────────────────────────────────
+
+	const tagStore = createConfigStore<{ rules: TagRule[] }>({
+		pluginName: 'pi-session-tree',
+		defaults: { rules: [] },
+	});
+
+	let sessionTree: SessionTreeAPI | null = null;
+	let lastScannedEntryId: string | null = null;
+	let lastRulesKey: string | null = null;
+
+	pi.on('session_start', async (_event, ctx) => {
+		tagStore.reload();
+		const sm = ctx.sessionManager as Parameters<typeof createSessionTree>[0];
+		sessionTree = createSessionTreeWithPi(sm);
+		sessionTree.setTagRules(tagStore.get().rules);
+	});
+
+	// 自动打标：turn_end 时用配置规则扫描新增条目。
+	// setLabels 幂等保证重复扫描不会产生重复标签。
+	pi.on('turn_end', async (_event, ctx) => {
+		if (!sessionTree) {
+			const sm = ctx.sessionManager as Parameters<typeof createSessionTree>[0];
+			sessionTree = createSessionTreeWithPi(sm);
+			sessionTree.setTagRules(tagStore.get().rules);
+		}
+		const tree = sessionTree;
+		const rules = tagStore.get().rules;
+
+		const entries = tree.getAllEntries();
+		// 规则集合变化（含清空）时全量重扫：对每个条目写入当前匹配标签，
+		// 未匹配的写入空标签以清除历史 #标签（与面板 rescanLabels 一致）；
+		// 否则增量扫描自上次以来的新增条目。
+		const { startIdx, rulesChanged, nextState } = computeScanWindow(entries, rules, {
+			rulesKey: lastRulesKey,
+			lastScannedEntryId,
+		});
+		lastRulesKey = nextState.rulesKey;
+		const fresh = entries.slice(startIdx);
+		if (fresh.length === 0) return;
+
+		const labelMap = applyRules(fresh as Array<{ id: string } & MatchableEntry>, rules);
+		if (rulesChanged) {
+			// 全量重扫：所有条目按当前规则重算（含空 → 清除旧 #标签）
+			for (const entry of fresh) {
+				tree.setLabels(entry.id, labelMap.get(entry.id) ?? []);
+			}
+		} else {
+			for (const [entryId, labels] of labelMap) {
+				tree.setLabels(entryId, labels);
+			}
+		}
+		lastScannedEntryId = entries[entries.length - 1]?.id ?? null;
+	});
+
+	log.info('Tag rules engine initialized');
 }
 
 // ── Annotation-aware factory ───────────────────────────────────────
 
-/** 带 Pi ExtensionAPI 的 createSessionTree（支持 annotate） */
+/** 带 Pi ExtensionAPI 的 createSessionTree（setLabels 持久化标签到 Pi 原生 label 字段） */
 function createSessionTreeWithPi(
 	sessionManager: Parameters<typeof createSessionTree>[0],
-	pi: ExtensionAPI,
 ): SessionTreeAPI {
 	const base = createSessionTree(sessionManager);
 
-	// Override annotate to use real pi.appendEntry
-	base.annotate = async (entryId: string, customType: string, data: unknown) => {
-		const entry = sessionManager.getEntry(entryId);
-		if (!entry) {
-			log.warn('annotate: entry not found | id=%s', entryId);
-			return;
+	// Override setLabels for real Pi integration — persists tags to entry labels.
+	base.setLabels = (entryId: string, labels: string[]) => {
+		try {
+			const sm = sessionManager as any;
+			const existing = sm.getLabel?.(entryId) ?? '';
+			const existingParts = existing
+				.split(',')
+				.map((s: string) => s.trim())
+				.filter(Boolean);
+			const nonTagParts = existingParts.filter((s: string) => !s.startsWith('#'));
+			const newTagParts = labels.map((l: string) => (l.startsWith('#') ? l : `#${l}`));
+			const merged = [...nonTagParts, ...newTagParts].join(',');
+			// Only write if label actually changed
+			if (merged !== existing) {
+				if (merged) {
+					sm.appendLabelChange?.(entryId, merged);
+				} else {
+					sm.appendLabelChange?.(entryId, undefined);
+				}
+			}
+		} catch (e) {
+			log.error('setLabels failed for entry %s: %s', entryId, (e as Error).message ?? e);
 		}
-		pi.appendEntry(customType, data);
-		log.debug('annotate: custom entry appended | type=%s entryId=%s', customType, entryId);
 	};
 
 	return base;
