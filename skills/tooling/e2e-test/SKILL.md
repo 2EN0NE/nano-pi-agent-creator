@@ -88,6 +88,10 @@ description: >
 - 自动化可判断的（exit code、日志模式匹配）→ 直接在 `test_it body` 中用 shell 判断
 - 需要 AI 判读的（语义验证、UI 表现）→ 用 `mark_for_review` 标记，保留完整输出快照
 - 如果一个功能有 N 个关键验证点，设计 N 条测试用例，而非 1 条大用例
+- **例外（重前置合并）**：若 N 个验证点共享相同的重前置（如构造 20 条消息的长会话树，每个进程都要重发一遍），
+  可合并为 1 条集中用例共享一次前置构造（参考 `test/e2e/extensions/pi-session-tree/tui-expect.smoke.test.sh`），
+  但必须配合步骤日志定位：每步输出 `STEP_BEGIN <id> <名称>` / `STEP_OK <id> <名称>`，
+  断言失败统一走 `fail` proc 输出 `FAIL_MARKER step=<id> reason=<原因>` 后 `exit 1`。
 
 ### 测试文件组织
 
@@ -251,3 +255,5 @@ REVIEW 的用例：
 3. **保留测试日志** — `test/results/` 下的结果由 agent 和用户共同查阅，不在结束时清理
 4. **测试目录不与原始项目冲突** — 所有隔离环境在 `.pi/tmp/` 下，不影响原始 `.pi/`
 5. **测试环境需要有 git 仓库** — 部分扩展（如 review）依赖 git diff，测试目录也需要是 git 工作目录或模拟
+6. **集中用例失败定位** — 合并用例排查入口：`grep "FAIL_MARKER" test/results/<latest>/extensions/<name>/cases/<NNN>-tui-output.log`
+   即可定位失败步骤与原因；扩展自身 error 在 `cases/<NNN>-logs/`，pi-tui 渲染诊断在 `cases/render-*.log`（`PI_TUI_DEBUG=1` 时）。

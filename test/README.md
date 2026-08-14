@@ -194,7 +194,33 @@ test_it "opens panel and responds to keys" <<'TEST'
 TEST
 ```
 
-TUI 测试辅助函数定义在 `test/e2e/helpers/tui-functions.sh`。
+### 集中式长树测试（重前置场景）
+
+当多个交互都依赖**相同的重前置**（如构造 20 条消息的长会话树，每个进程都要重发一遍），
+应合并到**单个 pi 进程**，共享一次前置构造，避免重复支付固定等待。
+
+参考实现：`test/e2e/extensions/pi-session-tree/tui-expect.smoke.test.sh` 的
+`consolidated long-tree panel interactions` 用例（8 个交互合并，~85s，替代原 8×~30s）。
+
+**失败定位约定**（合并用例内必须遵守）：
+
+```tcl
+proc fail {step reason} { puts "FAIL_MARKER step=$step reason=$reason"; exit 1 }
+proc step_begin {id name} { puts "STEP_BEGIN $id $name" }
+proc step_ok   {id name} { puts "STEP_OK   $id $name" }
+```
+
+- 每个交互前后输出 `STEP_BEGIN <id> <名称>` / `STEP_OK <id> <名称>`
+- 断言失败统一走 `fail <id> <原因>`（输出 `FAIL_MARKER step=<id> reason=<原因>` 后退出）
+- bash 层 `TUI_EXIT_CODE != 0` 时 grep `FAIL_MARKER` + 末尾可见输出，直接定位失败步骤
+
+**日志搜集位置**（每次运行自动持久化到 `test/results/<ts>/extensions/<name>/cases/`）：
+
+| 日志            | 路径                   | 内容                                          |
+| --------------- | ---------------------- | --------------------------------------------- |
+| expect 完整输出 | `<NNN>-tui-output.log` | 全部 PTY 输出 + STEP/FAIL_MARKER 轨迹         |
+| pi-logger 日志  | `<NNN>-logs/`          | 扩展自身 error/warn（按插件分文件）           |
+| pi-tui 渲染诊断 | `render-*.log`         | `PI_TUI_DEBUG=1` 时的 diff 渲染帧（重影排查） |
 
 ## 结果解读
 

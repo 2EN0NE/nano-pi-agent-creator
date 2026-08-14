@@ -3,7 +3,23 @@
 # pi-session-tree — expect TUI 测试
 #
 # 迁移自 tui.smoke.test.sh (script+heredoc → expect)
-# 包含面板交互测试：m/~, c/u/a, g, ctrl+x, ctrl+l, Esc
+#
+# 结构（集中方案，2026-08 重构）：
+#   ① TUI load no crash       — 空交互加载（快，~15s）
+#   ② c/u/a filter toggle      — 短交互过滤（~20s）
+#   ③ 91col ghosting repro     — 真实 pi 渲染缺陷复现（~30s，诊断用，不阻塞）
+#   ④ consolidated long-tree   — 8 个长树交互合并到单进程（~85s）
+#
+# 为什么集中：原 8 个长树交互（m+m / g help / g jump / ctrl+x / shift+l /
+#   cursor / scroll / Esc）各自独立 spawn pi 并重发 20 条消息构造长树，
+#   仅构造前置（sleep 0.5×20 + sleep 8 ≈ 18s）× 8 ≈ 144s 纯重复开销。
+#   合并后共享一次构造，省 ~150s，且 sleep 1.5 → 0.5 再省 ~160s。
+#
+# 失败定位（consolidated 用例内）：
+#   - 每步输出 STEP_BEGIN <id> <名称> / STEP_OK <id> <名称>
+#   - 失败统一走 fail proc：输出 FAIL_MARKER step=<id> reason=<原因> 后 exit 1
+#   - 排查：grep "FAIL_MARKER" cases/<NNN>-tui-output.log 即知失败步骤；
+#     完整 pi-logger 日志在 cases/<NNN>-logs/，渲染诊断在 cases/<NNN>-render-*.log（③ 用例）
 # ──────────────────────────────────────────────────────────────────────────────
 
 test_describe "pi-session-tree (expect TUI mode)"
@@ -19,67 +35,6 @@ test_it "expect: extension loads in TUI mode without crash" <<'TEST'
     exit 1
   fi
 
-  tui_cleanup
-TEST
-
-test_it "expect: m + m range workflow (two marks auto-analyze)" <<'TEST'
-  # 长树模式：面板 focus 就位需要 agent 完全空闲（多条消息轮转）。
-  # 消息少时 focus 滞留在 editor，m 等键全落在 editor 输入，"范围:" 断言
-  # 永不出现 → 假阳性。20 条消息构造长树后交互才真正进入面板。
-  # 新版流程：m 两下自动进入范围分析（无需再按 ~）。
-  export MOCK_LLM_REPEAT=25
-  tui_expect_test "pi-session-tree" '
-    set i 1
-    while {$i <= 20} {
-      send "msg $i\r"
-      incr i
-      sleep 1.5
-    }
-    sleep 8
-    send "/custom-session-tree\r"
-    sleep 3
-
-    proc drain {secs max} {
-      set acc ""
-      set n 0
-      expect {
-        -re {.+} {
-          append acc $expect_out(0,string)
-          if {[incr n] >= $max} { return $acc }
-          exp_continue
-        }
-        -timeout $secs timeout { }
-      }
-      return $acc
-    }
-    drain 2 30
-
-    send "m"
-    sleep 0.2
-    send "\033\[B"
-    sleep 0.1
-    send "m"
-    sleep 0.3
-    expect {
-      "范围:" { }
-      timeout { puts "FAIL: range footer"; exit 1 }
-    }
-    # 用 m 退出范围模式，再单次 Esc 关闭面板。
-    # 避免连续两次 Esc：间隔 <500ms 时 pi 的 editor 双 Esc 检测会误触发 /tree 选择器。
-    # Esc 前必须 drain：agent 处理消息尾部输出时裸 ESC 的 stdin flush 会延迟，
-    # 与后续输入合并成 meta 键（如 \x1b/ = alt+/）→ 面板收不到 escape → 面板未关。
-    send "m"
-    sleep 0.3
-    drain 3 60
-    send "\033"
-    sleep 0.5
-  ' 40
-
-  if [[ "$TUI_EXIT_CODE" -eq 0 ]]; then
-    echo "PASS: m + m workflow"
-  else
-    echo "FAIL: exit=$TUI_EXIT_CODE"; exit 1
-  fi
   tui_cleanup
 TEST
 
@@ -103,357 +58,6 @@ test_it "expect: c/u/a filter toggle without crash" <<'TEST'
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
     echo "PASS: c/u/a toggle"
-  else
-    echo "FAIL: exit=$TUI_EXIT_CODE"; exit 1
-  fi
-  tui_cleanup
-TEST
-
-test_it "expect: g jump bar shows help text" <<'TEST'
-  # 长树模式：确保面板 focus 就位，g 才进入面板触发 jump bar
-  export MOCK_LLM_REPEAT=25
-  tui_expect_test "pi-session-tree" '
-    set i 1
-    while {$i <= 20} {
-      send "msg $i\r"
-      incr i
-      sleep 1.5
-    }
-    sleep 8
-    send "/custom-session-tree\r"
-    sleep 3
-
-    proc drain {secs max} {
-      set acc ""
-      set n 0
-      expect {
-        -re {.+} {
-          append acc $expect_out(0,string)
-          if {[incr n] >= $max} { return $acc }
-          exp_continue
-        }
-        -timeout $secs timeout { }
-      }
-      return $acc
-    }
-    drain 2 30
-
-    send "g"
-    sleep 0.2
-    expect {
-      "向N节点" { }
-      timeout { puts "FAIL: g help"; exit 1 }
-    }
-    # 第一次 Esc 退出 jump 模式；间隔 >500ms 避免 pi 双 Esc 检测；
-    # drain 等待输出稳定，确保第二次 Esc 独立（不与其他输入合并）
-    send "\033"
-    sleep 0.7
-    drain 3 60
-    send "\033"
-    sleep 0.5
-  ' 40
-
-  if [[ "$TUI_EXIT_CODE" -eq 0 ]]; then
-    echo "PASS: g help"
-  else
-    echo "FAIL: exit=$TUI_EXIT_CODE"; exit 1
-  fi
-  tui_cleanup
-TEST
-
-test_it "expect: g 输入表达式并跳转（输入收集 + 光标移动）" <<'TEST'
-  # 关键回归：真实终端（可能启用 Kitty keyboard protocol）下，jump 输入必须用
-  # parseKey 解码后的 key 收集。若用原始 data，@~3:user 不会出现在跳转栏 → 跳转静默失败。
-  export MOCK_LLM_REPEAT=25
-  tui_expect_test "pi-session-tree" '
-    set i 1
-    while {$i <= 20} {
-      send "msg $i\r"
-      incr i
-      sleep 1.5
-    }
-    sleep 8
-    send "/custom-session-tree\r"
-    sleep 3
-
-    proc drain {secs max} {
-      set acc ""
-      set n 0
-      expect {
-        -re {.+} {
-          append acc $expect_out(0,string)
-          if {[incr n] >= $max} { return $acc }
-          exp_continue
-        }
-        -timeout $secs timeout { }
-      }
-      return $acc
-    }
-    drain 2 30
-
-    send "g"
-    sleep 0.3
-    expect {
-      "跳转:" { }
-      timeout { puts "FAIL: jump bar not shown"; exit 1 }
-    }
-    # 逐字符发送表达式（真实按键路径，覆盖 Kitty 协议 CSI-u 输入解码）
-    # 断言输入本身（@~3:user 仅出现在跳转栏输入，不受 "跳转: " 与输入间 ANSI 颜色码干扰）
-    send "@~3:user"
-    sleep 0.5
-    expect {
-      "@~3:user" { }
-      timeout { puts "FAIL: jump input not collected"; exit 1 }
-    }
-    # Enter 执行跳转 → 光标滚动到第 3 个 user 消息（msg 18，初始视图外）
-    send "\r"
-    sleep 0.6
-    # 跳转后关闭面板（drain 再 Esc，避免与后续输入合并成 meta 键）
-    drain 3 60
-    send "\033"
-    sleep 0.5
-  ' 40
-
-  if [[ "$TUI_EXIT_CODE" -eq 0 ]]; then
-    # D2 后初始光标在叶子，msg 18 已在初始视口内；断言跳转后光标行（"> " 前缀）落在 msg 18，
-    # 而非仅断言 "msg 18 出现"（那样无法区分跳转前后）。
-    if tui_output_matches "$TUI_OUTPUT_FILE" ">.*msg 18"; then
-      echo "PASS: g jump input + cursor moved to msg 18"
-    else
-      echo "FAIL: cursor did not move to msg 18 (input collected but jump failed)"
-      exit 1
-    fi
-  else
-    echo "FAIL: exit=$TUI_EXIT_CODE"; exit 1
-  fi
-  tui_cleanup
-TEST
-
-test_it "expect: ctrl+x copy shows toast" <<'TEST'
-  # 长树模式：确保面板 focus 就位，ctrl+x 才进入面板触发复制 toast
-  export MOCK_LLM_REPEAT=25
-  tui_expect_test "pi-session-tree" '
-    set i 1
-    while {$i <= 20} {
-      send "msg $i\r"
-      incr i
-      sleep 1.5
-    }
-    sleep 8
-    send "/custom-session-tree\r"
-    sleep 3
-
-    proc drain {secs max} {
-      set acc ""
-      set n 0
-      expect {
-        -re {.+} {
-          append acc $expect_out(0,string)
-          if {[incr n] >= $max} { return $acc }
-          exp_continue
-        }
-        -timeout $secs timeout { }
-      }
-      return $acc
-    }
-    drain 2 30
-
-    send "\x18"
-    sleep 0.2
-    expect {
-      "已复制" { }
-      timeout { puts "FAIL: copy toast"; exit 1 }
-    }
-    # drain 等待输出稳定，确保 Esc 独立（不与其他输入合并）
-    drain 3 60
-    send "\033"
-    sleep 0.5
-  ' 40
-
-  if [[ "$TUI_EXIT_CODE" -eq 0 ]]; then
-    echo "PASS: ctrl+x copy"
-  else
-    echo "FAIL: exit=$TUI_EXIT_CODE"; exit 1
-  fi
-  tui_cleanup
-TEST
-
-test_it "expect: shift+l tag panel opens" <<'TEST'
-  # 长树模式：确保面板 focus 就位，shift+l 才进入面板打开 tag 面板。
-  # 断言锚点用 tag 面板真实渲染文本"类型:"（旧锚点"公式:"在面板中不存在）。
-  # ctrl+l 已让位给 labeled-only 过滤，tag 面板移至 shift+l。
-  export MOCK_LLM_REPEAT=25
-  tui_expect_test "pi-session-tree" '
-    set i 1
-    while {$i <= 20} {
-      send "msg $i\r"
-      incr i
-      sleep 1.5
-    }
-    sleep 8
-    send "/custom-session-tree\r"
-    sleep 3
-
-    proc drain {secs max} {
-      set acc ""
-      set n 0
-      expect {
-        -re {.+} {
-          append acc $expect_out(0,string)
-          if {[incr n] >= $max} { return $acc }
-          exp_continue
-        }
-        -timeout $secs timeout { }
-      }
-      return $acc
-    }
-    drain 2 30
-
-    send "L"
-    sleep 0.3
-    expect {
-      "类型:" { }
-      timeout { puts "FAIL: tag panel"; exit 1 }
-    }
-    # 第一次 Esc 退出 tag 模式；间隔 >500ms 避免 pi 双 Esc 检测；
-    # drain 确保第二次 Esc 独立
-    send "\033"
-    sleep 0.7
-    drain 3 60
-    send "\033"
-    sleep 0.5
-  ' 40
-
-  if [[ "$TUI_EXIT_CODE" -eq 0 ]]; then
-    echo "PASS: shift+l tag panel"
-  else
-    echo "FAIL: exit=$TUI_EXIT_CODE"; exit 1
-  fi
-  tui_cleanup
-TEST
-
-test_it "expect: cursor movement does not duplicate rendering" <<'TEST'
-  # 长树模式：确保面板 focus 就位，方向键才进入面板触发差异渲染
-  export MOCK_LLM_REPEAT=25
-  tui_expect_test "pi-session-tree" '
-    set i 1
-    while {$i <= 20} {
-      send "msg $i\r"
-      incr i
-      sleep 1.5
-    }
-    sleep 8
-    send "/custom-session-tree\r"
-    sleep 3
-
-    # 累积输出辅助：expect_out(buffer) 在 timeout 分支不设置，用循环累积。
-    # max 上限兜底：pi 可能持续输出（状态栏/光标帧），防止 exp_continue 无限循环
-    proc drain {secs max} {
-      set acc ""
-      set n 0
-      expect {
-        -re {.+} {
-          append acc $expect_out(0,string)
-          if {[incr n] >= $max} { return $acc }
-          exp_continue
-        }
-        -timeout $secs timeout { }
-      }
-      return $acc
-    }
-
-    # 丢弃面板打开后的稳定帧（渐进渲染，确保完全稳定）
-    drain 2 30
-
-    # 移动光标 3 次（触发差异渲染，正常应只重写光标行）
-    send "\033\[B"
-    sleep 0.5
-    send "\033\[B"
-    sleep 0.5
-    send "\033\[B"
-    sleep 0.5
-
-    # 捕获移动后的新输出：若出现整树重绘（header 重现）= 重复渲染 bug
-    set new [drain 2 30]
-    set tree_cnt [regexp -all -nocase {会话树} $new]
-    puts "REPAINT_HEADER_COUNT=$tree_cnt"
-    if {$tree_cnt > 0} {
-      puts "FAIL: full re-render on cursor move (header count=$tree_cnt)"
-      exit 1
-    }
-    # 关闭面板后再退出，避免 /quit 被面板吞掉导致 eof 超时
-    send "\033"
-    sleep 0.5
-  ' 45
-
-  if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
-    echo "PASS: cursor movement no duplicate render"
-  else
-    echo "FAIL: exit=$TUI_EXIT_CODE"; exit 1
-  fi
-  tui_cleanup
-TEST
-
-test_it "expect: long tree scroll does not duplicate rendering" <<'TEST'
-  # 长树：25 条消息 → 每条 user+assistant 2 节点 → 50+ 节点，确定性触发滚动路径
-  # 长树：25 条消息 → 50+ 节点稳定树，滚动路径全覆盖（修复前固定 pageSize=20 时短树零覆盖）
-  export MOCK_LLM_REPEAT=25
-  tui_expect_test "pi-session-tree" '
-    # 发 20 条消息构造长会话树（42 节点 > 面板 pageSize，触发滚动；避免 25 条消息导致
-    # agent 处理堆积 → /quit 排队 → pi 不退出 → expect eof 超时后 wait 无超时卡死）
-    set i 1
-    while {$i <= 20} {
-      send "msg $i\r"
-      incr i
-      sleep 1.5
-    }
-    sleep 8
-    send "/custom-session-tree\r"
-    sleep 3
-
-    # 吞帧使焦点稳定在面板（无 drain 时 down 可能落在 editor）
-    proc drain {secs max} {
-      set acc ""
-      set n 0
-      expect {
-        -re {.+} {
-          append acc $expect_out(0,string)
-          if {[incr n] >= $max} { return $acc }
-          exp_continue
-        }
-        -timeout $secs timeout { }
-      }
-      return $acc
-    }
-    drain 2 30
-
-    # 滚动到树中部（50+ 节点 ≈ 3 页，滚 25 行到第 2 页中部）
-    set i 0
-    while {$i < 30} {
-      send "\033\[B"
-      incr i
-      sleep 0.3
-    }
-
-    # 捕获滚动后的新输出：修复后（面板总高 ≤ 视口）滚动是纯 diff，
-    # header（会话树）不应重现；重现 = 整树重绘（fullRender）= 重影 bug
-    set new [drain 2 30]
-    set tree_cnt [regexp -all -nocase {会话树} $new]
-    puts "SCROLL_HEADER_COUNT=$tree_cnt"
-    if {$tree_cnt > 0} {
-      puts "FAIL_MARKER: full re-render on scroll (header count=$tree_cnt)"
-    }
-    # 关闭面板后再退出，避免 /quit 被面板吞掉导致 eof 超时 150s
-    # （修复前 008 依赖 eof 超时 124 兜底 PASS，实际耗时 ~6 分钟）
-    send "\033"
-    sleep 0.5
-  ' 150
-
-  if grep -qa "FAIL_MARKER" "$TUI_OUTPUT_FILE" 2>/dev/null; then
-    echo "FAIL: long tree scroll duplicated rendering"
-    exit 1
-  elif [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
-    echo "PASS: long tree scroll no duplicate render"
   else
     echo "FAIL: exit=$TUI_EXIT_CODE"; exit 1
   fi
@@ -521,22 +125,34 @@ test_it "expect: 91col narrow terminal + active tools scroll ghosting repro (KNO
   tui_cleanup
 TEST
 
-test_it "expect: Esc exits panel back to chat" <<'TEST'
-  # 长树模式：面板 focus 就位需要 agent 完全空闲（多条消息轮转后）。
-  # 消息少时（1-8 条）focus 滞留在 editor，Esc 被 pi 当作 interrupt，
-  # /quit 也进 editor——面板交互从未真正发生，断言全是假阳性。
+test_it "expect: consolidated long-tree panel interactions (single process)" <<'TEST'
+  # ─────────────────────────────────────────────────────────────────────────
+  # 集中方案：8 个长树交互合并到一个 pi 进程，共享一次 20 条消息构造。
+  #
+  # 8 个交互（均需 agent 完全空闲后面板 focus 才就位）：
+  #   01 m+m range / 02 g help / 03 g jump @~3:user / 04 ctrl+x copy
+  #   05 shift+l tag / 06 cursor 移动 / 07 长树滚动 / 08 Esc 退出
+  #
+  # 失败定位约定：
+  #   - 每步 step_begin/step_ok 输出 "STEP_BEGIN/STEP_OK <id> <名称>"
+  #   - 失败统一走 fail proc → "FAIL_MARKER step=<id> reason=<原因>" 后 exit 1
+  #   - 排查入口：grep "FAIL_MARKER" cases/<NNN>-tui-output.log
+  #     （该文件由 tui_expect_test 自动持久化，含完整 expect 输出 + TUI 渲染帧）
+  #   - pi-logger 日志：cases/<NNN>-logs/（扩展自身 error 在此）
+  # ─────────────────────────────────────────────────────────────────────────
   export MOCK_LLM_REPEAT=25
   tui_expect_test "pi-session-tree" '
+    # ── 构造长树（一次）：20 条消息 → 42 节点 > 面板 pageSize，确定性触发滚动 ──
     set i 1
     while {$i <= 20} {
       send "msg $i\r"
       incr i
-      sleep 1.5
+      sleep 0.5
     }
     sleep 8
-    send "/custom-session-tree\r"
-    sleep 3
 
+    # ── 辅助 proc ──
+    # drain：吞帧直到输出停止 secs 秒（或匹配 max 次兜底），返回累积文本
     proc drain {secs max} {
       set acc ""
       set n 0
@@ -550,17 +166,174 @@ test_it "expect: Esc exits panel back to chat" <<'TEST'
       }
       return $acc
     }
-    drain 2 30
+    # fail：统一失败出口，输出可定位的 FAIL_MARKER 后退出
+    proc fail {step reason} {
+      puts "FAIL_MARKER step=$step reason=$reason"
+      exit 1
+    }
+    proc step_begin {id name} { puts "STEP_BEGIN $id $name" }
+    proc step_ok {id name} { puts "STEP_OK $id $name" }
+    # open_panel：打开面板并等渲染稳定（drain 信号代替固定 sleep）
+    proc open_panel {} {
+      send "/custom-session-tree\r"
+      drain 3 30
+    }
+    # close_panel：drain 后 Esc 关面板（避免 Esc 与其他输入合并成 meta 键）
+    proc close_panel {} {
+      drain 3 60
+      send "\033"
+      sleep 0.5
+    }
 
-    # Esc 关闭面板（面板 focus 已就位）
+    # ── 01) m + m range workflow（两下 m 自动进入范围分析）──
+    step_begin "01-range" "m+m range workflow"
+    open_panel
+    send "m"
+    sleep 0.2
+    send "\033\[B"
+    sleep 0.1
+    send "m"
+    sleep 0.3
+    expect {
+      "范围:" { }
+      timeout { fail "01-range" "range footer not shown" }
+    }
+    send "m"
+    sleep 0.3
+    close_panel
+    step_ok "01-range" "m+m range workflow"
+
+    # ── 02) g jump bar help ──
+    step_begin "02-ghelp" "g jump bar help text"
+    open_panel
+    send "g"
+    sleep 0.2
+    expect {
+      "向N节点" { }
+      timeout { fail "02-ghelp" "g jump bar help text not shown" }
+    }
+    send "\033"
+    sleep 0.7
+    drain 3 60
+    send "\033"
+    sleep 0.5
+    step_ok "02-ghelp" "g jump bar help text"
+
+    # ── 03) g jump input @~3:user + 光标移动到 msg 18 ──
+    # 关键回归：真实终端（Kitty keyboard protocol）下 jump 输入必须用 parseKey
+    # 解码后的 key 收集；且跳转后光标应落在第 3 个 user 消息（msg 18）。
+    step_begin "03-jump" "g jump @~3:user + cursor to msg 18"
+    open_panel
+    send "g"
+    sleep 0.3
+    expect {
+      "跳转:" { }
+      timeout { fail "03-jump" "jump bar not shown" }
+    }
+    send "@~3:user"
+    sleep 0.5
+    expect {
+      "@~3:user" { }
+      timeout { fail "03-jump" "jump input not collected (@~3:user)" }
+    }
+    send "\r"
+    sleep 0.6
+    # 断言跳转后光标行（"> " 前缀）落在 msg 18，而非仅断言 "msg 18 出现"
+    # （那样无法区分跳转前后）。先 strip ANSI 颜色码再匹配。
+    set new [drain 2 30]
+    set stripped [regsub -all {\x1b\[[0-9;]*[A-Za-z]} $new ""]
+    if {![regexp {>.*msg 18} $stripped]} {
+      fail "03-jump" "cursor did not move to msg 18 (input collected but jump failed)"
+    }
+    close_panel
+    step_ok "03-jump" "g jump @~3:user + cursor to msg 18"
+
+    # ── 04) ctrl+x copy toast ──
+    step_begin "04-copy" "ctrl+x copy toast"
+    open_panel
+    send "\x18"
+    sleep 0.2
+    expect {
+      "已复制" { }
+      timeout { fail "04-copy" "copy toast not shown" }
+    }
+    close_panel
+    step_ok "04-copy" "ctrl+x copy toast"
+
+    # ── 05) shift+l tag panel ──
+    step_begin "05-tag" "shift+l tag panel"
+    open_panel
+    send "L"
+    sleep 0.3
+    expect {
+      "类型:" { }
+      timeout { fail "05-tag" "tag panel not shown" }
+    }
+    send "\033"
+    sleep 0.7
+    drain 3 60
+    send "\033"
+    sleep 0.5
+    step_ok "05-tag" "shift+l tag panel"
+
+    # ── 06) cursor movement no duplicate render ──
+    # 移动光标 3 次触发差异渲染；若 header（会话树）重现 = 整树重绘 bug
+    step_begin "06-cursor" "cursor movement no duplicate render"
+    open_panel
+    send "\033\[B"
+    sleep 0.5
+    send "\033\[B"
+    sleep 0.5
+    send "\033\[B"
+    sleep 0.5
+    set new [drain 2 30]
+    set cnt [regexp -all -nocase {会话树} $new]
+    if {$cnt > 0} {
+      fail "06-cursor" "full re-render on cursor move (header count=$cnt)"
+    }
+    send "\033"
+    sleep 0.5
+    step_ok "06-cursor" "cursor movement no duplicate render"
+
+    # ── 07) long tree scroll no duplicate render ──
+    # 滚动 30 行到树中部；header 重现 = fullRender = 重影 bug
+    step_begin "07-scroll" "long tree scroll no duplicate render"
+    open_panel
+    set j 0
+    while {$j < 30} {
+      send "\033\[B"
+      incr j
+      sleep 0.3
+    }
+    set new [drain 2 30]
+    set cnt [regexp -all -nocase {会话树} $new]
+    if {$cnt > 0} {
+      fail "07-scroll" "full re-render on scroll (header count=$cnt)"
+    }
+    send "\033"
+    sleep 0.5
+    step_ok "07-scroll" "long tree scroll no duplicate render"
+
+    # ── 08) Esc exits panel ──
+    step_begin "08-esc" "Esc exits panel"
+    open_panel
     send "\033"
     sleep 1
-  ' 30
+    step_ok "08-esc" "Esc exits panel"
+  ' 120
 
+  # bash 层：失败时提取定位信息（FAIL_MARKER + 步骤轨迹 + 末尾可见输出）
   if [[ "$TUI_EXIT_CODE" -eq 0 ]]; then
-    echo "PASS: Esc exit"
+    echo "PASS: consolidated long-tree interactions"
   else
-    echo "FAIL: exit=$TUI_EXIT_CODE"; exit 1
+    echo "FAIL: consolidated interactions exit=$TUI_EXIT_CODE"
+    if [[ -f "$TUI_OUTPUT_FILE" ]]; then
+      echo "  ── 失败定位（步骤轨迹）──"
+      grep -aE "FAIL_MARKER|STEP_BEGIN|STEP_OK" "$TUI_OUTPUT_FILE" | tail -20
+      echo "  ── 末尾 TUI 可见输出 ──"
+      extract_visible_text "$TUI_OUTPUT_FILE" | tail -30
+    fi
+    exit 1
   fi
   tui_cleanup
 TEST
