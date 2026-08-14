@@ -2,7 +2,7 @@
 #
 # smoke.test.sh — pi-rate-limiter e2e tests (using mock LLM)
 #
-# 使用 mock-llm 辅助扩展（test/extensions/pi-rate-limiter/helpers/mock-llm.ts）
+# 使用 mock-llm 辅助扩展（test/e2e/extensions/pi-rate-limiter/helpers/mock-llm.ts）
 # 来模拟 LLM 回复，无需真实 API Key 和网络请求。
 #
 # 关键点：
@@ -53,12 +53,12 @@ setup_sandbox() {
 			;;
 		mock-llm)
 			mkdir -p "$test_home/.pi/extensions/mock-llm"
-			cp "$ROOT_DIR/test/extensions/pi-rate-limiter/helpers/mock-llm.ts" \
+			cp "$ROOT_DIR/test/e2e/extensions/pi-rate-limiter/helpers/mock-llm.ts" \
 				"$test_home/.pi/extensions/mock-llm/index.ts"
 			;;
 		mock-llm-429)
 			mkdir -p "$test_home/.pi/extensions/mock-llm-429"
-			cp "$ROOT_DIR/test/extensions/pi-rate-limiter/helpers/mock-llm-429.ts" \
+			cp "$ROOT_DIR/test/e2e/extensions/pi-rate-limiter/helpers/mock-llm-429.ts" \
 				"$test_home/.pi/extensions/mock-llm-429/index.ts"
 			;;
 		esac
