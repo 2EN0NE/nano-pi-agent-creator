@@ -33,7 +33,23 @@ for pkg in pi-logger pi-config; do
 	fi
 done
 
-# ── 3. 重建原生模块（node-pty） ──
+# ── 3. 安装系统依赖（expect，用于 TUI expect 交互测试） ──
+echo ""
+echo "--- Installing system dependency: expect ---"
+if command -v expect >/dev/null 2>&1; then
+	echo "  expect: already present at $(command -v expect)"
+elif command -v apt-get >/dev/null 2>&1; then
+	if command -v sudo >/dev/null 2>&1; then
+		sudo apt-get update -qq && sudo apt-get install -y -qq expect
+	else
+		apt-get update -qq && apt-get install -y -qq expect
+	fi
+	echo "  expect: installed via apt-get"
+else
+	echo "  WARNING: expect not found and apt-get unavailable; TUI expect tests will fail"
+fi
+
+# ── 4. 重建原生模块（node-pty） ──
 echo ""
 echo "--- Rebuilding native modules ---"
 if npm rebuild node-pty 2>&1; then
@@ -44,7 +60,7 @@ else
 	echo "  WARNING: node-pty rebuild failed (TUI tests will use describe.skip)"
 fi
 
-# ── 4. 安装 pi 全局 ──
+# ── 5. 安装 pi 全局 ──
 echo ""
 echo "--- Installing pi globally ---"
 PIPELINE="${PIPELINE:-latest}"
@@ -52,7 +68,7 @@ npm install -g "@earendil-works/pi-coding-agent@$PIPELINE"
 echo "  pi bin: $(which pi)"
 echo "  pi pkg: $(readlink -f "$(which pi)" | xargs dirname | xargs dirname)"
 
-# ── 5. 链接 @zenone 到全局 pi（兼容 pi 在项目外运行） ──
+# ── 6. 链接 @zenone 到全局 pi（兼容 pi 在项目外运行） ──
 # 非必要：大部分 e2e 测试在项目目录内运行，jiti 通过向上遍历
 # node_modules/@zenone/ 即可解析。但有些场景（如 tui 测试启动
 # 独立 pi 进程 HOME 被隔离），可能找不到项目 node_modules。
@@ -68,7 +84,7 @@ ln -sf "$PWD/node_modules/@zenone/pi-config" "$PI_ZENONE/pi-config" 2>/dev/null 
 	ln -sf "$PWD/extensions/meta/pi-config" "$PI_ZENONE/pi-config"
 echo "  linked: $(ls -la "$PI_ZENONE")"
 
-# ── 6. 清理 ──
+# ── 7. 清理 ──
 echo ""
 echo "--- Cleaning ---"
 rm -rf .pi/tmp/
