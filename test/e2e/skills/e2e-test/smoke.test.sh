@@ -17,7 +17,7 @@ TEST
 
 # ── 用例 2：run-e2e.sh 可执行 ──
 test_it "run-e2e.sh is executable" <<'TEST'
-  if [[ -x "$ROOT_DIR/test/scripts/run-e2e.sh" ]]; then
+  if [[ -x "$ROOT_DIR/test/e2e/scripts/run-e2e.sh" ]]; then
     exit 0
   else
     echo "run-e2e.sh is not executable"
@@ -28,10 +28,10 @@ TEST
 # ── 用例 3：测试目录结构完整 ──
 test_it "test infrastructure directories exist" <<'TEST'
   missing=""
-  [[ -d "$ROOT_DIR/test/extensions" ]] || missing="$missing test/extensions"
-  [[ -d "$ROOT_DIR/test/skills" ]]     || missing="$missing test/skills"
-  [[ -d "$ROOT_DIR/test/scripts" ]]    || missing="$missing test/scripts"
-  [[ -d "$ROOT_DIR/test/results" ]]    || missing="$missing test/results"
+  [[ -d "$ROOT_DIR/test/e2e/extensions" ]] || missing="$missing test/e2e/extensions"
+  [[ -d "$ROOT_DIR/test/e2e/skills" ]]     || missing="$missing test/e2e/skills"
+  [[ -d "$ROOT_DIR/test/e2e/scripts" ]]    || missing="$missing test/e2e/scripts"
+  [[ -d "$ROOT_DIR/test/results" ]]        || missing="$missing test/results"
   if [[ -n "$missing" ]]; then
     echo "Missing directories:$missing"
     exit 1
@@ -41,7 +41,7 @@ TEST
 
 # ── 用例 4：run-e2e.sh --help 输出帮助 ──
 test_it "run-e2e.sh --help prints usage" <<'TEST'
-  output=$(bash "$ROOT_DIR/test/scripts/run-e2e.sh" --help 2>&1 || true)
+  output=$(bash "$ROOT_DIR/test/e2e/scripts/run-e2e.sh" --help 2>&1 || true)
   if echo "$output" | grep -q "Usage"; then
     exit 0
   else
