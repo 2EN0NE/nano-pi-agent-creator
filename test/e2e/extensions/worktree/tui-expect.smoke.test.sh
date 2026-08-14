@@ -67,7 +67,7 @@ TEST
 # ── 测试 4：merge e2e ──
 test_it "expect: default merge via /worktree command" <<'TEST'
   local sandbox test_repo wt_dir wt_name
-  sandbox=$(mktemp -d "/tmp/pi-wt-merge-e2e-$$")
+  sandbox=$(mktemp -d "/tmp/pi-wt-merge-e2e-$$.XXXXXX")
   test_repo="$sandbox/repo"
   mkdir -p "$test_repo"
   git init --initial-branch main "$test_repo" >/dev/null 2>&1
@@ -105,7 +105,7 @@ TEST
 # ── 测试 5：squash merge e2e ──
 test_it "expect: squash merge via /worktree command" <<'TEST'
   local sandbox test_repo wt_dir wt_name
-  sandbox=$(mktemp -d "/tmp/pi-wt-squash-e2e-$$")
+  sandbox=$(mktemp -d "/tmp/pi-wt-squash-e2e-$$.XXXXXX")
   test_repo="$sandbox/repo"
   mkdir -p "$test_repo"
   git init --initial-branch main "$test_repo" >/dev/null 2>&1
@@ -143,7 +143,7 @@ TEST
 # ── 测试 6：rebase+ff e2e ──
 test_it "expect: rebase+ff via /worktree command" <<'TEST'
   local sandbox test_repo wt_dir wt_name
-  sandbox=$(mktemp -d "/tmp/pi-wt-rebaseff-e2e-$$")
+  sandbox=$(mktemp -d "/tmp/pi-wt-rebaseff-e2e-$$.XXXXXX")
   test_repo="$sandbox/repo"
   mkdir -p "$test_repo"
   git init --initial-branch main "$test_repo" >/dev/null 2>&1
