@@ -419,7 +419,7 @@ run_exp_file() {
 
 	# node_modules 链接
 	mkdir -p "$test_home/node_modules"
-	for pkg in pi-logger selector pi-config; do
+	for pkg in pi-logger selector pi-config pi-session-tree; do
 		local pkg_src="$ROOT_DIR/extensions/meta/$pkg"
 		local pkg_dir="$test_home/node_modules/@zenone/$pkg"
 		if [[ -d "$pkg_src" && ! -e "$pkg_dir" ]]; then

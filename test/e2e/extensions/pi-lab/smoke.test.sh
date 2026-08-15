@@ -70,3 +70,24 @@ test_it "works alongside edit extension (experiment auto-registration)" <<'TEST'
   fi
   exit 0
 TEST
+
+test_it "turn_end TAG ingestion co-exists with pi-session-tree without crash" <<'TEST'
+  # 触发真实 turn_end（mock-llm 响应 "hi"），验证 pi-lab 的 turn_end 处理器
+  # （createSessionTreeWithPi → extractLabels → ingest）与 pi-session-tree 的
+  # 自动打标处理器共存不崩溃。
+  run_pi_and_check \
+    --extensions "pi-lab,pi-session-tree" \
+    --prompt "hi" \
+    --expect-no-error
+
+  LOG_DIR="$PI_LOG_DIR"
+  if [[ -d "$LOG_DIR" ]]; then
+    if grep -r "ERROR" "$LOG_DIR" 2>/dev/null | grep -qiE "(pi-lab|pi-session-tree)"; then
+      echo "FAIL: Found ERROR in pi-lab or pi-session-tree logs after turn_end"
+      grep -r "ERROR" "$LOG_DIR" 2>/dev/null | grep -iE "(pi-lab|pi-session-tree)" | head -10
+      exit 1
+    fi
+    echo "PASS: No ERROR after turn_end with pi-lab + pi-session-tree"
+  fi
+  exit 0
+TEST

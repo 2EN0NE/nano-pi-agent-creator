@@ -2,36 +2,55 @@
  * 单个实验实例：select → record → stats
  */
 
-import type { ArmDef, ArmState, BanditStrategy, ContextKeyFn, Outcome } from '../types.js';
+import type {
+	AllocationStrategy,
+	ArmAggregate,
+	ArmDef,
+	ArmState,
+	ContextKeyFn,
+	MetricAggregate,
+	MetricDef,
+	Outcome,
+	QueryResult,
+} from '../types.js';
 import { selectArm, type EpsilonConfig } from './bandit.js';
+import { stableHashAssign } from './allocation.js';
+import { analyzeMetric, projectMetricValue } from './analysis.js';
 import { ExperimentStorage } from './storage.js';
 
 export class Experiment {
 	private _name: string;
-	private _strategy: BanditStrategy;
+	private _strategy: AllocationStrategy;
 	private _arms: ArmDef[];
+	private _metrics: MetricDef[];
 	private _contextKey: ContextKeyFn<any> | string;
 	private _storage: ExperimentStorage;
 	private _forceArmId: string | null = null;
 	private _epsilonConfig?: EpsilonConfig;
+	/** 已摄入的异步信号幂等键（去重，跨 /reload 从事件流重建） */
+	private _dedupKeys = new Set<string>();
+	/** query 结果缓存（事件流变化时失效），避免面板每次 render 重跑蒙特卡洛 */
+	private _queryCache = new Map<string, QueryResult>();
 
 	constructor(
 		name: string,
-		strategy: BanditStrategy,
+		strategy: AllocationStrategy,
 		arms: ArmDef[],
+		metrics: MetricDef[],
 		contextKey: ContextKeyFn<any> | string,
 		epsilonConfig?: EpsilonConfig,
 	) {
 		this._name = name;
 		this._strategy = strategy;
 		this._arms = arms;
+		this._metrics = metrics;
 		this._contextKey = contextKey;
 		this._epsilonConfig = epsilonConfig;
-		this._storage = new ExperimentStorage(
-			name,
-			strategy,
-			arms.map((a) => a.id),
-		);
+		this._storage = new ExperimentStorage(name);
+		// 从已加载事件重建去重集合，保证 /reload 后历史 TAG 不会重复摄入
+		for (const e of this._storage.getEvents()) {
+			if (e.dedupKey) this._dedupKeys.add(e.dedupKey);
+		}
 	}
 
 	// ── 核心 API ──
@@ -40,87 +59,140 @@ export class Experiment {
 		if (this._forceArmId) return this._forceArmId;
 
 		const ctxKey = this._resolveContextKey(context);
-		const states = this._getStates(ctxKey);
 
+		// 默认稳定哈希分桶；bandit（TS/EG）为 opt-in 在线优化
+		if (this._strategy === 'stable-hash') {
+			return stableHashAssign(ctxKey, this._arms);
+		}
+
+		const states = this._getBanditStates(ctxKey);
 		return selectArm(this._strategy, this._armIds(), states, this._epsilonConfig);
 	}
 
 	async record(armId: string, outcome: Outcome, context: unknown): Promise<void> {
 		const ctxKey = this._resolveContextKey(context);
-		const current = this._storage.getArmState(ctxKey, armId) ?? {
-			alpha: 1,
-			beta: 1,
-			firstAttempts: 0,
-			totalCalls: 0,
-			totalLatencyMs: 0,
-		};
-
-		this._storage.updateArmState(ctxKey, armId, {
-			alpha: current.alpha + (outcome.success ? 1 : 0),
-			beta: current.beta + (outcome.success ? 0 : 1),
-			firstAttempts: current.firstAttempts + (outcome.firstAttempt ? 1 : 0),
-			totalCalls: current.totalCalls + 1,
-			totalLatencyMs: current.totalLatencyMs + (outcome.latencyMs ?? 0),
+		this._storage.appendEvent({
+			ts: new Date().toISOString(),
+			armId,
+			ctxKey,
+			metrics: outcome.metrics,
+			metadata: outcome.metadata,
 		});
+		this._queryCache.clear();
+	}
+
+	/**
+	 * 从信号入口写入事件（ingest 用）。
+	 * 与 record 的区别：ctxKey 由 extractor 提供，不再走 contextKey fn 解析。
+	 *
+	 * @returns 是否实际写入（dedupKey 已存在时返回 false，幂等去重）
+	 */
+	appendEvent(event: {
+		armId: string;
+		ctxKey: string;
+		metrics: Record<string, number>;
+		metadata?: Record<string, unknown>;
+		dedupKey?: string;
+	}): boolean {
+		if (event.dedupKey) {
+			if (this._dedupKeys.has(event.dedupKey)) return false;
+			this._dedupKeys.add(event.dedupKey);
+		}
+		this._storage.appendEvent({
+			ts: new Date().toISOString(),
+			armId: event.armId,
+			ctxKey: event.ctxKey,
+			metrics: event.metrics,
+			metadata: event.metadata,
+			dedupKey: event.dedupKey,
+		});
+		this._queryCache.clear();
+		return true;
 	}
 
 	// ── 统计 ──
 
-	async stats(context?: unknown): Promise<Record<string, ArmState>> {
-		if (context !== undefined) {
-			const ctxKey = this._resolveContextKey(context);
-			const map = this._storage.getArmStates(ctxKey);
-			const result: Record<string, ArmState> = {};
-			for (const [id, state] of map) {
-				result[id] = state;
-			}
-			return result;
-		}
+	/** 从事件流投影聚合（每 arm × 每 metric 的 sum/count） */
+	stats(context?: unknown): Record<string, ArmAggregate> {
+		const events =
+			context === undefined
+				? this._storage.getEvents()
+				: this._storage.getEventsByContext(this._resolveContextKey(context));
 
-		// 所有 context 汇总
-		const result: Record<string, ArmState> = {};
+		const result: Record<string, ArmAggregate> = {};
 		for (const arm of this._arms) {
-			let alpha = 1;
-			let beta = 1;
-			let firstAttempts = 0;
-			let totalCalls = 0;
-			let totalLatencyMs = 0;
-
-			for (const ctxKey of this._storage.getContextKeys()) {
-				const state = this._storage.getArmState(ctxKey, arm.id);
-				if (state) {
-					alpha += state.alpha - 1;
-					beta += state.beta - 1;
-					firstAttempts += state.firstAttempts;
-					totalCalls += state.totalCalls;
-					totalLatencyMs += state.totalLatencyMs;
+			const armEvents = events.filter((e) => e.armId === arm.id);
+			const metrics: Record<string, MetricAggregate> = {};
+			for (const m of this._metrics) {
+				let sum = 0;
+				let count = 0;
+				for (const e of armEvents) {
+					// 派生指标走与 query() 相同的投影，避免 stats() 对派生指标恒返回 0
+					const v = projectMetricValue(m, e);
+					if (v !== undefined) {
+						sum += v;
+						count++;
+					}
 				}
+				metrics[m.id] = { sum, count };
 			}
-
-			result[arm.id] = {
-				alpha,
-				beta,
-				firstAttempts,
-				totalCalls,
-				totalLatencyMs,
-			};
+			result[arm.id] = { totalCalls: armEvents.length, metrics };
 		}
 		return result;
 	}
 
-	getContextKeys(): string[] {
-		return this._storage.getContextKeys();
+	/** 返回全部事件（供面板/分析使用） */
+	getEvents() {
+		return this._storage.getEvents();
 	}
 
-	getArmStates(contextKey: string): Map<string, ArmState> {
-		return this._storage.getArmStates(contextKey);
+	/** 对单个 metric 做贝叶斯后验分析（结果缓存，事件流变化时失效） */
+	query(metricId: string, context?: unknown): QueryResult {
+		const metricDef = this._metrics.find((m) => m.id === metricId);
+		if (!metricDef) throw new Error(`未知指标: ${metricId}`);
+		const ctxKey = context === undefined ? '__all__' : this._resolveContextKey(context);
+		const cacheKey = `${metricId}\u0000${ctxKey}`;
+		const cached = this._queryCache.get(cacheKey);
+		if (cached) return cached;
+		const events =
+			ctxKey === '__all__'
+				? this._storage.getEvents()
+				: this._storage.getEventsByContext(ctxKey);
+		const result = analyzeMetric(metricId, metricDef, events, this._armIds());
+		this._queryCache.set(cacheKey, result);
+		return result;
+	}
+
+	/**
+	 * 按已解析的 ctxKey 字符串过滤做分析（不经 contextKey fn 二次解析）。
+	 * 供面板按上下文分桶时用——getContextKeys() 返回的是已解析字符串，
+	 * 若走 query(metricId, ctxKey) 会被函数型 contextKey 二次解析破坏。
+	 */
+	queryByCtxKey(metricId: string, ctxKey: string): QueryResult {
+		const metricDef = this._metrics.find((m) => m.id === metricId);
+		if (!metricDef) throw new Error(`未知指标: ${metricId}`);
+		const cacheKey = `${metricId}\u0000${ctxKey}`;
+		const cached = this._queryCache.get(cacheKey);
+		if (cached) return cached;
+		const events = this._storage.getEventsByContext(ctxKey);
+		const result = analyzeMetric(metricId, metricDef, events, this._armIds());
+		this._queryCache.set(cacheKey, result);
+		return result;
+	}
+
+	getContextKeys(): string[] {
+		const keys = new Set(this._storage.getEvents().map((e) => e.ctxKey));
+		return Array.from(keys);
 	}
 
 	getInfo() {
 		return {
 			name: this._name,
+			strategy: this._strategy,
+			arms: this._arms,
+			metrics: this._metrics,
 			forceArmId: this._forceArmId,
-			...this._storage.getInfo(),
+			loadWarning: this._storage.getLoadWarning(),
 		};
 	}
 
@@ -130,9 +202,28 @@ export class Experiment {
 		this._forceArmId = armId;
 	}
 
+	/**
+	 * 原地更新实验定义（演进场景：同 owner 同 name 口径变化）。
+	 * 不重建 storage——保留内存事件与 JSONL 数据，仅替换口径字段并失效 forceArm/缓存。
+	 */
+	updateDef(
+		strategy: AllocationStrategy,
+		arms: ArmDef[],
+		metrics: MetricDef[],
+		contextKey: ContextKeyFn<any> | string,
+	): void {
+		this._strategy = strategy;
+		this._arms = arms;
+		this._metrics = metrics;
+		this._contextKey = contextKey;
+		this._forceArmId = null;
+		this._queryCache.clear();
+	}
+
 	async reset(): Promise<void> {
-		this._storage.resetAll();
-		await this._storage.flush();
+		await this._storage.reset();
+		this._dedupKeys.clear();
+		this._queryCache.clear();
 	}
 
 	async flush(): Promise<void> {
@@ -155,7 +246,29 @@ export class Experiment {
 		return this._contextKey;
 	}
 
-	private _getStates(ctxKey: string): Map<string, ArmState> {
-		return this._storage.getArmStates(ctxKey);
+	/** 从事件流投影 bandit 状态，target = 第一个非护栏、非派生的 binary metric */
+	private _getBanditStates(ctxKey: string): Map<string, ArmState> {
+		const target = this._metrics.find(
+			(m) => m.type === 'binary' && !m.isGuardrail && !m.derived,
+		);
+		const events = this._storage.getEventsByContext(ctxKey);
+
+		const map = new Map<string, ArmState>();
+		for (const arm of this._arms) {
+			const armEvents = events.filter((e) => e.armId === arm.id);
+			let alpha = 1;
+			let beta = 1;
+			if (target) {
+				for (const e of armEvents) {
+					const v = e.metrics[target.id];
+					if (v !== undefined) {
+						if (v >= 0.5) alpha++;
+						else beta++;
+					}
+				}
+			}
+			map.set(arm.id, { alpha, beta, totalCalls: armEvents.length });
+		}
+		return map;
 	}
 }

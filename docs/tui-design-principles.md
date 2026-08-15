@@ -348,6 +348,11 @@ if (matchesKey(data, Key.ctrlShift('o'))) {
 - 分隔：`'├' + '─'.repeat(n) + '┤'`
 - 底部：`'└' + '─'.repeat(n) + '┘'`
 
+**补充规则（无左右竖线的上下边框面板，如 pi-lab）：**
+
+1. **顶部边框写插件名**：`┌── pi-lab ──────┐`，插件名居中于顶部边框线，名字两边各空一格。用 `dim`/`muted` 色弱化名字（终端 TUI 无法改字号，用颜色弱化替代「小一号」的视觉诉求）。
+2. **中间分隔线左右缩进**：区分 header/footer 的横向分隔线左右各缩进 1 字符（`' ' + '─'.repeat(n) + ' '`），使其与 `┌┐└┘` 框的横线对齐——否则全宽横线视觉上比边框线宽出 2 个字符。
+
 ### 7.2 DynamicBorder 使用
 
 对于 Container 组件，使用 Pi 内置的 `DynamicBorder`：
@@ -369,19 +374,26 @@ for (let i = 0; i < padCount; i++) {
 }
 ```
 
-### 7.4 公共 TUI 辅助模块
+### 7.4 公共 TUI 辅助模块（建议参考，非强制）
 
-项目提供了 `src/tui/helpers.ts` 供各 TUI 面板复用，包含：
+项目提供 `src/tui/helpers.ts` 供 TUI 面板**参考**，包含：
 
-| 导出                              | 用途                                                      |
-| --------------------------------- | --------------------------------------------------------- |
-| `colLayout(opts)`                 | 两列布局描述（列宽计算 + 行渲染），替代手动 `padEnd` 拼接 |
-| `divider(width, fn)`              | accent 色全宽分隔线                                       |
-| `dimDivider(width, fn)`           | dim 色全宽分隔线                                          |
-| `checkAlignment(lines, sep, tol)` | 离线对齐检测（测试用）                                    |
+| 导出                              | 用途                              |
+| --------------------------------- | --------------------------------- |
+| `colLayout(opts)`                 | 两列布局描述（列宽计算 + 行渲染） |
+| `divider(width, fn)`              | accent 色全宽分隔线               |
+| `dimDivider(width, fn)`           | dim 色全宽分隔线                  |
+| `checkAlignment(lines, sep, tol)` | 离线对齐检测（测试用）            |
 
-详细 API 文档与使用示例见 [`docs/tui-helpers.md`](tui-helpers.md)。  
-新建 TUI 面板时优先使用上述工具，避免重复实现。
+详细 API 文档与使用示例见 [`docs/tui-helpers.md`](tui-helpers.md)。
+
+> ⚠️ **本模块为「建议参考」，非强制。** 当前实现存在已知局限，使用前需评估：
+>
+> - `colLayout` 的 `padEnd` 基于 `String.length`，**含 ANSI 转义（如 `theme.fg()` 输出）的左列会错位**，需调用方自行用 `visibleWidth` 保证对齐；仅适合纯文本两列。
+> - `colLayout` 的默认分隔符 `sep` 硬编码 ANSI（`\x1b[2m`），不随主题变化，与 5.3「禁止硬编码颜色」相悖。
+> - `divider` / `dimDivider` 实现相同，颜色完全由传入的 `fn` 决定，名字仅作语义提示。
+>
+> 面板若左列带主题色或需要严格对齐，优先自行用 `visibleWidth` 实现，不必强行套用本模块。
 
 ---
 

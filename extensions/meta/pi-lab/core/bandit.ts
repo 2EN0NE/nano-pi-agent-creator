@@ -28,32 +28,35 @@ export function getRNG(): () => number {
 // ============================================================================
 
 /**
+ * 从 Gamma(shape, scale=1) 采样（Marsaglia-Tsang 拒绝采样 + shape<1 的乘法扩张）。
+ * 供 bandit 的 Beta 采样与 analysis 的 Poisson-Gamma 后验采样复用。
+ */
+export function sampleGamma(shape: number): number {
+	// shape 极小时 Math.pow(u, 1/shape) 溢出，直接兜底
+	if (shape < 0.001) return 1;
+	if (shape < 1) {
+		const u = _rng();
+		return sampleGamma(shape + 1) * u ** (1 / shape);
+	}
+	const d = shape - 1 / 3;
+	const c = 1 / Math.sqrt(9 * d);
+	while (true) {
+		const x = normalSample();
+		const v = 1 + c * x;
+		if (v <= 0) continue;
+		const v3 = v * v * v;
+		const u = _rng();
+		if (u < 1 - 0.0331 * (x * x) * (x * x)) return d * v3;
+		if (Math.log(u) < 0.5 * x * x + d * (1 - v3 + Math.log(v3))) return d * v3;
+	}
+}
+
+/**
  * 从 Beta(α, β) 分布采样。
  * 使用 Gamma 近似：Beta(α, β) ≈ Gamma(α,1) / (Gamma(α,1) + Gamma(β,1))
  */
-function sampleBeta(alpha: number, beta: number): number {
+export function sampleBeta(alpha: number, beta: number): number {
 	if (alpha <= 0 && beta <= 0) return _rng();
-
-	function sampleGamma(shape: number): number {
-		// shape 极小时 Math.pow(u, 1/shape) 溢出，直接兜底
-		if (shape < 0.001) return 1;
-		if (shape < 1) {
-			const u = _rng();
-			return sampleGamma(shape + 1) * Math.pow(u, 1 / shape);
-		}
-		const d = shape - 1 / 3;
-		const c = 1 / Math.sqrt(9 * d);
-		while (true) {
-			const x = normalSample();
-			const v = 1 + c * x;
-			if (v <= 0) continue;
-			const v3 = v * v * v;
-			const u = _rng();
-			if (u < 1 - 0.0331 * (x * x) * (x * x)) return d * v3;
-			if (Math.log(u) < 0.5 * x * x + d * (1 - v3 + Math.log(v3))) return d * v3;
-		}
-	}
-
 	return sampleGamma(alpha) / (sampleGamma(alpha) + sampleGamma(beta));
 }
 
@@ -131,7 +134,7 @@ export function selectArm(
 	states: Map<string, ArmState>,
 	epsilonConfig?: EpsilonConfig,
 ): string {
-	if (armIds.length === 0) throw new Error('No arms available');
+	if (armIds.length === 0) throw new Error('无可用实验臂');
 	if (armIds.length === 1) return armIds[0];
 
 	switch (strategy) {
@@ -140,7 +143,7 @@ export function selectArm(
 		case 'epsilon-greedy':
 			return epsilonGreedyPick(armIds, states, epsilonConfig);
 		default:
-			throw new Error(`Unknown strategy: ${strategy}`);
+			throw new Error(`未知分流策略: ${strategy}`);
 	}
 }
 

@@ -19,6 +19,9 @@ import { getExperimentManager as _getExperimentManager } from './core/manager.js
 export const ExperimentManager = _ExperimentManager;
 export const getExperimentManager = _getExperimentManager;
 export type {
+	AllocationStrategy,
+	ArmAggregate,
+	ArmAnalysis,
 	ArmDef,
 	ArmState,
 	BanditStrategy,
@@ -26,6 +29,18 @@ export type {
 	ContextKeyFn,
 	ExperimentAPI,
 	ExperimentDef,
+	ExperimentEvent,
+	GuardrailAlert,
+	IngestionSource,
+	MetricAggregate,
+	MetricDef,
+	MetricType,
 	Outcome,
+	QueryResult,
 	RegistrationSource,
+	SignalExtractor,
 } from './types.js';
+
+// 信号入口 adapter 与 label 解析（纯函数）
+export { logExtractor, parseSignalLabel, tagExtractor } from './core/ingestion.js';
+export type { IngestedEvent, TaggedNode } from './core/ingestion.js';

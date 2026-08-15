@@ -1,207 +1,337 @@
-# @zenone/pi-lab — 实验框架 (Experiment / A/B Testing Framework)
+# @zenone/pi-lab — 实验框架（Experiment / A/B Testing）
 
-## 设计缘起
-
-本框架从 edit 工具的实现策略对比需求出发，抽象为通用的多臂老虎机实验框架。
-框架本身不绑定任何具体场景，只提供：**分配臂 → 收集反馈 → 更新策略状态** 三件事。
-
-未来可复用于模型切换策略选择、compaction 策略选择等场景。
-
-## 核心设计决策（2025-07 讨论记录）
-
-### 架构分层
-
-```
-@zenone/pi-lab (meta 元插件)
-  │  registerExperiment({ name, arms, strategy })
-  │  select(name, ctx) → armId
-  │  record(name, armId, outcome)
-  ▼
-消费方插件（edit / model-switcher 等）
-  │  注册实验 → 每次 execute 时 select → 按结果执行 → record
-```
-
-### 关键决策清单
-
-| #   | 决策              | 结论                                                                          | 理由                                                 |
-| --- | ----------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------- |
-| 1   | 架构分层          | 框架层 (@zenone/pi-lab) + 消费层 (edit 等)                                    | 分离关注点，复用决策引擎                             |
-| 2   | AB 连接方式       | **配置注册式** — 消费方注册 arm + 执行函数，框架只路由                        | 框架中立，不侵入业务语义                             |
-| 3   | 工具切换方式      | **单工具内部 dispatch** — 不碰 `setActiveTools`                               | 避免与 tools.ts / preset.ts 冲突                     |
-| 4   | 与 tools.ts 关系  | 实验模块不碰工具切换 API                                                      | tools.ts 的 tool_call handler 有硬阻断，冲突不可调和 |
-| 5   | 与 preset.ts 关系 | **独立**，不依赖 preset                                                       | preset 是用户主动选择，实验是数据驱动，两层正交      |
-| 6   | select 调用时机   | **每次 execute 都选**（Thompson Sampling 每步独立采样）                       | 收敛速度快；Pi 的 tool call 之间无会话内相关         |
-| 7   | Arm 函数签名      | `() => Promise<unknown>` — 通过闭包捕获依赖                                   | 框架零类型依赖，消费方最灵活                         |
-| 8   | Outcome 维度      | **多维**：success, firstAttempt, latencyMs, errorType, cost, contextFootprint | 覆盖业界 LLM 可观测性 5 层信号                       |
-| 9   | 贝叶斯更新信号    | 仅用 `success`（binary）做 Beta-Bernoulli 更新                                | 保持数学单纯，其他维度存 metadata                    |
-| 10  | 存储模型          | 每个实验一个 JSON 文件，`extensions-data/pi-lab/<experiment>.json`            | 无锁竞争，易查看，易删除                             |
-| 11  | 写入策略          | 内存增量更新 + debounced 写盘 (2s) + shutdown flush                           | 平衡 I/O 与数据安全                                  |
-| 12  | /experiment 面板  | TUI 面板：当前 session / 全局 双 tab；子视图含参数设置、统计、重置            | 参考 pi-plugins-manager 风格，无左右竖线边框         |
-| 13  | 重置安全          | 面板只提示 "高风险操作，手动删除 xxx 文件夹下的数据"                          | 不提供一键清空按钮                                   |
-| 14  | 状态栏            | `                                                                             | lab:off`(dim) /`                                     | lab:collecting`(无着色) /` | lab:switched`(高亮) | 用户随时感知实验状态 |
-
-### Outcome 接口设计（参考 Langfuse / LangSmith / Arize Phoenix）
-
-```
-Tier 1: 核心 — success (驱动贝叶斯更新)
-Tier 2: 质量 — firstAttempt, latencyMs, errorType
-Tier 3: 成本 — totalTokens, costUsd (预留)
-Tier 4: 上下文影响 — contextFootprintBytes, compactionTriggered (Pi 特有)
-Tier 5: 调试 — errorMessage, metadata (不入 bandit 数学)
-```
-
-### 存储格式示例
-
-```json
-// ~/.pi/agent/extensions-data/pi-lab/edit-matching.json
-{
-	"version": 1,
-	"strategy": "thompson-sampling",
-	"arms": ["classic", "row-script"],
-	"models": {
-		"anthropic:claude-sonnet-4-5": {
-			"classic": {
-				"alpha": 42,
-				"beta": 3,
-				"firstAttempts": 38,
-				"totalCalls": 45,
-				"totalLatencyMs": 12500
-			},
-			"row-script": {
-				"alpha": 18,
-				"beta": 7,
-				"firstAttempts": 10,
-				"totalCalls": 25,
-				"totalLatencyMs": 14200
-			}
-		}
-	}
-}
-```
-
-### 实验框架与 preset/tools 的协作边界
-
-```
-preset.ts          ─── 用户主动选择工具集
-                         │
-tools.ts           ─── 用户/工具管理工具的启用/禁用
-                         │  (tool_call handler 硬阻断)
-                         ▼
-pi.setActiveTools() ─── Pi 运行时
-                         │
-edit 工具内部       ─── pi-lab.select('edit-strategy')
-                         │  返回 arm ID，edit 内部 dispatch
-                         ▼
-classicImpl() / rowScriptImpl()
-```
-
-**pi-lab 不碰任何 setActiveTools / \__toolsApi 调用。** 它只回答一个问题：这次用哪个策略？
+> 一个不绑定具体场景的多臂实验框架：**分配臂 → 收集反馈 → 出分析结论**。
+> 它不做「切换决策」——切换归消费方（如 smart-context），它只做「结论的镜子」。
 
 ---
 
-## 消费方接入指南
+## 快速上手（30 秒看懂怎么用）
 
-### 接入方式
+一个实验的完整生命周期只有四步：
 
-消费方插件按与 pi-lab 的耦合强度分两种方式接入：
+```typescript
+// ① 注册实验（必须在 session_start 中，消除加载顺序竞险）
+pi.on('session_start', async (_event, ctx) => {
+	const mgr = (globalThis as any).__labApi?.getExperimentManager?.();
+	if (!mgr) return; // pi-lab 不可用 → 静默降级
 
-| 方式                 | API                                                                                         | 耦合         | package.json 依赖                         | 优先级 |
-| -------------------- | ------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------- | ------ |
-| **弱依赖（方案 A）** | `registerWeakExperiment()` — 通过 `globalThis.__labApi` 桥接                                | 不引入包依赖 | 不需要                                    | 低     |
-| **强依赖（方案 B）** | `registerStrongExperiment()` — 直接 `import { getExperimentManager } from '@zenone/pi-lab'` | 引入包依赖   | `"@zenone/pi-lab": "file:../meta/pi-lab"` | 高     |
+	const exp = mgr.registerWeakExperiment({
+		owner: 'edit', // 注册方身份 key（必填）——同 owner 同 name 视为同一逻辑实验
+		name: 'edit-strategy',
+		contextKey: (ctx) => `${ctx.model?.provider}:${ctx.model?.id}`, // 分桶键
+		arms: [
+			{ id: 'classic', label: '精确匹配' },
+			{ id: 'row-script', label: '模糊匹配' },
+		],
+		metrics: [{ id: 'match_success', type: 'binary', direction: 'maximize' }],
+	});
+	// 异 owner 撞名被阻断时返回 undefined → 判空降级
+	labSelect = exp ? (ctx) => exp.select(ctx) : undefined; // 保存 select 引用供后续用
+});
+
+// ② 每次执行时选臂（返回 armId）
+const armId = await labSelect(ctx);
+
+// ③ 上报信号（三种方式，见下节「信号入口」）
+log.info(`[pi-lab-signal] arm=${armId} metric=match_success value=1 ctx=${ctxKey}`);
+
+// ④ 打开 /lab 面板看结论（胜出概率 / 可信区间 / 护栏告警）
+```
+
+打开 `/lab` 面板即可看到每个实验的贝叶斯分析结论。
+
+---
+
+## 信号入口：三种上报方式怎么选
+
+pi-lab 支持三种上报 metric 的方式，各有适用场景：
+
+| 入口                | 用法                                                       | 适用场景                                                                    | 用户感知 |
+| ------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------- | -------- |
+| **`record()` 直报** | `exp.record(armId, { metrics: {...} }, ctx)`               | 消费方需即时读取统计反馈、或需要 `metadata` 关联调试信息                    | 无感知   |
+| **会话树 TAG**      | 用户在会话中打标签 `armId:metricId:value`                  | **用户显式反馈**——类似 Web 实验里「用户反馈采纳信号」，用户主动打标表达偏好 | 显式参与 |
+| **pi-logger 日志**  | `log.info('[pi-lab-signal] arm=... metric=... value=...')` | **静默自动上报**——工具执行结果等无需用户感知的信号（如 edit 工具）          | 无感知   |
+
+### 三种方式详解
+
+**① record() 直报（同步 API）**
+
+```typescript
+await exp.record('classic', { metrics: { match_success: 1, latency_ms: 42 } }, ctx);
+```
+
+最直接，但要求消费方持有 `ExperimentAPI` 引用（`select` 本来就要持有）。
+
+**② 会话树 TAG（用户显式反馈）**
+
+用户在会话里给节点打标签，格式 `armId:metricId:value`（如 `row-script:helpful:1`）。
+pi-lab 在 `turn_end` 时从会话树自动采集。
+
+适合：需要用户**主动表达反馈**的场景（如「这个策略好不好用」），类似 Web 实验的用户反馈按钮。
+**smart-context 这类涉及用户体验的选择，适合用会话树。**
+
+**③ pi-logger 日志（静默自动上报）**
+
+```typescript
+log.info(
+	`[pi-lab-signal] arm=${armId} metric=match_success value=${success ? 1 : 0} ctx=${ctxKey}`,
+);
+```
+
+pi-lab 通过订阅 pi-logger 事件实时采集（无需轮询文件、无重复）。
+适合：工具执行结果等**静默自动上报**的信号。
+**edit 这类工具内部策略对比，适合用日志（用户无感知）。**
+
+> ⚠️ 日志行格式必须匹配：`[pi-lab-signal] arm=<armId> metric=<metricId> value=<value> [ctx=<ctxKey>]`
+> 其中 `ctx` 可选（缺省 `global`），`value` 为数字。
+
+---
+
+## 指标定义
+
+### 基础指标
+
+```typescript
+metrics: [
+	{
+		id: 'match_success',
+		type: 'binary',
+		direction: 'maximize',
+		description: '精确匹配是否命中（1=命中，0=未命中）',
+	}, // 是/否
+	{
+		id: 'latency_ms',
+		type: 'continuous',
+		direction: 'minimize',
+		description: '编辑耗时（毫秒，越低越好）',
+	}, // 数值
+	{ id: 'tool_calls', type: 'count', direction: 'maximize' }, // 计数
+	{ id: 'error_rate', type: 'binary', direction: 'minimize', isGuardrail: true }, // 护栏：只告警不选赢家
+];
+```
+
+- `type`：`binary` / `continuous` / `count`，对应 Beta / 正态 / Poisson-Gamma 贝叶斯后验
+- `direction`：`maximize`（越大越好）/ `minimize`（越小越好）
+- `isGuardrail`：护栏指标，不参与选赢家，只在 arm 显著更差时告警
+- `description`（可选）：人话描述，`/lab` 面板统计视图在指标 id 下方展示，帮助理解指标含义（派生指标同样适用）
+
+### 派生指标（声明式复合）
+
+复合评分是消费方的领域逻辑，pi-lab 提供两个原语而非硬编码，**在 `query()` 时按声明投影计算**（改权重可回溯重算历史）：
+
+```typescript
+metrics: [
+	{ id: 'first_attempt', type: 'binary', direction: 'maximize' },
+	{ id: 'latency_ms', type: 'continuous', direction: 'minimize' },
+	{
+		id: 'quality_score',
+		type: 'continuous',
+		direction: 'maximize',
+		derived: {
+			kind: 'weighted-sum', // 加权和
+			components: [
+				{ metricId: 'first_attempt', weight: 0.8 },
+				{ metricId: 'latency_ms', weight: 0.2 },
+			],
+		},
+	},
+	{
+		id: 'any_error',
+		type: 'binary',
+		direction: 'minimize',
+		derived: { kind: 'any-fail', components: [{ metricId: 'e1' }, { metricId: 'e2' }] }, // 任一失败
+	},
+];
+```
+
+- `weighted-sum`：`Σ(weight × 源metric值)`，源值仍由消费方 `record()` 直报
+- `any-fail`：任一源 metric ≥ 0.5 视为 fail（1），否则 0
+
+---
+
+## 分配策略
+
+| 策略                  | 说明                                                 | 何时用                                           |
+| --------------------- | ---------------------------------------------------- | ------------------------------------------------ |
+| `stable-hash`（默认） | 稳定哈希分桶，同一 ctxKey 恒定分到同一 arm，默认等权 | **默认**，适合 AB 测试（流量均分、可做统计检验） |
+| `thompson-sampling`   | 在线多臂老虎机，自动倾斜流量给赢家                   | opt-in，适合在线优化（代价：破坏统计有效性）     |
+| `epsilon-greedy`      | ε 概率探索，其余贪心                                 | opt-in，同上                                     |
+
+```typescript
+registerWeakExperiment({
+ owner: 'edit', // 必填
+ name: 'edit-strategy',
+ contextKey: ...,
+ arms: [{ id: 'classic', label: '...', weight: 1 }, { id: 'row-script', label: '...', weight: 1 }],
+ strategy: 'thompson-sampling', // 默认 stable-hash
+ ...
+})
+```
+
+> `weight` 仅 `stable-hash` 分桶时生效，控制 arm 间流量比例。
+
+---
+
+## 消费方接入（强弱依赖 + 两条铁律）
+
+| 方式                 | API                                                     | 耦合       |
+| -------------------- | ------------------------------------------------------- | ---------- |
+| **弱依赖（方案 A）** | `globalThis.__labApi` 桥接，不 import 包                | 低         |
+| **强依赖（方案 B）** | `import { getExperimentManager } from '@zenone/pi-lab'` | 引入包依赖 |
 
 ### 两条铁律
 
-#### ① 注册必须在 `session_start` 中
+1. **注册必须在 `session_start` 中**——禁止在模块工厂函数顶层注册（消除加载顺序竞险，确保 `__labApi` 就绪）。
+2. **消费方必须自行降级**——pi-lab 不阻塞消费方启动；`__labApi` 缺失时用兜底行为（如 edit 回退 classic）。
 
-**禁止在模块工厂函数中注册实验。** 必须推迟到 `session_start` 事件处理器中。
+### 注册身份与冲突裁决
 
-原因：
+pi-lab 以 `(owner, name)` 二元组识别逻辑实验身份，注册裁决三分支：
 
-- 消除加载顺序竞险（`edit` → `pi-lab` 的字母序问题）
-- 确保所有扩展已加载，`globalThis.__labApi` 已就绪
-- 确保证册时有 `ctx` 可用，冲突时可推送 UI 通知
+| 场景                       | 结果                                                           |
+| -------------------------- | -------------------------------------------------------------- |
+| 全新注册                   | 返回新 API                                                     |
+| 同 owner 同 name，口径未变 | 幂等重声明，静默复用已存在实验                                 |
+| 同 owner 同 name，口径变化 | 原地更新定义 + `warn` 告警（含历史数据口径不一致的副作用说明） |
+| 异 owner 同 name           | 硬冲突（`error` + UI 通知），阻断后注册者并返回 `undefined`    |
 
-```typescript
-// ✅ 正确：方案 A（弱依赖）— 在 session_start 中注册
-pi.on('session_start', async (_event, ctx) => {
-  const lab = (globalThis as any).__labApi?.getExperimentManager?.();
-  if (!lab) {
-    log.warn('pi-lab not available — running without experiment');
-    return;
-  }
-  const exp = lab.registerWeakExperiment({
-    name: 'edit-strategy',
-    contextKey: (ctx) => `${ctx.model?.provider ?? 'unknown'}:${ctx.model?.id ?? 'unknown'}`,
-    arms: [
-      { id: 'classic', label: 'Exact text matching' },
-      { id: 'row-script', label: 'Fuzzy line matching' },
-    ],
-    strategy: 'thompson-sampling',
-  });
-  // 保存 select/record 引用供后续 tool execute 使用
-  labSelect = () => exp.select();
-  labRecord = (armId, outcome) => exp.record(armId, outcome);
-});
+- `owner` 为必填字段，消费方自行决定其命名/层级语义（插件名、或编码 user/project 级别）。
+- 撞名是配置错误而非竞争——后注册者被阻断，请改实验名或统一 owner。
 
-// ✅ 正确：方案 B（强依赖）— 在 session_start 中注册
-import { getExperimentManager } from '@zenone/pi-lab';
+---
 
-export default function (pi: ExtensionAPI) {
-  let labSelect: (() => Promise<string>) | undefined;
-  let labRecord: ((armId: string, outcome: any) => Promise<void>) | undefined;
+## /lab 面板使用教程
 
-  pi.on('session_start', async (_event, ctx) => {
-    const mgr = getExperimentManager();
-    const exp = mgr.registerStrongExperiment({
-      name: 'edit-strategy',
-      arms: [...],
-      strategy: 'thompson-sampling',
-    });
-    labSelect = () => exp.select();
-    labRecord = (armId, outcome) => exp.record(armId, outcome);
-    ctx.ui.notify('edit-strategy experiment active', 'info');
-  });
-}
+命令 `/lab` 打开实验面板。**面板是「看结论」的地方**——实验由消费方插件（如 edit）自动注册，数据在后台累积。
+
+### 面板结构
+
+```
+┌── pi-lab ────────────────────┐
+  当前会话    全局              ← Tab 栏（Tab 键切换）
+ ───────────────────────────────
+  edit-strategy (stable-hash)   ← 实验名 + 分流策略
+    精确匹配 vs 模糊匹配          ← 两个 arm 的说明
+→ 统计                          ← 菜单（↑↓ 移动，⏎ 选中）
+  设置
+  重置
+ ───────────────────────────────
+  Tab/⇧Tab 切标签 · ↑↓ 导航 · ⏎ 确认 · esc 关闭
+└──────────────────────────────┘
 ```
 
-#### ② 消费方必须自行处理降级
+### 三个菜单项
 
-pi-lab **不阻塞**消费方的启动。如果 pi-lab 不可用（未安装/加载失败），消费方必须自己提供兜底行为。
+| 菜单     | 用途                     | 里面看什么                              |
+| -------- | ------------------------ | --------------------------------------- |
+| **统计** | 看贝叶斯分析结论         | 每个 arm 的后验均值、可信区间、胜出概率 |
+| **设置** | 强制固定某 arm（调试用） | 选 arm 或「(自动)」                     |
+| **重置** | 清空实验数据             | 取消 / 确认清空                         |
 
-| 反馈级别 | 行为                               | 适用场景                                       |
-| -------- | ---------------------------------- | ---------------------------------------------- |
-| `silent` | 静默降级，无提示                   | 有完善兜底方案的插件（如 edit 回退到 classic） |
-| `warn`   | pi-logger 日志 + 如有 UI 则 notify | 有降级但希望用户知情                           |
-| `block`  | 不允许使用（当前不实现）           | 预留                                           |
+### 统计视图怎么读
 
-### 冲突裁决
+面板已经帮你把贝叶斯术语「翻译」成人话。选中「统计」后：
 
-同名实验冲突时按以下规则处理：
+```
+  edit-strategy stable-hash
+  指标: match_success  [< > 切换]
+  精确匹配是否命中（1=命中，0=未命中）     ← 指标描述（声明时写 description）
 
-| 已有注册 | 新来注册 | 结果                                          |
-| -------- | -------- | --------------------------------------------- |
-| 强（B）  | 弱（A）  | 阻断 A — 静默丢弃 + 日志 + UI 通知            |
-| 弱（A）  | 强（B）  | 覆盖 A — 强实验接管 + 日志 + UI 通知          |
-| 同级     | 同级     | 后注册覆盖先注册（last-wins）+ 日志 + UI 通知 |
+  cli-proxy-api:deepseek-v4-pro          ← 「按模型」tab：每个模型一个桶
+    模糊行匹配: 预估成功率 96.1%（74 次）真实约 92%~100%
+    精确匹配: 暂无数据
+  · 精确匹配 暂无样本，两策略暂时无法对比    ← 自动解读（人话结论）
+  · 稳定分流会把同一模型固定分到一侧，换不同模型编辑即可让另一侧分到流量
+  · 想看整体对比，按 Tab 切到「汇总」
+```
 
-冲突时框架自动记录 pi-logger `warn` 日志，并在有 `ctx` 的上下文中通过 `ctx.ui.notify()` 推送通知到 TUI。
+三行数据怎么读：
 
-### API 入口
+| 展示               | 含义                                                                                           |
+| ------------------ | ---------------------------------------------------------------------------------------------- |
+| `预估成功率 96.1%` | 贝叶斯估计的成功率。**不是简单准确率**，已含「1 成功 + 1 失败」的平滑，避免小样本时虚假的 100% |
+| `（74 次）`        | 样本量。判断结论可不可靠的关键——样本越少越要谨慎                                               |
+| `真实约 92%~100%`  | 95% 可信区间：真实成功率大概落在这个范围                                                       |
 
-| API                             | 用途                        | 说明                       |
-| ------------------------------- | --------------------------- | -------------------------- |
-| `getExperimentManager()`        | 获取 ExperimentManager 单例 | 方案 B 通过 import 使用    |
-| `registerStrongExperiment(def)` | 注册强依赖实验              | 优先级高，不会被弱依赖覆盖 |
-| `registerWeakExperiment(def)`   | 注册弱依赖实验              | 优先级低，可能被强依赖覆盖 |
-| `select(name, ctx?)`            | 选择臂                      | 返回 armId                 |
-| `record(name, armId, outcome)`  | 记录反馈                    | 更新贝叶斯统计             |
-| `forceArm(name, armId)`         | 强制固定臂                  | 调试用                     |
-| `getExperiment(name)`           | 获取实验 API                | 用于查看统计               |
+底部 `·` 开头的**自动解读**是重点，它直接用人话告诉你：
 
-### 完整设计文档
+- 谁明显更优（两臂都有足够数据时才下结论，用强调色）
+- 两臂无显著差距（继续观察）
+- 样本还少（结论仅供参考）
+- **单臂无数据时**：解释「稳定分流把同一模型固定分到一侧」，并提示换模型编辑、或切「汇总」
 
-详细的设计决策、冲突裁决原理、pi-lab 与 preset/tools 的协作边界见：
+多个 metric 时按 `→` 切换查看下一个，`←` 返回菜单。
 
-- `docs/adr/0003-pi-lab-extension-registration-mechanism.md` — 注册机制 ADR
-- `CONTEXT.md` — 领域词汇表
+### 当前会话 vs 全局（关键）
+
+| Tab          | 含义                                         | 什么时候看                     |
+| ------------ | -------------------------------------------- | ------------------------------ |
+| **当前会话** | 按 contextKey **分桶**展示（每个模型一个桶） | 想知道「特定模型下哪个策略好」 |
+| **全局**     | 所有 contextKey **合并**看整体               | 想知道「整体哪个策略好」       |
+
+edit 的 contextKey 是 `provider:model`，所以「当前会话」里每个模型一行，如：
+
+```
+  anthropic:claude-sonnet-4-5
+    classic: 95.0  ... 胜率=98%
+```
+
+### 完整使用流程
+
+1. 用 edit 工具编辑几次文件（触发选臂 + 日志上报）
+2. 输入 `/lab` 打开面板
+3. 看到 `edit-strategy` 实验 → `⏎` 进入 → 选中「统计」→ `⏎`
+4. 看 classic vs row-script 的胜率
+5. 想按模型看 → `Tab` 切「当前会话」
+6. `Esc` 关闭
+
+### 键盘速查
+
+| 按键                | 作用                      |
+| ------------------- | ------------------------- |
+| `Tab` / `⇧Tab`      | 切换 当前会话 ↔ 全局      |
+| `↑` / `↓`           | 菜单/列表上下移动         |
+| `⏎`                 | 选中当前项                |
+| `←`（或 Backspace） | 返回上一级                |
+| `→`                 | 统计视图切换下一个 metric |
+| `Esc`               | 关闭面板                  |
+
+### 常见困惑
+
+- **看不到实验**：实验由消费方（如 edit）在 `session_start` 注册。若消费方插件没加载，面板是空的。
+- **看到实验但「暂无数据」**：还没累积数据。先实际用 edit 编辑几次，再回来看。
+- **数据在哪个 tab**：edit 的数据按 model 分桶，在「当前会话」tab 的 model 桶下；「全局」是合并视图。
+- **状态栏**：`|lab:关闭/采集中/已切换` 随时反映实验状态（强制固定 arm 后显示「已切换」）。
+
+---
+
+## API 参考
+
+| API                                                             | 用途                                                            |
+| --------------------------------------------------------------- | --------------------------------------------------------------- |
+| `registerStrongExperiment(def)` / `registerWeakExperiment(def)` | 注册实验，返回 `ExperimentAPI`（异 owner 撞名返回 `undefined`） |
+| `ExperimentAPI.select(ctx)`                                     | 选臂，返回 armId                                                |
+| `ExperimentAPI.record(armId, outcome, ctx)`                     | 直报信号（同步）                                                |
+| `ExperimentAPI.stats(ctx?)`                                     | 聚合统计（sum/count）                                           |
+| `ExperimentAPI.query(metricId, ctx?)`                           | 贝叶斯后验分析结论                                              |
+| `ExperimentAPI.forceArm(armId)`                                 | 强制固定臂（调试）                                              |
+| `ExperimentAPI.reset()`                                         | 清空数据                                                        |
+| `registerIngestionSource(name, extractor)`                      | 注册自定义信号源（扩展点）                                      |
+
+---
+
+## 存储
+
+每实验一个 JSONL 文件（`extensions-data/pi-lab/<experiment>.jsonl`），append-only 事件流，每行一条 outcome 事件。聚合/分析在 `query()` 时从事件流投影计算，可回溯重算、可分段。
+
+## 完整设计文档
+
+- `docs/adr/0003-pi-lab-extension-registration-mechanism.md` — 注册机制
+- `docs/adr/0016-pi-lab-registration-owner-identity.md` — 注册身份模型与三语义裁决
+- `docs/adr/0008-pi-lab-measurement-analysis-positioning.md` — 测量/分析定位（bandit → opt-in）
+- `docs/adr/0009-pi-lab-metric-abstraction.md` — 指标抽象 + 派生指标
+- `docs/adr/0010-pi-lab-bayesian-inference.md` — 贝叶斯后验
+- `docs/adr/0011-pi-lab-jsonl-event-stream.md` — JSONL 事件流
+- `docs/adr/0012-pi-lab-ingestion-sources.md` — 信号入口（TAG/日志）
+- `docs/adr/0013-pi-lab-traffic-allocation.md` — 流量分配
+- `docs/adr/0014-pi-lab-panel-conclusion-display.md` — 面板结论展示

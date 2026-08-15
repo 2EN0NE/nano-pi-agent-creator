@@ -99,27 +99,9 @@ test_it "expect: works with edit extension in TUI mode [REVIEW]" <<'TEST'
   mark_for_review "检查 TUI 中两个扩展同时加载时的显示效果：状态栏、面板交互"
 TEST
 
-test_it "expect: panel renders two-column layout elements [REVIEW]" <<'TEST'
+test_it "expect: panel renders single-column box border [REVIEW]" <<'TEST'
   local WIDTH=100
-  tui_expect_test "pi-lab,tui-layout-helper" '
-    send "/lab\r"
-    sleep 3
-  ' 15 $WIDTH
-
-  if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
-    echo "PASS: TUI mode with pi-lab+helper exited cleanly (code=$TUI_EXIT_CODE)"
-  else
-    echo "FAIL: exit code $TUI_EXIT_CODE"
-    exit 1
-  fi
-
-  tui_cleanup
-  mark_for_review "人工 /reload 验证：输入 /lab 后应出现两列面板（命名空间 | 实验），竖线 │ 连续无断"
-TEST
-
-test_it "expect: vertical bar alignment detection logic [REVIEW]" <<'TEST'
-  local WIDTH=100
-  tui_expect_test "pi-lab,tui-layout-helper" '
+  tui_expect_test "pi-lab" '
     send "/lab\r"
     sleep 3
   ' 15 $WIDTH
@@ -127,36 +109,13 @@ test_it "expect: vertical bar alignment detection logic [REVIEW]" <<'TEST'
   local raw_file="$TUI_TEST_HOME/visible.txt"
   extract_visible_text "$TUI_OUTPUT_FILE" > "$raw_file"
 
-  local bar_lines
-  bar_lines=$(grep -n '│' "$raw_file" 2>/dev/null || true)
-
-  if [[ -z "$bar_lines" ]]; then
-    echo "PASS: No crash, alignment must be verified manually"
+  # 新面板为单列布局，顶部/底部为 ┌─┐ / └─┘ 框（无旧版左右竖线 │）
+  if grep -q '┌' "$raw_file" 2>/dev/null && grep -q '└' "$raw_file" 2>/dev/null; then
+    echo "PASS: top/bottom box border rendered (┌ / └)"
   else
-    local -a positions=()
-    while IFS=: read -r lno line; do
-      local pos
-      pos=$(echo "$line" | awk '{print index($0, "│")}')
-      [[ "$pos" -gt 0 ]] && positions+=("$pos")
-    done <<<"$bar_lines"
-
-    local n=${#positions[@]}
-    if [[ $n -ge 2 ]]; then
-      local first=${positions[0]}
-      for ((i=1; i<n; i++)); do
-        local diff=$((positions[i] - first))
-        [[ $diff -lt 0 ]] && diff=$((-diff))
-        if [[ $diff -gt 1 ]]; then
-          echo "NOTE: bar positions differ by $diff (pre-existing panel alignment issue)"
-          echo "WARN: Vertical bars not perfectly aligned"
-        fi
-      done
-      echo "PASS: $n lines │ aligned within 1 column"
-    else
-      echo "PASS: Only $n bar line(s), no alignment issue possible"
-    fi
+    echo "WARN: box border not detected, verify manually"
   fi
 
   tui_cleanup
-  mark_for_review "人工验证竖线对齐：/lab → 两列布局中 │ 列位置一致"
+  mark_for_review "人工验证单列面板：/lab 应出现顶部 ┌── pi-lab ──┐ 框、统计/设置/重置菜单、底部 └─┘ 框，无旧版两列竖线 │"
 TEST
