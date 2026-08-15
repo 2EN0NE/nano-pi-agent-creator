@@ -87,7 +87,11 @@ export class TuiRunner {
 		// 3. 设置 HOME 为隔离沙箱的 home
 		const isolatedHome = path.join(this.sandbox, 'home');
 
-		// 4. 创建 PTY 并启动 pi（使用 resolvePiBin 获取完整路径避免 posix_spawnp 找不到）
+		// 4. 在沙箱根目录创建 git 仓库供 worktree 扩展使用（必须先于 spawn，
+		//    否则 worktree 的 session_start 会穿透到真实项目仓库）
+		this.createGitRepo();
+
+		// 5. 创建 PTY 并启动 pi（使用 resolvePiBin 获取完整路径避免 posix_spawnp 找不到）
 		const piBin = resolvePiBin();
 		this.pty = spawn(piBin, ['-a'], {
 			name: 'xterm-256color',
@@ -99,48 +103,44 @@ export class TuiRunner {
 				HOME: isolatedHome,
 				CI: 'true',
 				PI_TUI_WRITE_LOG: this.writeLogPath,
+				// 跳过 fd/rg 网络下载，消除「命令在启动完成前被吞」的竞态窗口（问题 A）
+				PI_OFFLINE: '1',
+				// 阻断 git 向上穿透 sandbox（问题 B 兜底，git init 失败时避免误操作真实仓库）
+				GIT_CEILING_DIRECTORIES: this.sandbox,
 				// 固定终端大小防止 resize 事件干扰
 				COLUMNS: String(this.options.columns),
 				LINES: String(this.options.rows),
 			} as { [key: string]: string },
 		});
 
-		// 5. 收集 PTY 输出
+		// 6. 收集 PTY 输出
 		this.pty.onData((data: string) => {
 			this.rawOutput += data;
 		});
 
-		// 6. 在沙箱中创建 git 仓库供 worktree 扩展使用
-		this.createGitRepo();
-
-		// 7. 等待 pi 就绪（TUI 状态栏出现）
+		// 7. 等待 pi 就绪（TUI 状态栏出现 + 命令处理器就绪）
 		await this.waitForReady();
 		this.started = true;
 	}
 
 	/**
-	 * 在沙箱中初始化 git 仓库（供 worktree 扩展使用）
+	 * 在沙箱根目录初始化 git 仓库（供 worktree 扩展使用）。
 	 *
-	 * worktree 扩展使用 discoverRepos() 查找仓库，逻辑是：
-	 * 1. findHubRoot(cwd): 向上查找含 AGENTS.md / hub.config.ts 的目录
-	 * 2. 如果找到 hub root，扫描其直接子目录中带 .git 的作为 repos
-	 * 3. 如果没找到 hub root，检查 cwd 本身是否 git repo
-	 *
-	 * 因此要创建：sandbox/AGENTS.md 作为 hub root，sandbox/test-repo/ 作为 git repo
+	 * worktree 扩展的 getRepoRoot(cwd) 通过 `git rev-parse --git-common-dir`
+	 * 从 cwd 向上查找 .git。必须让 sandbox 根目录本身成为 git 仓库，否则会向上
+	 * 穿透到真实项目仓库（问题 B：sandbox 位于真实仓库的 .pi/tmp 内）。
 	 */
 	private createGitRepo(): void {
 		try {
-			// 创建 AGENTS.md 使 sandbox 成为 hub root
+			// 创建 AGENTS.md 使 sandbox 成为 hub root（阻止 pi 的 hub 检测向上穿透）
 			fs.writeFileSync(path.join(this.sandbox, 'AGENTS.md'), '# test hub\n');
 
-			// 创建 test-repo 作为 hub root 的 git 子仓库
-			const repoDir = path.join(this.sandbox, 'test-repo');
-			fs.mkdirSync(repoDir, { recursive: true });
-			execSync('git init --initial-branch main -q', { cwd: repoDir, timeout: 5000 });
-			fs.writeFileSync(path.join(repoDir, 'README.md'), '# test\n');
-			execSync('git add README.md', { cwd: repoDir, timeout: 5000 });
+			// 以 sandbox 根目录作为 git 仓库，使 getRepoRoot(sandbox) 命中沙箱本身
+			execSync('git init --initial-branch main -q', { cwd: this.sandbox, timeout: 5000 });
+			fs.writeFileSync(path.join(this.sandbox, 'README.md'), '# test\n');
+			execSync('git add README.md', { cwd: this.sandbox, timeout: 5000 });
 			execSync('git commit -m init -q', {
-				cwd: repoDir,
+				cwd: this.sandbox,
 				timeout: 5000,
 				env: {
 					...process.env,
@@ -156,7 +156,16 @@ export class TuiRunner {
 	}
 
 	/**
-	 * 等待 TUI 就绪（检测状态栏分隔符或模型名）
+	 * 等待 TUI 就绪。
+	 *
+	 * 分两阶段：
+	 *   1. 等状态栏渲染（UI 已挂载）。
+	 *   2. 等命令处理器就绪（setupEditorSubmitHandler）。
+	 *
+	 * pi 在启动早期把 editor.onSubmit 设为 handleStartupSubmit，此窗口内任何
+	 * 提交都会被吞掉并显示 "Startup is still in progress"；直到 ensureTool(fd/rg)
+	 * 完成后才替换为真正的处理器。状态栏信号在窗口早期就渲染，不能代表命令可处理，
+	 * 因此用「空提交探测」确认处理器已就绪：空提交被吞则仍处启动窗口。
 	 */
 	private async waitForReady(): Promise<void> {
 		const deadline = Date.now() + this.options.startTimeout;
@@ -166,19 +175,32 @@ export class TuiRunner {
 			/\(auto\)/, // auto 模式
 		];
 
+		// 阶段 1：等状态栏渲染
 		while (Date.now() < deadline) {
-			// 检查 write-log（包含所有 TUI 输出）
-			const log = this.readWriteLog();
-			for (const pattern of readyPatterns) {
-				if (pattern.test(log)) {
-					return; // 就绪
-				}
-			}
+			if (readyPatterns.some((p) => p.test(this.readWriteLog()))) break;
 			await this.sleep(100);
+		}
+		if (Date.now() >= deadline) {
+			throw new Error(
+				`TUI did not become ready within ${this.options.startTimeout}ms.\n` +
+					`Last PTY output (1000 chars): ${this.rawOutput.slice(-1000)}`,
+			);
+		}
+
+		// 阶段 2：等命令处理器就绪（空提交探测）
+		while (Date.now() < deadline) {
+			const marker = this.readWriteLog().length;
+			this.pty!.write('\r'); // 空提交：真处理器直接返回，启动处理器会显示提示
+			await this.sleep(250);
+			const tail = stripAnsi(this.readWriteLog().slice(marker));
+			if (!tail.includes('Startup is still in progress')) {
+				return; // 命令处理器已就绪
+			}
+			await this.sleep(250);
 		}
 
 		throw new Error(
-			`TUI did not become ready within ${this.options.startTimeout}ms.\n` +
+			`TUI command handler did not become ready within ${this.options.startTimeout}ms.\n` +
 				`Last PTY output (1000 chars): ${this.rawOutput.slice(-1000)}`,
 		);
 	}
