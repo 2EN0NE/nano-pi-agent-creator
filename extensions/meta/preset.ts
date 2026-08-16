@@ -376,11 +376,25 @@ export default function presetExtension(pi: ExtensionAPI) {
 	}
 
 	log.debug('registerShortcut');
-	pi.registerShortcut(Key.ctrlShift('u'), {
-		description: 'Cycle presets',
-		handler: async (ctx) => {
-			await cyclePreset(ctx);
-		},
+	async function handleCyclePreset(ctx: any): Promise<void> {
+		await cyclePreset(ctx);
+	}
+	// session_start 时注册（消除加载顺序竞险：hub 在所有扩展工厂函数执行后才挂载）
+	pi.on('session_start', () => {
+		const shortcutHub = (globalThis as any).__shortcutsApi;
+		if (shortcutHub?.register) {
+			shortcutHub.register({
+				name: 'preset',
+				keys: ['p'],
+				description: '循环切换 preset',
+				handler: handleCyclePreset,
+			});
+		} else {
+			pi.registerShortcut(Key.ctrlShift('u'), {
+				description: '循环切换 preset',
+				handler: handleCyclePreset,
+			});
+		}
 	});
 
 	// Register /preset command

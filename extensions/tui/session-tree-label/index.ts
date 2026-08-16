@@ -5,7 +5,7 @@
  *       /label b (或 /label bad)   → BAD
  *       /label                    → 查看当前标签
  *
- * 快捷键：alt+. → 激活标签模式，显示提示，按 g/b 标记
+ * 快捷键：leader-key 子键 `l`（无 pi-shortcuts 时降级为 alt+.）→ 激活标签模式，显示提示，按 g/b 标记
  *
  * 标签写入会话 JSONL，/tree 中可视化展示，也可在 /tree 中编辑。
  *
@@ -232,56 +232,71 @@ export default function sessionTreeLabel(pi: ExtensionAPI): void {
 	//  快捷键：ctrl+g → 激活标签模式
 	//  使用 registerShortcut（不拦截普通 Esc/tree）
 	// ═══════════════════════════════════════════════════
-	pi.registerShortcut(config.leaderKey as Parameters<typeof pi.registerShortcut>[0], {
-		description: `标签模式: ${buildHint(config.labels)}`,
-		handler: async (ctx: ExtensionContext) => {
-			if (!ctx.hasUI) return;
+	async function handleLabelMode(ctx: ExtensionContext): Promise<void> {
+		if (!ctx.hasUI) return;
 
-			const leafId = ctx.sessionManager.getLeafId();
-			if (!leafId) return;
+		const leafId = ctx.sessionManager.getLeafId();
+		if (!leafId) return;
 
-			// 显示已有标签和提示
-			const existing = ctx.sessionManager.getLabel(leafId);
-			const hint = buildHint(config.labels);
-			if (existing) {
-				ctx.ui.notify(`当前: ${existing} | ${hint}`, 'info');
-			} else {
-				ctx.ui.notify(`无标签 | ${hint}`, 'info');
-			}
-			ctx.ui.setStatus('session-tree-label', ctx.ui.theme.fg('dim', `|${hint}`));
+		// 显示已有标签和提示
+		const existing = ctx.sessionManager.getLabel(leafId);
+		const hint = buildHint(config.labels);
+		if (existing) {
+			ctx.ui.notify(`当前: ${existing} | ${hint}`, 'info');
+		} else {
+			ctx.ui.notify(`无标签 | ${hint}`, 'info');
+		}
+		ctx.ui.setStatus('session-tree-label', ctx.ui.theme.fg('dim', `|${hint}`));
 
-			let cleaned = false;
-			const clean = () => {
-				if (cleaned) return;
-				cleaned = true;
-				clearTimeout(timer);
-				ctx.ui.setStatus('session-tree-label', undefined);
-				unsub();
-			};
+		let cleaned = false;
+		const clean = () => {
+			if (cleaned) return;
+			cleaned = true;
+			clearTimeout(timer);
+			ctx.ui.setStatus('session-tree-label', undefined);
+			unsub();
+		};
 
-			const timer = setTimeout(() => {
+		const timer = setTimeout(() => {
+			clean();
+		}, config.timeout);
+
+		const unsub = ctx.ui.onTerminalInput((data: string) => {
+			// Esc / Ctrl+C → 取消
+			if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c'))) {
 				clean();
-			}, config.timeout);
+				return { consume: true };
+			}
 
-			const unsub = ctx.ui.onTerminalInput((data: string) => {
-				// Esc / Ctrl+C → 取消
-				if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c'))) {
+			// 匹配标签
+			for (const lc of config.labels) {
+				if (matchesKey(data, lc.key as Parameters<typeof matchesKey>[1])) {
+					applyLabelToLeaf(ctx, lc);
 					clean();
 					return { consume: true };
 				}
+			}
 
-				// 匹配标签
-				for (const lc of config.labels) {
-					if (matchesKey(data, lc.key as Parameters<typeof matchesKey>[1])) {
-						applyLabelToLeaf(ctx, lc);
-						clean();
-						return { consume: true };
-					}
-				}
+			// 不匹配的键 → 消耗但不退出（防止误输入）
+			return { consume: true };
+		});
+	}
 
-				// 不匹配的键 → 消耗但不退出（防止误输入）
-				return { consume: true };
+	// session_start 时注册（消除加载顺序竞险：hub 在所有扩展工厂函数执行后才挂载）
+	pi.on('session_start', () => {
+		const shortcutHub = (globalThis as any).__shortcutsApi;
+		if (shortcutHub?.register) {
+			shortcutHub.register({
+				name: 'session-tree-label',
+				keys: ['l'],
+				description: `标签模式: ${buildHint(config.labels)}`,
+				handler: handleLabelMode,
 			});
-		},
+		} else {
+			pi.registerShortcut(config.leaderKey as Parameters<typeof pi.registerShortcut>[0], {
+				description: `标签模式: ${buildHint(config.labels)}`,
+				handler: handleLabelMode,
+			});
+		}
 	});
 }

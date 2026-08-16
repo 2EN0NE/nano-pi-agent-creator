@@ -309,15 +309,33 @@ export default function widgetWranglerExtension(pi: ExtensionAPI) {
 		default: 'ctrl+shift+g',
 	});
 
-	const shortcutKey = String(pi.getFlag('widget-wrangler-key') ?? '').trim();
-	if (shortcutKey) {
-		pi.registerShortcut(shortcutKey as Parameters<ExtensionAPI['registerShortcut']>[0], {
-			description: '打开小组件管理面板',
-			handler: async (ctx) => {
-				await openPanel(ctx);
-			},
-		});
-	}
+	// session_start 时注册（消除加载顺序竞险：hub 在所有扩展工厂函数执行后才挂载）
+	pi.on('session_start', () => {
+		const shortcutHub = (globalThis as any).__shortcutsApi;
+		if (shortcutHub?.register) {
+			shortcutHub.register({
+				name: 'widget-wrangler',
+				keys: ['w'],
+				description: '打开小组件管理面板',
+				handler: async (ctx: any) => {
+					await openPanel(ctx);
+				},
+			});
+		} else {
+			const shortcutKey = String(pi.getFlag('widget-wrangler-key') ?? '').trim();
+			if (shortcutKey) {
+				pi.registerShortcut(
+					shortcutKey as Parameters<ExtensionAPI['registerShortcut']>[0],
+					{
+						description: '打开小组件管理面板',
+						handler: async (ctx) => {
+							await openPanel(ctx);
+						},
+					},
+				);
+			}
+		}
+	});
 
 	pi.on('session_start', (_event, ctx) => {
 		if (!ctx.hasUI) return;

@@ -646,8 +646,21 @@ export default function (pi: ExtensionAPI) {
 		handler: (_args, ctx) => answerHandler(ctx),
 	});
 
-	pi.registerShortcut('ctrl+.', {
-		description: 'Extract and answer questions',
-		handler: answerHandler,
+	// session_start 时注册（消除加载顺序竞险：hub 在所有扩展工厂函数执行后才挂载）
+	pi.on('session_start', () => {
+		const shortcutHub = (globalThis as any).__shortcutsApi;
+		if (shortcutHub?.register) {
+			shortcutHub.register({
+				name: 'answer',
+				keys: ['a'],
+				description: '提取并解答最后一条回复的问题',
+				handler: answerHandler,
+			});
+		} else {
+			pi.registerShortcut('ctrl+.', {
+				description: '提取并解答最后一条回复的问题',
+				handler: answerHandler,
+			});
+		}
 	});
 }

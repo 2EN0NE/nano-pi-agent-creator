@@ -297,13 +297,27 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerShortcut('ctrl+shift+z', {
-		description: 'Toggle resource tree panel expand/collapse',
-		handler: (ctx) => {
-			log.debug('toggleCollapsed fired', {
-				collapsed: state.widgetCollapsed,
+	function handleToggleResourceTree(ctx: any): void {
+		log.debug('toggleCollapsed fired', {
+			collapsed: state.widgetCollapsed,
+		});
+		toggleCollapsed(ctx);
+	}
+	// session_start 时注册（消除加载顺序竞险：hub 在所有扩展工厂函数执行后才挂载）
+	pi.on('session_start', () => {
+		const shortcutHub = (globalThis as any).__shortcutsApi;
+		if (shortcutHub?.register) {
+			shortcutHub.register({
+				name: 'resources-tree',
+				keys: ['r'],
+				description: '展开/收起资源树面板',
+				handler: handleToggleResourceTree,
 			});
-			toggleCollapsed(ctx);
-		},
+		} else {
+			pi.registerShortcut('ctrl+shift+z', {
+				description: '展开/收起资源树面板',
+				handler: handleToggleResourceTree,
+			});
+		}
 	});
 }

@@ -1,0 +1,25 @@
+{
+	"name": "@zenone/pi-shortcuts",
+	"version": "0.1.0",
+	"description": "快捷键中心 — leader-key 前缀模式，集中管理扩展快捷键的注册、分发与冲突裁决",
+	"type": "module",
+	"main": "./api.ts",
+	"exports": {
+		".": {
+			"import": "./api.ts"
+		}
+	},
+	"keywords": [
+		"pi-extension",
+		"shortcut",
+		"keybinding",
+		"leader-key"
+	],
+	"dependencies": {
+		"@zenone/pi-logger": "file:../pi-logger",
+		"@zenone/pi-config": "file:../pi-config"
+	},
+	"devDependencies": {
+		"typescript": "^7.0.2"
+	}
+}

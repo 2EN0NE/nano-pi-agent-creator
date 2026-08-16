@@ -567,19 +567,33 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerShortcut('ctrl+shift+p', {
-		description: 'Open prompt assembly panel',
-		handler: async (ctx) => {
-			const cmdCtx = ctx as ExtensionCommandContext;
-			const options = cmdCtx.getSystemPromptOptions?.();
-			if (!options) {
-				if (ctx.hasUI) {
-					ctx.ui.notify('System prompt options not available', 'warning');
-				}
-				return;
+	async function handleOpenPromptPanel(ctx: any): Promise<void> {
+		const cmdCtx = ctx as ExtensionCommandContext;
+		const options = cmdCtx.getSystemPromptOptions?.();
+		if (!options) {
+			if (ctx.hasUI) {
+				ctx.ui.notify('System prompt options not available', 'warning');
 			}
-			await showPromptPanel(pi, cmdCtx, options);
-		},
+			return;
+		}
+		await showPromptPanel(pi, cmdCtx, options);
+	}
+	// session_start 时注册（消除加载顺序竞险：hub 在所有扩展工厂函数执行后才挂载）
+	pi.on('session_start', () => {
+		const shortcutHub = (globalThis as any).__shortcutsApi;
+		if (shortcutHub?.register) {
+			shortcutHub.register({
+				name: 'prompt-editor',
+				keys: ['e'],
+				description: '打开 prompt 组装面板',
+				handler: handleOpenPromptPanel,
+			});
+		} else {
+			pi.registerShortcut('ctrl+shift+p', {
+				description: '打开 prompt 组装面板',
+				handler: handleOpenPromptPanel,
+			});
+		}
 	});
 
 	// Log system prompt structure at session start (for debugging)

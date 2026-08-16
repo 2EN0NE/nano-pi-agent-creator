@@ -9,7 +9,7 @@
  * 快捷键：
  *   ctrl+shift+o — 浏览会话中引用的文件
  *   ctrl+shift+f — 在 Finder 中显示最近引用的文件
- *   ctrl+shift+r — Quick Look 最近引用的文件
+ *   ctrl+shift+r — 快速预览最近引用的文件
  */
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -347,91 +347,121 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerShortcut('ctrl+shift+o', {
-		description: '浏览会话中引用的文件',
-		handler: async (ctx) => {
-			log.info('快捷键 ctrl+shift+o 触发：打开文件浏览器');
-			await runFileBrowser(pi, ctx);
-		},
-	});
+	// ── 快捷键注册（pi-shortcuts 中心优先，缺失回退降级键） ──
+	async function handleOpenBrowser(ctx: ExtensionContext): Promise<void> {
+		log.info('快捷键触发：打开文件浏览器');
+		await runFileBrowser(pi, ctx);
+	}
 
-	pi.registerShortcut('ctrl+shift+f', {
-		description: '在 Finder 中显示最近引用的文件',
-		handler: async (ctx) => {
-			log.info('快捷键 ctrl+shift+f 触发：reveal 最新文件引用');
-			const entries = ctx.sessionManager.getBranch();
-			const latest = findLatestFileReference(entries, ctx.cwd);
+	async function handleReveal(ctx: ExtensionContext): Promise<void> {
+		log.info('快捷键触发：reveal 最新文件引用');
+		const entries = ctx.sessionManager.getBranch();
+		const latest = findLatestFileReference(entries, ctx.cwd);
 
-			if (!latest) {
-				log.warn('ctrl+shift+f 未找到会话中的文件引用');
-				ctx.ui.notify('No file reference found in the session', 'warning');
-				return;
-			}
+		if (!latest) {
+			log.warn('未找到会话中的文件引用');
+			ctx.ui.notify('No file reference found in the session', 'warning');
+			return;
+		}
 
-			const canonical = toCanonicalPath(latest.path);
-			if (!canonical) {
-				log.warn('ctrl+shift+f 引用的文件不存在', {
-					路径: latest.display,
-				});
-				ctx.ui.notify(`File not found: ${latest.display}`, 'error');
-				return;
-			}
-
-			log.debug('ctrl+shift+f reveal 文件', { 路径: latest.display });
-			await revealPath(pi, ctx, {
-				canonicalPath: canonical.canonicalPath,
-				resolvedPath: canonical.canonicalPath,
-				displayPath: latest.display,
-				exists: true,
-				isDirectory: canonical.isDirectory,
-				gitRoot: undefined,
-				inRepo: false,
-				isTracked: false,
-				isReferenced: true,
-				hasSessionChange: false,
-				lastTimestamp: 0,
-			});
-		},
-	});
-
-	pi.registerShortcut('ctrl+shift+r', {
-		description: 'Quick Look 最近引用的文件',
-		handler: async (ctx) => {
-			log.info('快捷键 ctrl+shift+r 触发：Quick Look 最新文件引用');
-			const entries = ctx.sessionManager.getBranch();
-			const latest = findLatestFileReference(entries, ctx.cwd);
-
-			if (!latest) {
-				log.warn('ctrl+shift+r 未找到会话中的文件引用');
-				ctx.ui.notify('No file reference found in the session', 'warning');
-				return;
-			}
-
-			const canonical = toCanonicalPath(latest.path);
-			if (!canonical) {
-				log.warn('ctrl+shift+r 引用的文件不存在', {
-					路径: latest.display,
-				});
-				ctx.ui.notify(`File not found: ${latest.display}`, 'error');
-				return;
-			}
-
-			log.debug('ctrl+shift+r Quick Look 文件', {
+		const canonical = toCanonicalPath(latest.path);
+		if (!canonical) {
+			log.warn('引用的文件不存在', {
 				路径: latest.display,
 			});
-			await quickLookPath(pi, ctx, {
-				canonicalPath: canonical.canonicalPath,
-				resolvedPath: canonical.canonicalPath,
-				displayPath: latest.display,
-				exists: true,
-				isDirectory: canonical.isDirectory,
-				gitRoot: undefined,
-				inRepo: false,
-				isTracked: false,
-				isReferenced: true,
-				hasSessionChange: false,
-				lastTimestamp: 0,
+			ctx.ui.notify(`File not found: ${latest.display}`, 'error');
+			return;
+		}
+
+		log.debug('reveal 文件', { 路径: latest.display });
+		await revealPath(pi, ctx, {
+			canonicalPath: canonical.canonicalPath,
+			resolvedPath: canonical.canonicalPath,
+			displayPath: latest.display,
+			exists: true,
+			isDirectory: canonical.isDirectory,
+			gitRoot: undefined,
+			inRepo: false,
+			isTracked: false,
+			isReferenced: true,
+			hasSessionChange: false,
+			lastTimestamp: 0,
+		});
+	}
+
+	async function handleQuickLook(ctx: ExtensionContext): Promise<void> {
+		log.info('快捷键触发：Quick Look 最新文件引用');
+		const entries = ctx.sessionManager.getBranch();
+		const latest = findLatestFileReference(entries, ctx.cwd);
+
+		if (!latest) {
+			log.warn('未找到会话中的文件引用');
+			ctx.ui.notify('No file reference found in the session', 'warning');
+			return;
+		}
+
+		const canonical = toCanonicalPath(latest.path);
+		if (!canonical) {
+			log.warn('引用的文件不存在', {
+				路径: latest.display,
 			});
-		},
+			ctx.ui.notify(`File not found: ${latest.display}`, 'error');
+			return;
+		}
+
+		log.debug('Quick Look 文件', {
+			路径: latest.display,
+		});
+		await quickLookPath(pi, ctx, {
+			canonicalPath: canonical.canonicalPath,
+			resolvedPath: canonical.canonicalPath,
+			displayPath: latest.display,
+			exists: true,
+			isDirectory: canonical.isDirectory,
+			gitRoot: undefined,
+			inRepo: false,
+			isTracked: false,
+			isReferenced: true,
+			hasSessionChange: false,
+			lastTimestamp: 0,
+		});
+	}
+
+	// session_start 时注册（消除加载顺序竞险：pi-shortcuts 的 __shortcutsApi 在所有扩展工厂函数执行后才挂载）
+	pi.on('session_start', () => {
+		const shortcutHub = (globalThis as any).__shortcutsApi;
+		if (shortcutHub?.register) {
+			shortcutHub.register({
+				name: 'files',
+				keys: ['f', 'o'],
+				description: '浏览会话中引用的文件',
+				handler: handleOpenBrowser,
+			});
+			shortcutHub.register({
+				name: 'files',
+				keys: ['f', 'r'],
+				description: '在 Finder 中显示最近引用的文件',
+				handler: handleReveal,
+			});
+			shortcutHub.register({
+				name: 'files',
+				keys: ['f', 'q'],
+				description: '快速预览最近引用的文件',
+				handler: handleQuickLook,
+			});
+		} else {
+			pi.registerShortcut('ctrl+shift+o', {
+				description: '浏览会话中引用的文件',
+				handler: handleOpenBrowser,
+			});
+			pi.registerShortcut('ctrl+shift+f', {
+				description: '在 Finder 中显示最近引用的文件',
+				handler: handleReveal,
+			});
+			pi.registerShortcut('ctrl+shift+r', {
+				description: '快速预览最近引用的文件',
+				handler: handleQuickLook,
+			});
+		}
 	});
 }

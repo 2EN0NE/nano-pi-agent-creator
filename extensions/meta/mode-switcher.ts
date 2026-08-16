@@ -5,8 +5,10 @@
  *   /mode <name>          → 切换到指定 mode
  *   /mode                 → 打开 mode 选择面板
  *   /mode store [name]    → 保存当前配置为 mode
- *   Ctrl+Shift+M          → 打开 mode 管理面板（增删改）
- *   Ctrl+Space            → 循环切换 mode
+ *   快捷键（经 pi-shortcuts 纳管，前缀键 alt+.）：
+ *     m                   → 选择 prompt 模式
+ *     n                   → 循环切换 prompt 模式
+ *   （pi-shortcuts 缺失时降级为 Ctrl+Shift+M / Ctrl+Space）
  *
  * Mode 配置保存路径（使用 @zenone/pi-config 标准约定）：
  *   用户级：~/.pi/agent/extensions-data/mode-switcher/config.json
@@ -1166,7 +1168,7 @@ function applyEditor(pi: ExtensionAPI, ctx: ExtensionContext) {
 export default function (pi: ExtensionAPI) {
 	log.debug('registerCommand: mode');
 	pi.registerCommand('mode', {
-		description: 'Select prompt mode',
+		description: '选择 prompt 模式',
 		handler: async (args, ctx) => {
 			const tokens = args
 				.split(/\s+/)
@@ -1212,18 +1214,38 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerShortcut('ctrl+shift+m', {
-		description: 'Select prompt mode',
-		handler: async (ctx) => {
-			await selectModeUI(pi, ctx);
-		},
-	});
-
-	pi.registerShortcut('ctrl+space', {
-		description: 'Cycle prompt mode',
-		handler: async (ctx) => {
-			await cycleMode(pi, ctx, 1);
-		},
+	async function handleSelectMode(ctx: any): Promise<void> {
+		await selectModeUI(pi, ctx);
+	}
+	async function handleCycleMode(ctx: any): Promise<void> {
+		await cycleMode(pi, ctx, 1);
+	}
+	// session_start 时注册（消除加载顺序竞险：hub 在所有扩展工厂函数执行后才挂载）
+	pi.on('session_start', () => {
+		const shortcutHub = (globalThis as any).__shortcutsApi;
+		if (shortcutHub?.register) {
+			shortcutHub.register({
+				name: 'mode-switcher',
+				keys: ['m'],
+				description: '选择 prompt 模式',
+				handler: handleSelectMode,
+			});
+			shortcutHub.register({
+				name: 'mode-switcher',
+				keys: ['n'],
+				description: '循环切换 prompt 模式',
+				handler: handleCycleMode,
+			});
+		} else {
+			pi.registerShortcut('ctrl+shift+m', {
+				description: '选择 prompt 模式',
+				handler: handleSelectMode,
+			});
+			pi.registerShortcut('ctrl+space', {
+				description: '循环切换 prompt 模式',
+				handler: handleCycleMode,
+			});
+		}
 	});
 
 	pi.on('session_start', async (_event, ctx) => {
