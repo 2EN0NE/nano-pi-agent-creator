@@ -571,6 +571,9 @@ tui_expect_test() {
 		# 切换到工作目录
 		cd $pi_cwd
 
+		# 设置终端宽度（对齐 tui_run_pi_test，case 依赖 cols 参数做宽度断言）
+		set stty_init "cols $cols rows 24"
+
 		# 启动 pi
 		spawn pi -a
 

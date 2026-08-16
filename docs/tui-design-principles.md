@@ -395,6 +395,66 @@ for (let i = 0; i < padCount; i++) {
 >
 > 面板若左列带主题色或需要严格对齐，优先自行用 `visibleWidth` 实现，不必强行套用本模块。
 
+### 7.5 边框对齐技巧与适用场景
+
+单列竖边框盒（`│ 内容 │`）如何保证右边框不错位，标杆实现见 [`extensions/tui/answer.ts`](../extensions/tui/answer.ts) 的 `QnAComponent.render()`。核心思想是：**对齐不靠「每行内容长度恰好一致」，而靠每行都主动计算可见宽度、主动补右空格、主动把右边框推到固定列**。
+
+**五个关键技巧：**
+
+**1. 固定框宽** —— `boxWidth` 先算成常量，边框列位置不随任何一行内容漂移：
+
+```typescript
+const boxWidth = Math.min(width - 4, 120);
+const contentWidth = boxWidth - 4; // 左右各 2 字符 padding
+```
+
+**2. `visibleWidth` 精确补右空格** —— 每一行主动把右边框「推」到固定列，而非靠内容自然流过去。`dim` 泛指任意边框着色函数（如 `theme.fg('borderMuted', ...)`）：
+
+```typescript
+const boxLine = (content: string, leftPad = 2): string => {
+	const paddedContent = ' '.repeat(leftPad) + content;
+	const contentLen = visibleWidth(paddedContent); // 关键：可见宽度，非 .length
+	const rightPad = Math.max(0, boxWidth - contentLen - 2);
+	return dim('│') + paddedContent + ' '.repeat(rightPad) + dim('│');
+};
+```
+
+**3. 长文本先 `wrapTextWithAnsi` 换行** —— 内容先按 `contentWidth` 换行，从根上保证 `rightPad` 不会变负（变负会被 `Math.max(0, ...)` 截成 0，内容顶穿右边框）：
+
+```typescript
+const wrapped = wrapTextWithAnsi(questionText, contentWidth);
+for (const line of wrapped) lines.push(padToWidth(boxLine(line)));
+```
+
+**4. `padToWidth` 统一行长** —— 每行最终补到 `width`，保证渲染缓冲区行长度一致：
+
+```typescript
+const padToWidth = (line: string): string =>
+	line + ' '.repeat(Math.max(0, width - visibleWidth(line)));
+```
+
+**5. 嵌套子组件剥掉自己的边框 + 加 `truncateToWidth` 兜底** —— `Editor` 自带边框，取 `render()` 结果的第 2..N-1 行（跳过首尾边框行），并把宽度压进外层盒。注意：`btw.ts`、`todos/ui/actions.ts` 对外层盒每行都有 `truncateToWidth` 兜底，而 `answer.ts` 对 editor 行漏了这一层，是潜在隐患。
+
+**适用场景：**
+
+| 场景                       | 结论                                                                               |
+| -------------------------- | ---------------------------------------------------------------------------------- |
+| 单列竖边框盒（`│ 内容 │`） | 直接套用。`btw.ts` 的 `frameLine()`、`todos/ui/actions.ts` 的 `framedLines` 已同构 |
+| 左对齐补右空格（无竖框）   | 退化版适用，如 `cloud-sessions` 的 `padRight()`                                    |
+| 选择列表 / 单列面板        | 适用                                                                               |
+
+**不适用 / 需改造的特殊场景：**
+
+1. **左右分栏 / 两端对齐**（如 `session-breakdown.ts` 的 `left + 空格 + right`）：需要 justify 型算法（分别算左右可见宽度、中间补空格），本范式的 `boxLine` 只认一个右边框。
+2. **多列表格**（如 `quit.ts` 的 modelUsage 表，`' '.repeat(26 - name.length)` 固定列宽）：需要 column 布局，本范式没有「列」概念。
+3. **滚动 / 视口裁剪组件**（如 `pi-session-tree/ui/panel.ts`、`todos/ui/actions.ts` 的 `scrollOffset` 切片）：本范式假设全量渲染、高度不限，滚动窗需自行做高度裁剪。
+4. **内容含 tab 制表符**：`visibleWidth` 一般按 1 宽计，但终端把 tab 展开到 tab stop，实际宽度远超计算值 → 右边框错位。补空格前需先展开 tab。
+5. **emoji / 组合字符 / ZWJ 序列**：宽度不确定（见第 1 章「无 Emoji」），`visibleWidth` 可能少算 1-2 列 → 右边框左移。禁止在盒内使用 emoji。
+6. **嵌套第三方组件输出不保证宽度**：子组件 `render()` 某行超宽时，`rightPad` 归零但不截断，右边框被顶穿。必须对子组件输出行额外 `truncateToWidth` 兜底。
+7. **固定宽居中卡片**（如 `quit.ts` 的 `indent + W=64`）：需要「缩进 + 固定宽」变体，而非 `boxWidth = width - 4` 的自适应满宽。
+
+> ⚠️ **口径统一警示**：对齐计算只允许用 `visibleWidth` 一个口径。`quit.ts` 手写了 `displayWidth()` 宽度表，且多处混用 `.length`（如 `sid.length`、`displayName.length`），一旦含中文/宽字符会少算补空格 → 右边框左移。凡是对齐补空格，一律用 pi-tui 的 `visibleWidth`。
+
 ---
 
 ## 8. TUI 集成测试

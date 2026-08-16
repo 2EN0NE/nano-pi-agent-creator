@@ -211,6 +211,18 @@ run_pi_and_check() {
 		cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" "$test_home/.pi/pi-logger.json" 2>/dev/null || true
 	fi
 
+	# ── node_modules 本地包链接（扩展 import '@zenone/pi-logger' 等需要）──
+	# 与 tui_expect_test 对齐：在 $test_home/node_modules 下建立符号链接
+	mkdir -p "$test_home/node_modules"
+	for pkg in pi-logger selector pi-config; do
+		local pkg_src="$ROOT_DIR/extensions/meta/$pkg"
+		local pkg_dir="$test_home/node_modules/@zenone/$pkg"
+		if [[ -d "$pkg_src" && ! -e "$pkg_dir" ]]; then
+			mkdir -p "$(dirname "$pkg_dir")"
+			ln -sf "$pkg_src" "$pkg_dir"
+		fi
+	done
+
 	# ── HOME 隔离：避免全局扩展（~/.pi/agent/extensions/）与沙箱扩展冲突 ──
 	local isolated_home="$test_home/home"
 	mkdir -p "$isolated_home/.pi/agent"

@@ -387,6 +387,17 @@ lines.push(truncateToWidth('│  ' + content, width));
 lines.push(th.fg('accent', title));
 ```
 
+#### 边框对齐技巧与适用场景
+
+单列竖边框盒（`│ 内容 │`）保证右边框不错位的范式：**固定框宽 + `visibleWidth` 精确补右空格 + `wrapTextWithAnsi` 先换行 + `padToWidth` 统一行长**。标杆实现见 `extensions/tui/answer.ts` 的 `QnAComponent.render()`，`btw.ts` 的 `frameLine()`、`todos/ui/actions.ts` 的 `framedLines` 已同构。
+
+- **适用**：单列竖边框盒、左对齐补右空格（无竖框退化版）。
+- **不适用/需改造**：左右分栏两端对齐、多列表格、滚动视口、固定宽居中卡片。
+- **需加固**：内容含 tab / emoji / 嵌套第三方组件输出时，必须额外 `truncateToWidth` 兜底。
+- **口径统一**：对齐补空格只用 `visibleWidth`，禁止混用 `.length`（`quit.ts` 有此隐患）。
+
+完整清单见 [`docs/tui-design-principles.md` 第 7.5 节](docs/tui-design-principles.md#75-边框对齐技巧与适用场景)。
+
 #### 普通测试辅助扩展示例
 
 **`test/extensions/tools/helpers/dynamic-registrar.ts`**

@@ -26,7 +26,7 @@ test('captures sensitive .env values and skips trivial ones', () => {
 	withEnvFile(
 		[
 			'DATABASE_URL=postgres://u:supersecretpw@db:5432/app',
-			'OPENAI_API_KEY=sk-abc123def456ghi789jkl012',
+			'OPENAI_API_KEY=fake-key-for-testing',
 			'PORT=3000',
 			'NODE_ENV=production',
 		],
@@ -50,7 +50,7 @@ test('never treats infra/session env vars as secrets', () => {
 });
 
 test('assigns stable self-descriptive placeholders', () => {
-	withEnvFile(['STRIPE_SECRET=rk_live_xYz0123456789abcdef'], (dir) => {
+	withEnvFile(['STRIPE_SECRET=fake-stripe-token'], (dir) => {
 		const entry = discoverSecrets(dir).find((e) => e.name === 'STRIPE_SECRET');
 		assert.ok(entry);
 		assert.ok(entry.placeholder.includes('SECRET STRIPE_SECRET'));

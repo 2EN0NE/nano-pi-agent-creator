@@ -2,6 +2,7 @@ import {
 	type Theme,
 	type ExtensionContext,
 	copyToClipboard,
+	rawKeyHint,
 } from '@earendil-works/pi-coding-agent';
 import { Input, truncateToWidth, type Component } from '@earendil-works/pi-tui';
 import { TabBar } from './tab-bar.js';
@@ -455,7 +456,7 @@ export class TodoPanel implements Component {
 		const sortDir = this.sortConfig.direction === 'asc' ? 'Asc' : 'Desc';
 		const sortHint = this.theme.fg(
 			'dim',
-			` Sort: ${sortLabel} ${sortDir}  (Alt+s field, Alt+d direction)`,
+			` Sort: ${sortLabel} ${sortDir}  (${rawKeyHint('alt+s', 'field')}, ${rawKeyHint('alt+d', 'direction')})`,
 		);
 
 		lines.push(truncateToWidth(scopeInfo + sortHint, width));
@@ -525,7 +526,7 @@ export class TodoPanel implements Component {
 			truncateToWidth(
 				this.theme.fg(
 					'dim',
-					'Left/Right: switch tab  Enter: actions  Alt+s: sort field  Alt+d: sort direction  Esc: close',
+					`Left/Right: switch tab  Enter: actions  ${rawKeyHint('alt+s', 'sort field')}  ${rawKeyHint('alt+d', 'sort direction')}  Esc: close`,
 				),
 				width,
 			),

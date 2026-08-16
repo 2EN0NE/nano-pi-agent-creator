@@ -261,7 +261,9 @@ run_pi_and_check() {
 	local padded
 	padded=$(printf '%03d' "$CASE_INDEX")
 	local pi_stdout_file="$CASE_DIR/${padded}-pi-stdout.log"
-	local pi_logs_dir="$test_home/.pi/logs"
+	# pi-logger 日志写到 $HOME/.pi/logs（HOME 相对，非 cwd）；同时兼容旧 cwd 相对路径
+	local pi_logs_dir="$isolated_home/.pi/logs"
+	local pi_logs_dir_legacy="$test_home/.pi/logs"
 
 	cd "$test_home"
 	set +e
@@ -272,6 +274,9 @@ run_pi_and_check() {
 
 	if [[ -d "$pi_logs_dir" ]]; then
 		cp -r "$pi_logs_dir" "$CASE_DIR/${padded}-logs"
+	fi
+	if [[ -d "$pi_logs_dir_legacy" ]]; then
+		cp -r "$pi_logs_dir_legacy"/. "$CASE_DIR/${padded}-logs" 2>/dev/null || true
 	fi
 	rm -rf "$test_home"
 
