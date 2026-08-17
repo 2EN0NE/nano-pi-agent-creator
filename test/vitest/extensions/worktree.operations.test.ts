@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -272,6 +272,242 @@ describe('worktree execMerge', () => {
 // ═══════════════════════════════════════════
 // 套件 1b：execRebaseFF（rebase + fast-forward）
 // ═══════════════════════════════════════════
+
+describe('worktree execRebase (worktree-local)', () => {
+	let baseDir: string;
+	let repoDir: string;
+	let wtDir: string;
+
+	beforeAll(async () => {
+		baseDir = resolve(tmpdir(), 'pi-wt-rebase-' + Date.now());
+		mkdirSync(baseDir, { recursive: true });
+		repoDir = createGitRepo(baseDir, 'rebase-repo');
+
+		// worktree 分支：两个提交
+		gitCreateBranch(repoDir, 'wt/Leo-Denebola');
+		gitCommit(repoDir, 'r1.txt', 'r1 content');
+		gitCommit(repoDir, 'r2.txt', 'r2 content');
+
+		// main 前进：两个提交（rebase 目标）
+		gitCheckout(repoDir, 'main');
+		gitCommit(repoDir, 'm1.txt', 'm1 content');
+		gitCommit(repoDir, 'm2.txt', 'm2 content');
+
+		// 真实 worktree
+		wtDir = join(baseDir, 'wt-leo');
+		execSync(`git worktree add ${wtDir} wt/Leo-Denebola --quiet`, { cwd: repoDir });
+	});
+
+	afterAll(() => {
+		try {
+			execSync(`git worktree remove ${wtDir} --force`, { cwd: repoDir });
+		} catch {
+			/* already gone */
+		}
+		rmSync(baseDir, { recursive: true, force: true });
+	});
+
+	it('1. plain rebase 在 worktree 内成功，分支变基到 main 最新，停在 worktree 分支', async () => {
+		const { execRebase } = await import(resolve(EXT_LIB, 'git.ts'));
+		const result = execRebase(repoDir, 'wt/Leo-Denebola', 'main', wtDir);
+
+		expect(result.ok).toBe(true);
+		expect(result.conflicts).toEqual([]);
+		expect(result.message).toContain('Rebased');
+
+		// worktree 分支已包含 main 最新提交（m1/m2）+ 自己的提交（r1/r2），线性无 merge commit
+		const wtLog = execSync('git log --oneline -10', { cwd: wtDir, encoding: 'utf-8' });
+		expect(wtLog).toContain('update m1.txt');
+		expect(wtLog).toContain('update r1.txt');
+		expect(wtLog).not.toContain('Merge');
+
+		// main 未动：HEAD 仍是 main，不含 r1
+		const mainLog = execSync('git log --oneline -5', { cwd: repoDir, encoding: 'utf-8' });
+		expect(mainLog).not.toContain('update r1.txt');
+	});
+
+	it('2. rebase 冲突：返回冲突文件并留在冲突状态', async () => {
+		const { execRebase } = await import(resolve(EXT_LIB, 'git.ts'));
+
+		// 共同 base（在 main 上提交）
+		writeFileSync(join(repoDir, 'rebase-conflict.txt'), 'common base\n');
+		execSync('git add rebase-conflict.txt && git commit -m "add rebase-conflict base" -q', {
+			cwd: repoDir,
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: 'test',
+				GIT_AUTHOR_EMAIL: 'test@test',
+				GIT_COMMITTER_NAME: 'test',
+				GIT_COMMITTER_EMAIL: 'test@test',
+			},
+		});
+
+		// worktree 分支：version A
+		gitCreateBranch(repoDir, 'wt/Regulus');
+		writeFileSync(join(repoDir, 'rebase-conflict.txt'), 'version A\n');
+		gitCommit(repoDir, 'rebase-conflict.txt', 'rebase A');
+
+		// main 侧：version B
+		gitCheckout(repoDir, 'main');
+		writeFileSync(join(repoDir, 'rebase-conflict.txt'), 'version B\n');
+		gitCommit(repoDir, 'rebase-conflict.txt', 'rebase B');
+
+		// 建 worktree
+		const wtConflictDir = join(baseDir, 'wt-regulus');
+		execSync(`git worktree add ${wtConflictDir} wt/Regulus --quiet`, { cwd: repoDir });
+
+		const result = execRebase(repoDir, 'wt/Regulus', 'main', wtConflictDir);
+
+		expect(result.ok).toBe(false);
+		expect(result.conflicts).toContain('rebase-conflict.txt');
+		expect(result.message).toContain('conflict');
+
+		// 留在冲突状态：worktree gitDir 下 rebase-merge 状态存在
+		const rbPath = execSync('git rev-parse --git-path rebase-merge', {
+			cwd: wtConflictDir,
+			encoding: 'utf-8',
+		}).trim();
+		expect(existsSync(rbPath)).toBe(true);
+
+		// findInProgressDir 自动定位到冲突 worktree（ADR-0018 探测）
+		// 用 realpathSync 归一化：macOS 上 tmpdir 返回 /var/... 而 git 输出 /private/var/...（同一目录）
+		const { findInProgressDir } = await import(resolve(EXT_LIB, 'git.ts'));
+		const detectedDir = findInProgressDir(repoDir, 'rebase');
+		expect(detectedDir).not.toBeNull();
+		expect(realpathSync(detectedDir!)).toBe(realpathSync(wtConflictDir));
+		expect(findInProgressDir(repoDir, 'merge')).toBeNull();
+
+		// 清理：abort + 移除 worktree
+		execSync('git rebase --abort', { cwd: wtConflictDir });
+		execSync(`git worktree remove ${wtConflictDir} --force`, { cwd: repoDir });
+	});
+
+	it('3. worktree 有未提交修改时拒绝 rebase', async () => {
+		const { execRebase } = await import(resolve(EXT_LIB, 'git.ts'));
+		writeFileSync(join(wtDir, 'dirty.txt'), 'uncommitted\n');
+		const result = execRebase(repoDir, 'wt/Leo-Denebola', 'main', wtDir);
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain('uncommitted');
+		execSync('rm dirty.txt', { cwd: wtDir });
+	});
+
+	it('4. rebase 冲突中止状态不被 execRebase 静默 abort（保留用户进度）', async () => {
+		const { execRebase, findInProgressDir } = await import(resolve(EXT_LIB, 'git.ts'));
+
+		// 构造 main 与 wt 分支对同一文件的冲突
+		writeFileSync(join(repoDir, 'paused-conflict.txt'), 'base\n');
+		execSync('git add paused-conflict.txt && git commit -m "paused base" -q', {
+			cwd: repoDir,
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: 'test',
+				GIT_AUTHOR_EMAIL: 'test@test',
+				GIT_COMMITTER_NAME: 'test',
+				GIT_COMMITTER_EMAIL: 'test@test',
+			},
+		});
+		gitCreateBranch(repoDir, 'wt/PausedA');
+		writeFileSync(join(repoDir, 'paused-conflict.txt'), 'version A\n');
+		gitCommit(repoDir, 'paused-conflict.txt', 'paused A');
+		gitCheckout(repoDir, 'main');
+		writeFileSync(join(repoDir, 'paused-conflict.txt'), 'version B\n');
+		gitCommit(repoDir, 'paused-conflict.txt', 'paused B');
+
+		const wtPausedDir = join(baseDir, 'wt-paused');
+		execSync(`git worktree add ${wtPausedDir} wt/PausedA --quiet`, { cwd: repoDir });
+
+		// 手动发起 rebase 停在冲突（模拟用户手动操作），预期非零退出
+		try {
+			execSync('git rebase main', { cwd: wtPausedDir, stdio: 'pipe' });
+		} catch {
+			/* 冲突预期非零退出 */
+		}
+		// 确认处于冲突中止状态
+		const pausedPath = execSync('git rev-parse --git-path rebase-merge/stopped-sha', {
+			cwd: wtPausedDir,
+			encoding: 'utf-8',
+		}).trim();
+		expect(existsSync(pausedPath)).toBe(true);
+
+		// execRebase 不得 abort：失败但 rebase 状态与冲突文件保留
+		const result = execRebase(repoDir, 'wt/PausedA', 'main', wtPausedDir);
+		expect(result.ok).toBe(false);
+		expect(existsSync(pausedPath)).toBe(true); // 状态未被 abort 清除
+		expect(
+			execSync('git status --porcelain', { cwd: wtPausedDir, encoding: 'utf-8' }),
+		).toContain('paused-conflict.txt'); // 冲突文件仍在
+		expect(findInProgressDir(repoDir, 'rebase')).not.toBeNull();
+
+		// 清理：abort + 移除 worktree
+		execSync('git rebase --abort', { cwd: wtPausedDir });
+		execSync(`git worktree remove ${wtPausedDir} --force`, { cwd: repoDir });
+	});
+
+	it('5. [handler] handleRebase 不 abort 冲突暂停状态（ADR-0018 集成回归）', async () => {
+		// 构造 main 与 wt 分支对同一文件的冲突
+		writeFileSync(join(repoDir, 'handler-paused.txt'), 'base\n');
+		execSync('git add handler-paused.txt && git commit -m "handler paused base" -q', {
+			cwd: repoDir,
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: 'test',
+				GIT_AUTHOR_EMAIL: 'test@test',
+				GIT_COMMITTER_NAME: 'test',
+				GIT_COMMITTER_EMAIL: 'test@test',
+			},
+		});
+		gitCreateBranch(repoDir, 'wt/HandlerPaused');
+		writeFileSync(join(repoDir, 'handler-paused.txt'), 'version A\n');
+		gitCommit(repoDir, 'handler-paused.txt', 'handler paused A');
+		gitCheckout(repoDir, 'main');
+		writeFileSync(join(repoDir, 'handler-paused.txt'), 'version B\n');
+		gitCommit(repoDir, 'handler-paused.txt', 'handler paused B');
+
+		// worktree 放约定目录（handleRebase 经 resolveWorktreePath 按 name 解析）
+		const wtHPausedDir = join(`${repoDir}-worktrees`, 'HandlerPaused');
+		execSync(`git worktree add ${wtHPausedDir} wt/HandlerPaused --quiet`, { cwd: repoDir });
+
+		// 手动 rebase 停在冲突（模拟用户手动操作）
+		try {
+			execSync('git rebase main', { cwd: wtHPausedDir, stdio: 'pipe' });
+		} catch {
+			/* 冲突预期非零退出 */
+		}
+		const pausedPath = execSync('git rev-parse --git-path rebase-merge/stopped-sha', {
+			cwd: wtHPausedDir,
+			encoding: 'utf-8',
+		}).trim();
+		expect(existsSync(pausedPath)).toBe(true);
+
+		// 模拟用户已手工解决冲突并 git add（进度标记）
+		writeFileSync(join(wtHPausedDir, 'handler-paused.txt'), 'resolved content\n');
+		execSync('git add handler-paused.txt', { cwd: wtHPausedDir, encoding: 'utf-8' });
+
+		// 调用 handler（修复前：else 分支无条件 git rebase --abort 会销毁上述进度）
+		const notified: string[] = [];
+		const ctx = {
+			cwd: repoDir,
+			ui: { notify: (msg: string) => notified.push(msg) },
+		} as any;
+		const { handleRebase } = await import(resolve(EXT_LIB, 'handlers.ts'));
+		await handleRebase(repoDir, { source: 'HandlerPaused' }, ctx);
+
+		// 断言 1：rebase 状态保留（未被 abort）
+		expect(existsSync(pausedPath)).toBe(true);
+		// 断言 2：用户已 add 的解析进度仍留在 index
+		const staged = execSync('git diff --cached --name-only', {
+			cwd: wtHPausedDir,
+			encoding: 'utf-8',
+		});
+		expect(staged).toContain('handler-paused.txt');
+		// 断言 3：通知包含失败提示（引导 continue/abort）
+		expect(notified.some((m) => m.includes('Rebase failed'))).toBe(true);
+
+		// 清理：abort + 移除 worktree
+		execSync('git rebase --abort', { cwd: wtHPausedDir });
+		execSync(`git worktree remove ${wtHPausedDir} --force`, { cwd: repoDir });
+	});
+});
 
 describe('worktree execRebaseFF', () => {
 	let baseDir: string;
@@ -541,6 +777,56 @@ describe('worktree git helpers', () => {
 		const result = getAheadBehind(repoDir, 'non-existent-branch');
 		expect(result.ahead).toBe(0);
 		expect(result.behind).toBe(0);
+	});
+
+	it('getAheadBehind: ahead = 分支领先 main 的提交数（未 push 也可统计）', async () => {
+		const { getAheadBehind } = await import(resolve(EXT_LIB, 'git.ts'));
+		// feature/helper-test 领先 main 2 个提交（无 remote，即"未 push"场景）
+		const result = getAheadBehind(repoDir, 'feature/helper-test');
+		expect(result.ahead).toBe(2);
+		expect(result.behind).toBe(0);
+	});
+
+	it('getAheadBehind: main 前进后 behind 正确', async () => {
+		const { getAheadBehind } = await import(resolve(EXT_LIB, 'git.ts'));
+		gitCommit(repoDir, 'helper-main.txt', 'main content');
+		const result = getAheadBehind(repoDir, 'feature/helper-test');
+		expect(result.ahead).toBe(2); // feature 仍领先 2
+		expect(result.behind).toBe(1); // main 领先 1
+	});
+
+	it('getAheadBehind: main checkout 停留其他分支时基准仍为 main（不随 HEAD 漂移）', async () => {
+		const { getAheadBehind, getCurrentBranch } = await import(resolve(EXT_LIB, 'git.ts'));
+		// main checkout 切到别的分支（模拟用户在 main checkout 上工作）
+		gitCreateBranch(repoDir, 'feature/unrelated');
+		gitCommit(repoDir, 'unrelated.txt', 'unrelated work');
+		expect(getCurrentBranch(repoDir)).toBe('feature/unrelated');
+
+		// 基准固定 main：feature/helper-test 相对 main 仍是 behind=1, ahead=2
+		const result = getAheadBehind(repoDir, 'feature/helper-test');
+		expect(result.ahead).toBe(2);
+		expect(result.behind).toBe(1);
+
+		// 切回 main，避免影响后续用例
+		gitCheckout(repoDir, 'main');
+	});
+
+	it('getAheadBehind: 分支名含 shell 元字符时不执行注入（参数数组传递）', async () => {
+		const { getAheadBehind } = await import(resolve(EXT_LIB, 'git.ts'));
+		const marker = join(tmpdir(), 'pwn-' + Date.now() + '.txt');
+		// 该分支名在 git 中可创建（; 与 > 均合法、无空格），但不应触发 shell 执行
+		const evilBranch = `wt/evil;echoINJ>${marker}`;
+		try {
+			execSync(`git branch ${JSON.stringify(evilBranch)}`, { cwd: repoDir });
+		} catch {
+			/* 环境不支持该分支名则跳过注入断言，仅验证不抛异常 */
+		}
+		const result = getAheadBehind(repoDir, evilBranch);
+		expect(existsSync(marker)).toBe(false); // 未执行注入命令
+		expect(typeof result.ahead).toBe('number');
+		expect(typeof result.behind).toBe('number');
+		// 清理测试分支，避免污染后续用例
+		execSync(`git branch -D ${JSON.stringify(evilBranch)}`, { cwd: repoDir, stdio: 'pipe' });
 	});
 });
 
@@ -957,5 +1243,160 @@ describe('worktree parseArgs', () => {
 		expect(help).toContain('create');
 		expect(help).toContain('delete');
 		expect(help).toContain('zodiac+star');
+	});
+});
+
+describe('worktree findInProgressDir merge 场景（ADR-0018）', () => {
+	let baseDir: string;
+	let repoDir: string;
+
+	beforeAll(async () => {
+		baseDir = resolve(tmpdir(), 'pi-wt-merge-probe-' + Date.now());
+		mkdirSync(baseDir, { recursive: true });
+		repoDir = createGitRepo(baseDir, 'merge-probe-repo');
+
+		// feature 分支
+		gitCreateBranch(repoDir, 'feature/probe');
+		gitCommit(repoDir, 'probe.txt', 'probe A');
+		gitCheckout(repoDir, 'main');
+		gitCommit(repoDir, 'probe.txt', 'probe B');
+	});
+
+	afterAll(() => {
+		rmSync(baseDir, { recursive: true, force: true });
+	});
+
+	it('main 根 merge 冲突 → merge 探测返回 main 根，rebase 探测返回 null', async () => {
+		const { findInProgressDir } = await import(resolve(EXT_LIB, 'git.ts'));
+
+		// 真实 merge 冲突（main 根）：冲突时 git merge 退出码非零，预期行为
+		try {
+			execSync('git merge feature/probe', { cwd: repoDir, stdio: 'pipe' });
+		} catch {
+			/* merge 冲突预期非零退出 */
+		}
+		// 断言冲突发生（merge 未完成，MERGE_MSG 存在）
+		const mergeMsg = execSync('git rev-parse --git-path MERGE_MSG', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		}).trim();
+		expect(existsSync(resolve(repoDir, mergeMsg))).toBe(true);
+
+		const detected = findInProgressDir(repoDir, 'merge');
+		expect(detected).not.toBeNull();
+		expect(realpathSync(detected!)).toBe(realpathSync(repoDir));
+		// rebase 探测不应误判 merge 冲突
+		expect(findInProgressDir(repoDir, 'rebase')).toBeNull();
+
+		// 清理：abort 恢复
+		execSync('git merge --abort', { cwd: repoDir });
+	});
+
+	it('worktree rebase 冲突存在时 merge 探测排除该目录', async () => {
+		// 保险：若上个用例异常导致 merge 状态残留，先清理
+		try {
+			execSync('git merge --abort', { cwd: repoDir });
+		} catch {
+			/* 无进行中 merge */
+		}
+		const { execRebase, findInProgressDir } = await import(resolve(EXT_LIB, 'git.ts'));
+
+		// 构造 worktree 内的 rebase 冲突
+		gitCreateBranch(repoDir, 'wt/probe-rb');
+		gitCommit(repoDir, 'rb.txt', 'rb A');
+		gitCheckout(repoDir, 'main');
+		gitCommit(repoDir, 'rb.txt', 'rb B');
+		const wtDir = join(baseDir, 'wt-probe-rb');
+		execSync(`git worktree add ${wtDir} wt/probe-rb --quiet`, { cwd: repoDir });
+		const result = execRebase(repoDir, 'wt/probe-rb', 'main', wtDir);
+		expect(result.ok).toBe(false);
+		expect(result.conflicts.length).toBeGreaterThan(0);
+
+		// worktree 有 rebase 状态：merge 探测不应返回该目录
+		expect(findInProgressDir(repoDir, 'rebase')).not.toBeNull();
+		expect(findInProgressDir(repoDir, 'merge')).toBeNull();
+
+		// 清理
+		execSync('git rebase --abort', { cwd: wtDir });
+		execSync(`git worktree remove ${wtDir} --force`, { cwd: repoDir });
+	});
+});
+
+describe('worktree sync 别名声明（05）', () => {
+	it('COMMANDS 包含 sync 并声明为 rebase 别名', async () => {
+		const { COMMANDS, formatHelp } = await import(resolve(EXT_LIB, 'handlers.ts'));
+		const syncCmd = COMMANDS.find((c: string) => c.startsWith('sync'));
+		expect(syncCmd).toBeDefined();
+		expect(syncCmd).toContain('alias for rebase');
+		const help = formatHelp();
+		expect(help).toContain('sync');
+		expect(help).toContain('rebase');
+	});
+});
+
+describe('worktree hasClonedSession 路径归一化（06）', () => {
+	let baseDir: string;
+	let repoDir: string;
+	let targetDir: string;
+
+	beforeAll(async () => {
+		baseDir = resolve(tmpdir(), 'pi-wt-clone-meta-' + Date.now());
+		mkdirSync(baseDir, { recursive: true });
+		repoDir = createGitRepo(baseDir, 'clone-repo');
+		targetDir = join(baseDir, 'wt-clone-target');
+	});
+
+	afterAll(() => {
+		rmSync(baseDir, { recursive: true, force: true });
+	});
+
+	async function writeCloneMeta(sourceCwd: string): Promise<void> {
+		// 目标目录的 session 目录（resolveSessionDir = getAgentDir()/sessions/--<cwd>--）与
+		// .clone-meta.json（与 cloneSession 写入结构一致）
+		const { resolveSessionDir } = await import(resolve(EXT_LIB, 'session.ts'));
+		const sessionDir = resolveSessionDir(targetDir);
+		mkdirSync(sessionDir, { recursive: true });
+		const metaPath = join(sessionDir, '.clone-meta.json');
+		writeFileSync(
+			metaPath,
+			JSON.stringify(
+				{
+					sourceCwd,
+					targetCwd: targetDir,
+					clonedAt: new Date().toISOString(),
+					sourceSessionId: 'src-id',
+					targetSessionId: 'tgt-id',
+				},
+				null,
+				2,
+			),
+			'utf-8',
+		);
+	}
+
+	it('realpath 归一化后匹配（macOS /var vs /private/var）', async () => {
+		const { hasClonedSession } = await import(resolve(EXT_LIB, 'session.ts'));
+		// 源 cwd 用非 realpath 形式存储（如 /var/...），查询用 realpath 形式（/private/var/...）
+		const storedCwd = realpathSync(repoDir).replace('/private/var', '/var');
+		const queryCwd = realpathSync(repoDir);
+
+		if (storedCwd === queryCwd) {
+			// 平台无 /var 符号链接差异（如 Linux /tmp）：退化为普通匹配断言
+			await writeCloneMeta(queryCwd);
+			expect(hasClonedSession(targetDir, queryCwd)).not.toBeNull();
+		} else {
+			await writeCloneMeta(storedCwd);
+			const meta = hasClonedSession(targetDir, queryCwd);
+			expect(meta).not.toBeNull();
+			expect(meta!.sourceSessionId).toBe('src-id');
+		}
+	});
+
+	it('来源目录不同时不匹配', async () => {
+		const { hasClonedSession } = await import(resolve(EXT_LIB, 'session.ts'));
+		await writeCloneMeta(realpathSync(repoDir));
+		const other = join(baseDir, 'unrelated-dir');
+		mkdirSync(other, { recursive: true });
+		expect(hasClonedSession(targetDir, other)).toBeNull();
 	});
 });

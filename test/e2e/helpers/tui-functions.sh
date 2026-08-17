@@ -105,6 +105,160 @@ tui_output_count() {
 	extract_visible_text "$file" | grep -cF "$keyword" || true
 }
 
+# ── 共享沙箱搭建助手（tui_run_pi_test / tui_expect_test 复用）──
+
+# 复制依赖扩展到指定目录（pi 自动发现的位置）。
+# 参数：$1 = ext_dir（目标目录）  $2 = 逗号分隔扩展列表
+# 查找逻辑：extensions/ 目录/单文件 → test/e2e/helpers/ 测试辅助扩展 → 递归搜索 extensions/ 子目录
+tui_copy_extensions() {
+	local ext_dir="$1"
+	local extensions="$2"
+	mkdir -p "$ext_dir"
+	local -a DEPS
+	IFS=',' read -ra DEPS <<<"$extensions"
+	for dep in "${DEPS[@]}"; do
+		local dn
+		dn=$(echo "$dep" | xargs)
+		[[ -z "$dn" ]] && continue
+
+		if [[ -d "$ROOT_DIR/extensions/$dn" ]]; then
+			cp -r "$ROOT_DIR/extensions/$dn" "$ext_dir/$dn"
+		elif [[ -f "$ROOT_DIR/extensions/$dn.ts" ]]; then
+			cp "$ROOT_DIR/extensions/$dn.ts" "$ext_dir/$dn.ts"
+		elif [[ -f "$ROOT_DIR/test/e2e/helpers/$dn.ts" ]]; then
+			# test/e2e/helpers/ 扩展：拷贝为目录扩展
+			mkdir -p "$ext_dir/$dn"
+			cp "$ROOT_DIR/test/e2e/helpers/$dn.ts" "$ext_dir/$dn/index.ts"
+		else
+			local found=""
+			while IFS= read -r -d '' match; do
+				found="$match"
+				break
+			done < <(find "$ROOT_DIR/extensions" -maxdepth 3 -name "$dn.ts" -print0 \
+				-o -type d -name "$dn" -exec test -f '{}/index.ts' \; -print0 \
+				-o -type d -name "$dn" -exec test -f '{}/dist/index.js' \; -print0 2>/dev/null)
+			if [[ -n "$found" ]]; then
+				if [[ -d "$found" ]]; then
+					cp -r "$found" "$ext_dir/$dn"
+				else
+					cp "$found" "$ext_dir/$dn.ts"
+				fi
+			else
+				echo "WARNING: dependency '$dn' not found in extensions/ (including subdirectories) or test/helpers/"
+			fi
+		fi
+	done
+}
+
+# 搭建隔离 HOME 沙箱：pi-logger 配置、node_modules 本地包链接、HOME 隔离、
+# 用户级扩展复制（保证 pi 在沙箱外 cwd 启动时扩展可达）、模型配置、全局扩展配置复制。
+# 参数：$1 = test_home（沙箱根目录）
+# 副作用：export HOME=$test_home/home
+tui_setup_sandbox_home() {
+	local test_home="$1"
+
+	# 拷贝 pi-logger 配置
+	if [[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]]; then
+		mkdir -p "$test_home/.pi"
+		cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" "$test_home/.pi/pi-logger.json" 2>/dev/null || true
+	fi
+
+	# node_modules 本地包链接（扩展 import '@zenone/...' 需要能找到本地包）
+	mkdir -p "$test_home/node_modules"
+	for pkg in pi-logger selector pi-config; do
+		local pkg_src="$ROOT_DIR/extensions/meta/$pkg"
+		local pkg_dir="$test_home/node_modules/@zenone/$pkg"
+		if [[ -d "$pkg_src" && ! -e "$pkg_dir" ]]; then
+			mkdir -p "$(dirname "$pkg_dir")"
+			ln -sf "$pkg_src" "$pkg_dir"
+		fi
+	done
+
+	# HOME 隔离
+	mkdir -p "$test_home/home/.pi/agent"
+	export HOME="$test_home/home"
+	[[ -f "$test_home/.pi/pi-logger.json" ]] && cp "$test_home/.pi/pi-logger.json" "$HOME/.pi/agent/"
+
+	# 关键：扩展复制到用户级目录 + node_modules 链接。
+	# pi 可能在沙箱外目录启动（cwd 参数），此时项目级 .pi/extensions 不可达；
+	# 用户级 ~/.pi/agent/extensions 保证扩展被发现。删除项目级副本避免双路径重复加载（flag 冲突）。
+	if [[ -d "$test_home/.pi/extensions" ]]; then
+		mkdir -p "$HOME/.pi/agent/extensions"
+		cp -r "$test_home/.pi/extensions/." "$HOME/.pi/agent/extensions/"
+		rm -rf "$test_home/.pi/extensions"
+	fi
+	if [[ -d "$test_home/node_modules/@zenone" ]]; then
+		mkdir -p "$HOME/node_modules/@zenone"
+		for pkg in pi-logger selector pi-config; do
+			if [[ -d "$test_home/node_modules/@zenone/$pkg" && ! -e "$HOME/node_modules/@zenone/$pkg" ]]; then
+				ln -sf "$test_home/node_modules/@zenone/$pkg" "$HOME/node_modules/@zenone/$pkg"
+			fi
+		done
+	fi
+
+	# 模型配置：CI 模式写 mock-llm providers（models.json 的 providers 结构让 pi 启动即识别模型，
+	# 仅 models-store.json 时启动显示 "No models available"）；非 CI 复制真实配置。
+	local real_home
+	real_home=$(eval echo ~)
+	if [[ "${CI:-false}" == "true" ]]; then
+		cat >"$HOME/.pi/agent/models-store.json" <<-CIEOF
+			{
+			  "mock-llm": {
+			    "models": [
+			      {
+			        "id": "mock-model-1",
+			        "name": "Mock Model (CI)",
+			        "api": "openai-completions",
+			        "provider": "mock-llm",
+			        "apiKey": "ci-noop-key",
+			        "baseUrl": "http://localhost:0"
+			      }
+			    ],
+			    "default": "mock-model-1"
+			  }
+			}
+		CIEOF
+		cat >"$HOME/.pi/agent/models.json" <<-CIEOF2
+			{
+			  "providers": {
+			    "mock-llm": {
+			      "name": "Mock LLM Provider",
+			      "api": "openai-completions",
+			      "baseUrl": "http://localhost:0",
+			      "apiKey": "ci-noop-key",
+			      "models": [
+			        {
+			          "id": "mock-model-1",
+			          "name": "Mock Model (CI)",
+			          "api": "openai-completions",
+			          "provider": "mock-llm",
+			          "apiKey": "ci-noop-key",
+			          "baseUrl": "http://localhost:0"
+			        }
+			      ]
+			    }
+			  }
+			}
+		CIEOF2
+	else
+		if [[ -f "$HOME/.pi/agent/models.json" ]]; then
+			: # 已存在
+		elif [[ -f "$ROOT_DIR/.pi/agent/models.json" ]]; then
+			mkdir -p "$HOME/.pi/agent"
+			cp "$ROOT_DIR/.pi/agent/models.json" "$HOME/.pi/agent/"
+		elif [[ -f "$real_home/.pi/agent/models.json" ]]; then
+			mkdir -p "$HOME/.pi/agent"
+			cp "$real_home/.pi/agent/models.json" "$HOME/.pi/agent/"
+		fi
+	fi
+
+	# 全局 extension 配置（防止启动时缺少文件报错）
+	if [[ -d "$real_home/.pi/agent/extensions-data" ]]; then
+		mkdir -p "$HOME/.pi/agent/extensions-data"
+		cp -r "$real_home/.pi/agent/extensions-data/"* "$HOME/.pi/agent/extensions-data/" 2>/dev/null || true
+	fi
+}
+
 # 构建隔离环境并执行 pi 的 TUI 测试
 # 用法：tui_run_pi_test <extension_list> <input_script> <timeout_seconds>
 #   extension_list  - 逗号分隔的依赖扩展列表
@@ -134,120 +288,15 @@ tui_run_pi_test() {
 
 	# 拷贝依赖扩展到 .pi/extensions/ 下（pi 自动发现的位置）
 	if [[ -n "$extensions" ]]; then
-		local ext_dir="$test_home/.pi/extensions"
-		mkdir -p "$ext_dir" "$test_home/.pi/logs"
-
-		local -a DEPS
-		IFS=',' read -ra DEPS <<<"$extensions"
-		for dep in "${DEPS[@]}"; do
-			local dn
-			dn=$(echo "$dep" | xargs)
-			[[ -z "$dn" ]] && continue
-
-			# 与 run_pi_and_check 相同的查找逻辑：
-			# 1) extensions/ 下的目录扩展或单文件扩展
-			# 2) test/helpers/ 下的测试辅助扩展（如 mock-llm）
-			# 3) 递归搜索 extensions/ 子目录
-			if [[ -d "$ROOT_DIR/extensions/$dn" ]]; then
-				cp -r "$ROOT_DIR/extensions/$dn" "$ext_dir/$dn"
-			elif [[ -f "$ROOT_DIR/extensions/$dn.ts" ]]; then
-				cp "$ROOT_DIR/extensions/$dn.ts" "$ext_dir/$dn.ts"
-			elif [[ -f "$ROOT_DIR/test/e2e/helpers/$dn.ts" ]]; then
-				# test/e2e/helpers/ 扩展：拷贝为目录扩展
-				mkdir -p "$ext_dir/$dn"
-				cp "$ROOT_DIR/test/e2e/helpers/$dn.ts" "$ext_dir/$dn/index.ts"
-			else
-				local found=""
-				while IFS= read -r -d '' match; do
-					found="$match"
-					break
-				done < <(find "$ROOT_DIR/extensions" -maxdepth 3 -name "$dn.ts" -print0 \
-					-o -type d -name "$dn" -exec test -f '{}/index.ts' \; -print0 \
-					-o -type d -name "$dn" -exec test -f '{}/dist/index.js' \; -print0 2>/dev/null)
-				if [[ -n "$found" ]]; then
-					if [[ -d "$found" ]]; then
-						cp -r "$found" "$ext_dir/$dn"
-					else
-						cp "$found" "$ext_dir/$dn.ts"
-					fi
-				else
-					echo "WARNING: dependency '$dn' not found in extensions/ (including subdirectories) or test/helpers/"
-				fi
-			fi
-		done
+		tui_copy_extensions "$test_home/.pi/extensions" "$extensions"
+		mkdir -p "$test_home/.pi/logs"
 	fi
 
-	# 拷贝 pi-logger 配置
-	if [[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]]; then
-		mkdir -p "$test_home/.pi"
-		cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" "$test_home/.pi/pi-logger.json" 2>/dev/null || true
-	fi
-
-	# ── 关键修复：建立 node_modules 本地包链接 ──
-	# 扩展中 import '@zenone/pi-logger' 需要能找到本地包
-	# 在项目目录中通过 node_modules/@zenone/pi-logger -> ../../extensions/meta/pi-logger 链接工作
-	mkdir -p "$test_home/node_modules"
-	local pkgs=("pi-logger" "selector" "pi-config")
-	for pkg in "${pkgs[@]}"; do
-		local pkg_src="$ROOT_DIR/extensions/meta/$pkg"
-		local pkg_name="@zenone/$pkg"
-		local pkg_dir="$test_home/node_modules/$pkg_name"
-		if [[ -d "$pkg_src" && ! -e "$pkg_dir" ]]; then
-			mkdir -p "$(dirname "$pkg_dir")"
-			ln -sf "$pkg_src" "$pkg_dir"
-		fi
-	done
-
-	# 创建 HOME 下的 .pi 链接（某些扩展需要读取配置）
-	mkdir -p "$test_home/home"
-	export HOME="$test_home/home"
-	if [[ ! -f "$HOME/.pi/agent/pi-logger.json" ]]; then
-		mkdir -p "$HOME/.pi/agent"
-		[[ -f "$test_home/.pi/pi-logger.json" ]] && cp "$test_home/.pi/pi-logger.json" "$HOME/.pi/agent/"
-	fi
-	# 复制 pi 全局配置中的 models.json（避免模型配置丢失）
-	local real_home
-	real_home=$(eval echo ~)
-	if [[ -f "$HOME/.pi/agent/models.json" ]]; then
-		: # 已存在
-	elif [[ -f "$ROOT_DIR/.pi/agent/models.json" ]]; then
-		mkdir -p "$HOME/.pi/agent"
-		cp "$ROOT_DIR/.pi/agent/models.json" "$HOME/.pi/agent/"
-	elif [[ -f "$real_home/.pi/agent/models.json" ]]; then
-		mkdir -p "$HOME/.pi/agent"
-		cp "$real_home/.pi/agent/models.json" "$HOME/.pi/agent/"
-	fi
-
-	# 复制全局 extension 配置（防止启动时缺少文件报错）
-	if [[ -d "$real_home/.pi/agent/extensions-data" ]]; then
-		mkdir -p "$HOME/.pi/agent/extensions-data"
-		cp -r "$real_home/.pi/agent/extensions-data/"* "$HOME/.pi/agent/extensions-data/" 2>/dev/null || true
-	fi
+	tui_setup_sandbox_home "$test_home"
 
 	# 在 test_home 下初始化 git（某些扩展需要）
 	if ! git -C "$test_home" rev-parse --git-dir &>/dev/null; then
 		git -C "$test_home" init --initial-branch main &>/dev/null || true
-	fi
-
-	# CI 模式：创建 mock-llm 模型配置，覆盖用户配置
-	if [[ "$PI_CI_MODE" == true ]]; then
-		cat >"$HOME/.pi/agent/models-store.json" <<-CIEOF
-			{
-			  "mock-llm": {
-			    "models": [
-			      {
-			        "id": "mock-model-1",
-			        "name": "Mock Model (CI)",
-			        "api": "openai-completions",
-			        "provider": "mock-llm",
-			        "apiKey": "ci-noop-key",
-			        "baseUrl": "http://localhost:0"
-			      }
-			    ],
-			    "default": "mock-model-1"
-			  }
-			}
-		CIEOF
 	fi
 
 	# ── expect 替代 script：生成 expect 脚本并执行 ──
@@ -457,100 +506,11 @@ tui_expect_test() {
 	fi
 
 	if [[ -n "$extensions" ]]; then
-		local ext_dir="$test_home/.pi/extensions"
-		mkdir -p "$ext_dir" "$test_home/.pi/logs"
-
-		local -a DEPS
-		IFS=',' read -ra DEPS <<<"$extensions"
-		for dep in "${DEPS[@]}"; do
-			local dn
-			dn=$(echo "$dep" | xargs)
-			[[ -z "$dn" ]] && continue
-
-			if [[ -d "$ROOT_DIR/extensions/$dn" ]]; then
-				cp -r "$ROOT_DIR/extensions/$dn" "$ext_dir/$dn"
-			elif [[ -f "$ROOT_DIR/extensions/$dn.ts" ]]; then
-				cp "$ROOT_DIR/extensions/$dn.ts" "$ext_dir/$dn.ts"
-			elif [[ -f "$ROOT_DIR/test/e2e/helpers/$dn.ts" ]]; then
-				mkdir -p "$ext_dir/$dn"
-				cp "$ROOT_DIR/test/e2e/helpers/$dn.ts" "$ext_dir/$dn/index.ts"
-			else
-				local found=""
-				while IFS= read -r -d '' match; do
-					found="$match"
-					break
-				done < <(find "$ROOT_DIR/extensions" -maxdepth 3 -name "$dn.ts" -print0 \
-					-o -type d -name "$dn" -exec test -f '{}/index.ts' \; -print0 2>/dev/null)
-				if [[ -n "$found" ]]; then
-					if [[ -d "$found" ]]; then
-						cp -r "$found" "$ext_dir/$dn"
-					else
-						cp "$found" "$ext_dir/$dn.ts"
-					fi
-				else
-					echo "WARNING: dependency '$dn' not found"
-				fi
-			fi
-		done
+		tui_copy_extensions "$test_home/.pi/extensions" "$extensions"
+		mkdir -p "$test_home/.pi/logs"
 	fi
 
-	# pi-logger 配置
-	if [[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]]; then
-		mkdir -p "$test_home/.pi"
-		cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" "$test_home/.pi/pi-logger.json" 2>/dev/null || true
-	fi
-
-	# node_modules 本地包链接
-	mkdir -p "$test_home/node_modules"
-	for pkg in pi-logger selector pi-config; do
-		local pkg_src="$ROOT_DIR/extensions/meta/$pkg"
-		local pkg_dir="$test_home/node_modules/@zenone/$pkg"
-		if [[ -d "$pkg_src" && ! -e "$pkg_dir" ]]; then
-			mkdir -p "$(dirname "$pkg_dir")"
-			ln -sf "$pkg_src" "$pkg_dir"
-		fi
-	done
-
-	# HOME 隔离
-	mkdir -p "$test_home/home/.pi/agent"
-	export HOME="$test_home/home"
-	[[ -f "$test_home/.pi/pi-logger.json" ]] && cp "$test_home/.pi/pi-logger.json" "$HOME/.pi/agent/"
-
-	# 模型配置
-	local real_home
-	real_home=$(eval echo ~)
-	if [[ "$PI_CI_MODE" == true ]]; then
-		cat >"$HOME/.pi/agent/models-store.json" <<-CIEOF
-			{
-			  "mock-llm": {
-			    "models": [
-			      {
-			        "id": "mock-model-1",
-			        "name": "Mock Model (CI)",
-			        "api": "openai-completions",
-			        "provider": "mock-llm",
-			        "apiKey": "ci-noop-key",
-			        "baseUrl": "http://localhost:0"
-			      }
-			    ],
-			    "default": "mock-model-1"
-			  }
-			}
-		CIEOF
-	else
-		for models_file in "$ROOT_DIR/.pi/agent/models.json" "$real_home/.pi/agent/models.json"; do
-			if [[ -f "$models_file" ]]; then
-				cp "$models_file" "$HOME/.pi/agent/" 2>/dev/null || true
-				break
-			fi
-		done
-	fi
-
-	# 全局 extension 配置
-	if [[ -d "$real_home/.pi/agent/extensions-data" ]]; then
-		mkdir -p "$HOME/.pi/agent/extensions-data"
-		cp -r "$real_home/.pi/agent/extensions-data/"* "$HOME/.pi/agent/extensions-data/" 2>/dev/null || true
-	fi
+	tui_setup_sandbox_home "$test_home"
 
 	# git init
 	if ! git -C "$test_home" rev-parse --git-dir &>/dev/null; then
@@ -578,13 +538,8 @@ tui_expect_test() {
 		spawn pi -a
 
 		# 等待 TUI 就绪（匹配状态栏中 (auto) 或 0.0%/0——连续出现，不会被 ANSI 打断）
-		expect {
-			-re {\(auto\)|0\.0%/0} { }
-			timeout {
-				send_error "TIMEOUT: TUI did not become ready within ${timeout_seconds}s\n"
-				exit 124
-			}
-		}
+		# 注意：必须用单行 expect（多行 expect 对部分命令名如 sync 有补全时序干扰，命令不被提交）
+		expect { -re {\(auto\)|0\.0%/0} { } timeout { send_error "TIMEOUT: TUI did not become ready within ${timeout_seconds}s\n"; exit 124 } }
 
 		# 额外等待确保 TUI 完全渲染
 		sleep 1

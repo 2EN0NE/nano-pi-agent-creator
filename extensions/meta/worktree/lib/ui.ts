@@ -51,6 +51,7 @@ interface WorktreeItem {
 	branch: string;
 	dirty: number;
 	ahead: number;
+	behind: number;
 }
 
 /**
@@ -170,11 +171,22 @@ class WorktreeSwitcherPanel {
 		const th = this.theme_;
 		const lines: string[] = [];
 
-		// 标题
-		lines.push(truncateToWidth(th.fg('accent', 'pi-worktree'), width));
-
-		// 分隔
-		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
+		// 标题（嵌入上边框）：── pi-worktree ────...
+		// 前缀线与右侧填充线同为 dim 色，保证整条上边框颜色一致
+		const titleText = th.fg('accent', 'pi-worktree');
+		const titlePrefix = th.fg('dim', '── ');
+		const titleSuffix = ' ';
+		const titleVisible = visibleWidth(titleText);
+		const titleFill = Math.max(
+			0,
+			width - visibleWidth(titlePrefix) - titleVisible - visibleWidth(titleSuffix),
+		);
+		lines.push(
+			truncateToWidth(
+				titlePrefix + titleText + titleSuffix + th.fg('dim', '─'.repeat(titleFill)),
+				width,
+			),
+		);
 
 		// 当前 cwd
 		const cwdLabel = this.currentName_
@@ -210,11 +222,13 @@ class WorktreeSwitcherPanel {
 			const namePadded = namePart + ' '.repeat(Math.max(0, 15 - nameVisible));
 			const dirtyStr =
 				item.dirty > 0 ? th.fg('warning', `dirty(${item.dirty})`) : th.fg('dim', 'clean');
-			const aheadStr = item.ahead > 0 ? th.fg('info', ` +${item.ahead}`) : '';
+			// ahead = worktree 领先 main（待合并），behind = worktree 落后 main（需 sync）
+			const aheadStr = item.ahead > 0 ? th.fg('accent', ` +${item.ahead}`) : '';
+			const behindStr = item.behind > 0 ? th.fg('warning', ` -${item.behind}`) : '';
 
 			lines.push(
 				truncateToWidth(
-					` ${arrow} ${namePadded} ${item.branch.padEnd(18)} ${dirtyStr}${aheadStr}`,
+					` ${arrow} ${namePadded} ${item.branch.padEnd(18)} ${dirtyStr}${aheadStr}${behindStr}`,
 					width,
 				),
 			);
@@ -265,14 +279,25 @@ export async function showWorktreeTui(
 	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<SwitchResult>(
 		(tui, theme, _kb, done) => {
 			const items: WorktreeItem[] = [
-				{ type: 'main', name: 'main', branch: 'current', dirty: 0, ahead: 0 },
-				...allWorktrees.map((wt) => ({
-					type: 'worktree' as const,
-					name: wt.name,
-					branch: wt.branch,
-					dirty: getDirtyCount(wt.path),
-					ahead: getAheadBehind(repoRoot, wt.branch).ahead,
-				})),
+				{
+					type: 'main',
+					name: 'main',
+					branch: 'current',
+					dirty: 0,
+					ahead: 0,
+					behind: 0,
+				},
+				...allWorktrees.map((wt) => {
+					const { ahead, behind } = getAheadBehind(repoRoot, wt.branch);
+					return {
+						type: 'worktree' as const,
+						name: wt.name,
+						branch: wt.branch,
+						dirty: getDirtyCount(wt.path),
+						ahead,
+						behind,
+					};
+				}),
 			];
 
 			const panel = new WorktreeSwitcherPanel({
@@ -370,6 +395,42 @@ class ListSelector {
 	}
 
 	invalidate(): void {}
+}
+
+// ═══════════════════════════════════════════
+// 删除当前 worktree 时的离开去向选择
+// ═══════════════════════════════════════════
+
+export async function askDeleteLeaveChoice(
+	ctx: any,
+	hasHistory: boolean,
+): Promise<'resume' | 'new' | 'cancel'> {
+	if (!ctx.hasUI) return hasHistory ? 'resume' : 'new';
+
+	const options: Array<{ value: 'resume' | 'new' | 'cancel'; label: string }> = [];
+	if (hasHistory) {
+		options.push({ value: 'resume', label: 'Resume main history' });
+	}
+	options.push({ value: 'new', label: 'New session in main' });
+	options.push({ value: 'cancel', label: 'Cancel deletion' });
+
+	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<
+		'resume' | 'new' | 'cancel'
+	>((tui, theme, _kb, done) => {
+		const selector = new ListSelector({
+			tui,
+			theme,
+			done,
+			title: 'Delete current worktree: where to go?',
+			options,
+			footer: 'up/down navigate  Enter confirm  Esc cancel',
+		});
+		return {
+			render: (w: number) => selector.render(w),
+			handleInput: (d: string) => selector.handleInput(d),
+			invalidate: () => selector.invalidate(),
+		};
+	});
 }
 
 // ═══════════════════════════════════════════
@@ -1083,7 +1144,7 @@ class OperationSubmenu {
 			{ value: 'switch', label: 'Switch to worktree', key: 'S' },
 			{ value: 'fork', label: 'Fork context to worktree', key: 'F' },
 			{ value: 'merge', label: 'Merge into main', key: 'M' },
-			{ value: 'rebase', label: 'Rebase onto main', key: 'R' },
+			{ value: 'rebase', label: 'Sync onto main (rebase)', key: 'R' },
 			{ value: 'delete', label: 'Delete worktree', key: 'D' },
 			{ value: 'shell', label: 'Open shell in worktree', key: 'H' },
 			{ value: 'cancel', label: 'Cancel', key: '' },

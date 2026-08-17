@@ -91,11 +91,23 @@ describe('getWorktreePath', () => {
 // ── isWorktreeCwd ──
 
 describe('isWorktreeCwd', () => {
+	const porcelain = [
+		`worktree ${MAIN_REPO}`,
+		'HEAD abc123...',
+		'branch refs/heads/main',
+		'',
+		`worktree ${WORKTREES_DIR}/Aries-Hamal`,
+		'HEAD def456...',
+		'branch refs/heads/wt/Aries-Hamal',
+	].join('\n');
+
 	it('returns true when cwd is inside a worktree', () => {
+		mockExecSync.mockReturnValueOnce(porcelain + '\n');
 		expect(isWorktreeCwd(`${WORKTREES_DIR}/Aries-Hamal`, MAIN_REPO)).toBe(true);
 	});
 
 	it('returns true when cwd is deep inside a worktree', () => {
+		mockExecSync.mockReturnValueOnce(porcelain + '\n');
 		expect(isWorktreeCwd(`${WORKTREES_DIR}/Aries-Hamal/src/app.ts`, MAIN_REPO)).toBe(true);
 	});
 
@@ -115,11 +127,23 @@ describe('isWorktreeCwd', () => {
 // ── getNameFromCwd ──
 
 describe('getNameFromCwd', () => {
+	const porcelain = [
+		`worktree ${MAIN_REPO}`,
+		'HEAD abc123...',
+		'branch refs/heads/main',
+		'',
+		`worktree ${WORKTREES_DIR}/Aries-Hamal`,
+		'HEAD def456...',
+		'branch refs/heads/wt/Aries-Hamal',
+	].join('\n');
+
 	it('extracts name from worktree root', () => {
+		mockExecSync.mockReturnValueOnce(porcelain + '\n');
 		expect(getNameFromCwd(`${WORKTREES_DIR}/Aries-Hamal`, MAIN_REPO)).toBe('Aries-Hamal');
 	});
 
 	it('extracts name from deep path inside worktree', () => {
+		mockExecSync.mockReturnValueOnce(porcelain + '\n');
 		expect(getNameFromCwd(`${WORKTREES_DIR}/Aries-Hamal/lib/utils.ts`, MAIN_REPO)).toBe(
 			'Aries-Hamal',
 		);
@@ -168,7 +192,7 @@ describe('parseWorktreeList', () => {
 	].join('\n');
 
 	it('parses worktrees and filters out main', () => {
-		const result = parseWorktreeList(porcelain, WORKTREES_DIR);
+		const result = parseWorktreeList(porcelain, WORKTREES_DIR, MAIN_REPO);
 		expect(result).toHaveLength(2);
 		expect(result[0].name).toBe('Aries-Hamal');
 		expect(result[0].branch).toBe('wt/Aries-Hamal');
@@ -178,21 +202,31 @@ describe('parseWorktreeList', () => {
 	});
 
 	it('returns empty for empty input', () => {
-		expect(parseWorktreeList('', WORKTREES_DIR)).toEqual([]);
+		expect(parseWorktreeList('', WORKTREES_DIR, MAIN_REPO)).toEqual([]);
 	});
 
-	it('ignores worktrees outside managed dir', () => {
+	it('accepts external worktrees with repo-relative name', () => {
+		// 新语义：仓库内（如 wt/）或其他任意位置的 worktree 都被识别，
+		// name = 相对仓库根路径（外部仓库外则用完整路径）
 		const output = [
 			`worktree ${MAIN_REPO}`,
 			'HEAD abc...',
 			'branch refs/heads/main',
 			'',
-			'worktree /some/other/path/Aries-Hamal',
+			`worktree ${MAIN_REPO}/wt/Virgo-Spica`,
 			'HEAD def...',
-			'branch refs/heads/wt/Aries-Hamal',
+			'branch refs/heads/wt/tui-design',
+			'',
+			'worktree /elsewhere/out-of-repo',
+			'HEAD ghi...',
+			'branch refs/heads/wt/out',
 		].join('\n');
-		const result = parseWorktreeList(output, WORKTREES_DIR);
-		expect(result).toHaveLength(0);
+		const result = parseWorktreeList(output, WORKTREES_DIR, MAIN_REPO);
+		expect(result).toHaveLength(2);
+		expect(result[0].name).toBe('wt/Virgo-Spica');
+		expect(result[0].branch).toBe('wt/tui-design');
+		// 仓库外 worktree 用完整路径为名
+		expect(result[1].name).toBe('/elsewhere/out-of-repo');
 	});
 });
 

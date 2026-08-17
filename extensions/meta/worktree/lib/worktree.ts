@@ -4,15 +4,11 @@
  * 所有 worktree 存放在主仓库外：<parentDir>/<repoName>-worktrees/<name>/
  */
 import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createLogger } from '@zenone/pi-logger';
 import type { OpResult, SymlinkSelections } from '../types.js';
-import {
-	getWorktreesDir,
-	getWorktreePath,
-	assertPathInWorktrees,
-	getManagedWorktrees,
-} from './paths.js';
+import { getWorktreePath, resolveWorktreePath, getManagedWorktrees } from './paths.js';
 import { getDefaultBranch, getCurrentBranch } from './git.js';
 import { runWorktreeSetup } from './setup.js';
 import type { NodeModulesStrategy } from '../types.js';
@@ -95,11 +91,19 @@ export function createWorktree(
 // ── 删除 worktree ──
 
 export function removeWorktree(repoRoot: string, name: string, force?: boolean): OpResult {
-	const worktreesDir = getWorktreesDir(repoRoot);
-	const targetDir = getWorktreePath(repoRoot, name);
+	const targetDir = resolveWorktreePath(repoRoot, name);
 
-	// 安全守卫：防止误删 main checkout
-	assertPathInWorktrees(worktreesDir, targetDir);
+	// 安全守卫：目标必须是 git worktree list 中的真实 worktree（防误删 main checkout 或任意目录）
+	const isRealWorktree = getManagedWorktrees(repoRoot).some((w) => w.path === targetDir);
+	if (!isRealWorktree) {
+		return {
+			ok: false,
+			message:
+				targetDir === resolve(repoRoot)
+					? 'SAFETY 拒绝：不能删除 main checkout。'
+					: `SAFETY 拒绝：'${targetDir}' 不是受管理的 git worktree。`,
+		};
+	}
 
 	if (!existsSync(targetDir))
 		return { ok: false, message: `Worktree '${name}' not found at ${targetDir}` };

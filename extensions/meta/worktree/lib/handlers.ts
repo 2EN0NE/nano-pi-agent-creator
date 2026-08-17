@@ -9,10 +9,10 @@ import type { MergeStrategy } from '../types.js';
 import {
 	getCurrentBranch,
 	execRebase,
-	isMergeInProgress,
-	isRebaseInProgress,
+	findInProgressDir,
 	getConflictFiles,
 	getMergeSourceBranch,
+	isRebaseConflictPaused,
 	popWorktreeStash,
 } from './git.js';
 import {
@@ -24,7 +24,7 @@ import {
 } from './worktree.js';
 import {
 	getManagedWorktrees,
-	getWorktreePath,
+	resolveWorktreePath,
 	getRepoRoot,
 	isWorktreeCwd,
 	getNameFromCwd,
@@ -33,6 +33,7 @@ import {
 	showWorktreeTui,
 	showOperationSubmenu,
 	askSessionStrategy,
+	askDeleteLeaveChoice,
 	askSymlinkTargetsPanel,
 	askMergeStrategy,
 	promptWorktreeName,
@@ -50,6 +51,7 @@ import {
 	cloneSession,
 	hasClonedSession,
 	findClonedSessionFile,
+	resolveSessionDir,
 } from './session.js';
 
 const log = createLogger('pi-worktree');
@@ -91,10 +93,12 @@ export const COMMANDS = [
 	'delete <name>',
 	'merge [--source <n>] [--target <b>] [--strategy <merge|squash|rebase-ff>]',
 	'rebase [--source <n>] [--target <b>]',
+	'sync <name>  (alias for rebase)',
 	'continue',
 	'abort',
 	'status',
 	'clean [--dry-run]',
+	'prune [--dry-run]',
 	'shell',
 	'widget <on|off>',
 ];
@@ -203,6 +207,10 @@ export async function handleWorktreeCommand(
 		case 'rebase':
 			await handleRebase(repoRoot, flags, ctx);
 			break;
+		case 'sync':
+			// sync = rebase 别名：把 worktree 分支同步到上游最新（ADR-0018）
+			await handleRebase(repoRoot, flags, ctx);
+			break;
 		case 'continue':
 			await handleContinue(repoRoot, ctx);
 			break;
@@ -214,6 +222,9 @@ export async function handleWorktreeCommand(
 			break;
 		case 'clean':
 			await handleClean(repoRoot, flags, ctx);
+			break;
+		case 'prune':
+			await handlePrune(repoRoot, flags, ctx);
 			break;
 		case 'shell':
 			handleShell(repoRoot, ctx);
@@ -375,6 +386,19 @@ async function _switchWithCreate(
 
 	if (strategy === 'resume' && sessionFile) {
 		await switchToSession(ctx, wtDir, sessionFile);
+	} else if (strategy === 'clone') {
+		// 克隆当前会话历史到 worktree（新建 worktree 无历史时默认选项）。
+		// 源会话文件缺失（如 pi 新会话尚未落盘）时降级为 new 空会话——保证创建后一定切换，
+		// 否则用户会停留在 main checkout 误以为创建失败。
+		const sourceFile: string | undefined = ctx.sessionManager?.getSessionFile?.();
+		if (!sourceFile || !existsSync(sourceFile)) {
+			log.info('clone fallback to new session: no source session file', { wtDir });
+			const newSessionFile = createSession(wtDir, repoRoot, name);
+			await switchToSession(ctx, wtDir, newSessionFile);
+			return;
+		}
+		const clonedFile = cloneSession(sourceFile, wtDir);
+		await switchToSession(ctx, wtDir, clonedFile);
 	} else {
 		// 新开会话
 		const newSessionFile = createSession(wtDir, repoRoot, name);
@@ -394,7 +418,7 @@ async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: a
 	}
 
 	const isMain = target === 'main';
-	const targetCwd = isMain ? repoRoot : getWorktreePath(repoRoot, target);
+	const targetCwd = isMain ? repoRoot : resolveWorktreePath(repoRoot, target);
 
 	if (!existsSync(targetCwd)) {
 		ctx.ui.notify(
@@ -449,8 +473,9 @@ async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: a
 			ctx.ui.notify('No active session file to clone from.', 'error');
 			return;
 		}
-		// 检查是否已有 clone 版本
-		const existingClone = hasClonedSession(targetCwd, repoRoot);
+		// 检查是否已有 clone 版本（sourceCwd = 当前会话实际 cwd，可能是一个 worktree 而非 main）
+		const sourceCwd: string = ctx.sessionManager?.getCwd?.() ?? repoRoot;
+		const existingClone = hasClonedSession(targetCwd, sourceCwd);
 		if (existingClone) {
 			// 已有 clone, 询问是否覆盖
 			try {
@@ -459,8 +484,8 @@ async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: a
 						'Overwrite with current session? [Y] Yes [N] Keep existing [Esc] Cancel',
 				);
 				if (overwrite === false) {
-					// 保留现有 clone 会话
-					const existingFile = findClonedSessionFile(targetCwd, repoRoot);
+					// 保留现有 clone 会话（sourceCwd 可能是 worktree，须与 hasClonedSession 检测一致）
+					const existingFile = findClonedSessionFile(targetCwd, sourceCwd);
 					if (existingFile) {
 						await switchToSession(ctx, targetCwd, existingFile);
 					} else {
@@ -493,7 +518,7 @@ async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: a
 
 async function handleFork(repoRoot: string, target: string, ctx: any): Promise<void> {
 	const isMain = target === 'main';
-	const targetCwd = isMain ? repoRoot : getWorktreePath(repoRoot, target);
+	const targetCwd = isMain ? repoRoot : resolveWorktreePath(repoRoot, target);
 
 	if (!existsSync(targetCwd)) {
 		ctx.ui.notify(
@@ -557,11 +582,28 @@ async function handleDelete(
 		return;
 	}
 
-	// 如果是当前 worktree，先切回 main
+	// 如果是当前 worktree，先切回 main（询问离开去向）
 	if (isCurrent) {
 		ctx.ui.notify(`Currently in worktree "${name}". Switching to main first...`, 'info');
-		const mainSessionFile = createSession(repoRoot, repoRoot, 'main');
-		await switchToSession(ctx, repoRoot, mainSessionFile);
+		// 恢复路径用真实历史会话（findExistingSession），不再覆盖 main.jsonl 丢历史
+		const existingSession = findExistingSession(repoRoot, repoRoot, 'main');
+		const choice = await askDeleteLeaveChoice(ctx, Boolean(existingSession));
+		if (choice === 'cancel') {
+			ctx.ui.notify('Deletion cancelled.', 'info');
+			return;
+		}
+		const mainSessionFile =
+			choice === 'resume' && existingSession
+				? existingSession
+				: createSession(repoRoot, repoRoot, 'main');
+		const switched = await switchToSession(ctx, repoRoot, mainSessionFile);
+		if (!switched) {
+			ctx.ui.notify(
+				'Failed to switch to main session. Deletion aborted to keep current worktree.',
+				'error',
+			);
+			return;
+		}
 	}
 
 	// 尝试安全删除
@@ -574,7 +616,7 @@ async function handleDelete(
 			result.message.includes('untracked') ||
 			result.message.includes('contains'))
 	) {
-		const preview = _dirtyPreview(getWorktreePath(repoRoot, name));
+		const preview = _dirtyPreview(resolveWorktreePath(repoRoot, name));
 		const forceOk = await confirmForceDelete(ctx, name, preview);
 		if (forceOk) {
 			result = removeWorktree(repoRoot, name, true);
@@ -1020,7 +1062,7 @@ async function handleMerge(
 
 	let result: MergeResult;
 	if (strategy === 'rebase-ff') {
-		const sourceDir = getWorktreePath(repoRoot, sourceWorktree);
+		const sourceDir = resolveWorktreePath(repoRoot, sourceWorktree);
 		result = execRebaseFF(repoRoot, sourceBranch, targetBranch, sourceDir);
 	} else {
 		result = execMerge(repoRoot, sourceBranch, targetBranch, strategy);
@@ -1074,7 +1116,7 @@ async function handleMerge(
 // rebase
 // ═══════════════════════════════════════════
 
-async function handleRebase(
+export async function handleRebase(
 	repoRoot: string,
 	flags: Record<string, string>,
 	ctx: any,
@@ -1113,11 +1155,13 @@ async function handleRebase(
 
 	const sourceBranch = 'wt/' + sourceWorktree;
 	const ontoBranch = flags.target || 'main';
+	const sourceDir = resolveWorktreePath(repoRoot, sourceWorktree);
 
 	log.info('rebasing', { source: sourceBranch, onto: ontoBranch, repo: basename(repoRoot) });
 	ctx.ui.notify(`Rebasing '${sourceBranch}' onto '${ontoBranch}'...`, 'info');
 
-	const result = execRebase(repoRoot, sourceBranch, ontoBranch);
+	// Worktree-Local Rebase（ADR-0018）：变基在持有该分支的 worktree 目录内执行
+	const result = execRebase(repoRoot, sourceBranch, ontoBranch, sourceDir);
 
 	if (result.ok) {
 		// P0-2: rebase 成功 → 步骤引导
@@ -1144,8 +1188,15 @@ async function handleRebase(
 		}
 	} else {
 		ctx.ui.notify('Rebase failed: ' + result.message, 'error');
+		// 失败收尾：仅当失败原因不是"冲突暂停"时才清理残留 rebase 状态。
+		// 冲突暂停（isRebaseConflictPaused）说明 worktree 停在待解决状态且可能已有
+		// 用户手工解决的进度——无条件 abort 会销毁这些进度（ADR-0018 冲突保留语义）。
+		if (isRebaseConflictPaused(sourceDir)) {
+			return;
+		}
 		try {
-			execSync('git rebase --abort', { cwd: repoRoot, encoding: 'utf-8' });
+			// 非冲突失败时若残留 rebase 状态，从发起目录（worktree 内）abort
+			execSync('git rebase --abort', { cwd: sourceDir, encoding: 'utf-8' });
 		} catch {
 			/* ignore */
 		}
@@ -1238,24 +1289,70 @@ async function handleClean(
 }
 
 // ═══════════════════════════════════════════
+// prune（清理孤儿 worktree 元数据 + 孤儿 session 目录提示）
+// ═══════════════════════════════════════════
+
+async function handlePrune(
+	repoRoot: string,
+	flags: Record<string, string>,
+	ctx: any,
+): Promise<void> {
+	const dryRun = flags.dry !== undefined || flags['dry-run'] !== undefined;
+
+	// 1. prune 前收集所有受管 worktree 记录（手动 rm -rf 的目录在 git 记录中仍存在，可被检测）
+	const wts = getManagedWorktrees(repoRoot);
+
+	// 2. 执行 git worktree prune（清理元数据中已不存在的目录记录）
+	if (!dryRun) {
+		try {
+			execSync('git worktree prune', { cwd: repoRoot, encoding: 'utf-8' });
+		} catch (err: any) {
+			ctx.ui.notify(`prune failed: ${err.stderr?.trim() || err.message}`, 'error');
+			return;
+		}
+	}
+
+	// 3. 孤儿 session 目录检测：worktree 目录已不存在但其 session 目录还在（不自动删除）
+	const orphanSessions = wts
+		.filter((wt) => !existsSync(wt.path))
+		.map((wt) => resolveSessionDir(wt.path))
+		.filter((dir) => existsSync(dir));
+
+	const lines: string[] = [];
+	lines.push(
+		dryRun
+			? 'Prune (dry run): would remove git worktree metadata for missing directories.'
+			: 'Pruned git worktree metadata.',
+	);
+	if (orphanSessions.length > 0) {
+		lines.push('Orphaned session directories (not deleted — clean manually):');
+		for (const dir of orphanSessions) lines.push('  ' + dir);
+	} else {
+		lines.push('No orphaned session directories.');
+	}
+	ctx.ui.notify(lines.join('\n'), 'info');
+}
+
+// ═══════════════════════════════════════════
 // continue（P0-3）
 // ═══════════════════════════════════════════
 
 async function handleContinue(repoRoot: string, ctx: any): Promise<void> {
-	const isMerge = isMergeInProgress(repoRoot);
-	const isRebase = isRebaseInProgress(repoRoot);
+	// 自动定位进行中的 merge/rebase 所在目录（main 根或 worktree，ADR-0018）
+	const rebaseDir = findInProgressDir(repoRoot, 'rebase');
+	const mergeDir = findInProgressDir(repoRoot, 'merge');
 
-	if (!isMerge && !isRebase) {
+	if (!rebaseDir && !mergeDir) {
 		ctx.ui.notify('No merge or rebase in progress.', 'info');
 		return;
 	}
 
 	ctx.ui.notify('Continuing...', 'info');
 
-	if (isRebase) {
+	if (rebaseDir) {
 		try {
-			execSync('git add -u', { cwd: repoRoot, encoding: 'utf-8' });
-			execSync('git rebase --continue', { cwd: repoRoot, encoding: 'utf-8' });
+			execSync('git add -u', { cwd: rebaseDir, encoding: 'utf-8' });
+			execSync('git rebase --continue', { cwd: rebaseDir, encoding: 'utf-8' });
 			ctx.ui.notify('Rebase continued successfully.', 'success');
 			// 尝试 pop stash（如果有的话）
 			popWorktreeStash(repoRoot);
@@ -1265,9 +1362,9 @@ async function handleContinue(repoRoot: string, ctx: any): Promise<void> {
 		return;
 	}
 
-	if (isMerge) {
+	if (mergeDir) {
 		// 合并需要用户先 git add 解决冲突的文件
-		const conflictFiles = getConflictFiles(repoRoot);
+		const conflictFiles = getConflictFiles(mergeDir);
 		if (conflictFiles.length > 0) {
 			ctx.ui.notify(
 				'Merge conflict still present. Resolve conflicts first, then /worktree continue.\n' +
@@ -1279,7 +1376,7 @@ async function handleContinue(repoRoot: string, ctx: any): Promise<void> {
 		// 无冲突 → 尝试 git merge --continue
 		try {
 			execSync('git merge --continue --no-edit', {
-				cwd: repoRoot,
+				cwd: mergeDir,
 				encoding: 'utf-8',
 			});
 			ctx.ui.notify('Merge continued successfully.', 'success');
@@ -1295,28 +1392,29 @@ async function handleContinue(repoRoot: string, ctx: any): Promise<void> {
 // ═══════════════════════════════════════════
 
 async function handleAbort(repoRoot: string, ctx: any): Promise<void> {
-	const isMerge = isMergeInProgress(repoRoot);
-	const isRebase = isRebaseInProgress(repoRoot);
+	// 自动定位进行中的 merge/rebase 所在目录（main 根或 worktree，ADR-0018）
+	const rebaseDir = findInProgressDir(repoRoot, 'rebase');
+	const mergeDir = findInProgressDir(repoRoot, 'merge');
 
-	if (!isMerge && !isRebase) {
+	if (!rebaseDir && !mergeDir) {
 		ctx.ui.notify('No merge or rebase to abort.', 'info');
 		return;
 	}
 
 	ctx.ui.notify('Aborting...', 'info');
 
-	if (isRebase) {
+	if (rebaseDir) {
 		try {
-			execSync('git rebase --abort', { cwd: repoRoot, encoding: 'utf-8' });
+			execSync('git rebase --abort', { cwd: rebaseDir, encoding: 'utf-8' });
 			ctx.ui.notify('Rebase aborted.', 'success');
 			popWorktreeStash(repoRoot);
 		} catch (err: any) {
 			ctx.ui.notify('Abort failed: ' + (err.stderr?.trim() || err.message), 'error');
 		}
 	}
-	if (isMerge) {
+	if (mergeDir) {
 		try {
-			execSync('git merge --abort', { cwd: repoRoot, encoding: 'utf-8' });
+			execSync('git merge --abort', { cwd: mergeDir, encoding: 'utf-8' });
 			ctx.ui.notify('Merge aborted.', 'success');
 			popWorktreeStash(repoRoot);
 		} catch (err: any) {
@@ -1330,15 +1428,16 @@ async function handleAbort(repoRoot: string, ctx: any): Promise<void> {
 // ═══════════════════════════════════════════
 
 function handleStatus(repoRoot: string, ctx: any): void {
-	const isMerge = isMergeInProgress(repoRoot);
-	const isRebase = isRebaseInProgress(repoRoot);
+	// 自动定位进行中的 merge/rebase 所在目录（main 根或 worktree，ADR-0018）
+	const rebaseDir = findInProgressDir(repoRoot, 'rebase');
+	const mergeDir = findInProgressDir(repoRoot, 'merge');
 
-	if (isRebase) {
-		const conflicts = getConflictFiles(repoRoot);
+	if (rebaseDir) {
+		const conflicts = getConflictFiles(rebaseDir);
 		let branch = 'unknown';
 		try {
 			branch = execSync('git rev-parse --abbrev-ref HEAD', {
-				cwd: repoRoot,
+				cwd: rebaseDir,
 				encoding: 'utf-8',
 			}).trim();
 		} catch {
@@ -1349,9 +1448,9 @@ function handleStatus(repoRoot: string, ctx: any): void {
 			branch +
 			(conflicts.length > 0 ? '\nConflict files: ' + conflicts.join(', ') : '');
 		ctx.ui.notify(msg, 'info');
-	} else if (isMerge) {
-		const source = getMergeSourceBranch(repoRoot);
-		const conflicts = getConflictFiles(repoRoot);
+	} else if (mergeDir) {
+		const source = getMergeSourceBranch(mergeDir);
+		const conflicts = getConflictFiles(mergeDir);
 		const msg =
 			'Merge in progress' +
 			(source ? ' (merging ' + source + ')' : '') +
@@ -1411,7 +1510,7 @@ function handleShell(repoRoot: string, ctx: any, targetName?: string): void {
 	}
 
 	const isMain = name === 'main';
-	const targetDir = isMain ? repoRoot : getWorktreePath(repoRoot, name);
+	const targetDir = isMain ? repoRoot : resolveWorktreePath(repoRoot, name);
 	if (!existsSync(targetDir)) {
 		ctx.ui.notify(`Worktree directory not found: ${targetDir}`, 'error');
 		return;

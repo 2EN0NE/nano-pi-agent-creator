@@ -10,10 +10,17 @@
  */
 import { createLogger } from '@zenone/pi-logger';
 import { join, resolve, sep } from 'node:path';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	writeFileSync,
+	readFileSync,
+	readdirSync,
+	realpathSync,
+} from 'node:fs';
 import crypto from 'node:crypto';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
-import { getDefaultSessionDirPath } from './paths.js';
+import { getDefaultSessionDirPath, getManagedWorktrees } from './paths.js';
 import { getWorktreesDir } from './paths.js';
 
 const log = createLogger('pi-worktree');
@@ -242,9 +249,23 @@ export function hasClonedSession(targetCwd: string, sourceCwd: string): CloneMet
 
 	try {
 		const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as CloneMeta;
-		return meta.sourceCwd === sourceCwd ? meta : null;
+		// 路径归一化比较：clone-meta 存的是 clone 时的会话 header cwd（可能为 /var/...），
+		// 而当前会话 getCwd() 可能为 /private/var/...（同一目录，macOS 符号链接），
+		// 直接 === 字符串比较会漏检。用 realpathSync 归一化后再比较。
+		const metaCwd = normalizeRealPath(meta.sourceCwd);
+		const curCwd = normalizeRealPath(sourceCwd);
+		return metaCwd === curCwd ? meta : null;
 	} catch {
 		return null;
+	}
+}
+
+/** realpath 归一化（失败时回退原始路径）。 */
+function normalizeRealPath(p: string): string {
+	try {
+		return realpathSync(p);
+	} catch {
+		return p;
 	}
 }
 
@@ -421,8 +442,12 @@ export function forkToNewSession(
  * 对 worktree 路径自动批准，避免用户在切换 worktree 时频繁确认信任。
  */
 export function autoApproveProjectTrust(repoRoot: string, cwd: string): boolean {
-	const worktreesDir = resolve(getWorktreesDir(repoRoot));
 	const resolved = resolve(cwd);
-	// Exact match (e.g. process running in the worktrees root) or path under worktreesDir
-	return resolved === worktreesDir || resolved.startsWith(worktreesDir + sep);
+	// 约定目录内（向后兼容：exact match 或路径前缀）
+	const worktreesDir = resolve(getWorktreesDir(repoRoot));
+	if (resolved === worktreesDir || resolved.startsWith(worktreesDir + sep)) return true;
+	// 任意位置的 git worktree（含仓库内 wt/ 等外部 worktree）
+	return getManagedWorktrees(repoRoot).some(
+		(wt) => resolved === wt.path || resolved.startsWith(wt.path + sep),
+	);
 }

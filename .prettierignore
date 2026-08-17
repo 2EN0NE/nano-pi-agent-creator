@@ -7,3 +7,6 @@ build
 package-lock.json
 *.jsonl
 **/config.json.example
+
+# 其他 worktree 分支的 checkout 不属于主仓库格式检查范围
+wt/

@@ -9,9 +9,9 @@
  * - 会话文件创建与 header 格式（session.ts）
  * - SessionManager.open 兼容性
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { execSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,8 @@ const {
 	getWorktreePath,
 	isWorktreeCwd,
 	getNameFromCwd,
+	isMainCwd,
+	resolveWorktreePath,
 	assertPathInWorktrees,
 	getManagedWorktrees,
 } = await import(resolve(LIB_DIR, 'paths.ts'));
@@ -1131,5 +1133,384 @@ describe('worktree extension — clone session', () => {
 		const firstMsg = JSON.parse(content[1]);
 		expect(firstMsg.parentId).toBe(header.id);
 		expect(firstMsg.parentId).not.toBe(srcHeaderId);
+	});
+});
+
+// ═══════════════════════════════════════════
+// 套件：handleDelete 离开去向选择（T3）
+// ═══════════════════════════════════════════
+
+describe('worktree extension — delete leave choice', () => {
+	let sandbox: string;
+	let isolatedHome: string;
+	let repoDir: string;
+	let wtDir: string;
+
+	beforeAll(async () => {
+		sandbox = createSandbox({ useMockLLM: true });
+		isolatedHome = resolve(sandbox, 'home');
+		repoDir = join(isolatedHome, 'delete-test-repo');
+		mkdirSync(repoDir, { recursive: true });
+		execSync('git init --initial-branch main', { cwd: repoDir });
+		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
+		writeFileSync(join(repoDir, 'README.md'), '# Delete test\n');
+		execSync('git add README.md && git commit -m init', { cwd: repoDir });
+		execSync('git worktree add -b wt/delete-wt ../delete-test-repo-worktrees/delete-wt main', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
+		wtDir = join(repoDir, '..', 'delete-test-repo-worktrees', 'delete-wt');
+	});
+
+	afterAll(() => {
+		try {
+			execSync('git worktree remove ../delete-test-repo-worktrees/delete-wt', {
+				cwd: repoDir,
+				encoding: 'utf-8',
+			});
+		} catch {
+			/* ignore */
+		}
+		if (sandbox) destroySandbox(sandbox);
+	});
+
+	function mockCtx(customResults: unknown[]) {
+		const notifyMsgs: string[] = [];
+		const ctx: any = {
+			hasUI: true,
+			cwd: wtDir,
+			sessionManager: { getSessionFile: () => undefined },
+			ui: {
+				notify: (msg: string) => {
+					notifyMsgs.push(msg);
+				},
+				custom: async () => customResults.shift(),
+			},
+			switchSession: async () => ({ cancelled: false }),
+		};
+		return { ctx, notifyMsgs };
+	}
+
+	it('1. cancel 中止删除：worktree 保留、git 记录未动', async () => {
+		const { handleWorktreeCommand } = await import(resolve(LIB_DIR, 'handlers.ts'));
+		const { ctx, notifyMsgs } = mockCtx([true, 'cancel']);
+
+		await handleWorktreeCommand('delete delete-wt', ctx);
+
+		// worktree 未删除
+		expect(existsSync(wtDir)).toBe(true);
+		const list = execSync('git worktree list --porcelain', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
+		expect(list).toContain('delete-wt');
+		expect(notifyMsgs.some((m) => m.includes('Deletion cancelled'))).toBe(true);
+	});
+
+	it('2. 非 TUI 模式：有历史 resume、无历史 new', async () => {
+		const { askDeleteLeaveChoice } = await import(resolve(LIB_DIR, 'ui.ts'));
+		const { ctx } = mockCtx([]);
+		ctx.hasUI = false;
+		expect(await askDeleteLeaveChoice(ctx, true)).toBe('resume');
+		expect(await askDeleteLeaveChoice(ctx, false)).toBe('new');
+	});
+});
+
+// ═══════════════════════════════════════════
+// 套件：prune 命令（T7）
+// ═══════════════════════════════════════════
+
+describe('worktree extension — prune', () => {
+	let sandbox: string;
+	let isolatedHome: string;
+	let repoDir: string;
+	let wtDir: string;
+
+	beforeAll(async () => {
+		sandbox = createSandbox({ useMockLLM: true });
+		isolatedHome = resolve(sandbox, 'home');
+		repoDir = join(isolatedHome, 'prune-test-repo');
+		mkdirSync(repoDir, { recursive: true });
+		execSync('git init --initial-branch main', { cwd: repoDir });
+		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
+		writeFileSync(join(repoDir, 'README.md'), '# Prune test\n');
+		execSync('git add README.md && git commit -m init', { cwd: repoDir });
+		execSync('git worktree add -b wt/prune-wt ../prune-test-repo-worktrees/prune-wt main', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
+		wtDir = join(repoDir, '..', 'prune-test-repo-worktrees', 'prune-wt');
+	});
+
+	afterAll(() => {
+		try {
+			execSync('git worktree remove ../prune-test-repo-worktrees/prune-wt', {
+				cwd: repoDir,
+				encoding: 'utf-8',
+			});
+		} catch {
+			/* ignore */
+		}
+		if (sandbox) destroySandbox(sandbox);
+	});
+
+	function pruneCtx(notifyMsgs: string[]) {
+		return {
+			hasUI: false,
+			cwd: repoDir,
+			ui: { notify: (m: string) => notifyMsgs.push(m) },
+			sessionManager: {},
+		};
+	}
+
+	it('1. dry-run 列出孤儿 session 目录且不执行 prune', async () => {
+		// 模拟用户手动删除 worktree 目录
+		rmSync(wtDir, { recursive: true, force: true });
+		// 制造该 worktree 的孤儿 session 目录
+		const { resolveSessionDir } = await import(resolve(LIB_DIR, 'session.ts'));
+		const sessionDir = resolveSessionDir(wtDir);
+		mkdirSync(sessionDir, { recursive: true });
+
+		const { handleWorktreeCommand } = await import(resolve(LIB_DIR, 'handlers.ts'));
+		const notifyMsgs: string[] = [];
+		await handleWorktreeCommand('prune --dry-run', pruneCtx(notifyMsgs));
+
+		expect(notifyMsgs.some((m) => m.includes('Orphaned session directories'))).toBe(true);
+		expect(notifyMsgs.some((m) => m.includes('dry run'))).toBe(true);
+
+		// dry-run 不执行：git 记录仍存在
+		const list = execSync('git worktree list --porcelain', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
+		expect(list).toContain('prune-wt');
+
+		rmSync(sessionDir, { recursive: true, force: true });
+	});
+
+	it('2. 执行 prune 清理 git 元数据（孤儿记录消失）', async () => {
+		// worktree 目录已被测试 1 删除，git 记录仍在
+		const { handleWorktreeCommand } = await import(resolve(LIB_DIR, 'handlers.ts'));
+		const notifyMsgs: string[] = [];
+		await handleWorktreeCommand('prune', pruneCtx(notifyMsgs));
+
+		expect(notifyMsgs.some((m) => m.includes('Pruned git worktree metadata'))).toBe(true);
+		const list = execSync('git worktree list --porcelain', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
+		expect(list).not.toContain('prune-wt');
+	});
+});
+
+// ═══════════════════════════════════════════
+// 套件：create 后会话切换（clone 策略）与 cwd 迁移
+// ═══════════════════════════════════════════
+
+describe('worktree extension — create with clone strategy', () => {
+	let sandbox: string;
+	let isolatedHome: string;
+	let repoDir: string;
+	let sourceSessionFile: string;
+
+	beforeAll(async () => {
+		sandbox = createSandbox({ useMockLLM: true });
+		isolatedHome = resolve(sandbox, 'home');
+		repoDir = join(isolatedHome, 'clone-create-repo');
+		mkdirSync(repoDir, { recursive: true });
+		execSync('git init --initial-branch main', { cwd: repoDir });
+		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
+		writeFileSync(join(repoDir, 'README.md'), '# Clone create test\n');
+		execSync('git add README.md && git commit -m init', { cwd: repoDir });
+
+		// 造一个真实源 session 文件（模拟 main checkout 中已有历史的会话）
+		const { createSession } = await import(resolve(LIB_DIR, 'session.ts'));
+		sourceSessionFile = createSession(repoDir, repoDir, 'main');
+		const ts = new Date().toISOString();
+		const msg1 = {
+			type: 'message',
+			id: 'src-msg-1',
+			parentId: null,
+			timestamp: ts,
+			message: { role: 'user', content: 'hi' },
+		};
+		const msg2 = {
+			type: 'message',
+			id: 'src-msg-2',
+			parentId: 'src-msg-1',
+			timestamp: ts,
+			message: { role: 'assistant', content: 'hello' },
+		};
+		const entries = [msg1, msg2].map((e) => JSON.stringify(e)).join('\n') + '\n';
+		writeFileSync(
+			sourceSessionFile,
+			readFileSync(sourceSessionFile, 'utf-8') + entries,
+			'utf-8',
+		);
+	});
+
+	afterAll(() => {
+		try {
+			const wtDir = join(repoDir, '..', 'clone-create-repo-worktrees', 'clone-wt');
+			if (existsSync(wtDir)) {
+				execSync(`git worktree remove ${wtDir} --force`, { cwd: repoDir });
+			}
+		} catch {
+			/* ignore */
+		}
+		if (sandbox) destroySandbox(sandbox);
+	});
+
+	it('create 选择 clone：worktree 会话文件含源历史，且切换目标为克隆文件', async () => {
+		const { handleWorktreeCommand } = await import(resolve(LIB_DIR, 'handlers.ts'));
+		const { resolveSessionDir } = await import(resolve(LIB_DIR, 'session.ts'));
+		const wtDir = join(repoDir, '..', 'clone-create-repo-worktrees', 'clone-wt');
+
+		const notifyMsgs: string[] = [];
+		let switchedTo: string | undefined;
+		const ctx: any = {
+			hasUI: true,
+			cwd: repoDir,
+			sessionManager: {
+				getSessionFile: () => sourceSessionFile,
+				getCwd: () => repoDir,
+			},
+			ui: {
+				notify: (m: string) => notifyMsgs.push(m),
+				// TUI 面板序列：symlink 多选面板(返回 string[]) → session 策略面板('clone')。
+				// 注意必须用闭包消费序列：`() => ([...]).shift()` 每次调用重建数组，shift 恒返回首元素。
+				// 选中 'pi'（非 node_modules/__other__）不触发 node_modules 策略与自定义路径面板。
+				custom: (() => {
+					const responses: unknown[] = [['pi'], 'clone'];
+					return async () => responses.shift();
+				})(),
+			},
+			switchSession: async (file: string) => {
+				switchedTo = file;
+				return { cancelled: false };
+			},
+		};
+
+		await handleWorktreeCommand('create clone-wt', ctx);
+
+		// 1. worktree 创建成功
+		expect(existsSync(wtDir)).toBe(true);
+
+		// 2. clone 是异步 fire-and-forget（handleCreate 不 await _switchWithCreate），
+		//    等待切换完成（switchedTo 为克隆文件路径）
+		await vi.waitFor(() => expect(switchedTo).toBeDefined(), { timeout: 5000 });
+		const clonedPath = switchedTo!;
+
+		// 3. 克隆文件在 worktree 的 session 目录中，header cwd = worktree 路径
+		expect(dirname(clonedPath)).toBe(resolveSessionDir(wtDir));
+		const lines = readFileSync(clonedPath, 'utf-8').trim().split('\n');
+		const header = JSON.parse(lines[0]);
+		expect(header.cwd).toBe(realpathSync(wtDir));
+
+		// 4. 源历史完整克隆（2 条 message entry，非空会话）
+		expect(lines.length).toBe(3); // header + 2 条 message
+		expect(lines.join('\n')).toContain('src-msg-1');
+		expect(lines.join('\n')).toContain('src-msg-2');
+
+		// 5. 切换目标 = 克隆文件（pi 的 cwd 将迁移到 worktree）
+		expect(switchedTo).toBe(clonedPath);
+
+		// 6. 源文件未被修改（header cwd 仍是 repoDir）
+		const srcHeader = JSON.parse(readFileSync(sourceSessionFile, 'utf-8').split('\n')[0]);
+		expect(srcHeader.cwd).toBe(repoDir);
+	});
+});
+
+// ═══════════════════════════════════════════
+// 套件：外部 worktree 识别（仓库内 wt/ 等非约定目录）
+// ═══════════════════════════════════════════
+
+describe('worktree extension — external worktrees (inside repo, e.g. wt/)', () => {
+	let sandbox: string;
+	let isolatedHome: string;
+	let repoDir: string;
+
+	beforeAll(() => {
+		sandbox = createSandbox({ useMockLLM: true });
+		isolatedHome = resolve(sandbox, 'home');
+		repoDir = join(isolatedHome, 'ext-wt-test-repo');
+		mkdirSync(repoDir, { recursive: true });
+		execSync('git init --initial-branch main', { cwd: repoDir });
+		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
+		writeFileSync(join(repoDir, 'README.md'), '# Ext WT Test\n');
+		execSync('git add README.md && git commit -m init', { cwd: repoDir });
+	});
+
+	afterAll(() => {
+		if (sandbox) destroySandbox(sandbox);
+	});
+
+	it('discovers a worktree created inside the repo (wt/<name>)', () => {
+		// 手动在仓库内 wt/ 目录创建 worktree（模拟用户/其他工具创建的外部 worktree）
+		const wtPath = join(repoDir, 'wt', 'Virgo-Spica');
+		execSync('git worktree add -b wt/tui-design wt/Virgo-Spica', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		});
+		expect(existsSync(wtPath)).toBe(true);
+
+		const wts = getManagedWorktrees(repoDir);
+		const names = wts.map((w: { name: string }) => w.name);
+		// 外部 worktree name = 相对仓库根路径
+		expect(names).toContain('wt/Virgo-Spica');
+		// main checkout 不被包含
+		expect(names).not.toContain(repoDir);
+		expect(names).not.toContain('');
+
+		const hit = wts.find((w: { name: string }) => w.name === 'wt/Virgo-Spica');
+		expect(hit?.branch).toBe('wt/tui-design');
+		expect(hit?.path).toBe(wtPath);
+	});
+
+	it('cwd identity: wt/ path is a worktree, not main', () => {
+		const wtPath = join(repoDir, 'wt', 'Virgo-Spica');
+		expect(isWorktreeCwd(wtPath, repoDir)).toBe(true);
+		expect(isWorktreeCwd(repoDir, repoDir)).toBe(false);
+		expect(getNameFromCwd(wtPath, repoDir)).toBe('wt/Virgo-Spica');
+		expect(getNameFromCwd(repoDir, repoDir)).toBeNull();
+		expect(isMainCwd(wtPath, repoDir)).toBe(false);
+		expect(isMainCwd(repoDir, repoDir)).toBe(true);
+	});
+
+	it('resolveWorktreePath resolves external worktree by name', () => {
+		const wtPath = join(repoDir, 'wt', 'Virgo-Spica');
+		expect(resolveWorktreePath(repoDir, 'wt/Virgo-Spica')).toBe(wtPath);
+		expect(resolveWorktreePath(repoDir, 'main')).toBe(repoDir);
+		// 未知 name 兜底约定目录（旧行为兼容）
+		expect(resolveWorktreePath(repoDir, 'nope')).toBe(getWorktreePath(repoDir, 'nope'));
+	});
+
+	it('removeWorktree removes an external worktree', () => {
+		const wtPath = join(repoDir, 'wt', 'Virgo-Spica');
+		const result = removeWorktree(repoDir, 'wt/Virgo-Spica');
+		expect(result.ok).toBe(true);
+		expect(existsSync(wtPath)).toBe(false);
+	});
+
+	it('removeWorktree refuses non-worktree paths (safety)', () => {
+		const result = removeWorktree(repoDir, 'main');
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain('SAFETY');
+		// 一个不存在于 worktree list 中的任意 name 也被拒绝
+		const bad = removeWorktree(repoDir, 'not-a-real-worktree');
+		expect(bad.ok).toBe(false);
+		expect(bad.message).toContain('SAFETY');
 	});
 });

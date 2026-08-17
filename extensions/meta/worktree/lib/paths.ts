@@ -5,10 +5,8 @@
  * 所有函数可单元测试。
  */
 import { execSync } from 'node:child_process';
-import { join, dirname, basename, resolve, relative } from 'node:path';
-import { createLogger } from '@zenone/pi-logger';
-
-const log = createLogger('pi-worktree');
+import { realpathSync } from 'node:fs';
+import { join, dirname, basename, resolve, relative, sep } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 
 // ── 类型 ──
@@ -64,49 +62,73 @@ export function getWorktreePath(repoRoot: string, name: string): string {
 	return join(getWorktreesDir(repoRoot), name);
 }
 
+// ── 工具 ──
+
+/**
+ * 归一化为真实路径（解析符号链接）。
+ *
+ * macOS /var → /private/var 等符号链接下，resolve() 与 git worktree list
+ * 返回的逻辑路径可能不一致（git 返回未解析路径）。统一用 realpath 比较。
+ */
+export function realpathOf(p: string): string {
+	try {
+		return realpathSync(p);
+	} catch {
+		return resolve(p);
+	}
+}
+
 // ── cwd 身份判断 ──
 
 /**
- * 当前 cwd 是否在管理的 worktree 目录内。
+ * 当前 cwd 是否在某个 git worktree 目录内。
+ *
+ * 基于 git worktree list 判断（而非固定目录约定），因此仓库内（如 wt/ 下）
+ * 或任意位置的外部 worktree 都能被识别。
  */
 export function isWorktreeCwd(cwd: string, repoRoot: string): boolean {
-	const wtDir = getWorktreesDir(repoRoot);
-	const rel = relative(wtDir, resolve(cwd));
-	// rel 非空且不以 '..' 开头 = cwd 在 wtDir 子路径内
-	return rel !== '' && !rel.startsWith('..') && !rel.startsWith('/');
+	const resolved = realpathOf(cwd);
+	return getManagedWorktrees(repoRoot).some(
+		(wt) => resolved === realpathOf(wt.path) || resolved.startsWith(realpathOf(wt.path) + sep),
+	);
 }
 
 /**
  * 从 cwd 提取 worktree 名称。
  * 前提：isWorktreeCwd(cwd, repoRoot) === true
  *
- * @returns worktree 名称，若 cwd 不在 worktree 内则返回 null
+ * @returns worktree 名称（约定目录内为原名，外部为相对仓库根的路径），不在 worktree 内返回 null
  */
 export function getNameFromCwd(cwd: string, repoRoot: string): string | null {
-	if (!isWorktreeCwd(cwd, repoRoot)) return null;
-	const wtDir = getWorktreesDir(repoRoot);
-	const rel = relative(wtDir, resolve(cwd));
-	// 取第一段路径组件
-	const first = rel.split(/[/\\]/)[0];
-	return first || null;
+	const resolved = realpathOf(cwd);
+	const wt = getManagedWorktrees(repoRoot).find((w) => {
+		const real = realpathOf(w.path);
+		return resolved === real || resolved.startsWith(real + sep);
+	});
+	return wt ? wt.name : null;
 }
 
 /**
- * 当前 cwd 是否不在任何 worktree 内（在主仓库根中）。
+ * 当前 cwd 是否在主仓库根中（不在任何 worktree 内）。
+ *
+ * 注意：cwd 在 repoRoot 之下但属于某个 worktree（如 <repo>/wt/<name>）时，
+ * 返回 false —— 仓库内 worktree 不再被误判为 main。
  */
 export function isMainCwd(cwd: string, repoRoot: string): boolean {
-	const resolved = resolve(cwd);
-	const root = resolve(repoRoot);
-	return resolved === root || resolved.startsWith(root + '/');
+	const resolved = realpathOf(cwd);
+	const root = realpathOf(repoRoot);
+	if (!(resolved === root || resolved.startsWith(root + '/'))) return false;
+	return !isWorktreeCwd(cwd, repoRoot);
 }
 
 // ── worktree 发现与过滤 ──
 
 /**
- * 从 git worktree list --porcelain 收集 managed worktrees。
+ * 从 git worktree list --porcelain 收集所有受管 worktree（不包含 main checkout）。
  *
- * 只返回路径在 getWorktreesDir(repoRoot) 下的 worktree（不包含 main checkout）。
- * main checkout 的 branch 不会出现在返回值中。
+ * 与旧版不同：不再限定在 <repo>-worktrees/ 约定目录下——任意位置的
+ * git worktree（如仓库内的 wt/、其他工具的 .pi/worktrees 等）都会被列出，
+ * 名称推导见 parseWorktreeList。
  *
  * @param repoRoot 主仓库根
  * @returns ManagedWorktree 列表
@@ -119,7 +141,7 @@ export function getManagedWorktrees(repoRoot: string): ManagedWorktree[] {
 			encoding: 'utf-8',
 			timeout: 5000,
 		});
-		return parseWorktreeList(output, wtDir);
+		return parseWorktreeList(output, wtDir, repoRoot);
 	} catch {
 		return [];
 	}
@@ -137,14 +159,23 @@ export function getManagedWorktrees(repoRoot: string): ManagedWorktree[] {
  *   HEAD def456...
  *   branch refs/heads/wt/Aries-Hamal
  *
- *   worktree /path/to/repo-worktrees/Leo-Denebola
+ *   worktree /path/to/repo/wt/Virgo-Spica   ← 仓库内外部 worktree
  *   HEAD ghi789...
- *   detached
+ *   branch refs/heads/wt/tui-design
+ *
+ * 名称推导：
+ *   - 约定目录（<repo>-worktrees/）内 → 相对该目录的路径（如 'Aries-Hamal'）
+ *   - 其他位置 → 相对主仓库根的路径（如 'wt/Virgo-Spica'）；在仓库外则以完整路径为名
  */
-export function parseWorktreeList(output: string, wtDir: string): ManagedWorktree[] {
+export function parseWorktreeList(
+	output: string,
+	wtDir: string,
+	repoRoot: string,
+): ManagedWorktree[] {
 	const results: ManagedWorktree[] = [];
 	const blocks = output.trim().split('\n\n');
-	const normalizedWtDir = resolve(wtDir);
+	const normalizedWtDir = realpathOf(wtDir);
+	const normalizedRoot = realpathOf(repoRoot);
 
 	for (const block of blocks) {
 		const lines = block.split('\n');
@@ -154,14 +185,25 @@ export function parseWorktreeList(output: string, wtDir: string): ManagedWorktre
 		const pathLine = lines[0];
 		if (!pathLine.startsWith('worktree ')) continue;
 		const wtPath = resolve(pathLine.slice('worktree '.length).trim());
+		const wtReal = realpathOf(wtPath);
 
-		// 过滤：只接受在 wtDir 下，且不是主仓库根
-		if (!wtPath.startsWith(normalizedWtDir + '/')) continue;
+		// 排除主仓库根本身（main checkout）——realpath 比较，兼容 /var→/private/var 符号链接
+		if (wtReal === normalizedRoot) continue;
 
-		// 提取名称
-		const rel = relative(normalizedWtDir, wtPath);
-		if (!rel || rel.startsWith('..')) continue;
-		const name = rel.split(/[/\\]/)[0];
+		// 名称推导
+		let name: string;
+		const relWt = relative(normalizedWtDir, wtReal);
+		if (relWt && !relWt.startsWith('..') && !relWt.startsWith('/')) {
+			// 约定目录内：取第一段路径组件
+			name = relWt.split(/[/\\]/)[0];
+		} else {
+			const relRoot = relative(normalizedRoot, wtReal);
+			if (relRoot && !relRoot.startsWith('..')) {
+				name = relRoot; // 仓库内外部 worktree：相对仓库根的完整路径
+			} else {
+				name = wtPath; // 仓库外：完整路径
+			}
+		}
 		if (!name) continue;
 
 		// 提取 branch
@@ -174,6 +216,19 @@ export function parseWorktreeList(output: string, wtDir: string): ManagedWorktre
 	}
 
 	return results;
+}
+
+/**
+ * 解析 worktree 目标到真实路径（支持任意位置的外部 worktree）。
+ *
+ * - target === 'main' → repoRoot
+ * - 否则先在 git worktree list 中按名称匹配 → 该 worktree 的实际路径
+ * - 匹配失败兜底约定目录 getWorktreePath（兼容旧命令与尚未检出的目录）
+ */
+export function resolveWorktreePath(repoRoot: string, target: string): string {
+	if (target === 'main') return repoRoot;
+	const hit = getManagedWorktrees(repoRoot).find((w) => w.name === target);
+	return hit ? hit.path : getWorktreePath(repoRoot, target);
 }
 
 /**
