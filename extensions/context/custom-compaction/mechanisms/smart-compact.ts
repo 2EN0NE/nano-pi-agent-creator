@@ -14,6 +14,11 @@
  *      - true  (default): smart_compact will run inside session_before_compact
  *      - false: compaction will fall through to Pi's default behavior
  *
+ * ⚠️ 实验注意：本 adapter 是 collaboration pass-through（beforeCompact 恒返回
+ * false），不会真实拦截压缩。mechanism-strategy 实验要求 adapter 声明
+ * `handlesCompaction: true` 才有真实机制对比度——本 adapter 不声明，
+ * 因此机制实验在当前形态下不会注册（见 lab.ts initExperiments）。
+ *
  * Usage in profile:
  *   { trigger: { type: "context_percent", threshold: 70 },
  *     mechanism: { type: "adapter", adapterId: "smart_compact" } }

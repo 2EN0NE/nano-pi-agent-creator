@@ -91,7 +91,7 @@ echo "🔍 pre-push: e2e tests for changed modules..."
 echo "   Extensions:${EXTS:- (none)}"
 echo "   Skills:${SKILLS:- (none)}"
 
-# 逐模块运行测试（不阻塞推送，失败只 warning）
+# 逐模块运行测试（阻塞推送：任一模块失败或 review-required 则 exit 1）
 ALL_PASS=true
 
 for ext in $EXTS; do

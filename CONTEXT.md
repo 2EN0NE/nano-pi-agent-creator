@@ -142,3 +142,52 @@ pi-lab 是**纯基础设施**——提供测量、存储、统计分析。**不�
 | **降级键（Fallback Key）**               | 回退注册时消费方写的完整快捷键（如 `ctrl+shift+o`）。与子键成对出现在接入代码块中，是抽取脚本的扫描源之一。                                                       |
 | **接入代码块（Registration Block）**     | 消费方接入快捷键中心的统一模板：`hub.register({ name, subKey, description })` + `else pi.registerShortcut('<fallbackKey>')`。元信息即代码，抽取脚本按此形态扫描。 |
 | **快捷键中心（Shortcut Hub）**           | meta 目录下的基础设施插件，集中持有前缀键注册、子键注册表、子键分发（静默/面板两模式）与冲突裁决。                                                                |
+
+## custom-compaction（压缩实验）
+
+| 术语                                   | 定义                                                                                                                                                                          |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **分层最小写入（Layer-Scoped Write）** | 配置写操作只更新目标层（session/project/user）原始文件中的差异字段，绝不把合并后的全量快照写回单层文件。防止项目级/会话级配置被固化为用户级快照（跨项目污染）。               |
+| **活跃层（Active Scope）**             | 当前生效的配置层（session > project > user；无配置文件时映射为 user）。settings panel 编辑时保存到该层，与面板显示一致。                                                      |
+| **回退信号（Rollback Signal）**        | 用户将会话树当前节点回退到压缩摘要节点之前的行为，视为对压缩结果不满意的负信号。pi 无原生事件，靠压缩时记录摘要节点位置、turn_end 对比检测。                                  |
+| **重压信号（Recompact Signal）**       | 压缩后用户手动再次 `/custom-compact`，视为对上次压缩不满意的负信号。custom-compaction 内部直接可感知。                                                                        |
+| **打标信号（Tag Signal）**             | 用户在会话树节点打 GOOD/BAD 等自然语言标签。pi-lab 默认只解析 `<armId>:<metricId>:<value>` 三字段，自然语言标签需由 custom-compaction 注册自定义 SignalExtractor 做归因翻译。 |
+| **归因（Attribution）**                | 把发生在压缩之后的用户行为信号（回退/重压/打标）关联到最近一次压缩所使用的实验臂。pi-lab 设计哲学：armId 归因是消费方 extractor 的职责，pi-lab 只负责存储与统计。             |
+| **过程指标（Process Metric）**         | 压缩过程中直接可测的 guardrail 指标：压缩耗时（latency_ms）、token 节省量（saved_tokens）、摘要长度（summary_length）。可作为质量代理，但无法测真实摘要质量。                 |
+| **维度实验（Dimension Experiment）**   | 用户要对比的三个独立维度——机制（summarize vs smart-compact adapter）、压缩 prompt 变体、触发阈值。各自注册为独立实验（name 不同），避免臂集混入同一实验。                     |
+
+### custom-compaction 实验决策（2026-08 确认）
+
+| 决策点               | 结论                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **实验并行性**       | 三个维度实验（机制 / prompt / 阈值）**并行**注册运行。用 pi-lab `select()`/`record()` 直报：每次压缩对各实验独立 `select` 选臂，反馈信号对各实验独立 `record`（armId 即当时 select 结果，存于「最近压缩记录」），消除并行归因混淆。机制实验需 smart_compact adapter 声明 `handlesCompaction: true` 才注册（当前 collaboration 模式无真实机制差异，跳过）。未激活实验的维度（mechanism/prompt 为 null）不覆盖 profile 原配置。 |
+| **反馈信号优先级**   | **回退信号最有用**（用户不满时通常回退输入其他 prompt 而非重新压缩）。重压信号保留为补充。打标信号（GOOD/BAD）入口由 pi-session-tree 提供，custom-compaction 只消费。                                                                                                                                                                                                                                                         |
+| **实验定位**         | 实事求是收集真实数据（stable-hash 稳定分配），不做 forceArm 固定臂、不讲究初期数据好看。分析时能解释原因即可。                                                                                                                                                                                                                                                                                                                |
+| **实验状态展示**     | settings panel 显示实验状态（活跃实验、当前臂、样本量）。                                                                                                                                                                                                                                                                                                                                                                     |
+| **自动打标 UI 提醒** | pi-session-tree 自动打标（如不满话语正则规则命中）时，`setStatus` 提示「pi-session-tree 根据 [规则] 打标 [标签]」。tag-engine 已支持 `on:user_message` + `contentPattern`，缺的只是提醒。                                                                                                                                                                                                                                     |
+
+## pi-worktree 隔离开发
+
+| 术语                                     | 定义                                                                                                                                                                   |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Worktree / 工作区**                    | git worktree 创建的独立工作目录：共享同一仓库历史与远端，各自持有独立分支与文件状态（git 原生概念）                                                                    |
+| **Main Checkout / 主仓库**               | 仓库的主工作树（默认 clone 目录），不归属任何 worktree。插件以 `ctx.cwd` 是否在受管 worktree 目录下区分身份                                                            |
+| **Managed Worktree / 受管工作区**        | 位于 `<repo>-worktrees/<name>/`（仓库外）且由 pi-worktree 插件管理的工作区；名称来自黄道恒星名池（如 `Aries-Hamal`），分支 `wt/<name>`                                 |
+| **Session Switch / 会话切换**            | 通过 `ctx.switchSession()` 将 Pi 会话替换到目标 cwd 的会话文件，使工具层根目录（bash/read/write/edit）变为 worktree 路径的硬约束机制                                   |
+| **Worktree-Local Rebase / 工作区内变基** | git 约束：不能 rebase 一个正被其他 worktree checkout 的分支，因此变基必须在持有该分支的 worktree 目录内执行。plain `rebase` 与 `rebase-ff` 均遵循此约束                |
+| **Merge Strategy / 收尾合并策略**        | worktree 分支合回主分支的三种方式：`merge`（保留拓扑的 merge commit）、`squash`（压成单提交、线性）、`rebase-ff`（先工作区内变基再 fast-forward，线性无 merge commit） |
+| **Rebase-FF / 变基快进**                 | 收尾合并策略之一：在 worktree 目录内把分支变基到 origin/main，再在主仓库 fast-forward 合并——保证主干历史完全线性干净                                                   |
+| **受管目录外 / Unmanaged**               | 不在 `<repo>-worktrees/` 下的 git worktree（如 pi-dynamic-workflows 的 `.pi/worktrees/`、手动 add 的），插件不识别、不管理                                             |
+
+### pi-worktree 职责边界（2026-08-17 确认）
+
+pi-worktree 是**本地 git 工作区生命周期管理**工具。**不做远端操作。**
+
+| 操作域              | 归属     | 说明                                                                                                                 |
+| ------------------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
+| 创建/删除/列表/切换 | 插件     | `create`/`delete`/`list`/`use`/`shell` 等本地工作区管理                                                              |
+| 同步与合并          | 插件     | `sync`(=rebase 别名)/`rebase`/`rebase-ff`/`merge`/`squash`/`continue`/`abort`/`clean`/`prune`——均为本地 git 仓库操作 |
+| 会话管理            | 插件     | `ctx.switchSession()` 切换 cwd 与会话历史                                                                            |
+| **push / 远端发布** | **用户** | 合并成功后插件只提示，不执行 `git push`（认证/权限/远端策略属用户决策域）                                            |
+
+**决策归属**：远端发布（push、PR 创建、远程分支管理）由用户自己完成。插件不自动推、不强推，不在命令中隐含远端副作用。

@@ -685,6 +685,20 @@ export function createSessionTree(sessionManager: {
 	return api;
 }
 
+// ── Auto-tag 增量扫描提醒 ───────────────────────────────────────
+
+/**
+ * 汇总增量扫描命中的标签为去重逗号分隔字符串。
+ * 空字符串 = 无新标签（不触发 UI 提醒）。纯函数，不依赖 pi 生命周期。
+ */
+export function summarizeNewLabels(labelMap: ReadonlyMap<string, string[]>): string {
+	const seen = new Set<string>();
+	for (const labels of labelMap.values()) {
+		for (const l of labels) seen.add(l);
+	}
+	return [...seen].join(',');
+}
+
 // ── Extension ──────────────────────────────────────────────────────
 
 /**
@@ -855,12 +869,15 @@ export default function piSessionTreeExtension(pi: ExtensionAPI) {
 	let sessionTree: SessionTreeAPI | null = null;
 	let lastScannedEntryId: string | null = null;
 	let lastRulesKey: string | null = null;
+	/** 是否已设置了打标提醒 status（无新标签时需清除，避免状态栏残留） */
+	let tagNotifyActive = false;
 
 	pi.on('session_start', async (_event, ctx) => {
 		tagStore.reload();
 		const sm = ctx.sessionManager as Parameters<typeof createSessionTree>[0];
 		sessionTree = createSessionTreeWithPi(sm);
 		sessionTree.setTagRules(tagStore.get().rules);
+		tagNotifyActive = false;
 	});
 
 	// 自动打标：turn_end 时用配置规则扫描新增条目。
@@ -889,12 +906,32 @@ export default function piSessionTreeExtension(pi: ExtensionAPI) {
 		const labelMap = applyRules(fresh as Array<{ id: string } & MatchableEntry>, rules);
 		if (rulesChanged) {
 			// 全量重扫：所有条目按当前规则重算（含空 → 清除旧 #标签）
+			// 不触发 UI 提醒（避免规则变更/启动时刷屏）
 			for (const entry of fresh) {
 				tree.setLabels(entry.id, labelMap.get(entry.id) ?? []);
 			}
 		} else {
+			// 增量扫描：只处理新增条目，命中即提醒（幂等——同条目不重复扫）。
+			// 首次扫描（lastScannedEntryId 为 null，覆盖全部历史）不提醒，
+			// 避免启动/首轮对历史条目刷屏。
 			for (const [entryId, labels] of labelMap) {
 				tree.setLabels(entryId, labels);
+			}
+			if (lastScannedEntryId !== null) {
+				const newLabels = summarizeNewLabels(labelMap);
+				if (newLabels) {
+					log.info('Auto-tag applied (turn_end):', newLabels);
+					if (ctx.hasUI) {
+						ctx.ui.setStatus('pi-session-tree-tag', `|打标:${newLabels}`);
+					}
+					tagNotifyActive = true;
+				} else if (tagNotifyActive) {
+					// 本轮无新标签 → 清除旧提醒，避免状态栏残留过期信息
+					if (ctx.hasUI) {
+						ctx.ui.setStatus('pi-session-tree-tag', '');
+					}
+					tagNotifyActive = false;
+				}
 			}
 		}
 		lastScannedEntryId = entries[entries.length - 1]?.id ?? null;

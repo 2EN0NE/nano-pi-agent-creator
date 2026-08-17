@@ -1,17 +1,15 @@
 /**
  * Settings panel for /custom-compaction-setting command.
  *
- * Interaction flow:
- * 1. Main panel > top selection bar "> 配置: {label}" (press Enter)
- * 2. Profile tree (level 1: profile names, level 2: details on navigate)
- * 3. Press Enter on a profile > field editor (key-value tree of all fields)
- * 4. Select any field > edit its value directly
- * 5. Save creates/updates config (user-level by default, persists across sessions)
+ * 交互流程（answer 范式自定义边框组件 + 原生编辑对话框）：
+ * 1. 主面板（SettingsComponent main）：配置信息 + profile 列表 + 实验状态
+ * 2. Enter 选中 profile > 字段面板（fields）：字段列表 + 当前值
+ * 3. Enter 选中字段 > 原生对话框（ctx.ui.input/select/editor/confirm）编辑
+ * 4. 修改即时保存到当前活跃层（user/project/session），只更新目标层该 profile
  */
 
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import {
-	type CompactionConfig,
 	type CompactionProfile,
 	type TriggerType,
 	type MechanismType,
@@ -20,6 +18,7 @@ import {
 	describeTrigger,
 	describeMechanism,
 	validateTriggerThreshold,
+	resolveTriggerThresholdAfterTypeChange,
 	DEFAULT_AUTO_CONTINUE_MESSAGE,
 	toModelSpec,
 } from './types.js';
@@ -30,41 +29,23 @@ import {
 	getConfigLabel,
 	getActiveProfile,
 	getEffectiveProfile,
+	getActiveScope,
 	setActiveProfile,
-	upsertProfile,
+	updateProfileFields,
+	type SaveScope,
 } from './config.js';
+import { getLabStatus } from './lab.js';
+import {
+	SettingsComponent,
+	type SettingsPanelData,
+	type SettingsUIAction,
+	type ProfileView,
+	type ProfileFieldView,
+} from './settings-ui.js';
 import { getAllAdapters } from './mechanisms/index.js';
 
-// ── Helpers ---------------------------------------------------──
+// ── Profile 字段编辑器（原生对话框） ────────────────────────────
 
-/** Safely describe a profile - handles partial/incomplete profiles */
-function safeDescribe(p: CompactionProfile): string {
-	const parts: string[] = [];
-	if (p.matchModel) parts.push(`Match: ${p.matchModel}`);
-	parts.push(`Model: ${p.model === 'current' ? 'Current' : p.model}`);
-	if (p.trigger) {
-		parts.push(`Trigger: ${describeTrigger(p.trigger)}`);
-	} else {
-		parts.push('Trigger: (not configured - edit profile to set)');
-	}
-	if (p.mechanism) {
-		parts.push(`Mechanism: ${describeMechanism(p.mechanism)}`);
-	} else {
-		parts.push('Mechanism: (not configured - edit profile to set)');
-	}
-	parts.push(`Auto-continue: ${p.autoContinue ? 'Yes' : 'No'}`);
-	return parts.join(' | ');
-}
-
-/** Alias for backward compat */
-const profileDescription = safeDescribe;
-
-// ── Profile field editor (inline key-value tree) ---------------─
-
-/**
- * Field definitions for a CompactionProfile.
- * Each field knows how to render its current value and how to edit it.
- */
 interface ProfileField {
 	key: string;
 	label: string;
@@ -75,10 +56,10 @@ interface ProfileField {
 const PROFILE_FIELDS: ProfileField[] = [
 	{
 		key: 'name',
-		label: 'Profile name',
+		label: '名称',
 		readValue: (p) => p.name,
 		edit: async (ctx, p) => {
-			const val = await ctx.ui.input('Profile name', p.name);
+			const val = await ctx.ui.input('Profile 名称', p.name);
 			if (val === undefined) return false;
 			if (val.trim()) p.name = val.trim();
 			return true;
@@ -86,13 +67,13 @@ const PROFILE_FIELDS: ProfileField[] = [
 	},
 	{
 		key: 'model',
-		label: 'Model',
-		readValue: (p) => (p.model === 'current' ? "Current (Pi's active model)" : p.model),
+		label: '摘要模型',
+		readValue: (p) => (p.model === 'current' ? '当前（Pi 的活动模型）' : p.model),
 		edit: async (ctx, p) => {
 			// Build list of available models (only those with configured API keys)
 			const available = ctx.modelRegistry.getAvailable();
 			const modelOptions = [
-				`Current (use Pi's active model)${p.model === 'current' ? ' [X]' : ''}`,
+				`当前（使用 Pi 的活动模型）${p.model === 'current' ? ' [X]' : ''}`,
 			];
 			// Track model labels for reliable reverse-lookup
 			const modelLabelToSpec = new Map<string, string>();
@@ -103,9 +84,9 @@ const PROFILE_FIELDS: ProfileField[] = [
 				modelOptions.push(`${label}${p.model === spec ? ' [X]' : ''}`);
 			}
 
-			const choice = await ctx.ui.select('Select model', modelOptions);
+			const choice = await ctx.ui.select('选择摘要模型', modelOptions);
 			if (choice === undefined) return false;
-			if (choice.startsWith('Current')) {
+			if (choice.startsWith('当前')) {
 				p.model = 'current';
 			} else {
 				// Look up by exact label match (no regex parsing needed)
@@ -121,13 +102,13 @@ const PROFILE_FIELDS: ProfileField[] = [
 	},
 	{
 		key: 'matchModel',
-		label: 'Match model pattern',
-		readValue: (p) => p.matchModel || '(any model - universal fallback)',
+		label: '匹配模型',
+		readValue: (p) => p.matchModel || '(任意模型 - 通用兜底)',
 		edit: async (ctx, p) => {
 			// Build list of suggested model patterns
 			const available = ctx.modelRegistry.getAvailable();
 			const seen = new Set<string>();
-			const suggestions: string[] = ['(clear - match any model)'];
+			const suggestions: string[] = ['(清除 - 匹配任意模型)'];
 
 			for (const m of available) {
 				// Provider-level pattern
@@ -145,28 +126,28 @@ const PROFILE_FIELDS: ProfileField[] = [
 			}
 
 			// Mark current value
-			const currentVal = p.matchModel || '(any)';
+			const currentVal = p.matchModel || '(任意)';
 			const suggestionOptions = suggestions.map((s) => {
-				const label = s === '(clear - match any model)' ? 'Any model (universal)' : s;
+				const label = s === '(清除 - 匹配任意模型)' ? '任意模型（通用）' : s;
 				const isCurrent =
-					s === '(clear - match any model)' ? !p.matchModel : s === p.matchModel;
+					s === '(清除 - 匹配任意模型)' ? !p.matchModel : s === p.matchModel;
 				return `${isCurrent ? '[X] ' : '  '}${label}`;
 			});
-			suggestionOptions.push('---', 'Custom input...');
+			suggestionOptions.push('---', '自定义输入...');
 
 			const choice = await ctx.ui.select(
-				'Select model pattern (current: ' +
+				'选择匹配模型（当前: ' +
 					currentVal +
-					')\nThis profile auto-activates when current model matches this pattern.',
+					'）\n当前模型匹配该模式时此 profile 自动激活。',
 				suggestionOptions,
 			);
 			if (choice === undefined) return false;
 
 			if (choice === '---') return false;
 
-			if (choice === 'Custom input...') {
+			if (choice === '自定义输入...') {
 				const val = await ctx.ui.input(
-					'Model pattern (e.g. "openai/gpt-4o", "openai/", leave empty for any model):',
+					'模型匹配模式（如 "openai/gpt-4o"、"openai/"，留空匹配任意模型）:',
 					p.matchModel || '',
 				);
 				if (val === undefined) return false;
@@ -174,7 +155,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 				return true;
 			}
 
-			if (choice.includes('Any model')) {
+			if (choice.includes('任意模型')) {
 				p.matchModel = undefined;
 				return true;
 			}
@@ -182,7 +163,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 			// Extract the pattern from the choice
 			for (const s of suggestions) {
 				if (choice.includes(s)) {
-					p.matchModel = s === '(clear - match any model)' ? undefined : s;
+					p.matchModel = s === '(清除 - 匹配任意模型)' ? undefined : s;
 					return true;
 				}
 			}
@@ -191,9 +172,9 @@ const PROFILE_FIELDS: ProfileField[] = [
 	},
 	{
 		key: 'triggerType',
-		label: 'Trigger type',
+		label: '触发类型',
 		readValue: (p) => {
-			if (!p.trigger?.type) return '(not configured)';
+			if (!p.trigger?.type) return '(未配置)';
 			return TRIGGER_LABELS[p.trigger.type] || p.trigger.type;
 		},
 		edit: async (ctx, p) => {
@@ -208,15 +189,25 @@ const PROFILE_FIELDS: ProfileField[] = [
 				const checked = t === p.trigger.type ? ' [X]' : '';
 				return `${label}${checked} - ${desc}`;
 			});
-			const choice = await ctx.ui.select('Select trigger type', options);
+			const choice = await ctx.ui.select('选择触发类型', options);
 			if (choice === undefined) return false;
 
 			for (const t of ['context_percent', 'fixed', 'reserve'] as const) {
 				if (choice.startsWith(TRIGGER_LABELS[t])) {
+					const oldThreshold = p.trigger.threshold;
 					p.trigger.type = t;
-					if (t === 'context_percent') p.trigger.threshold = 20;
-					else if (t === 'fixed') p.trigger.threshold = 200000;
-					else p.trigger.threshold = 10000;
+					// 尽量保留旧阈值；仅当旧值在新类型下非法时重置为默认并提示
+					const { threshold, reset } = resolveTriggerThresholdAfterTypeChange(
+						t,
+						oldThreshold,
+					);
+					p.trigger.threshold = threshold;
+					if (reset) {
+						ctx.ui.notify(
+							`阈值已重置为 ${TRIGGER_LABELS[t]} 默认值（原值 ${oldThreshold} 不合法）`,
+							'info',
+						);
+					}
 					return true;
 				}
 			}
@@ -225,31 +216,31 @@ const PROFILE_FIELDS: ProfileField[] = [
 	},
 	{
 		key: 'threshold',
-		label: 'Trigger threshold',
+		label: '触发阈值',
 		readValue: (p) => {
 			const t = p.trigger;
-			if (!t?.type) return '(not configured)';
+			if (!t?.type) return '(未配置)';
 			switch (t.type) {
 				case 'context_percent':
 					return `${t.threshold}%`;
 				case 'fixed':
 					return `${t.threshold.toLocaleString()} tokens`;
 				case 'reserve':
-					return `${t.threshold.toLocaleString()} tokens reserved`;
+					return `保留 ${t.threshold.toLocaleString()} tokens`;
 			}
 		},
 		edit: async (ctx, p) => {
 			if (!p.trigger) p.trigger = { type: 'context_percent', threshold: 20 };
 			const hints: Record<TriggerType, string> = {
-				context_percent: 'Percentage of context window (1-99)',
-				fixed: 'Absolute token count (min 1,000)',
-				reserve: 'Minimum tokens to keep free (min 100)',
+				context_percent: '上下文窗口百分比（1-99）',
+				fixed: '绝对 Token 数（至少 1,000）',
+				reserve: '保持空闲的最小 Token 数（至少 100）',
 			};
 			const val = await ctx.ui.input(hints[p.trigger.type], String(p.trigger.threshold));
 			if (val === undefined) return false;
 			const n = parseInt(val, 10);
 			if (isNaN(n)) {
-				ctx.ui.notify('Invalid number', 'warning');
+				ctx.ui.notify('无效的数字', 'warning');
 				return false;
 			}
 			const err = validateTriggerThreshold(p.trigger.type, n);
@@ -263,9 +254,9 @@ const PROFILE_FIELDS: ProfileField[] = [
 	},
 	{
 		key: 'mechanismType',
-		label: 'Compression mechanism',
+		label: '压缩机制',
 		readValue: (p) => {
-			if (!p.mechanism) return '(not configured)';
+			if (!p.mechanism) return '(未配置)';
 			return describeMechanism(p.mechanism);
 		},
 		edit: async (ctx, p) => {
@@ -276,7 +267,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 				const checked = t === p.mechanism.type ? ' [X]' : '';
 				return `${label}${checked}`;
 			});
-			const choice = await ctx.ui.select('Select compression mechanism', baseOptions);
+			const choice = await ctx.ui.select('选择压缩机制', baseOptions);
 			if (choice === undefined) return false;
 
 			for (const t of mechTypes) {
@@ -290,7 +281,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 									? `[X] ${a.name} - ${a.description}`
 									: `  ${a.name} - ${a.description}`,
 							);
-							const adpChoice = await ctx.ui.select('Select adapter', adpOptions);
+							const adpChoice = await ctx.ui.select('选择适配器', adpOptions);
 							if (adpChoice) {
 								for (const a of adapters) {
 									if (adpChoice.includes(a.name)) {
@@ -300,10 +291,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 								}
 							}
 						} else {
-							ctx.ui.notify(
-								'No adapters registered. Install a compatible compaction extension.',
-								'warning',
-							);
+							ctx.ui.notify('未注册适配器。请安装兼容的压缩扩展。', 'warning');
 						}
 					} else {
 						p.mechanism.adapterId = undefined;
@@ -316,14 +304,11 @@ const PROFILE_FIELDS: ProfileField[] = [
 	},
 	{
 		key: 'prompt',
-		label: 'Custom prompt',
+		label: '自定义提示词',
 		readValue: (p) =>
-			p.prompt ? p.prompt.slice(0, 60) + (p.prompt.length > 60 ? '…' : '') : '(default)',
+			p.prompt ? p.prompt.slice(0, 60) + (p.prompt.length > 60 ? '…' : '') : '(默认)',
 		edit: async (ctx, p) => {
-			const val = await ctx.ui.editor(
-				'Custom compaction prompt (leave empty for default)',
-				p.prompt,
-			);
+			const val = await ctx.ui.editor('自定义压缩提示词（留空使用默认）', p.prompt);
 			if (val === undefined) return false;
 			p.prompt = val.trim();
 			return true;
@@ -331,12 +316,12 @@ const PROFILE_FIELDS: ProfileField[] = [
 	},
 	{
 		key: 'autoContinue',
-		label: 'Auto-continue',
-		readValue: (p) => (p.autoContinue ? 'Yes' : 'No'),
+		label: '自动继续',
+		readValue: (p) => (p.autoContinue ? '是' : '否'),
 		edit: async (ctx, p) => {
 			const val = await ctx.ui.confirm(
-				'Auto-continue after compaction?',
-				`Current: ${p.autoContinue ? 'Yes' : 'No'}`,
+				'压缩完成后自动继续？',
+				`当前: ${p.autoContinue ? '是' : '否'}`,
 			);
 			if (val === undefined) return false;
 			p.autoContinue = val;
@@ -345,11 +330,11 @@ const PROFILE_FIELDS: ProfileField[] = [
 	},
 	{
 		key: 'autoContinueMessage',
-		label: 'Continue message',
-		readValue: (p) => (p.autoContinue ? `"${p.autoContinueMessage}"` : '(disabled)'),
+		label: '继续消息',
+		readValue: (p) => (p.autoContinue ? `"${p.autoContinueMessage}"` : '(未启用)'),
 		edit: async (ctx, p) => {
 			const val = await ctx.ui.input(
-				'Auto-continue message',
+				'自动继续消息',
 				p.autoContinueMessage || DEFAULT_AUTO_CONTINUE_MESSAGE,
 			);
 			if (val === undefined) return false;
@@ -359,188 +344,201 @@ const PROFILE_FIELDS: ProfileField[] = [
 	},
 ];
 
-/**
- * Inline field editor for a profile.
- * Changes are saved immediately when any field is edited.
- * No explicit save/cancel - just "< 返回" to go back.
- */
-async function editProfileFieldsInPlace(
-	ctx: ExtensionCommandContext,
-	profile: CompactionProfile,
-	profileId: string,
-): Promise<void> {
-	let editing = true;
+// ── 数据组装 ────────────────────────────────────────────────────
 
-	while (editing) {
-		// Build field list: each option shows "key: value"
-		const fieldOptions = PROFILE_FIELDS.map(
-			(f) => `${f.label.padEnd(24)} ${f.readValue(profile)}`,
-		);
-		fieldOptions.push('---', '< 返回');
+/** 构造面板数据快照（SettingsComponent 纯渲染输入） */
+async function buildPanelData(ctx: ExtensionCommandContext): Promise<SettingsPanelData> {
+	const config = loadConfig();
+	const activePath = getActiveConfigPath();
+	const configLabel = getConfigLabel();
+	const scope: SaveScope = getActiveScope();
 
-		const title = [
-			`编辑 Profile: ${profile.name}`,
-			'(↑↓ 选择字段, Enter 编辑, 修改即时保存)',
-			'',
-		].join('\n');
+	const modelSpec = toModelSpec(ctx.model);
+	const effectiveProfile = getEffectiveProfile(modelSpec);
+	const activeProfile = getActiveProfile();
 
-		const choice = await ctx.ui.select(title, fieldOptions);
+	const profiles: ProfileView[] = Object.entries(config.profiles).map(([id, p]) => ({
+		id,
+		name: p.name,
+		active: id === activeProfile?.id,
+		description: safeDescribe(p),
+		fields: PROFILE_FIELDS.map((f): ProfileFieldView => ({
+			key: f.key,
+			label: f.label,
+			value: f.readValue(p),
+		})),
+	}));
 
-		if (!choice || choice === '< 返回') {
-			editing = false;
-			break;
-		}
+	const lab = await getLabStatus();
 
-		if (choice === '---') continue;
-
-		// Find which field was selected
-		const idx = fieldOptions.indexOf(choice);
-		if (idx < 0 || idx >= PROFILE_FIELDS.length) continue;
-
-		const field = PROFILE_FIELDS[idx];
-		const changed = await field.edit(ctx, profile);
-		if (changed) {
-			// Save immediately on each field edit
-			profile.id = profileId;
-			const ok = upsertProfile(profile);
-			if (ok) {
-				ctx.ui.notify(`"${field.label}" > 已保存`, 'info');
-			} else {
-				ctx.ui.notify(`"${field.label}" 保存失败`, 'error');
-			}
-		}
-	}
+	return {
+		configLabel,
+		activePath,
+		saveScope: scope,
+		modelLine: modelSpec
+			? `当前模型: ${modelSpec} > Profile: ${effectiveProfile?.name ?? '(无)'}`
+			: '当前模型: (未知)',
+		profiles,
+		lab: {
+			active: lab.active,
+			experiments: lab.experiments.map((e) => ({
+				key: e.key,
+				name: e.name,
+				currentArm: e.currentArm,
+				totalCalls: e.totalCalls,
+			})),
+		},
+	};
 }
 
-// ── Profile tree (level 1 + level 2 inline) ---------------------
+/** Safely describe a profile - handles partial/incomplete profiles */
+function safeDescribe(p: CompactionProfile): string {
+	const parts: string[] = [];
+	if (p.matchModel) parts.push(`匹配: ${p.matchModel}`);
+	parts.push(`模型: ${p.model === 'current' ? '当前' : p.model}`);
+	if (p.trigger) {
+		parts.push(`触发: ${describeTrigger(p.trigger)}`);
+	} else {
+		parts.push('触发: (未配置 - 编辑 profile 设置)');
+	}
+	if (p.mechanism) {
+		parts.push(`机制: ${describeMechanism(p.mechanism)}`);
+	} else {
+		parts.push('机制: (未配置 - 编辑 profile 设置)');
+	}
+	parts.push(`自动继续: ${p.autoContinue ? '是' : '否'}`);
+	return parts.join(' | ');
+}
+
+// ── 字段编辑（原生对话框） ──────────────────────────────────────
+
+/** UI 字段 key → CompactionProfile 顶层字段（triggerType/threshold 都映射到 trigger，mechanismType 映射到 mechanism） */
+const FIELD_TO_PROFILE_KEY: Record<string, keyof CompactionProfile> = {
+	name: 'name',
+	model: 'model',
+	matchModel: 'matchModel',
+	triggerType: 'trigger',
+	threshold: 'trigger',
+	mechanismType: 'mechanism',
+	prompt: 'prompt',
+	autoContinue: 'autoContinue',
+	autoContinueMessage: 'autoContinueMessage',
+};
 
 /**
- * Show the profile tree.
- * Level 1: profile names (navigate with ↑↓, details shown as description)
- * Press Enter > enter field-editing mode for the selected profile.
+ * 计算编辑前后变化的顶层字段（浅比较；trigger/mechanism 作为整体参与比较）。
+ * 只返回变化的字段，供 updateProfileFields 做目标层差异写入——
+ * 避免把合并视图中的完整 profile（含低层字段值）固化到活跃高层。
  */
-async function openProfileTreeAndEdit(
+function diffProfileFields(
+	before: CompactionProfile,
+	after: CompactionProfile,
+): Partial<CompactionProfile> {
+	const diff: Record<string, unknown> = {};
+	for (const f of PROFILE_FIELDS) {
+		const key = FIELD_TO_PROFILE_KEY[f.key];
+		if (key === 'trigger' || key === 'mechanism') {
+			// 复合字段：子字段级比较，只输出变化的子字段。
+			// 否则整个 trigger/mechanism（含合并视图继承的低层字段值）
+			// 会被 updateProfileFields 固化到活跃层，遮蔽低层配置。
+			const b = (before[key] ?? {}) as unknown as Record<string, unknown>;
+			const a = (after[key] ?? {}) as unknown as Record<string, unknown>;
+			const subDiff: Record<string, unknown> = {};
+			for (const sk of Object.keys(a)) {
+				if (JSON.stringify(b[sk]) !== JSON.stringify(a[sk])) subDiff[sk] = a[sk];
+			}
+			if (Object.keys(subDiff).length > 0) diff[key] = subDiff;
+		} else if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) {
+			diff[key] = after[key];
+		}
+	}
+	return diff as Partial<CompactionProfile>;
+}
+
+/** 编辑单个字段：原生对话框 → 差异写入活跃层 → 激活 profile */
+async function editFieldViaDialog(
 	ctx: ExtensionCommandContext,
-	config: CompactionConfig,
+	profileId: string,
+	fieldKey: string,
+	scope: SaveScope,
 ): Promise<void> {
-	const entries = Object.entries(config.profiles);
-	if (entries.length === 0) {
-		ctx.ui.notify('No profiles available', 'warning');
+	const config = loadConfig();
+	const profile = config.profiles[profileId];
+	if (!profile) {
+		ctx.ui.notify('Profile 不存在', 'warning');
 		return;
 	}
 
-	// Show profiles with descriptions (this is the multi-level tree: level 1 = names, level 2 = details)
-	const profileOptions = entries.map(
-		([id, p]) =>
-			`${id === config.activeProfileId ? '* ' : '  '}${p.name} - ${profileDescription(p)}`,
-	);
-
-	const chosen = await ctx.ui.select(
-		'选择 Profile (Enter 进入编辑, ↑↓ 浏览, 详情见下方)',
-		profileOptions,
-	);
-
-	if (!chosen) return;
-
-	// Extract the profile ID
-	let profileId: string | undefined;
-	for (const [id, p] of entries) {
-		const prefix = id === config.activeProfileId ? '* ' : '  ';
-		if (chosen.startsWith(`${prefix}${p.name}`)) {
-			profileId = id;
-			break;
-		}
-	}
-
-	if (!profileId) {
-		// Fallback by index
-		const idx = profileOptions.indexOf(chosen);
-		if (idx >= 0 && idx < entries.length) profileId = entries[idx][0];
-	}
-
-	if (!profileId || !config.profiles[profileId]) {
-		ctx.ui.notify('Profile not found', 'warning');
+	const field = PROFILE_FIELDS.find((f) => f.key === fieldKey);
+	if (!field) {
+		ctx.ui.notify(`未知字段: ${fieldKey}`, 'warning');
 		return;
 	}
 
-	// Activate the selected profile first
-	if (profileId !== config.activeProfileId) {
-		const ok = setActiveProfile(profileId);
-		if (ok) {
-			ctx.ui.notify(`已切换至 Profile: ${config.profiles[profileId].name}`, 'info');
-		}
-	}
-
-	// Deep clone the profile for editing
+	// 深拷贝（编辑前后各一份），编辑后只把变化的字段写入目标层
+	// （避免直接改 config 缓存对象，也避免整 profile 固化到目标层）
+	let before: CompactionProfile;
 	let workingProfile: CompactionProfile;
 	try {
-		workingProfile = JSON.parse(JSON.stringify(config.profiles[profileId]));
+		before = JSON.parse(JSON.stringify(profile));
+		workingProfile = JSON.parse(JSON.stringify(profile));
 	} catch {
-		ctx.ui.notify('Failed to clone profile', 'error');
+		ctx.ui.notify('克隆 profile 失败', 'error');
 		return;
 	}
 
-	// Enter field editor - changes save immediately, no explicit save step
-	await editProfileFieldsInPlace(ctx, workingProfile, profileId);
+	const changed = await field.edit(ctx, workingProfile);
+	if (!changed) return;
+
+	const diff = diffProfileFields(before, workingProfile);
+	if (Object.keys(diff).length === 0) return;
+
+	const ok = updateProfileFields(profileId, diff, scope);
+	if (ok) {
+		ctx.ui.notify(`"${field.label}" 已保存到 ${scope} 层`, 'info');
+		// 编辑成功 → 激活该 profile（仅当尚未激活）
+		const cur = getActiveProfile();
+		if (!cur || cur.id !== profileId) {
+			setActiveProfile(profileId, scope);
+		}
+	} else {
+		ctx.ui.notify(`"${field.label}" 保存失败`, 'error');
+	}
 }
 
-// ── Main panel ------------------------------------------------──
+// ── 主面板 ──────────────────────────────────────────────────────
 
 /**
  * Open the custom-compaction settings panel.
- *
- * Layout:
- * - Top selection bar: "> 配置: {label}" - press Enter to open profile tree
- * - Below: current config details
- * - Actions: 关闭
+ * 循环：主面板 → 字段面板 → 原生编辑 → 返回主面板（数据刷新）。
  */
 export async function openSettingsPanel(ctx: ExtensionCommandContext): Promise<void> {
-	let navigating = true;
-
-	while (navigating) {
+	while (true) {
 		reloadConfig();
-		const config = loadConfig();
-		const activePath = getActiveConfigPath();
-		const configLabel = getConfigLabel();
+		const data = await buildPanelData(ctx);
 
-		// Show model-aware profile selection
-		const modelSpec = toModelSpec(ctx.model);
-		const effectiveProfile = getEffectiveProfile(modelSpec);
-		const activeProfile = getActiveProfile();
+		// 主面板
+		const action = await ctx.ui.custom<SettingsUIAction>(
+			(_tui, _theme, _kb, done) => new SettingsComponent(data, done, 'main'),
+		);
+		if (!action || action.type === 'close') break;
 
-		// Details lines - show the active (stored) profile's details
-		const details = activeProfile
-			? PROFILE_FIELDS.map((f) => `  ${f.label}: ${f.readValue(activeProfile)}`)
-			: ['  (no profile)'];
+		if (action.type === 'edit-profile') {
+			// 字段面板
+			const fieldAction = await ctx.ui.custom<SettingsUIAction>(
+				(_tui, _theme, _kb, done) =>
+					new SettingsComponent(data, done, 'fields', action.profileId),
+			);
+			if (!fieldAction || fieldAction.type === 'close') continue; // 返回主面板
 
-		// Model-aware info
-		const modelLine = modelSpec
-			? `  当前模型: ${modelSpec} > Profile: ${effectiveProfile?.name ?? '(none)'}`
-			: '  当前模型: (unknown)';
-
-		// Options: first is the selection bar (press Enter to open tree)
-		const options = [`> 配置: ${configLabel}`, '  关闭'];
-
-		const titleLines = [
-			` Custom Compaction Settings`,
-			`   ${activePath}`,
-			modelLine,
-			'',
-			'当前配置:',
-			...details,
-			'',
-		];
-
-		const choice = await ctx.ui.select(titleLines.join('\n'), options);
-
-		if (!choice || choice === '  关闭') {
-			navigating = false;
-			break;
-		}
-
-		if (choice.startsWith('> 配置:')) {
-			// Open profile tree > user selects a profile > field editor opens
-			await openProfileTreeAndEdit(ctx, config);
+			if (fieldAction.type === 'edit-field') {
+				await editFieldViaDialog(
+					ctx,
+					fieldAction.profileId,
+					fieldAction.fieldKey,
+					data.saveScope,
+				);
+			}
 		}
 	}
 }

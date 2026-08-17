@@ -1,0 +1,11 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": true
+	},
+	"include": [
+		"test/vitest/extensions/custom-compaction*.test.ts",
+		"test/vitest/extensions/pi-session-tree-tag-notify.test.ts"
+	],
+	"exclude": ["node_modules", "dist", ".pi", "test/results"]
+}

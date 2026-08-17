@@ -70,7 +70,7 @@
 		"lint:fix": "eslint . --fix",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
-		"typecheck": "tsc --noEmit",
+		"typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
 		"semgrep": "semgrep --config .semgrep.yml --exclude 'node_modules/**' --exclude '.pi/**' --exclude '.git/**' --metrics=off --no-git-ignore",
 		"semgrep:ci": "npm run semgrep -- --severity ERROR --severity WARNING",
 		"test": "vitest run --pool forks",

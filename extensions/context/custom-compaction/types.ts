@@ -11,22 +11,22 @@
 export type TriggerType = 'context_percent' | 'fixed' | 'reserve';
 
 export const TRIGGER_LABELS: Record<TriggerType, string> = {
-	context_percent: 'Context percentage',
-	fixed: 'Fixed token count',
-	reserve: 'Reserve tokens',
+	context_percent: '上下文百分比',
+	fixed: '固定 Token 数',
+	reserve: '保留 Token 数',
 };
 
 /** Describe what a trigger condition means */
 export function describeTrigger(trigger: { type: TriggerType; threshold: number }): string {
 	switch (trigger.type) {
 		case 'context_percent':
-			return `Compact at ${trigger.threshold}% context window usage`;
+			return `上下文使用达 ${trigger.threshold}% 时压缩`;
 		case 'fixed':
-			return `Compact when tokens exceed ${trigger.threshold.toLocaleString()}`;
+			return `Token 数超过 ${trigger.threshold.toLocaleString()} 时压缩`;
 		case 'reserve':
-			return `Compact when remaining tokens < ${trigger.threshold.toLocaleString()}`;
+			return `剩余 Token 少于 ${trigger.threshold.toLocaleString()} 时压缩`;
 		default:
-			return `Unknown trigger`;
+			return '未知触发类型';
 	}
 }
 
@@ -35,20 +35,47 @@ export function validateTriggerThreshold(type: TriggerType, value: number): stri
 	switch (type) {
 		case 'context_percent':
 			if (!Number.isFinite(value) || value < 1 || value > 99)
-				return 'Threshold must be between 1 and 99';
+				return '阈值必须在 1 到 99 之间';
 			break;
 		case 'fixed':
-			if (!Number.isFinite(value) || value < 1000)
-				return 'Token count must be at least 1,000';
+			if (!Number.isFinite(value) || value < 1000) return 'Token 数至少为 1,000';
 			break;
 		case 'reserve':
-			if (!Number.isFinite(value) || value < 100)
-				return 'Reserve must be at least 100 tokens';
+			if (!Number.isFinite(value) || value < 100) return '保留 Token 数至少为 100';
 			break;
 		default:
-			return `Unknown trigger type`;
+			return '未知触发类型';
 	}
 	return null;
+}
+
+// ── Trigger type change: threshold preservation ─────────────────
+
+/** 各触发类型的默认阈值（切换类型且旧值非法时使用） */
+export const DEFAULT_TRIGGER_THRESHOLDS: Record<TriggerType, number> = {
+	context_percent: 20,
+	fixed: 200000,
+	reserve: 10000,
+};
+
+export interface TriggerThresholdResolution {
+	threshold: number;
+	/** true = 旧阈值在新类型下非法，已被重置为默认（调用方应提示用户） */
+	reset: boolean;
+}
+
+/**
+ * 切换触发类型时确定保留/重置阈值：
+ * 旧阈值在新类型下合法则原样保留；非法则重置为该类型默认值。
+ */
+export function resolveTriggerThresholdAfterTypeChange(
+	type: TriggerType,
+	oldThreshold: number,
+): TriggerThresholdResolution {
+	if (validateTriggerThreshold(type, oldThreshold) === null) {
+		return { threshold: oldThreshold, reset: false };
+	}
+	return { threshold: DEFAULT_TRIGGER_THRESHOLDS[type], reset: true };
 }
 
 // ── Mechanism: how to compact ───────────────────────────────────
@@ -56,19 +83,19 @@ export function validateTriggerThreshold(type: TriggerType, value: number): stri
 export type MechanismType = 'summarize' | 'pass_through' | 'adapter';
 
 export const MECHANISM_LABELS: Record<MechanismType, string> = {
-	summarize: 'LLM summarization',
-	pass_through: 'Pass through (default Pi / other)',
-	adapter: 'External adapter',
+	summarize: 'LLM 摘要',
+	pass_through: '透传（Pi 默认/其他扩展）',
+	adapter: '外部适配器',
 };
 
 export function describeMechanism(mechanism: { type: MechanismType; adapterId?: string }): string {
 	switch (mechanism.type) {
 		case 'summarize':
-			return 'LLM full summary (custom prompt)';
+			return 'LLM 全量摘要（自定义提示词）';
 		case 'pass_through':
-			return 'Let Pi default or other extensions handle compaction';
+			return '交由 Pi 默认或其他扩展处理压缩';
 		case 'adapter':
-			return `External adapter: ${mechanism.adapterId ?? '(none)'}`;
+			return `外部适配器：${mechanism.adapterId ?? '(未指定)'}`;
 	}
 }
 

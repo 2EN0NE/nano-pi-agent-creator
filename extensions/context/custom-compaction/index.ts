@@ -28,8 +28,27 @@ import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-c
 import { createLogger } from '@zenone/pi-logger';
 import { showSelect } from '@zenone/pi-selector';
 import { loadConfig, reloadConfig, setSessionId, getEffectiveProfile } from './config.js';
-import { buildCompactionHandler, setPendingSupplement } from './compactor.js';
+import {
+	buildCompactionHandler,
+	setPendingSupplement,
+	getAndClearCompactResult,
+} from './compactor.js';
 import { openSettingsPanel } from './settings-panel.js';
+import {
+	initExperiments,
+	selectArms,
+	applyLabOverrides,
+	markCompactStart,
+	markCompactEnd,
+	clearActiveCompact,
+	reportProcessMetrics,
+	reportRecompact,
+	detectRollback,
+	rememberModel,
+	resetLabState,
+	clearRecentCompact,
+	type LabArmSelection,
+} from './lab.js';
 import { type CompactionProfile, describeTrigger, toModelSpec } from './types.js';
 import { shouldTrigger, isApproaching } from './trigger.js';
 
@@ -46,13 +65,54 @@ let currentModelSpec: string | undefined;
 
 // ── Helpers ─────────────────────────────────────────────────────
 
+/** 从 sessionManager 读取当前 leaf id（失败返回 null） */
+function getLeafId(ctx: { sessionManager?: { getLeafId?: () => string | null } }): string | null {
+	try {
+		return ctx.sessionManager?.getLeafId?.() ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/** 从 sessionManager 构建当前 leaf 的祖先链（含自身，leaf → ... → root）。
+ *  用于回退检测：pi 会话 append-only，fork 节点追加在文件末尾，
+ *  数组 index 位置比较无法反映「回退到压缩点之前」；祖先链判定才能识别。 */
+function getAncestorChain(
+	ctx: {
+		sessionManager?: {
+			getEntry?: (id: string) => { parentId: string | null } | undefined;
+		};
+	},
+	leafId: string | null,
+): string[] {
+	try {
+		const sm = ctx.sessionManager;
+		if (!sm?.getEntry || !leafId) return [];
+		const chain: string[] = [];
+		let cur: string | null = leafId;
+		const seen = new Set<string>();
+		while (cur && !seen.has(cur)) {
+			chain.push(cur);
+			seen.add(cur);
+			const entry = sm.getEntry(cur);
+			cur = entry?.parentId ?? null;
+		}
+		return chain;
+	} catch {
+		return [];
+	}
+}
+
 /**
  * Execute compaction with the active profile's settings.
+ * @param labArms 实验选臂结果（pi-lab 激活时由调用方 selectArms 得到；null 走原 profile）
  */
-function doCompact(
+async function doCompact(
 	pi: ExtensionAPI,
 	ctx: Parameters<Parameters<typeof pi.on>[1]>[1],
 	profile: CompactionProfile,
+	labArms: LabArmSelection | null = null,
+	source: 'auto' | 'manual' = 'auto',
 ) {
 	if (compactingInProgress) {
 		log.info('Compaction already in progress, skipping');
@@ -61,18 +121,62 @@ function doCompact(
 
 	compactingInProgress = true;
 	const triggerProfile = profile;
+	const startTime = Date.now();
 
-	if (ctx.hasUI) {
+	// 丢弃上次中断压缩残留的过程指标（若上次压缩的 onComplete 未消费），
+	// 避免陈旧结果归因到本次压缩
+	getAndClearCompactResult();
+
+	if (labArms) {
+		// 实验激活：本次压缩的阈值由实验臂覆盖（机制/prompt 覆盖在 compactor 执行时生效）
+		const eff = applyLabOverrides(profile, labArms);
+		rememberModel(ctx.model);
+		log.info('Lab arms in effect:', labArms);
+		if (ctx.hasUI && eff.trigger.threshold !== profile.trigger.threshold) {
+			ctx.ui.notify(`Compaction starting (阈值 ${eff.trigger.threshold}% - 实验臂)`, 'info');
+		} else if (ctx.hasUI) {
+			ctx.ui.notify(`Compaction starting (${describeTrigger(profile.trigger)})`, 'info');
+		}
+	} else if (ctx.hasUI) {
 		ctx.ui.notify(`Compaction starting (${describeTrigger(profile.trigger)})`, 'info');
 	}
+
+	// 记录压缩前 leaf 位置（回退信号基准）
+	const leafBefore = getLeafId(ctx);
+	markCompactStart(ctx, labArms, leafBefore, source);
 
 	ctx.compact({
 		onComplete: () => {
 			log.info('Compaction completed successfully');
 			compactingInProgress = false;
+			// 清理 supplement：无论本次是否被消费（如 pass_through/失败回退），
+			// 一次 compaction 结束后都不应残留到下一次
+			setPendingSupplement(undefined);
 
-			if (ctx.hasUI) {
-				ctx.ui.notify('Compaction completed', 'info');
+			// 实验信号：记录压缩后 leaf + 过程指标；清除活跃选臂（本次压缩结束）
+			markCompactEnd(ctx, getLeafId(ctx));
+			clearActiveCompact();
+			if (labArms) {
+				const result = getAndClearCompactResult();
+				if (result) {
+					void reportProcessMetrics({
+						latencyMs: Date.now() - startTime,
+						savedTokens: result.savedTokens,
+						summaryLength: result.summaryLength,
+					});
+				}
+			}
+
+			// ctx 在压缩后可能已 stale（会话替换/重载）——UI 通知安全降级
+			try {
+				if (ctx.hasUI) {
+					ctx.ui.notify('Compaction completed', 'info');
+				}
+			} catch (e) {
+				log.warn(
+					'ctx unavailable in onComplete (session replaced):',
+					e instanceof Error ? e.message : String(e),
+				);
 			}
 
 			if (triggerProfile.autoContinue) {
@@ -86,9 +190,22 @@ function doCompact(
 		onError: (err) => {
 			log.error('Compaction failed:', err.message);
 			compactingInProgress = false;
+			setPendingSupplement(undefined);
+			clearActiveCompact();
+			// 压缩失败不产生可归因信号：清除最近压缩记录，防止后续
+			// detectRollback 把「失败后 leaf 未推进」误判为用户回退不满。
+			clearRecentCompact();
 
-			if (ctx.hasUI) {
-				ctx.ui.notify(`Compaction failed: ${err.message}`, 'error');
+			// ctx 在压缩失败后可能已 stale（会话替换/重载）——UI 通知安全降级
+			try {
+				if (ctx.hasUI) {
+					ctx.ui.notify(`Compaction failed: ${err.message}`, 'error');
+				}
+			} catch (e) {
+				log.warn(
+					'ctx unavailable in onError (session replaced):',
+					e instanceof Error ? e.message : String(e),
+				);
 			}
 		},
 	});
@@ -233,6 +350,8 @@ export default function (pi: ExtensionAPI) {
 			'profile:',
 			profile?.id ?? 'none',
 		);
+		// 注册 pi-lab 实验（弱依赖，不可用时降级）
+		initExperiments(ctx);
 		updateStatus(ctx);
 	});
 
@@ -303,7 +422,10 @@ export default function (pi: ExtensionAPI) {
 
 		// Store supplement for the compactor to pick up
 		if (supplement) setPendingSupplement(supplement);
-		doCompact(pi, ctx, chosenProfile!);
+		// 实验选臂 + 重压信号（自动压缩后 30min 内手动重压 = 对上次不满）
+		const labArms = await selectArms(ctx);
+		if (labArms) await reportRecompact();
+		await doCompact(pi, ctx, chosenProfile!, labArms, 'manual');
 	};
 
 	pi.registerCommand('custom-compact', {
@@ -320,6 +442,14 @@ export default function (pi: ExtensionAPI) {
 	// The compactingInProgress flag prevents re-entry.
 	pi.on('agent_end', async (_event, ctx) => {
 		updateStatus(ctx);
+
+		// 回退信号检测：用户是否回到压缩之前的位置（对最近一次压缩不满）
+		const curLeaf = getLeafId(ctx);
+		const ancestorChain = getAncestorChain(ctx, curLeaf);
+		if (detectRollback(ctx, curLeaf, ancestorChain)) {
+			log.info('Rollback signal reported');
+		}
+
 		if (compactingInProgress) return;
 
 		// Track model changes for model-aware profile selection
@@ -352,6 +482,11 @@ export default function (pi: ExtensionAPI) {
 		const profile = getEffectiveProfile(modelSpec);
 		if (!profile) return;
 
+		// 实验选臂 + 阈值覆盖（阈值臂影响触发点；机制/prompt 覆盖在 compactor 执行时生效）
+		const labArms = await selectArms(ctx);
+		const effProfile = applyLabOverrides(profile, labArms);
+		const trigger = effProfile.trigger;
+
 		const contextUsage = ctx.getContextUsage();
 		if (!contextUsage) {
 			log.info('Proactive trigger: getContextUsage() returned undefined');
@@ -368,28 +503,28 @@ export default function (pi: ExtensionAPI) {
 			`${contextUsage.tokens.toLocaleString()} tokens`,
 			contextUsage.percent !== null ? `(${contextUsage.percent.toFixed(1)}%)` : '',
 			'trigger type:',
-			profile.trigger.type,
+			trigger.type,
 			'threshold:',
-			profile.trigger.threshold,
+			trigger.threshold,
 			'profile:',
-			profile.id,
+			effProfile.id,
 		);
 
 		if (
 			shouldTrigger(
-				profile.trigger,
+				trigger,
 				contextUsage as { tokens: number; percent: number | null },
 				contextWindow,
 			)
 		) {
 			log.info('Proactive compaction triggered', {
-				type: profile.trigger.type,
-				threshold: profile.trigger.threshold,
+				type: trigger.type,
+				threshold: trigger.threshold,
 				tokens: contextUsage.tokens,
 				percent: contextUsage.percent,
-				profile: profile.id,
+				profile: effProfile.id,
 			});
-			doCompact(pi, ctx, profile);
+			await doCompact(pi, ctx, effProfile, labArms, 'auto');
 		}
 	});
 
@@ -399,10 +534,13 @@ export default function (pi: ExtensionAPI) {
 	// ── Cleanup after compaction (belt-and-suspenders) ────────
 	pi.on('session_compact', async () => {
 		compactingInProgress = false;
+		clearActiveCompact();
 	});
 
 	// ── Cleanup on session shutdown ───────────────────────────
 	pi.on('session_shutdown', async () => {
 		compactingInProgress = false;
+		setPendingSupplement(undefined);
+		resetLabState();
 	});
 }

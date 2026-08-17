@@ -36,6 +36,13 @@ export interface CompactionAdapter {
 	 * Return false → fall through (may be picked up by another extension or default).
 	 */
 	beforeCompact?: (ctx: ExtensionContext, profile: CompactionProfile) => Promise<boolean>;
+	/**
+	 * 声明 beforeCompact 会真实拦截压缩（返回 true，执行自己的压缩逻辑）。
+	 * 机制实验（mechanism-strategy）注册前提：要求 smart_compact 臂与 summarize 臂
+	 * 有真实机制差异。collaboration 模式的 adapter（beforeCompact 恒返回 false，
+	 * 把压缩交给第三方扩展/Pi 默认）不满足，不应声明此字段。
+	 */
+	handlesCompaction?: boolean;
 }
 
 // ── Registry ────────────────────────────────────────────────────
@@ -59,6 +66,14 @@ export function registerAdapter(adapter: CompactionAdapter): void {
  */
 export function getAdapter(id: string): CompactionAdapter | undefined {
 	return _adapters.get(id);
+}
+
+/**
+ * 仅供 vitest：清空 adapter 注册表（模块级单例，测试间需重置）。
+ * 生产代码不要调用。
+ */
+export function __clearAdaptersForTest(): void {
+	_adapters.clear();
 }
 
 /**
