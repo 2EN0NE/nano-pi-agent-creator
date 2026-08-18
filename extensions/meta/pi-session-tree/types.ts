@@ -91,6 +91,27 @@ export interface RangeReport {
 	timeSpan: { start: string; end: string };
 }
 
+// ── Complexity analysis ────────────────────────────────────────────
+
+/** 会话复杂度等级 */
+export type ComplexityLevel = 'low' | 'medium' | 'high';
+
+/** 会话复杂度 6 维指标 */
+export interface ComplexityDimensions {
+	branchPoints: number;
+	maxDepth: number;
+	compactionCount: number;
+	toolTypeCount: number;
+	userQuestionCount: number;
+	turnsPerQuestion: number;
+}
+
+/** 会话复杂度分析结果 */
+export interface ComplexityReport {
+	level: ComplexityLevel;
+	dimensions: ComplexityDimensions;
+}
+
 // ── Retry detection ────────────────────────────────────────────────
 
 export interface RetryResult {

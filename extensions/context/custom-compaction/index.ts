@@ -36,18 +36,14 @@ import {
 import { openSettingsPanel } from './settings-panel.js';
 import {
 	initExperiments,
-	selectArms,
-	applyLabOverrides,
 	markCompactStart,
 	markCompactEnd,
-	clearActiveCompact,
 	reportProcessMetrics,
 	reportRecompact,
 	detectRollback,
 	rememberModel,
 	resetLabState,
 	clearRecentCompact,
-	type LabArmSelection,
 } from './lab.js';
 import { type CompactionProfile, describeTrigger, toModelSpec } from './types.js';
 import { shouldTrigger, isApproaching } from './trigger.js';
@@ -105,13 +101,11 @@ function getAncestorChain(
 
 /**
  * Execute compaction with the active profile's settings.
- * @param labArms 实验选臂结果（pi-lab 激活时由调用方 selectArms 得到；null 走原 profile）
  */
 async function doCompact(
 	pi: ExtensionAPI,
 	ctx: Parameters<Parameters<typeof pi.on>[1]>[1],
 	profile: CompactionProfile,
-	labArms: LabArmSelection | null = null,
 	source: 'auto' | 'manual' = 'auto',
 ) {
 	if (compactingInProgress) {
@@ -127,23 +121,14 @@ async function doCompact(
 	// 避免陈旧结果归因到本次压缩
 	getAndClearCompactResult();
 
-	if (labArms) {
-		// 实验激活：本次压缩的阈值由实验臂覆盖（机制/prompt 覆盖在 compactor 执行时生效）
-		const eff = applyLabOverrides(profile, labArms);
-		rememberModel(ctx.model);
-		log.info('Lab arms in effect:', labArms);
-		if (ctx.hasUI && eff.trigger.threshold !== profile.trigger.threshold) {
-			ctx.ui.notify(`Compaction starting (阈值 ${eff.trigger.threshold}% - 实验臂)`, 'info');
-		} else if (ctx.hasUI) {
-			ctx.ui.notify(`Compaction starting (${describeTrigger(profile.trigger)})`, 'info');
-		}
-	} else if (ctx.hasUI) {
+	rememberModel(ctx.model);
+	if (ctx.hasUI) {
 		ctx.ui.notify(`Compaction starting (${describeTrigger(profile.trigger)})`, 'info');
 	}
 
-	// 记录压缩前 leaf 位置（回退信号基准）
+	// 记录压缩前 leaf 位置（回退信号基准）+ 生效 profile id（record 归因）
 	const leafBefore = getLeafId(ctx);
-	markCompactStart(ctx, labArms, leafBefore, source);
+	markCompactStart(ctx, profile.id, leafBefore, source);
 
 	ctx.compact({
 		onComplete: () => {
@@ -153,18 +138,15 @@ async function doCompact(
 			// 一次 compaction 结束后都不应残留到下一次
 			setPendingSupplement(undefined);
 
-			// 实验信号：记录压缩后 leaf + 过程指标；清除活跃选臂（本次压缩结束）
+			// 实验信号：记录压缩后 leaf + 过程指标（armId = 生效 profile id）
 			markCompactEnd(ctx, getLeafId(ctx));
-			clearActiveCompact();
-			if (labArms) {
-				const result = getAndClearCompactResult();
-				if (result) {
-					void reportProcessMetrics({
-						latencyMs: Date.now() - startTime,
-						savedTokens: result.savedTokens,
-						summaryLength: result.summaryLength,
-					});
-				}
+			const result = getAndClearCompactResult();
+			if (result) {
+				void reportProcessMetrics({
+					latencyMs: Date.now() - startTime,
+					savedTokens: result.savedTokens,
+					summaryLength: result.summaryLength,
+				});
 			}
 
 			// ctx 在压缩后可能已 stale（会话替换/重载）——UI 通知安全降级
@@ -191,7 +173,6 @@ async function doCompact(
 			log.error('Compaction failed:', err.message);
 			compactingInProgress = false;
 			setPendingSupplement(undefined);
-			clearActiveCompact();
 			// 压缩失败不产生可归因信号：清除最近压缩记录，防止后续
 			// detectRollback 把「失败后 leaf 未推进」误判为用户回退不满。
 			clearRecentCompact();
@@ -350,8 +331,8 @@ export default function (pi: ExtensionAPI) {
 			'profile:',
 			profile?.id ?? 'none',
 		);
-		// 注册 pi-lab 实验（弱依赖，不可用时降级）
-		initExperiments(ctx);
+		// 注册 pi-lab 实验（弱依赖，不可用时降级）；臂 = 当前 config 的 profile id
+		initExperiments(ctx, Object.values(loadConfig().profiles));
 		updateStatus(ctx);
 	});
 
@@ -422,10 +403,9 @@ export default function (pi: ExtensionAPI) {
 
 		// Store supplement for the compactor to pick up
 		if (supplement) setPendingSupplement(supplement);
-		// 实验选臂 + 重压信号（自动压缩后 30min 内手动重压 = 对上次不满）
-		const labArms = await selectArms(ctx);
-		if (labArms) await reportRecompact();
-		await doCompact(pi, ctx, chosenProfile!, labArms, 'manual');
+		// 重压信号（自动压缩后 30min 内手动重压 = 对上次不满）
+		await reportRecompact();
+		await doCompact(pi, ctx, chosenProfile!, 'manual');
 	};
 
 	pi.registerCommand('custom-compact', {
@@ -482,10 +462,8 @@ export default function (pi: ExtensionAPI) {
 		const profile = getEffectiveProfile(modelSpec);
 		if (!profile) return;
 
-		// 实验选臂 + 阈值覆盖（阈值臂影响触发点；机制/prompt 覆盖在 compactor 执行时生效）
-		const labArms = await selectArms(ctx);
-		const effProfile = applyLabOverrides(profile, labArms);
-		const trigger = effProfile.trigger;
+		// 直接按生效 profile 的 trigger 判断（无实验臂覆盖）
+		const trigger = profile.trigger;
 
 		const contextUsage = ctx.getContextUsage();
 		if (!contextUsage) {
@@ -507,7 +485,7 @@ export default function (pi: ExtensionAPI) {
 			'threshold:',
 			trigger.threshold,
 			'profile:',
-			effProfile.id,
+			profile.id,
 		);
 
 		if (
@@ -522,9 +500,9 @@ export default function (pi: ExtensionAPI) {
 				threshold: trigger.threshold,
 				tokens: contextUsage.tokens,
 				percent: contextUsage.percent,
-				profile: effProfile.id,
+				profile: profile.id,
 			});
-			await doCompact(pi, ctx, effProfile, labArms, 'auto');
+			await doCompact(pi, ctx, profile, 'auto');
 		}
 	});
 
@@ -534,7 +512,6 @@ export default function (pi: ExtensionAPI) {
 	// ── Cleanup after compaction (belt-and-suspenders) ────────
 	pi.on('session_compact', async () => {
 		compactingInProgress = false;
-		clearActiveCompact();
 	});
 
 	// ── Cleanup on session shutdown ───────────────────────────

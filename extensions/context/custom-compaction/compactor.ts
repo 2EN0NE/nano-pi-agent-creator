@@ -24,7 +24,6 @@ import { getEffectiveProfile } from './config.js';
 import type { CompactionProfile } from './types.js';
 import { DEFAULT_COMPACTION_PROMPT, toModelSpec } from './types.js';
 import { getAdapter } from './mechanisms/index.js';
-import { applyLabOverrides, getActiveCompactArms } from './lab.js';
 
 const log = createLogger('custom-compaction:compactor');
 
@@ -150,18 +149,15 @@ export function buildCompactionHandler() {
 			return; // let Pi default handle it
 		}
 
-		// 实验覆盖：本次压缩的机制/prompt/阈值由 lab 选臂决定（无实验时原样）
-		const effProfile = applyLabOverrides(profile, getActiveCompactArms());
-
 		// ── Dispatch by compaction mechanism ──────────
-		switch (effProfile.mechanism.type) {
+		switch (profile.mechanism.type) {
 			case 'pass_through':
 				// Don't intercept — let Pi default or other extensions handle it.
 				log.debug('Mechanism is "pass_through" — skipping custom-compaction handler');
 				return;
 
 			case 'adapter': {
-				const adapterId = effProfile.mechanism.adapterId;
+				const adapterId = profile.mechanism.adapterId;
 				if (!adapterId) {
 					log.warn('Mechanism is "adapter" but no adapterId set — falling through');
 					break;
@@ -173,7 +169,7 @@ export function buildCompactionHandler() {
 					);
 					break;
 				}
-				const handled = await adp.beforeCompact(ctx, effProfile);
+				const handled = await adp.beforeCompact(ctx, profile);
 				if (handled) {
 					log.info(`Adapter "${adapterId}" handled compaction`);
 					return;
@@ -192,7 +188,7 @@ export function buildCompactionHandler() {
 				break;
 		}
 
-		const modelInfo = resolveModel(effProfile, ctx);
+		const modelInfo = resolveModel(profile, ctx);
 
 		// Distinguish compaction flows (pi >= 0.79.10): manual /compact, context
 		// threshold auto-compaction, and overflow recovery (aborted turn retried).
@@ -242,10 +238,8 @@ export function buildCompactionHandler() {
 			? `\n\nPrevious session summary for context:\n${previousSummary}`
 			: '';
 
-		// Use the (lab-overridden) profile's custom prompt, or the default
-		// ⚠️ 必须读 effProfile.prompt：实验 prompt 臂（structured/narrative）经
-		// applyLabOverrides 覆盖到这里，读 profile.prompt 会让 prompt 实验失效。
-		const basePrompt = effProfile.prompt.trim() || DEFAULT_COMPACTION_PROMPT;
+		// Use the profile's custom prompt, or the default
+		const basePrompt = profile.prompt.trim() || DEFAULT_COMPACTION_PROMPT;
 
 		// Prepend any supplement from the manual trigger's Tab input
 		const supplement = getAndClearPendingSupplement();

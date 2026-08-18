@@ -60,7 +60,8 @@ export interface SettingsPanelData {
 export type SettingsUIAction =
 	| { type: 'close' }
 	| { type: 'edit-profile'; profileId: string }
-	| { type: 'edit-field'; profileId: string; fieldKey: string };
+	| { type: 'edit-field'; profileId: string; fieldKey: string }
+	| { type: 'add-profile' };
 
 // ── ANSI 颜色辅助（answer 同款） ───────────────────────────────
 
@@ -116,6 +117,11 @@ export class SettingsComponent implements Component {
 		if (matchesKey(input, Key.down)) {
 			// Down
 			this.navigate(1);
+			return;
+		}
+		if (this.mode === 'main' && input.toLowerCase() === 'n') {
+			// n — 新增 profile（字段面板不响应，避免与字段编辑冲突）
+			this.onDone({ type: 'add-profile' });
 			return;
 		}
 		if (matchesKey(input, Key.enter)) {
@@ -267,7 +273,7 @@ export class SettingsComponent implements Component {
 		lines.push(emptyBoxLine());
 
 		// 操作提示
-		lines.push(boxLine(dim('   ↑↓ 选择  Enter 编辑  Esc 关闭')));
+		lines.push(boxLine(dim('   ↑↓ 选择  Enter 编辑  n 新增  Esc 关闭')));
 	}
 
 	// ── 字段面板 ──────────────────────────────────────────────

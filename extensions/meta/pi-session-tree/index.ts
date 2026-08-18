@@ -28,6 +28,9 @@ import type {
 	PathSegment,
 	RetryResult,
 	RangeReport,
+	ComplexityLevel,
+	ComplexityDimensions,
+	ComplexityReport,
 } from './types.js';
 // 说明：.semgrep.yml 的 pi.logger-imported-but-unused 规则存在误报（import 节点上 pattern-not const 声明恒成立），
 // 下方 nosemgrep 注释用于抑制该误报；const log = createLogger(...) 在下方实例化并被 log.info/error 实际使用。
@@ -129,6 +132,28 @@ function collectNodes(roots: TreeNode[]): TreeNode[] {
 	return result;
 }
 
+// ── Complexity analysis ────────────────────────────────────────────
+
+/** 6 维 → 等级的下界 [medium 下界, high 下界]，左闭右开（<med → low, <high → medium, else high） */
+const COMPLEXITY_THRESHOLDS: Record<keyof ComplexityDimensions, [number, number]> = {
+	branchPoints: [1, 3],
+	maxDepth: [10, 30],
+	compactionCount: [1, 2],
+	toolTypeCount: [3, 6],
+	userQuestionCount: [5, 15],
+	turnsPerQuestion: [2, 5],
+};
+
+/** 单维值 → 0(low)/1(medium)/2(high) */
+function dimensionLevel(dimension: keyof ComplexityDimensions, value: number): number {
+	const [med, high] = COMPLEXITY_THRESHOLDS[dimension];
+	if (value < med) return 0;
+	if (value < high) return 1;
+	return 2;
+}
+
+const COMPLEXITY_LEVELS: ComplexityLevel[] = ['low', 'medium', 'high'];
+
 /** 找从根到目标节点的路径 */
 function findPath(roots: TreeNode[], targetId: string): TreeNode[] {
 	function search(nodes: TreeNode[], path: TreeNode[]): TreeNode[] | null {
@@ -201,6 +226,9 @@ export interface SessionTreeAPI {
 	maxDepth(): number;
 	pathLength(id?: string): number;
 	treeComplexity(): number;
+
+	/** 当前会话的复杂度分析（6 维指标 + 综合等级） */
+	analyzeComplexity(): ComplexityReport;
 
 	// ② Analyze
 	/** 从 fromId 到 toId 之间的结构化范围报告 */
@@ -489,6 +517,49 @@ export function createSessionTree(sessionManager: {
 			return bc * 10 + md;
 		},
 
+		analyzeComplexity(): ComplexityReport {
+			const nodes = collectNodes(getRoots());
+			const dimensions: ComplexityDimensions = {
+				branchPoints: 0,
+				maxDepth: 0,
+				compactionCount: 0,
+				toolTypeCount: 0,
+				userQuestionCount: 0,
+				turnsPerQuestion: 0,
+			};
+			if (nodes.length === 0) {
+				return { level: 'low', dimensions };
+			}
+
+			const toolTypes = new Set<string>();
+			let userQuestions = 0;
+			let agentMessages = 0;
+
+			for (const n of nodes) {
+				if (n.depth > dimensions.maxDepth) dimensions.maxDepth = n.depth;
+				if (n.children.length > 1) dimensions.branchPoints++;
+				if (n.type === 'compaction') dimensions.compactionCount++;
+				if (n.type === 'message') {
+					const msg = (n.raw as any).message;
+					if (msg?.role === 'user') userQuestions++;
+					else if (msg?.role === 'assistant') agentMessages++;
+					else if (msg?.role === 'toolResult' && msg.toolName)
+						toolTypes.add(msg.toolName);
+				}
+			}
+
+			dimensions.toolTypeCount = toolTypes.size;
+			dimensions.userQuestionCount = userQuestions;
+			dimensions.turnsPerQuestion = userQuestions > 0 ? agentMessages / userQuestions : 0;
+
+			let levelIndex = 0;
+			for (const key of Object.keys(dimensions) as (keyof ComplexityDimensions)[]) {
+				levelIndex = Math.max(levelIndex, dimensionLevel(key, dimensions[key]));
+			}
+
+			return { level: COMPLEXITY_LEVELS[levelIndex], dimensions };
+		},
+
 		// ── ② Analyze ──────────────────────────────────────────
 
 		analyze(fromId: string, toId: string): RangeReport {
@@ -713,11 +784,14 @@ export default function piSessionTreeExtension(pi: ExtensionAPI) {
 		const branchCount = tree.branchCount();
 		const depth = tree.maxDepth();
 		const complexity = tree.treeComplexity();
+		const complexityReport = tree.analyzeComplexity();
 		const path = tree.pathToLeaf();
 		const report = tree.analyze(path[0].id, path[path.length - 1].id);
 		const labels = tree.extractLabels();
 
+		const d = complexityReport.dimensions;
 		const lines = [
+			`Complexity: ${complexityReport.level} [branch ${d.branchPoints} | depth ${d.maxDepth} | compact ${d.compactionCount} | tools ${d.toolTypeCount} | questions ${d.userQuestionCount} | turns ${d.turnsPerQuestion.toFixed(1)}]`,
 			`Branch points: ${branchCount}`,
 			`Max depth: ${depth}`,
 			`Path length: ${path.length}`,

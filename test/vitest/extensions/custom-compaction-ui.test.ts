@@ -131,6 +131,13 @@ describe('SettingsComponent content', () => {
 		expect(text).toContain('保存目标: user 层');
 	});
 
+	it('footer shows add-profile hint', () => {
+		const comp = new SettingsComponent(makeData(), () => {});
+		const text = stripAnsi(comp.render(80).join('\n'));
+		expect(text).toContain('n 新增');
+		expect(text).toContain('Esc 关闭');
+	});
+
 	it('top border embeds the plugin name (╭── custom-compaction ─...╮)', () => {
 		const comp = new SettingsComponent(makeData(), () => {});
 		const first = stripAnsi(comp.render(80)[0]);
@@ -197,6 +204,26 @@ describe('SettingsComponent keyboard', () => {
 		comp.handleInput('\r');
 		expect(actions).toHaveLength(1);
 		expect(actions[0]).toEqual({ type: 'edit-profile', profileId: 'default' });
+	});
+
+	it('n emits add-profile action in main mode', () => {
+		const { comp, actions } = capture(makeData());
+		comp.handleInput('n');
+		expect(actions).toHaveLength(1);
+		expect(actions[0]).toEqual({ type: 'add-profile' });
+	});
+
+	it('uppercase N also emits add-profile action (case-insensitive)', () => {
+		const { comp, actions } = capture(makeData());
+		comp.handleInput('N');
+		expect(actions).toHaveLength(1);
+		expect(actions[0]).toEqual({ type: 'add-profile' });
+	});
+
+	it('n does NOT emit add-profile in fields mode', () => {
+		const { comp, actions } = capture(makeData(), 'fields', 'default');
+		comp.handleInput('n');
+		expect(actions).toHaveLength(0);
 	});
 
 	it('Esc emits close', () => {

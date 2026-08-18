@@ -94,9 +94,8 @@ describe('supplement one-shot semantics', () => {
 	});
 });
 
-// ── buildCompactionHandler：实验 prompt 臂消费点 ─────────────────
-// P1 回归：compactor 必须读 effProfile.prompt（applyLabOverrides 覆盖后的值），
-// 读 profile.prompt 会让 prompt-strategy 实验（structured/narrative）失效。
+// ── buildCompactionHandler：使用 profile 自定义 prompt ────────────
+// 移除实验臂覆盖后，compactor 直接读 profile.prompt（不再有 lab 覆盖）。
 
 import { buildCompactionHandler } from '../../../extensions/context/custom-compaction/compactor.js';
 
@@ -123,30 +122,16 @@ vi.mock(
 		return { ...mod, getAdapter: vi.fn() };
 	},
 );
-vi.mock('../../../extensions/context/custom-compaction/lab.js', async (importOriginal) => {
-	const mod =
-		await importOriginal<
-			typeof import('../../../extensions/context/custom-compaction/lab.js')
-		>();
-	return { ...mod, getActiveCompactArms: vi.fn() };
-});
-
 import { vi } from 'vitest';
 import { complete } from '@earendil-works/pi-ai/compat';
 import { getEffectiveProfile } from '../../../extensions/context/custom-compaction/config.js';
 import { getAdapter } from '../../../extensions/context/custom-compaction/mechanisms/index.js';
-import { getActiveCompactArms } from '../../../extensions/context/custom-compaction/lab.js';
 import {
 	createDefaultProfile,
 	type CompactionProfile,
 } from '../../../extensions/context/custom-compaction/types.js';
-import {
-	NARRATIVE_PROMPT,
-	STRUCTURED_PROMPT,
-	type LabArmSelection,
-} from '../../../extensions/context/custom-compaction/lab.js';
 
-describe('buildCompactionHandler — lab prompt arm wiring', () => {
+describe('buildCompactionHandler — uses profile prompt', () => {
 	beforeEach(() => {
 		// mock.calls 跨测试累积（vitest 默认不自动 clear），每个用例清空后取 calls[0]
 		vi.mocked(complete).mockClear();
@@ -185,9 +170,8 @@ describe('buildCompactionHandler — lab prompt arm wiring', () => {
 		};
 	}
 
-	async function summarizeWithArms(arms: LabArmSelection | null): Promise<string> {
+	async function summarize(): Promise<string> {
 		vi.mocked(getEffectiveProfile).mockReturnValue(makeProfile());
-		vi.mocked(getActiveCompactArms).mockReturnValue(arms);
 		vi.mocked(getAdapter).mockReturnValue(undefined);
 		vi.mocked(complete).mockResolvedValue({
 			content: [{ type: 'text', text: 'summary ok' }],
@@ -204,28 +188,8 @@ describe('buildCompactionHandler — lab prompt arm wiring', () => {
 		return messages[0].content[0].text as string;
 	}
 
-	it('uses the narrative lab prompt arm instead of the profile prompt', async () => {
-		const text = await summarizeWithArms({
-			mechanism: 'summarize',
-			prompt: 'narrative',
-			threshold: null,
-		});
-		expect(text).toContain(NARRATIVE_PROMPT.slice(0, 60));
-		expect(text).not.toContain('PROFILE_CUSTOM_PROMPT');
-	});
-
-	it('uses the structured lab prompt arm when selected', async () => {
-		const text = await summarizeWithArms({
-			mechanism: 'summarize',
-			prompt: 'structured',
-			threshold: null,
-		});
-		expect(text).toContain(STRUCTURED_PROMPT.slice(0, 60));
-		expect(text).not.toContain('PROFILE_CUSTOM_PROMPT');
-	});
-
-	it('falls back to the profile prompt when no lab arms are active', async () => {
-		const text = await summarizeWithArms(null);
+	it('uses the profile custom prompt directly (no lab arm override)', async () => {
+		const text = await summarize();
 		expect(text).toContain('PROFILE_CUSTOM_PROMPT');
 	});
 });

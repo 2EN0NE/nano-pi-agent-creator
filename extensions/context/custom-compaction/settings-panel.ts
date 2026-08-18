@@ -31,6 +31,7 @@ import {
 	getEffectiveProfile,
 	getActiveScope,
 	setActiveProfile,
+	upsertProfile,
 	updateProfileFields,
 	type SaveScope,
 } from './config.js';
@@ -506,6 +507,74 @@ async function editFieldViaDialog(
 	}
 }
 
+// ── 新增 profile ────────────────────────────────────────────────
+
+/** 名称 → 稳定 id（小写、非字母数字转连字符、去首尾连字符；纯非 ASCII 名称追加短哈希兜底） */
+function slugifyProfileId(name: string): string {
+	const slug = name
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '');
+	if (slug) return slug;
+	// 非 ASCII 名称（如中文）slug 坍缩为空 → 追加确定性短哈希，
+	// 避免连续新增产生 profile / profile-2 / profile-3 这类不可区分的 id
+	return `profile-${shortHash(name)}`;
+}
+
+/** 确定性短哈希（djb2，8 位十六进制），仅用于区分非 ASCII 名称的 slug */
+function shortHash(input: string): string {
+	let h = 5381;
+	for (let i = 0; i < input.length; i++) {
+		h = ((h << 5) + h + input.charCodeAt(i)) >>> 0;
+	}
+	return h.toString(16).padStart(8, '0').slice(0, 8);
+}
+
+/** 生成不与现有 profile 冲突的唯一 id */
+function uniqueProfileId(name: string, profiles: Record<string, CompactionProfile>): string {
+	const base = slugifyProfileId(name);
+	if (!(base in profiles)) return base;
+	let i = 2;
+	while (`${base}-${i}` in profiles) i++;
+	return `${base}-${i}`;
+}
+
+/**
+ * 新增 profile：输入名称 → 生成唯一 id → 以默认配置落盘到当前活跃层 → 激活。
+ * 返回是否成功（面板循环据此刷新）。
+ */
+async function addProfile(ctx: ExtensionCommandContext, scope: SaveScope): Promise<boolean> {
+	const name = await ctx.ui.input('新 Profile 名称（如 "Code Review"）', '');
+	if (name === undefined) return false;
+	const trimmed = name.trim();
+	if (!trimmed) {
+		ctx.ui.notify('名称不能为空', 'warning');
+		return false;
+	}
+
+	const config = loadConfig();
+	const id = uniqueProfileId(trimmed, config.profiles);
+	const profile: CompactionProfile = {
+		id,
+		name: trimmed,
+		model: 'current',
+		trigger: { type: 'context_percent', threshold: 20 },
+		mechanism: { type: 'summarize' },
+		prompt: '',
+		autoContinue: true,
+		autoContinueMessage: DEFAULT_AUTO_CONTINUE_MESSAGE,
+	};
+
+	if (!upsertProfile(profile, scope)) {
+		ctx.ui.notify(`新增 profile "${trimmed}" 失败`, 'error');
+		return false;
+	}
+	// 新增后激活（仅当尚未激活其它 profile 时不强改；此处直接激活便于用户继续编辑）
+	setActiveProfile(id, scope);
+	ctx.ui.notify(`已新增 profile "${trimmed}"（id: ${id}），保存到 ${scope} 层`, 'info');
+	return true;
+}
+
 // ── 主面板 ──────────────────────────────────────────────────────
 
 /**
@@ -522,6 +591,11 @@ export async function openSettingsPanel(ctx: ExtensionCommandContext): Promise<v
 			(_tui, _theme, _kb, done) => new SettingsComponent(data, done, 'main'),
 		);
 		if (!action || action.type === 'close') break;
+
+		if (action.type === 'add-profile') {
+			await addProfile(ctx, data.saveScope);
+			continue; // 刷新主面板（新增后回到 profile 列表）
+		}
 
 		if (action.type === 'edit-profile') {
 			// 字段面板

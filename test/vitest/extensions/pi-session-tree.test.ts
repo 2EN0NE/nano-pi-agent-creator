@@ -46,7 +46,11 @@ interface MockEntry {
 	type: string;
 	timestamp: string;
 	label?: string;
-	message?: { role: string; content: string | Array<{ type: string; text: string }> };
+	message?: {
+		role: string;
+		content: string | Array<{ type: string; text: string }>;
+		toolName?: string;
+	};
 	details?: any;
 	tokensBefore?: number;
 }
@@ -359,6 +363,239 @@ describe('treeComplexity', () => {
 		]);
 		const tree = createSessionTree(sm);
 		expect(tree.treeComplexity()).toBeGreaterThan(0);
+	});
+});
+
+describe('analyzeComplexity', () => {
+	it('returns low with zeroed dimensions for empty session', () => {
+		const sm = mockSessionManager([]);
+		const tree = createSessionTree(sm);
+		expect(tree.analyzeComplexity()).toEqual({
+			level: 'low',
+			dimensions: {
+				branchPoints: 0,
+				maxDepth: 0,
+				compactionCount: 0,
+				toolTypeCount: 0,
+				userQuestionCount: 0,
+				turnsPerQuestion: 0,
+			},
+		});
+	});
+
+	it('computes all 6 dimensions and aggregate level from a known tree', () => {
+		const sm = mockSessionManager([
+			{
+				id: '1',
+				parentId: null,
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'user', content: 'q1' },
+			},
+			{
+				id: '2',
+				parentId: '1',
+				type: 'message',
+				timestamp: 't2',
+				message: { role: 'assistant', content: 'a1' },
+			},
+			{
+				id: '3',
+				parentId: '2',
+				type: 'message',
+				timestamp: 't3',
+				message: { role: 'toolResult', content: '', toolName: 'bash' },
+			},
+			{
+				id: '4',
+				parentId: '2',
+				type: 'message',
+				timestamp: 't4',
+				message: { role: 'user', content: 'q2' },
+			},
+			{
+				id: '5',
+				parentId: '4',
+				type: 'message',
+				timestamp: 't5',
+				message: { role: 'assistant', content: 'a2' },
+			},
+		]);
+		const tree = createSessionTree(sm);
+		const r = tree.analyzeComplexity();
+		expect(r.dimensions).toEqual({
+			branchPoints: 1,
+			maxDepth: 3,
+			compactionCount: 0,
+			toolTypeCount: 1,
+			userQuestionCount: 2,
+			turnsPerQuestion: 1,
+		});
+		// branchPoints=1 恰好是 medium 下界，是唯一非 low 维 → 综合 medium
+		expect(r.level).toBe('medium');
+	});
+
+	it('branchPoints >= 3 dominates to high', () => {
+		// 3 个分支点：r(2 孩子) + b1(2 孩子) + c1(2 孩子)
+		const sm = mockSessionManager([
+			{
+				id: 'r',
+				parentId: null,
+				type: 'message',
+				timestamp: 't0',
+				message: { role: 'user', content: 'q' },
+			},
+			{
+				id: 'b1',
+				parentId: 'r',
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'assistant', content: 'a' },
+			},
+			{
+				id: 'b2',
+				parentId: 'r',
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'assistant', content: 'a' },
+			},
+			{
+				id: 'c1',
+				parentId: 'b1',
+				type: 'message',
+				timestamp: 't2',
+				message: { role: 'assistant', content: 'a' },
+			},
+			{
+				id: 'c2',
+				parentId: 'b1',
+				type: 'message',
+				timestamp: 't2',
+				message: { role: 'assistant', content: 'a' },
+			},
+			{
+				id: 'd1',
+				parentId: 'c1',
+				type: 'message',
+				timestamp: 't3',
+				message: { role: 'assistant', content: 'a' },
+			},
+			{
+				id: 'd2',
+				parentId: 'c1',
+				type: 'message',
+				timestamp: 't3',
+				message: { role: 'assistant', content: 'a' },
+			},
+		]);
+		const tree = createSessionTree(sm);
+		const r = tree.analyzeComplexity();
+		expect(r.dimensions.branchPoints).toBe(3);
+		expect(r.level).toBe('high');
+	});
+
+	it('compactionCount >= 2 dominates to high', () => {
+		const sm = mockSessionManager([
+			{
+				id: '1',
+				parentId: null,
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'user', content: 'q' },
+			},
+			{ id: '2', parentId: '1', type: 'compaction', timestamp: 't2' },
+			{ id: '3', parentId: '2', type: 'compaction', timestamp: 't3' },
+		]);
+		const tree = createSessionTree(sm);
+		const r = tree.analyzeComplexity();
+		expect(r.dimensions.compactionCount).toBe(2);
+		expect(r.level).toBe('high');
+	});
+
+	it('maxDepth >= 30 dominates to high', () => {
+		const entries: MockEntry[] = [];
+		for (let i = 0; i <= 30; i++) {
+			entries.push({
+				id: `n${i}`,
+				parentId: i === 0 ? null : `n${i - 1}`,
+				type: 'message',
+				timestamp: `t${i}`,
+				message: { role: i % 2 === 0 ? 'user' : 'assistant', content: 'x' },
+			});
+		}
+		const tree = createSessionTree(mockSessionManager(entries));
+		const r = tree.analyzeComplexity();
+		expect(r.dimensions.maxDepth).toBe(30);
+		expect(r.level).toBe('high');
+	});
+
+	it('turnsPerQuestion >= 5 dominates to high', () => {
+		const entries: MockEntry[] = [
+			{
+				id: 'u',
+				parentId: null,
+				type: 'message',
+				timestamp: 't0',
+				message: { role: 'user', content: 'q' },
+			},
+		];
+		for (let i = 1; i <= 5; i++) {
+			entries.push({
+				id: `a${i}`,
+				parentId: i === 1 ? 'u' : `a${i - 1}`,
+				type: 'message',
+				timestamp: `t${i}`,
+				message: { role: 'assistant', content: 'a' },
+			});
+		}
+		const tree = createSessionTree(mockSessionManager(entries));
+		const r = tree.analyzeComplexity();
+		expect(r.dimensions.turnsPerQuestion).toBe(5);
+		expect(r.level).toBe('high');
+	});
+
+	it('toolTypeCount dedupes tool names and maps 3 distinct tools to medium', () => {
+		const sm = mockSessionManager([
+			{
+				id: 'u',
+				parentId: null,
+				type: 'message',
+				timestamp: 't0',
+				message: { role: 'user', content: 'q' },
+			},
+			{
+				id: 'a',
+				parentId: 'u',
+				type: 'message',
+				timestamp: 't1',
+				message: { role: 'assistant', content: 'a' },
+			},
+			{
+				id: 't1',
+				parentId: 'a',
+				type: 'message',
+				timestamp: 't2',
+				message: { role: 'toolResult', content: '', toolName: 'bash' },
+			},
+			{
+				id: 't2',
+				parentId: 't1',
+				type: 'message',
+				timestamp: 't3',
+				message: { role: 'toolResult', content: '', toolName: 'read' },
+			},
+			{
+				id: 't3',
+				parentId: 't2',
+				type: 'message',
+				timestamp: 't4',
+				message: { role: 'toolResult', content: '', toolName: 'write' },
+			},
+		]);
+		const tree = createSessionTree(sm);
+		const r = tree.analyzeComplexity();
+		expect(r.dimensions.toolTypeCount).toBe(3);
+		expect(r.level).toBe('medium');
 	});
 });
 
