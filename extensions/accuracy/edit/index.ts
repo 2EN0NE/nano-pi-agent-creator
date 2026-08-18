@@ -77,8 +77,13 @@ export default function editExtension(pi: ExtensionAPI) {
 			const editExp = mgr.registerWeakExperiment({
 				owner: 'edit',
 				name: 'edit-strategy',
+				// 分组键 = 模型（分析时按模型分层，控制模型效应混杂）
 				contextKey: (ctx: ExtensionContext) =>
 					`${ctx.model?.provider ?? 'unknown'}:${ctx.model?.id ?? 'unknown'}`,
+				// 分流键 = 会话（跨模型分布的稳定单元）：同一会话稳定同一臂，
+				// 不同会话即使同模型也会 hash 到不同臂，消除「臂=模型」混杂
+				assignKey: (ctx: ExtensionContext) =>
+					ctx.sessionManager?.getSessionId?.() ?? 'unknown-session',
 				arms: [
 					{ id: 'classic', label: '精确匹配' },
 					{ id: 'row-script', label: '模糊行匹配' },
@@ -94,7 +99,8 @@ export default function editExtension(pi: ExtensionAPI) {
 						id: 'latency_ms',
 						type: 'continuous',
 						direction: 'minimize',
-						description: '编辑耗时（毫秒，越低越好）',
+						isGuardrail: true,
+						description: '编辑耗时（毫秒，护栏：越低越好）',
 					},
 				],
 			});
@@ -150,7 +156,8 @@ export default function editExtension(pi: ExtensionAPI) {
 			// 日志信号的 ctxKey（与注册时的 contextKey fn 保持一致）
 			const ctxKey = `${ctx.model?.provider ?? 'unknown'}:${ctx.model?.id ?? 'unknown'}`;
 			let armId = 'classic';
-			let success = false;
+			// intent-to-treat：分配臂是否命中（fallback 补救成功不等于分配臂命中）
+			let armHit = false;
 			let result: { content: Array<{ type: 'text'; text: string }>; details: any };
 
 			try {
@@ -169,7 +176,7 @@ export default function editExtension(pi: ExtensionAPI) {
 						],
 						details: { diff: r.combinedDiff, firstChangedLine: r.firstChangedLine },
 					};
-					success = true;
+					armHit = true;
 				} else {
 					if (labSelect) {
 						armId = await labSelect(ctx);
@@ -184,7 +191,8 @@ export default function editExtension(pi: ExtensionAPI) {
 							log.info('Classic had failures, trying row-script fallback', {
 								failures: r.results.filter((r) => !r.success).length,
 							});
-							armId = 'row-script';
+							// intent-to-treat：fallback 补救执行（完成任务），但臂归属仍是
+							// classic，match_success 记 classic 未命中——不污染 row-script 臂
 							const fallbackOps = buildFallbackRows(r.results, edits);
 							const fr = await rowScript.execute(fallbackOps, ctx.cwd, signal);
 							const summary = fr.results
@@ -202,7 +210,7 @@ export default function editExtension(pi: ExtensionAPI) {
 									firstChangedLine: fr.firstChangedLine,
 								},
 							};
-							success = true;
+							armHit = false;
 						} else {
 							if (r.results.length === 1) {
 								result = {
@@ -229,7 +237,7 @@ export default function editExtension(pi: ExtensionAPI) {
 									},
 								};
 							}
-							success = true;
+							armHit = true;
 						}
 					} else {
 						const edits = buildEditList(path, oldText, newText, multi);
@@ -247,7 +255,7 @@ export default function editExtension(pi: ExtensionAPI) {
 							],
 							details: { diff: r.combinedDiff, firstChangedLine: r.firstChangedLine },
 						};
-						success = true;
+						armHit = true;
 					}
 				}
 			} catch (err: any) {
@@ -258,7 +266,7 @@ export default function editExtension(pi: ExtensionAPI) {
 			}
 
 			// 日志静默上报结果信号（pi-lab 日志 adapter 采集）
-			reportSignal(armId, ctxKey, 'match_success', success ? 1 : 0);
+			reportSignal(armId, ctxKey, 'match_success', armHit ? 1 : 0);
 			reportSignal(armId, ctxKey, 'latency_ms', Date.now() - startTime);
 
 			return result;

@@ -1,22 +1,37 @@
 /**
  * /lab 命令的 TUI 面板
  *
- * 布局（无左右竖线边框）:
+ * 两级导航（master-detail）：
  *
- *   [当前会话]  全局
- *   ──────────────────────────────
- *   Edit Strategy
- *   ├─ 统计
- *   ├─ 设置
- *   └─ 重置
- *   ──────────────────────────────
- *   Tab/⇧Tab 切标签 · ↑↓ 导航 · ⏎ 确认 · esc 关闭
+ *   一级（实验列表，1 个 SelectList + 滚动视口）:
+ *     ┌── pi-lab ──────────────────────────────┐
+ *       [分桶] [汇总]
+ *      ────────────────────────────────────────
+ *      → edit:edit-strategy    精确匹配 vs 模糊行匹配
+ *        custom-compaction:prompt-strategy  ...
+ *      ────────────────────────────────────────
+ *       Tab/⇧Tab 切标签 · ↑↓ 导航 · ⏎ 进入 · esc 关闭
+ *     └───────────────────────────────────────┘
+ *
+ *   二级（实验操作，操作条 Tab 切换）:
+ *     ┌── pi-lab · custom-compaction:prompt-strategy ──┐
+ *       [统计] [设置] [重置]
+ *      ────────────────────────────────────────────────
+ *       （统计图表 / 设置表单 / 重置确认）
+ *      ────────────────────────────────────────────────
+ *       Tab/⇧Tab 切操作 · esc 返回
+ *     └───────────────────────────────────────────────┘
  *
  * 键盘约定：
- *   Tab / Shift+Tab  — 切换 当前会话 / 全局 标签
- *   ↑↓               — 在菜单行之间导航（由 SelectList 管理）
- *   ⏎                — 选择当前项
- *   Esc              — 关闭面板
+ *   一级：Tab/Shift+Tab — 切换 分桶 / 汇总；↑↓ — 导航；⏎ — 进入实验；Esc — 关闭
+ *   二级：Tab/Shift+Tab — 切换 统计 / 设置 / 重置；←→ — 统计页切指标；Esc — 返回一级
+ *
+ * 设计要点（修复旧版平铺菜单的 3 个病根）：
+ *   1. 操作不重复渲染：统计/设置/重置从每个实验内嵌的 SelectList 收敛为二级操作条（撑高消失）
+ *   2. 焦点管理：每屏只有 1 个 SelectList（一级列表 / 设置臂 / 重置确认），焦点可流转（旧版 N 个
+ *      SelectList 且 activeSelectListIndex 恒 0 导致焦点卡死在第一个实验的 bug 消失）
+ *   3. 导航/操作分层：一级选实验（导航），二级对当前实验操作（master-detail）
+ *   4. 一级列表带滚动视口上限（MAX_VISIBLE_EXPERIMENTS），实验数超过时滚动不撑高
  */
 
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
@@ -27,22 +42,32 @@ import {
 	SelectList,
 	Spacer,
 	Text,
+	truncateToWidth,
+	visibleWidth,
 } from '@earendil-works/pi-tui';
 import type { ExperimentManager } from '../core/experiment-manager.js';
-import type { MetricDef, PanelTab, PanelView, QueryResult } from '../types.js';
+import type { ExperimentOperation, MetricDef, PanelTab, PanelView, QueryResult } from '../types.js';
 
 // 胜出高亮的最小样本量护栏：极小样本（如 n=1 vs n=0）胜率可达 100%，
 // 过早高亮为「显著胜出」会误导结论
 const MIN_WINNER_SAMPLES = 10;
 
+// 一级列表最大可视行数（滚动视口上限）：实验数超过时 SelectList 内部滚动，面板不撑高
+const MAX_VISIBLE_EXPERIMENTS = 8;
+
+// 二级统计页内容最大可视行数：指标/模型/arm 多时内容超长，滚动视口防止撑爆终端高度
+const MAX_CONTENT_LINES = 10;
+
 export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManager): Promise<void> {
 	return ctx.ui.custom<void>((tui, theme, _kb, done) => {
-		let currentTab: PanelTab = 'session';
-		let currentView: PanelView = { kind: 'menu' };
+		let currentTab: PanelTab = 'bucket';
+		let currentView: PanelView = { kind: 'menu', tab: 'bucket' };
 		let dismissed = false;
 		let currentWidth = 80; // fallback width（首次 render 时被真实宽度覆盖）
 		let needsFirstRebuild = true;
 		let metricIndex = 0;
+		/** 二级统计页内容滚动偏移（指标/模型/arm 多时 ↑↓ 滚动） */
+		let contentScroll = 0;
 
 		const safeDone = () => {
 			if (dismissed) return;
@@ -52,9 +77,8 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 
 		const container = new Container();
 
-		// ── SelectList 管理 ──
-		let activeSelectLists: SelectList[] = [];
-		let activeSelectListIndex = 0;
+		// ── SelectList 管理：每屏至多 1 个（一级列表 / 设置臂 / 重置确认）──
+		let activeSelectList: SelectList | null = null;
 
 		// ── 主题辅助 ──
 
@@ -63,22 +87,20 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 		const muted = (s: string) => theme.fg('muted', s);
 		const bold = (s: string) => theme.bold(s);
 
-		// ── Tab Bar ──
+		// ── 实验显示名（owner:name，区分实验归属插件）──
 
-		function renderTabBar() {
-			// 事件无 sessionId 维度，「session」实为按上下文键（模型）分组展示，
-			// 「global」为跨上下文汇总——标签如实命名，避免误导为「当前会话」。
-			const tabs = [
-				{ key: 'session' as PanelTab, label: '按模型' },
-				{ key: 'global' as PanelTab, label: '汇总' },
-			];
-			const parts = tabs.map((tab) => {
-				const isActive = currentTab === tab.key;
-				return isActive ? accent(bold(`  ${tab.label}  `)) : dim(`  ${tab.label}  `);
-			});
-			// 顶部边框 ┌── pi-lab ──┐：插件名居中于边框线，名字用 dim 弱化（代替改字号）
-			const topName = ' pi-lab ';
-			const topFill = Math.max(0, currentWidth - 2 - 2 - topName.length);
+		function displayName(name: string, owner: string | undefined): string {
+			return owner ? `${owner}:${name}` : name;
+		}
+
+		// ── 顶部边框（标题写在边框线上）──
+
+		function renderTopBorder(title: string) {
+			// 标题过长（如 custom-compaction:profile-satisfaction）时截断，避免窄终端顶边框超宽
+			const maxTitleWidth = Math.max(0, currentWidth - 6); // 预留 "┌──" + "  " + "┐"
+			const safeTitle = truncateToWidth(title, maxTitleWidth, '');
+			const topName = ` ${safeTitle} `;
+			const topFill = Math.max(0, currentWidth - 4 - visibleWidth(topName));
 			container.addChild(
 				new Text(
 					accent('\u250c\u2500\u2500') +
@@ -88,18 +110,32 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 					0,
 				),
 			);
-			container.addChild(new Text(parts.join(''), 0, 0));
-			// 中间分隔线：左右各缩进 1 字符，与 ┌┐ 框的横线对齐
+		}
+
+		/** 中间分隔线：左右各缩进 1 字符，与 ┌┐ 框的横线对齐 */
+		function renderDivider() {
 			container.addChild(
 				new Text(accent(' ' + '\u2500'.repeat(Math.max(0, currentWidth - 2)) + ' '), 0, 0),
 			);
 		}
 
-		// ── 菜单视图 ──
+		/** 横向标签/操作条（选中项 accent+bold，其余 dim） */
+		function renderPills(
+			items: Array<{ key: string; label: string }>,
+			activeKey: string,
+		): void {
+			const parts = items.map((item) =>
+				item.key === activeKey
+					? accent(bold(`  ${item.label}  `))
+					: dim(`  ${item.label}  `),
+			);
+			container.addChild(new Text(parts.join(''), 0, 0));
+		}
+
+		// ── 一级：实验列表 ──
 
 		function renderMenu() {
-			activeSelectLists = [];
-			activeSelectListIndex = 0;
+			activeSelectList = null;
 
 			const experiments = manager.getAllExperiments();
 
@@ -110,73 +146,53 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 				return;
 			}
 
-			for (const { name, info } of experiments) {
+			const items: SelectItem[] = experiments.map(({ name, owner, info }) => {
 				const armLabels = info.arms.map((a: any) => a.label ?? a.id).join(' vs ');
-				const statusBadge = info.forceArmId
-					? accent(` [强制:${info.forceArmId}]`)
-					: dim(` (${info.strategy})`);
+				return {
+					value: name,
+					label: displayName(name, owner),
+					description: `${info.forceArmId ? `[强制:${info.forceArmId}] ` : ''}${armLabels}`,
+				};
+			});
 
-				container.addChild(new Spacer(1));
-				container.addChild(new Text(`  ${accent(bold(name))}${statusBadge}`, 0, 0));
-				container.addChild(new Text(`    ${dim(armLabels)}`, 0, 0));
-
-				// 操作菜单
-				const menuItems: SelectItem[] = [
-					{
-						value: 'stats',
-						label: '统计',
-						description: '查看各模型/实验臂的统计',
-					},
-					{
-						value: 'settings',
-						label: '设置',
-						description: '配置强制臂、分流策略',
-					},
-					{
-						value: 'reset',
-						label: '重置',
-						description: '清空实验数据',
-					},
-				];
-
-				const list = new SelectList(menuItems, 3, {
+			const maxVisible = Math.min(items.length, MAX_VISIBLE_EXPERIMENTS);
+			const list = new SelectList(
+				items,
+				maxVisible,
+				{
 					selectedPrefix: (s: string) => accent('> ' + s),
 					selectedText: (s: string) => accent(s),
 					description: (s: string) => dim(s),
 					scrollInfo: (s: string) => dim(s),
 					noMatch: (s: string) => muted(s),
-				});
+				},
+				// 主列放宽：owner:name（如 custom-compaction:prompt-strategy）默认 32 列会截断
+				{ maxPrimaryColumnWidth: 40 },
+			);
 
-				list.onSelect = (item) => {
-					const view = item.value;
-					if (view === 'stats') {
-						currentView = {
-							kind: 'experiment-detail',
-							experimentName: name,
-							tab: currentTab,
-						};
-					} else if (view === 'settings') {
-						currentView = { kind: 'settings', experimentName: name };
-					} else if (view === 'reset') {
-						currentView = {
-							kind: 'confirm-reset',
-							experimentName: name,
-							tab: currentTab,
-						};
-					}
-					rebuild();
-					tui.requestRender();
+			list.onSelect = (item) => {
+				// 进入二级：切换实验时重置指标索引与内容滚动偏移
+				metricIndex = 0;
+				contentScroll = 0;
+				currentView = {
+					kind: 'experiment-operations',
+					experimentName: item.value,
+					operation: 'stats',
+					tab: currentTab,
 				};
-				list.onCancel = () => safeDone();
+				rebuild();
+				tui.requestRender();
+			};
+			list.onCancel = () => safeDone();
 
-				activeSelectLists.push(list);
-				container.addChild(list);
-			}
+			activeSelectList = list;
+			container.addChild(list);
 		}
 
-		// ── 统计详情视图 ──
+		// ── 统计详情 ──
 
 		function renderArmAnalysis(
+			lines: string[],
 			metricDef: MetricDef,
 			result: QueryResult,
 			armLabel: Map<string, string>,
@@ -185,34 +201,24 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 			for (const arm of result.arms) {
 				const label = armLabel.get(arm.armId) ?? arm.armId;
 				if (arm.n === 0) {
-					container.addChild(new Text(`    ${label}: ${muted('暂无数据')}`, 0, 0));
+					lines.push(`    ${label}: ${muted('暂无数据')}`);
 					continue;
 				}
 				if (isRate) {
 					const pct = (arm.mean * 100).toFixed(1);
 					const low = Math.max(0, arm.credibleInterval.low * 100).toFixed(0);
 					const high = Math.min(100, arm.credibleInterval.high * 100).toFixed(0);
-					container.addChild(
-						new Text(
-							`    ${label}: 预估成功率 ${pct}%（${arm.n} 次）真实约 ${low}%~${high}%`,
-							0,
-							0,
-						),
+					lines.push(
+						`    ${label}: 预估成功率 ${pct}%（${arm.n} 次）真实约 ${low}%~${high}%`,
 					);
 				} else {
-					container.addChild(
-						new Text(`    ${label}: 均值 ${arm.mean.toFixed(1)}（${arm.n} 次）`, 0, 0),
-					);
+					lines.push(`    ${label}: 均值 ${arm.mean.toFixed(1)}（${arm.n} 次）`);
 				}
 			}
 			for (const alert of result.guardrailAlert) {
 				const label = armLabel.get(alert.armId) ?? alert.armId;
-				container.addChild(
-					new Text(
-						`    ${theme.fg('error', `护栏: ${label} 更差 ${(alert.pWorse * 100).toFixed(0)}%`)}`,
-						0,
-						0,
-					),
+				lines.push(
+					`    ${theme.fg('error', `护栏: ${label} 更差 ${(alert.pWorse * 100).toFixed(0)}%`)}`,
 				);
 			}
 		}
@@ -221,7 +227,11 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 		 * 自动解读：把贝叶斯术语翻译成通俗结论，避免 AB 测试专业性困扰用户。
 		 * 只陈述「事实 + 可操作建议」，不下无数据支撑的判断。
 		 */
-		function renderInsight(result: QueryResult, armLabel: Map<string, string>): void {
+		function renderInsight(
+			lines: string[],
+			result: QueryResult,
+			armLabel: Map<string, string>,
+		): void {
 			const withData = result.arms.filter((a) => a.n > 0);
 			const noData = result.arms.filter((a) => a.n === 0);
 			const name = (id: string) => armLabel.get(id) ?? id;
@@ -234,9 +244,11 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 			} else if (withData.length === 1 && noData.length >= 1) {
 				// 单臂有数据：无法对比，解释稳定分流
 				hints.push(`${name(noData[0].armId)} 暂无样本，两策略暂时无法对比`);
-				hints.push('稳定分流会把同一模型固定分到一侧，换不同模型编辑即可让另一侧分到流量');
-				if (currentTab === 'session') {
-					hints.push('想看整体对比，按 Tab 切到「汇总」');
+				hints.push(
+					'分流按会话稳定：同一模型的不同会话会分到不同臂，多开几个会话即可让另一侧分到流量',
+				);
+				if (currentTab === 'bucket') {
+					hints.push('想看整体对比，esc 返回一级后 Tab 切「汇总」再进入');
 				}
 				if (withData[0].n < MIN_WINNER_SAMPLES) {
 					hints.push(`当前仅 ${withData[0].n} 次样本，结论仅供参考`);
@@ -260,10 +272,10 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 
 			if (conclusions.length === 0 && hints.length === 0) return;
 			for (const c of conclusions) {
-				container.addChild(new Text(`  ${accent('· ' + c)}`, 0, 0));
+				lines.push(`  ${accent('· ' + c)}`);
 			}
 			for (const h of hints) {
-				container.addChild(new Text(`  ${dim('· ' + h)}`, 0, 0));
+				lines.push(`  ${dim('· ' + h)}`);
 			}
 		}
 
@@ -286,53 +298,74 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 				armLabel.set(a.id, a.label ?? a.id);
 			}
 
-			container.addChild(new Spacer(1));
-			container.addChild(
-				new Text(`  ${accent(bold(experimentName))} ${dim(info.strategy)}`, 0, 0),
+			// 先收集全部内容行（含 ANSI），再按 contentScroll 切片渲染——指标/模型/arm
+			// 多时内容超长，滚动视口防止撑爆终端高度（TUI 铁律：组件总高 ≤ 视口）
+			const lines: string[] = [];
+
+			lines.push('');
+			lines.push(
+				truncateToWidth(
+					`  ${accent(bold(displayName(experimentName, manager.getOwner(experimentName))))}`,
+					currentWidth,
+					'',
+				),
 			);
 
 			if (info.loadWarning) {
 				// 历史数据整体读取失败：显式提示而非静默空态
+				lines.push(`  ${theme.fg('error', '历史数据加载失败: ' + info.loadWarning)}`);
+			}
+
+			if (info.forceArmId) {
+				lines.push(`  ${accent(`>> 强制: ${info.forceArmId}`)}`);
+			}
+
+			lines.push(`  ${dim(`指标: ${metricDef.id}  [< > 切换]`)}`);
+			if (metricDef.description) {
+				lines.push(`  ${dim(metricDef.description)}`);
+			}
+
+			lines.push('');
+
+			if (currentTab === 'global') {
+				const result = exp.query(metricDef.id);
+				renderArmAnalysis(lines, metricDef, result, armLabel);
+				renderInsight(lines, result, armLabel);
+			} else {
+				const ctxKeys = exp.getContextKeys();
+				if (ctxKeys.length === 0) {
+					lines.push(muted('  尚未采集到数据。'));
+				}
+				for (const ctxKey of ctxKeys) {
+					lines.push(`  ${accent(ctxKey)}`);
+					// 用 queryByCtxKey 按已解析 ctxKey 过滤，避免函数型 contextKey 二次解析
+					const result = exp.queryByCtxKey(metricDef.id, ctxKey);
+					renderArmAnalysis(lines, metricDef, result, armLabel);
+					renderInsight(lines, result, armLabel);
+				}
+			}
+
+			// 切片渲染（clamp 越界偏移；内容变化导致行数变少时自动纠正）
+			const maxOffset = Math.max(0, lines.length - MAX_CONTENT_LINES);
+			if (contentScroll > maxOffset) contentScroll = maxOffset;
+			const visible = lines.slice(contentScroll, contentScroll + MAX_CONTENT_LINES);
+			for (const line of visible) {
+				container.addChild(new Text(line, 0, 0));
+			}
+			// 滚动指示（内容超长时提示可滚动）
+			if (lines.length > MAX_CONTENT_LINES) {
+				const end = Math.min(contentScroll + MAX_CONTENT_LINES, lines.length);
 				container.addChild(
 					new Text(
-						`  ${theme.fg('error', '历史数据加载失败: ' + info.loadWarning)}`,
+						dim(`  (${contentScroll + 1}-${end}/${lines.length}) \u2191\u2193 滚动`),
 						0,
 						0,
 					),
 				);
 			}
-
-			if (info.forceArmId) {
-				container.addChild(new Text(`  ${accent(`>> 强制: ${info.forceArmId}`)}`, 0, 0));
-			}
-
-			container.addChild(new Text(`  ${dim(`指标: ${metricDef.id}  [< > 切换]`)}`, 0, 0));
-			if (metricDef.description) {
-				container.addChild(new Text(`  ${dim(metricDef.description)}`, 0, 0));
-			}
-
-			container.addChild(new Spacer(1));
-
-			if (currentTab === 'global') {
-				const result = exp.query(metricDef.id);
-				renderArmAnalysis(metricDef, result, armLabel);
-				renderInsight(result, armLabel);
-			} else {
-				const ctxKeys = exp.getContextKeys();
-				if (ctxKeys.length === 0) {
-					container.addChild(new Text(muted('  尚未采集到数据。'), 0, 0));
-				}
-				for (const ctxKey of ctxKeys) {
-					container.addChild(new Text(`  ${accent(ctxKey)}`, 0, 0));
-					// 用 queryByCtxKey 按已解析 ctxKey 过滤，避免函数型 contextKey 二次解析
-					const result = exp.queryByCtxKey(metricDef.id, ctxKey);
-					renderArmAnalysis(metricDef, result, armLabel);
-					renderInsight(result, armLabel);
-				}
-			}
 		}
 
-		// ── 设置视图 ──
+		// ── 设置（强制臂）──
 
 		function renderSettings(experimentName: string) {
 			const exp = manager.getExperimentRaw(experimentName);
@@ -364,21 +397,20 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 				// 走公开 API 的 forceArm（内部同步 setStatus('switched'/'collecting')），
 				// 状态栏才能反映「已切换」；直接 exp.forceArm 只改 _forceArmId，状态栏不更新
 				manager.getExperiment(experimentName)?.forceArm(armId);
-				currentView = { kind: 'menu' };
+				currentView = { kind: 'menu', tab: currentTab };
 				rebuild();
 				tui.requestRender();
 			};
 			list.onCancel = () => {
-				currentView = { kind: 'menu' };
+				currentView = { kind: 'menu', tab: currentTab };
 				rebuild();
 				tui.requestRender();
 			};
-			activeSelectLists = [list];
-			activeSelectListIndex = 0;
+			activeSelectList = list;
 			container.addChild(list);
 		}
 
-		// ── 重置确认视图 ──
+		// ── 重置确认 ──
 
 		function renderConfirmReset(experimentName: string) {
 			const exp = manager.getExperimentRaw(experimentName);
@@ -389,7 +421,11 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 
 			container.addChild(new Spacer(1));
 			container.addChild(
-				new Text(`  ${theme.fg('error', bold('重置: ' + experimentName))}`, 0, 0),
+				new Text(
+					`  ${theme.fg('error', bold('重置: ' + displayName(experimentName, manager.getOwner(experimentName))))}`,
+					0,
+					0,
+				),
 			);
 			container.addChild(new Spacer(1));
 
@@ -409,7 +445,7 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 					void exp
 						.reset()
 						.then(() => {
-							currentView = { kind: 'menu' };
+							currentView = { kind: 'menu', tab: currentTab };
 							rebuild();
 							tui.requestRender();
 						})
@@ -417,7 +453,8 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 							// 写盘失败：显示错误而非跳回菜单，避免静默假成功
 							const msg = err instanceof Error ? err.message : String(err);
 							container.clear();
-							renderTabBar();
+							renderTopBorder('pi-lab');
+							renderOperationBar();
 							container.addChild(new Spacer(1));
 							container.addChild(
 								new Text(`  ${theme.fg('error', '重置失败: ' + msg)}`, 0, 0),
@@ -426,34 +463,66 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 							tui.requestRender();
 						});
 				} else {
-					currentView = { kind: 'menu' };
+					currentView = { kind: 'menu', tab: currentTab };
 					rebuild();
 					tui.requestRender();
 				}
 			};
 			list.onCancel = () => {
-				currentView = { kind: 'menu' };
+				currentView = { kind: 'menu', tab: currentTab };
 				rebuild();
 				tui.requestRender();
 			};
-			activeSelectLists = [list];
-			activeSelectListIndex = 0;
+			activeSelectList = list;
 			container.addChild(list);
+		}
+
+		// ── 二级：操作条 + 内容 ──
+
+		function renderOperationBar() {
+			const ops: Array<{ key: ExperimentOperation; label: string }> = [
+				{ key: 'stats', label: '统计' },
+				{ key: 'settings', label: '设置' },
+				{ key: 'reset', label: '重置' },
+			];
+			const active =
+				currentView.kind === 'experiment-operations' ? currentView.operation : 'stats';
+			const parts = ops.map((o) =>
+				o.key === active ? accent(bold(`[${o.label}]`)) : dim(`[${o.label}]`),
+			);
+			container.addChild(new Text('  ' + parts.join(' '), 0, 0));
+		}
+
+		function renderOperations() {
+			activeSelectList = null;
+			if (currentView.kind !== 'experiment-operations') return;
+			const { experimentName, operation } = currentView;
+			switch (operation) {
+				case 'stats':
+					renderDetail(experimentName);
+					break;
+				case 'settings':
+					renderSettings(experimentName);
+					break;
+				case 'reset':
+					renderConfirmReset(experimentName);
+					break;
+			}
 		}
 
 		// ── 底部帮助栏 ──
 
 		function renderHelpBar() {
 			// 中间分隔线：左右各缩进 1 字符，与 └┘ 框的横线对齐
-			container.addChild(
-				new Text(accent(' ' + '\u2500'.repeat(Math.max(0, currentWidth - 2)) + ' '), 0, 0),
-			);
+			renderDivider();
 			container.addChild(
 				new Text(
 					dim(
 						currentView.kind === 'menu'
-							? '  Tab/\u21E7Tab 切标签 \u00B7 \u2191\u2193 导航 \u00B7 \u23CE 确认 \u00B7 esc 关闭'
-							: '  esc 返回',
+							? '  Tab/\u21E7Tab 切标签 \u00B7 \u2191\u2193 导航 \u00B7 \u23CE 进入 \u00B7 esc 关闭'
+							: currentView.operation === 'stats'
+								? '  Tab/\u21E7Tab 切操作 \u00B7 \u2190\u2192 切指标 \u00B7 \u2191\u2193 滚动 \u00B7 esc 返回'
+								: '  Tab/\u21E7Tab 切操作 \u00B7 esc 返回',
 					),
 					0,
 					0,
@@ -473,21 +542,30 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 
 		function rebuild() {
 			container.clear();
-			renderTabBar();
 
-			switch (currentView.kind) {
-				case 'menu':
-					renderMenu();
-					break;
-				case 'experiment-detail':
-					renderDetail(currentView.experimentName);
-					break;
-				case 'settings':
-					renderSettings(currentView.experimentName);
-					break;
-				case 'confirm-reset':
-					renderConfirmReset(currentView.experimentName);
-					break;
+			if (currentView.kind === 'experiment-operations') {
+				const exp = manager.getExperimentRaw(currentView.experimentName);
+				const title = exp
+					? `pi-lab \u00B7 ${displayName(exp.getInfo().name, manager.getOwner(currentView.experimentName))}`
+					: 'pi-lab';
+				renderTopBorder(title);
+				renderOperationBar();
+				renderDivider();
+				renderOperations();
+			} else {
+				renderTopBorder('pi-lab');
+				// 事件无 sessionId 维度，信号按 contextKey（消费方声明的分桶键）分组。
+				// 「分桶」而非「按模型」：contextKey 是通用机制，消费方可按任意维度分桶
+				// （模型/项目/语言…），不应把当前两个消费方都用模型分桶的事实写死进标签。
+				renderPills(
+					[
+						{ key: 'bucket', label: '分桶' },
+						{ key: 'global', label: '汇总' },
+					],
+					currentTab,
+				);
+				renderDivider();
+				renderMenu();
 			}
 
 			renderHelpBar();
@@ -500,61 +578,67 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 			// 直接比 raw 字节 '\t'/'\\x1b' 会全部失效，表现为「按键无响应」）。
 			const key = parseKey(data) ?? data;
 
-			// Tab → 切换 Current Session / Global 标签
-			if (key === 'tab') {
-				currentTab = currentTab === 'session' ? 'global' : 'session';
-				if (currentView.kind === 'menu' || currentView.kind === 'experiment-list') {
-					currentView = { kind: 'menu' };
-				} else if ('tab' in currentView && currentView.tab !== currentTab) {
-					currentView = { ...currentView, tab: currentTab };
-				}
-				rebuild();
-				tui.requestRender();
-				return;
-			}
-
-			// Shift+Tab → 反向切换
-			if (key === 'shift+tab') {
-				currentTab = currentTab === 'session' ? 'global' : 'session';
-				if (currentView.kind === 'menu' || currentView.kind === 'experiment-list') {
-					currentView = { kind: 'menu' };
-				}
-				rebuild();
-				tui.requestRender();
-				return;
-			}
-
-			// Esc → 上一级：menu 视图关闭，其他视图（detail/settings/confirm-reset）回到 menu
+			// Esc → 上一级：一级关闭面板，二级返回一级
 			if (key === 'escape') {
 				if (currentView.kind === 'menu') {
 					safeDone();
 				} else {
-					currentView = { kind: 'menu' };
+					currentView = { kind: 'menu', tab: currentTab };
 					rebuild();
 					tui.requestRender();
 				}
 				return;
 			}
 
-			// 有 SelectList 的视图（menu/settings/confirm-reset）：委派键盘输入
-			if (
-				currentView.kind === 'menu' ||
-				currentView.kind === 'settings' ||
-				currentView.kind === 'confirm-reset'
-			) {
-				if (activeSelectLists.length > 0) {
-					activeSelectLists[activeSelectListIndex % activeSelectLists.length].handleInput(
-						data,
-					);
+			// Tab/Shift+Tab → 一级切「分桶/汇总」标签；二级切「统计/设置/重置」操作
+			if (key === 'tab' || key === 'shift+tab') {
+				if (currentView.kind === 'menu') {
+					currentTab = currentTab === 'bucket' ? 'global' : 'bucket';
+					currentView = { kind: 'menu', tab: currentTab };
+				} else if (currentView.kind === 'experiment-operations') {
+					const ops: ExperimentOperation[] = ['stats', 'settings', 'reset'];
+					const idx = ops.indexOf(currentView.operation);
+					const next =
+						key === 'shift+tab'
+							? (idx - 1 + ops.length) % ops.length
+							: (idx + 1) % ops.length;
+					currentView = { ...currentView, operation: ops[next] };
+					// 切换操作时重置内容滚动偏移
+					contentScroll = 0;
+				}
+				rebuild();
+				tui.requestRender();
+				return;
+			}
+
+			// 二级统计页：←/→ 循环切换指标；↑/↓ 滚动内容（返回一级用 esc）
+			if (currentView.kind === 'experiment-operations' && currentView.operation === 'stats') {
+				if (key === 'right' || key === 'left') {
+					const exp = manager.getExperimentRaw(currentView.experimentName);
+					const metricCount = exp?.getInfo().metrics.length ?? 0;
+					if (metricCount > 0) {
+						const delta = key === 'right' ? 1 : -1;
+						// 双向循环（负索引安全：metrics[-1] 会是 undefined）
+						metricIndex =
+							(((metricIndex + delta) % metricCount) + metricCount) % metricCount;
+						// 切换指标后内容回到顶部
+						contentScroll = 0;
+						rebuild();
+						tui.requestRender();
+					}
+				} else if (key === 'down' || key === 'up') {
+					// 内容滚动（上限在 renderDetail 里 clamp，这里只防负）
+					contentScroll += key === 'down' ? 1 : -1;
+					if (contentScroll < 0) contentScroll = 0;
+					rebuild();
 					tui.requestRender();
 				}
 				return;
 			}
 
-			// detail 视图：→ 切换指标（返回上一级用 esc）
-			if (key === 'right') {
-				metricIndex++;
-				rebuild();
+			// 其余（一级列表导航 / 设置臂 / 重置确认）：委派给当前唯一 SelectList
+			if (activeSelectList) {
+				activeSelectList.handleInput(data);
 				tui.requestRender();
 			}
 		}

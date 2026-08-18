@@ -113,13 +113,6 @@ export interface QueryResult {
 	guardrailAlert: GuardrailAlert[];
 }
 
-/** bandit 投影状态 */
-export interface ArmState {
-	alpha: number;
-	beta: number;
-	totalCalls: number;
-}
-
 // ============================================================================
 // ContextKey — 上下文键
 // ============================================================================
@@ -143,8 +136,19 @@ export interface ExperimentDef {
 	owner: string;
 	/** 实验名称，owner 内唯一 */
 	name: string;
-	/** 上下文键提取函数 */
+	/**
+	 * 分组键（分析/展示维度）：事件按此键分桶，面板「分桶」视图按此键分组。
+	 * 通常声明为模型（provider:model）——分析时按模型分层，控制「模型效应」混杂。
+	 */
 	contextKey: string | ContextKeyFn<any>;
+	/**
+	 * 分流键（stable-hash 的分流单元，可选）：决定同一单元稳定分到同一臂。
+	 * 应为跨分组键分布、稳定的单元（如会话 sessionId），缺省回退 contextKey。
+	 *
+	 * ⚠️ 若缺省（= contextKey=模型），则「臂」与「模型」完全绑定（confounding），
+	 * 同一模型内无法对比两臂。消费方应显式声明会话级 assignKey 解耦。
+	 */
+	assignKey?: string | ContextKeyFn<any>;
 	/** 实验臂定义 */
 	arms: ArmDef[];
 	/** 观测指标定义 */
@@ -163,11 +167,14 @@ export interface ArmDef {
 	weight?: number;
 }
 
-/** 多臂老虎机决策策略（bandit 在线优化，opt-in） */
-export type BanditStrategy = 'thompson-sampling' | 'epsilon-greedy';
-
-/** 分配策略：默认稳定哈希分桶，bandit 为 opt-in */
-export type AllocationStrategy = 'stable-hash' | BanditStrategy;
+/**
+ * 分配策略。当前只有 stable-hash（固定分流 + 事后统计检验，即 AB 测试）。
+ *
+ * bandit（thompson-sampling / epsilon-greedy）已拆除——在线优化与 AB 测试
+ * 目标相反（自适应倾斜流量会破坏统计有效性），未来若需引入，应作为独立
+ * 「模式」（mode）与 AB 测试正交拆分，而非混入本枚举。
+ */
+export type AllocationStrategy = 'stable-hash';
 
 // ============================================================================
 // Registration — 注册来源与冲突
@@ -225,7 +232,12 @@ export interface ExperimentAPI {
 	/** 强制固定臂（禁用自动切换，调试用） */
 	forceArm: (armId: string | null) => void;
 	/** 获取实验信息 */
-	info: () => { name: string; strategy: AllocationStrategy; forceArmId: string | null };
+	info: () => {
+		name: string;
+		source: RegistrationSource | undefined;
+		strategy: AllocationStrategy;
+		forceArmId: string | null;
+	};
 	/** 重置统计数据 */
 	reset: () => Promise<void>;
 }
@@ -267,11 +279,22 @@ export interface IngestionSource {
 	extract: SignalExtractor;
 }
 
-export type PanelTab = 'session' | 'global';
+/** 面板统计分组口径：'bucket' = 按 contextKey 分桶（消费方声明的分桶键），'global' = 跨桶汇总 */
+export type PanelTab = 'bucket' | 'global';
 
+/** 二级操作视图：对当前实验的操作（操作条 Tab 切换） */
+export type ExperimentOperation = 'stats' | 'settings' | 'reset';
+
+/**
+ * 两级导航（master-detail）：
+ *  - menu：一级实验列表（1 个 SelectList + 滚动视口）
+ *  - experiment-operations：二级操作页（操作条 [统计] [设置] [重置] Tab 切换）
+ */
 export type PanelView =
-	| { kind: 'menu' }
-	| { kind: 'experiment-list'; tab: PanelTab }
-	| { kind: 'experiment-detail'; experimentName: string; tab: PanelTab }
-	| { kind: 'settings'; experimentName: string }
-	| { kind: 'confirm-reset'; experimentName: string; tab: PanelTab };
+	| { kind: 'menu'; tab: PanelTab }
+	| {
+			kind: 'experiment-operations';
+			experimentName: string;
+			operation: ExperimentOperation;
+			tab: PanelTab;
+	  };

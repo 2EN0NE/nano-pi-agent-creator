@@ -24,7 +24,6 @@ export default function (pi: ExtensionAPI) {
 				{ id: 'a', label: 'Arm A' },
 				{ id: 'b', label: 'Arm B' },
 			],
-			strategy: 'thompson-sampling',
 			metrics: [
 				{ id: 'score', type: 'continuous', direction: 'maximize', label: '综合得分' },
 			],
@@ -40,7 +39,6 @@ export default function (pi: ExtensionAPI) {
 				{ id: 'tree-escal', label: 'tree-escalation (T)' },
 				{ id: 'pure-sig', label: 'pure-signals (P)' },
 			],
-			strategy: 'thompson-sampling',
 			metrics: [
 				{
 					id: 'composite_score',
@@ -79,7 +77,6 @@ export default function (pi: ExtensionAPI) {
 				{ id: 'fast', label: 'fast-profile' },
 				{ id: 'balanced', label: 'balanced-profile' },
 			],
-			strategy: 'epsilon-greedy',
 			metrics: [
 				{ id: 'score', type: 'continuous', direction: 'maximize', label: '综合得分' },
 			],

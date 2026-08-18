@@ -12,7 +12,6 @@
  */
 
 import type {
-	AllocationStrategy,
 	ConflictEvent,
 	ExperimentAPI,
 	ExperimentDef,
@@ -23,7 +22,7 @@ import type {
 } from '../types.js';
 import { Experiment } from './experiment.js';
 import { definitionDiff } from './definition-diff.js';
-import { createLogger } from '@zenone/pi-logger';
+import { createLogger } from '@zenone/pi-logger'; // nosemgrep: pi.logger-imported-but-unused
 
 const log = createLogger('pi-lab');
 
@@ -96,14 +95,21 @@ export class ExperimentManager {
 
 	getAllExperiments(): Array<{
 		name: string;
+		owner: string | undefined;
 		source: RegistrationSource | undefined;
 		info: ReturnType<Experiment['getInfo']>;
 	}> {
 		return Array.from(this._experiments.entries()).map(([name, exp]) => ({
 			name,
+			owner: this._owners.get(name),
 			source: this._sources.get(name),
 			info: exp.getInfo(),
 		}));
+	}
+
+	/** 实验注册方（插件名）。面板用于显示「插件名:实验名」归属 */
+	getOwner(name: string): string | undefined {
+		return this._owners.get(name);
 	}
 
 	getExperimentRaw(name: string): Experiment | undefined {
@@ -240,8 +246,13 @@ export class ExperimentManager {
 						changes: diff.changes,
 					});
 					const strategy = def.strategy ?? 'stable-hash';
-					this._checkBanditTarget(def, strategy);
-					existing.updateDef(strategy, def.arms, def.metrics, def.contextKey);
+					existing.updateDef(
+						strategy,
+						def.arms,
+						def.metrics,
+						def.contextKey,
+						def.assignKey,
+					);
 					this._defs.set(def.name, def);
 					this._sources.set(def.name, newSource);
 					log.warn('Experiment definition evolved', {
@@ -291,25 +302,17 @@ export class ExperimentManager {
 		return this._createAPI(experiment);
 	}
 
-	/** bandit 策略依赖 binary 目标 metric；缺失时 Thompson 采样退化为均匀随机（静默降级，注册即告警） */
-	private _checkBanditTarget(def: ExperimentDef, strategy: AllocationStrategy): void {
-		if (strategy === 'stable-hash') return;
-		const hasBinaryTarget = def.metrics.some(
-			(m) => m.type === 'binary' && !m.isGuardrail && !m.derived,
-		);
-		if (!hasBinaryTarget) {
-			log.warn('Bandit strategy without binary target metric (uniform-random fallback)', {
-				name: def.name,
-				strategy,
-			});
-		}
-	}
-
 	/** 构造 Experiment 实例 */
 	private _buildExperiment(def: ExperimentDef): Experiment {
 		const strategy = def.strategy ?? 'stable-hash';
-		this._checkBanditTarget(def, strategy);
-		return new Experiment(def.name, strategy, def.arms, def.metrics, def.contextKey);
+		return new Experiment(
+			def.name,
+			strategy,
+			def.arms,
+			def.metrics,
+			def.contextKey,
+			def.assignKey,
+		);
 	}
 
 	private _bufferConflict(conflict: ConflictEvent): void {

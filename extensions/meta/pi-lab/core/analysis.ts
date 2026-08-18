@@ -6,7 +6,7 @@
  */
 
 import type { ExperimentEvent, GuardrailAlert, MetricDef, QueryResult } from '../types.js';
-import { getRNG, sampleBeta, sampleGamma } from './bandit.js';
+import { getRNG, sampleBeta, sampleGamma } from './sampling.js';
 
 interface Posterior {
 	armId: string;

@@ -26,7 +26,6 @@ export default function (pi: ExtensionAPI) {
 				{ id: 'arm-a', label: 'Strategy A' },
 				{ id: 'arm-b', label: 'Strategy B' },
 			],
-			strategy: 'thompson-sampling',
 		});
 
 		log.info('test-experiment registered');

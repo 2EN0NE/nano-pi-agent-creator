@@ -18,7 +18,12 @@ pi.on('session_start', async (_event, ctx) => {
 	const exp = mgr.registerWeakExperiment({
 		owner: 'edit', // 注册方身份 key（必填）——同 owner 同 name 视为同一逻辑实验
 		name: 'edit-strategy',
-		contextKey: (ctx) => `${ctx.model?.provider}:${ctx.model?.id}`, // 分桶键
+		// 分组键 = 模型（分析/展示按此分层，控制模型效应混杂）
+		contextKey: (ctx) => `${ctx.model?.provider}:${ctx.model?.id}`,
+		// 分流键 = 会话（stable-hash 的分流单元，跨模型分布的稳定单元）。
+		// ⚠️ 缺省会回退 contextKey=模型 → 臂与模型绑定（confounding），
+		// 同一模型内无法对比两臂。务必显式声明会话级 assignKey。
+		assignKey: (ctx) => ctx.sessionManager?.getSessionId?.() ?? 'unknown-session',
 		arms: [
 			{ id: 'classic', label: '精确匹配' },
 			{ id: 'row-script', label: '模糊匹配' },
@@ -151,24 +156,25 @@ metrics: [
 
 ## 分配策略
 
-| 策略                  | 说明                                                 | 何时用                                           |
-| --------------------- | ---------------------------------------------------- | ------------------------------------------------ |
-| `stable-hash`（默认） | 稳定哈希分桶，同一 ctxKey 恒定分到同一 arm，默认等权 | **默认**，适合 AB 测试（流量均分、可做统计检验） |
-| `thompson-sampling`   | 在线多臂老虎机，自动倾斜流量给赢家                   | opt-in，适合在线优化（代价：破坏统计有效性）     |
-| `epsilon-greedy`      | ε 概率探索，其余贪心                                 | opt-in，同上                                     |
+| 策略                  | 说明                                                                  | 何时用                             |
+| --------------------- | --------------------------------------------------------------------- | ---------------------------------- |
+| `stable-hash`（默认） | 稳定哈希分桶，同一 **assignKey（分流键）** 恒定分到同一 arm，默认等权 | 固定分流 + 事后统计检验（AB 测试） |
+
+> bandit（thompson-sampling / epsilon-greedy）已拆除——在线优化与 AB 测试目标相反
+> （自适应倾斜流量破坏统计有效性），未来若需引入，应作为独立「模式」正交拆分。
 
 ```typescript
 registerWeakExperiment({
  owner: 'edit', // 必填
  name: 'edit-strategy',
- contextKey: ...,
+ contextKey: ...,          // 分组键（分析分层，通常=模型）
+ assignKey: ...,           // 分流键（稳定单元，通常=会话；缺省回退 contextKey）
  arms: [{ id: 'classic', label: '...', weight: 1 }, { id: 'row-script', label: '...', weight: 1 }],
- strategy: 'thompson-sampling', // 默认 stable-hash
  ...
 })
 ```
 
-> `weight` 仅 `stable-hash` 分桶时生效，控制 arm 间流量比例。
+> `weight` 控制 arm 间流量比例（stable-hash 分桶时生效）。
 
 ---
 
@@ -206,23 +212,39 @@ pi-lab 以 `(owner, name)` 二元组识别逻辑实验身份，注册裁决三�
 
 ### 面板结构
 
+两级导航（master-detail）：一级选实验，二级对当前实验操作。
+
+**一级（实验列表，1 个 SelectList + 滚动视口）：**
+
 ```
 ┌── pi-lab ────────────────────┐
-  当前会话    全局              ← Tab 栏（Tab 键切换）
+  分桶    汇总                ← Tab 栏（Tab 键切换）
  ───────────────────────────────
-  edit-strategy (stable-hash)   ← 实验名 + 分流策略
-    精确匹配 vs 模糊匹配          ← 两个 arm 的说明
-→ 统计                          ← 菜单（↑↓ 移动，⏎ 选中）
-  设置
-  重置
+→ edit:edit-strategy  精确匹配 vs 模糊行匹配 (stable-hash)   ← 插件名:实验名 + arm 摘要
+  custom-compaction:prompt-strategy  结构化 vs 叙事 (stable-hash)
  ───────────────────────────────
-  Tab/⇧Tab 切标签 · ↑↓ 导航 · ⏎ 确认 · esc 关闭
+  Tab/⇧Tab 切标签 · ↑↓ 导航 · ⏎ 进入 · esc 关闭
 └──────────────────────────────┘
 ```
 
-### 三个菜单项
+- 每行显示 `插件名:实验名`（owner 区分实验归属插件；如 `edit:edit-strategy`、`custom-compaction:prompt-strategy`）
+- 实验数超过 8 个时列表内部滚动，不撑高面板
 
-| 菜单     | 用途                     | 里面看什么                              |
+**二级（实验操作，操作条 Tab 切换）：**
+
+```
+┌── pi-lab · edit:edit-strategy ──┐
+  [统计] [设置] [重置]            ← Tab/⇧Tab 切换操作
+ ─────────────────────────────────
+  （统计图表 / 设置表单 / 重置确认）
+ ─────────────────────────────────
+  Tab/⇧Tab 切操作 · ←→ 切指标 · ↑↓ 滚动 · esc 返回
+└────────────────────────────────┘
+```
+
+### 三个操作
+
+| 操作     | 用途                     | 里面看什么                              |
 | -------- | ------------------------ | --------------------------------------- |
 | **统计** | 看贝叶斯分析结论         | 每个 arm 的后验均值、可信区间、胜出概率 |
 | **设置** | 强制固定某 arm（调试用） | 选 arm 或「(自动)」                     |
@@ -230,19 +252,19 @@ pi-lab 以 `(owner, name)` 二元组识别逻辑实验身份，注册裁决三�
 
 ### 统计视图怎么读
 
-面板已经帮你把贝叶斯术语「翻译」成人话。选中「统计」后：
+面板已经帮你把贝叶斯术语「翻译」成人话。进入「统计」页后：
 
 ```
   edit-strategy stable-hash
   指标: match_success  [< > 切换]
   精确匹配是否命中（1=命中，0=未命中）     ← 指标描述（声明时写 description）
 
-  cli-proxy-api:deepseek-v4-pro          ← 「按模型」tab：每个模型一个桶
+  cli-proxy-api:deepseek-v4-pro          ← 「分桶」tab：按 contextKey 分桶
     模糊行匹配: 预估成功率 96.1%（74 次）真实约 92%~100%
     精确匹配: 暂无数据
   · 精确匹配 暂无样本，两策略暂时无法对比    ← 自动解读（人话结论）
-  · 稳定分流会把同一模型固定分到一侧，换不同模型编辑即可让另一侧分到流量
-  · 想看整体对比，按 Tab 切到「汇总」
+  · 分流按会话稳定：同一模型的不同会话会分到不同臂，多开几个会话即可让另一侧分到流量
+  · 想看整体对比，esc 返回一级后 Tab 切「汇总」再进入
 ```
 
 三行数据怎么读：
@@ -258,18 +280,18 @@ pi-lab 以 `(owner, name)` 二元组识别逻辑实验身份，注册裁决三�
 - 谁明显更优（两臂都有足够数据时才下结论，用强调色）
 - 两臂无显著差距（继续观察）
 - 样本还少（结论仅供参考）
-- **单臂无数据时**：解释「稳定分流把同一模型固定分到一侧」，并提示换模型编辑、或切「汇总」
+- **单臂无数据时**：解释「分流按会话稳定，同一模型不同会话分到不同臂」，并提示多开会话、或切「汇总」
 
-多个 metric 时按 `→` 切换查看下一个，`←` 返回菜单。
+多个 metric 时按 `←`/`→` 循环切换。
 
-### 当前会话 vs 全局（关键）
+### 分桶 vs 汇总（关键）
 
-| Tab          | 含义                                         | 什么时候看                     |
-| ------------ | -------------------------------------------- | ------------------------------ |
-| **当前会话** | 按 contextKey **分桶**展示（每个模型一个桶） | 想知道「特定模型下哪个策略好」 |
-| **全局**     | 所有 contextKey **合并**看整体               | 想知道「整体哪个策略好」       |
+| Tab      | 含义                           | 什么时候看                   |
+| -------- | ------------------------------ | ---------------------------- |
+| **分桶** | 按 contextKey 分组展示         | 想知道「特定桶下哪个策略好」 |
+| **全局** | 所有 contextKey **合并**看整体 | 想知道「整体哪个策略好」     |
 
-edit 的 contextKey 是 `provider:model`，所以「当前会话」里每个模型一行，如：
+edit 的 contextKey 是 `provider:model`，所以「分桶」里每个模型一块，如：
 
 ```
   anthropic:claude-sonnet-4-5
@@ -280,27 +302,26 @@ edit 的 contextKey 是 `provider:model`，所以「当前会话」里每个模�
 
 1. 用 edit 工具编辑几次文件（触发选臂 + 日志上报）
 2. 输入 `/lab` 打开面板
-3. 看到 `edit-strategy` 实验 → `⏎` 进入 → 选中「统计」→ `⏎`
+3. 看到 `edit:edit-strategy` 实验 → `⏎` 进入（默认统计页）
 4. 看 classic vs row-script 的胜率
-5. 想按模型看 → `Tab` 切「当前会话」
+5. 想按桶看 → `Tab` 切「分桶」
 6. `Esc` 关闭
 
 ### 键盘速查
 
-| 按键                | 作用                      |
-| ------------------- | ------------------------- |
-| `Tab` / `⇧Tab`      | 切换 当前会话 ↔ 全局      |
-| `↑` / `↓`           | 菜单/列表上下移动         |
-| `⏎`                 | 选中当前项                |
-| `←`（或 Backspace） | 返回上一级                |
-| `→`                 | 统计视图切换下一个 metric |
-| `Esc`               | 关闭面板                  |
+| 按键           | 作用                        |
+| -------------- | --------------------------- |
+| `Tab` / `⇧Tab` | 切换 分桶 ↔ 汇总            |
+| `↑` / `↓`      | 菜单/列表上下移动           |
+| `⏎`            | 选中当前项                  |
+| `←` / `→`      | 统计视图切换 metric（循环） |
+| `Esc`          | 关闭面板                    |
 
 ### 常见困惑
 
 - **看不到实验**：实验由消费方（如 edit）在 `session_start` 注册。若消费方插件没加载，面板是空的。
 - **看到实验但「暂无数据」**：还没累积数据。先实际用 edit 编辑几次，再回来看。
-- **数据在哪个 tab**：edit 的数据按 model 分桶，在「当前会话」tab 的 model 桶下；「全局」是合并视图。
+- **数据在哪个 tab**：edit 的数据按 model 分桶，「分桶」tab 每个 contextKey 一块；「汇总」是合并视图。
 - **状态栏**：`|lab:关闭/采集中/已切换` 随时反映实验状态（强制固定 arm 后显示「已切换」）。
 
 ---
@@ -328,7 +349,7 @@ edit 的 contextKey 是 `provider:model`，所以「当前会话」里每个模�
 
 - `docs/adr/0003-pi-lab-extension-registration-mechanism.md` — 注册机制
 - `docs/adr/0016-pi-lab-registration-owner-identity.md` — 注册身份模型与三语义裁决
-- `docs/adr/0008-pi-lab-measurement-analysis-positioning.md` — 测量/分析定位（bandit → opt-in）
+- `docs/adr/0008-pi-lab-measurement-analysis-positioning.md` — 测量/分析定位（AB 测试）
 - `docs/adr/0009-pi-lab-metric-abstraction.md` — 指标抽象 + 派生指标
 - `docs/adr/0010-pi-lab-bayesian-inference.md` — 贝叶斯后验
 - `docs/adr/0011-pi-lab-jsonl-event-stream.md` — JSONL 事件流

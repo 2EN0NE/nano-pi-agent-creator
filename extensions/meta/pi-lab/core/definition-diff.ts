@@ -6,8 +6,9 @@
  *
  *   - arms：id 集合增删 + 每个 arm 的 weight（label 仅展示，不参与）
  *   - metrics：id 集合增删 + 每个 metric 的 type/direction/isGuardrail/derived（description 仅展示，不参与）
- *   - strategy ✅
  *   - contextKey 为 string ✅；为 function ⏭️ 跳过（每次注册新建闭包，无法可靠比较）
+ *   - assignKey 为 string ✅；为 function ⏭️ 跳过（同上）
+ *   - strategy 已收窄为单值 stable-hash，无比较意义（未来加新值再恢复此比较）
  *
  * 输出人话描述列表，供演进告警的「副作用说明」使用。
  */
@@ -70,19 +71,18 @@ function diffMetrics(oldMetrics: MetricDef[], newMetrics: MetricDef[]): string[]
 export function definitionDiff(oldDef: ExperimentDef, newDef: ExperimentDef): DefinitionDiff {
 	const changes: string[] = [];
 
-	const oldStrategy = oldDef.strategy ?? 'stable-hash';
-	const newStrategy = newDef.strategy ?? 'stable-hash';
-	if (oldStrategy !== newStrategy) {
-		changes.push(`strategy ${oldStrategy} → ${newStrategy}`);
-	}
-
 	changes.push(...diffArms(oldDef.arms, newDef.arms));
 	changes.push(...diffMetrics(oldDef.metrics, newDef.metrics));
 
-	// contextKey 仅 string 型比较；function 型跳过（闭包每次新建，无法可靠比较）
+	// contextKey / assignKey 仅 string 型比较；function 型跳过（闭包每次新建，无法可靠比较）
 	if (typeof oldDef.contextKey === 'string' && typeof newDef.contextKey === 'string') {
 		if (oldDef.contextKey !== newDef.contextKey) {
 			changes.push(`contextKey ${oldDef.contextKey} → ${newDef.contextKey}`);
+		}
+	}
+	if (typeof oldDef.assignKey === 'string' && typeof newDef.assignKey === 'string') {
+		if (oldDef.assignKey !== newDef.assignKey) {
+			changes.push(`assignKey ${oldDef.assignKey} → ${newDef.assignKey}`);
 		}
 	}
 

@@ -23,8 +23,6 @@ export type {
 	ArmAggregate,
 	ArmAnalysis,
 	ArmDef,
-	ArmState,
-	BanditStrategy,
 	ConflictEvent,
 	ContextKeyFn,
 	ExperimentAPI,

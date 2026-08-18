@@ -174,29 +174,6 @@ describe('pi-lab: definitionDiff 纯函数', () => {
 		expect(descChange.changed).toBe(false);
 	});
 
-	it('strategy 变化 → 描述变化', () => {
-		const diff = definitionDiff(
-			{
-				owner: 'o',
-				name: 'x',
-				contextKey: () => 'g',
-				arms: ARM_A,
-				metrics: BIN,
-				strategy: 'stable-hash' as const,
-			},
-			{
-				owner: 'o',
-				name: 'x',
-				contextKey: () => 'g',
-				arms: ARM_A,
-				metrics: BIN,
-				strategy: 'thompson-sampling' as const,
-			},
-		);
-		expect(diff.changed).toBe(true);
-		expect(diff.changes).toContain('strategy stable-hash → thompson-sampling');
-	});
-
 	it('function 型 contextKey 跳过（不同闭包视为未变）', () => {
 		const diff = definitionDiff(
 			{ owner: 'o', name: 'x', contextKey: () => 'g', arms: ARM_A, metrics: BIN },
@@ -236,7 +213,8 @@ describe('pi-lab: 注册三语义', () => {
 			metrics: BIN,
 		});
 		expect(exp).toBeDefined();
-		expect(exp!.info().source).toBe('bridge');
+		// source（接入方式）在 getAllExperiments 里暴露，用于面板展示归属
+		expect(manager.getAllExperiments().find((e) => e.name === 'x')?.source).toBe('bridge');
 	});
 
 	it('同 owner 同 name 同定义 → 幂等：静默、保留状态、无冲突事件', () => {

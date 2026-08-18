@@ -3,7 +3,7 @@
  *
  * 覆盖：
  * - ExperimentManager 注册/生命周期/冲突裁决
- * - Experiment select（稳定哈希 + bandit opt-in）/record/stats
+ * - Experiment select（稳定哈希分流）/record/stats
  * - forceArm 覆盖
  * - JSONL 事件流存储
  * - 稳定哈希分桶 + 权重
@@ -43,7 +43,7 @@ function cleanupTempHome(): void {
 import { ExperimentManager } from '../../../extensions/meta/pi-lab/core/experiment-manager.js';
 import { Experiment } from '../../../extensions/meta/pi-lab/core/experiment.js';
 import { ExperimentStorage } from '../../../extensions/meta/pi-lab/core/storage.js';
-import { selectArm, winProbability, setRNG } from '../../../extensions/meta/pi-lab/core/bandit.js';
+import { setRNG } from '../../../extensions/meta/pi-lab/core/sampling.js';
 import { stableHashAssign } from '../../../extensions/meta/pi-lab/core/allocation.js';
 import {
 	logExtractor,
@@ -88,8 +88,7 @@ describe('pi-lab: ExperimentManager', () => {
 				{ id: 'b', label: 'Arm B' },
 			],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
+		})!;
 
 		expect(exp).toBeDefined();
 		expect(typeof exp.select).toBe('function');
@@ -100,7 +99,7 @@ describe('pi-lab: ExperimentManager', () => {
 
 		const info = exp.info();
 		expect(info.name).toBe('test-strategy');
-		expect(info.strategy).toBe('thompson-sampling');
+		expect(info.strategy).toBe('stable-hash');
 		expect(info.forceArmId).toBeNull();
 	});
 
@@ -114,8 +113,7 @@ describe('pi-lab: ExperimentManager', () => {
 				{ id: 'y', label: 'Y' },
 			],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
+		})!;
 
 		const arm = await exp.select();
 		expect(['x', 'y']).toContain(arm);
@@ -131,8 +129,7 @@ describe('pi-lab: ExperimentManager', () => {
 				{ id: 'b', label: 'B' },
 			],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
+		})!;
 
 		exp.forceArm('b');
 		const arm1 = await exp.select();
@@ -151,8 +148,7 @@ describe('pi-lab: ExperimentManager', () => {
 				{ id: 'b', label: 'B' },
 			],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
+		})!;
 
 		exp.forceArm('a');
 		expect(await exp.select()).toBe('a');
@@ -171,8 +167,7 @@ describe('pi-lab: ExperimentManager', () => {
 				{ id: 'b', label: 'B' },
 			],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
+		})!;
 
 		await exp.record('a', { metrics: { success: 1 } });
 		await exp.record('a', { metrics: { success: 1 } });
@@ -196,8 +191,7 @@ describe('pi-lab: ExperimentManager', () => {
 			contextKey: () => 'global',
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
+		})!;
 
 		await exp.record('a', { metrics: { success: 1 } });
 		const before = await exp.stats();
@@ -217,7 +211,6 @@ describe('pi-lab: ExperimentManager', () => {
 			contextKey: () => 'global',
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
 		});
 		expect(manager.status).toBe('collecting');
 	});
@@ -229,7 +222,6 @@ describe('pi-lab: ExperimentManager', () => {
 			contextKey: () => 'k',
 			arms: [{ id: 'a1', label: 'A1' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
 		});
 		manager.registerExperiment({
 			owner: 'test',
@@ -237,12 +229,15 @@ describe('pi-lab: ExperimentManager', () => {
 			contextKey: () => 'k',
 			arms: [{ id: 'b1', label: 'B1' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
 		});
 
 		const all = manager.getAllExperiments();
 		expect(all.length).toBe(2);
 		expect(all.map((e) => e.name).sort()).toEqual(['exp-a', 'exp-b']);
+		// 每个实验携带 owner（插件名），供面板显示「插件名:实验名」
+		expect(all.every((e) => e.owner === 'test')).toBe(true);
+		expect(manager.getOwner('exp-a')).toBe('test');
+		expect(manager.getOwner('nonexistent')).toBeUndefined();
 	});
 
 	// ── 双轨 API + 冲突裁决 ──
@@ -254,8 +249,7 @@ describe('pi-lab: ExperimentManager', () => {
 			contextKey: () => 'g',
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
+		})!;
 		expect(exp).toBeDefined();
 		expect(typeof exp.select).toBe('function');
 	});
@@ -267,8 +261,7 @@ describe('pi-lab: ExperimentManager', () => {
 			contextKey: () => 'g',
 			arms: [{ id: 'b', label: 'B' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
+		})!;
 		expect(exp).toBeDefined();
 		expect(typeof exp.select).toBe('function');
 	});
@@ -282,7 +275,6 @@ describe('pi-lab: ExperimentManager', () => {
 			contextKey: () => 'k',
 			arms: [{ id: 'a1', label: 'A1' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
 		});
 		manager.registerWeakExperiment({
 			owner: 'test',
@@ -290,7 +282,6 @@ describe('pi-lab: ExperimentManager', () => {
 			contextKey: () => 'k',
 			arms: [{ id: 'b1', label: 'B1' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
 		});
 
 		const all = manager.getAllExperiments();
@@ -311,7 +302,6 @@ describe('pi-lab: ExperimentManager', () => {
 			contextKey: () => 'g',
 			arms: [{ id: 'x', label: 'X' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
 		});
 		manager.registerStrongExperiment({
 			owner: 'owner-b',
@@ -319,7 +309,6 @@ describe('pi-lab: ExperimentManager', () => {
 			contextKey: () => 'g',
 			arms: [{ id: 'y', label: 'Y' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
 		});
 
 		expect(manager.getConflicts().length).toBeGreaterThan(0);
@@ -338,7 +327,7 @@ describe('pi-lab: ExperimentManager', () => {
 				{ id: 'b', label: 'B' },
 			],
 			metrics: BIN,
-		});
+		})!;
 
 		const arm1 = await exp.select({ model: 'm1' });
 		// 同一 model 稳定（stable-hash 确定性）
@@ -353,6 +342,56 @@ describe('pi-lab: ExperimentManager', () => {
 		const stats2 = await exp.stats({ model: 'm2' });
 		expect(Object.values(stats2).reduce((s, a) => s + a.totalCalls, 0)).toBe(0);
 	});
+
+	it('assignKey 与 contextKey 解耦：同会话稳定，不同会话同模型可分到两臂', async () => {
+		const exp = manager.registerExperiment({
+			owner: 'test',
+			name: 'assign-decouple',
+			// 分组键 = 模型（分析分层），分流键 = 会话（稳定单元）——两者解耦
+			contextKey: (ctx: any) => ctx.model,
+			assignKey: (ctx: any) => ctx.session,
+			arms: [
+				{ id: 'a', label: 'A' },
+				{ id: 'b', label: 'B' },
+			],
+			metrics: BIN,
+		})!;
+
+		// 同一会话稳定（分流键确定性）
+		const armS1 = await exp.select({ session: 'sess-1', model: 'm1' });
+		expect(await exp.select({ session: 'sess-1', model: 'm1' })).toBe(armS1);
+
+		// 不同会话、同一模型 → 分布到两臂（消除「臂=模型」混杂的关键）
+		const armsForM1 = new Set<string>();
+		for (let i = 0; i < 64; i++) {
+			armsForM1.add(await exp.select({ session: `sess-${i}`, model: 'm1' }));
+		}
+		expect(armsForM1.size).toBe(2);
+
+		// record 仍按 contextKey（模型）分桶：同一模型下两臂样本可对比
+		await exp.record('a', { metrics: { success: 1 } }, { session: 'sess-x', model: 'm1' });
+		await exp.record('b', { metrics: { success: 0 } }, { session: 'sess-y', model: 'm1' });
+		const stats = await exp.stats({ model: 'm1' });
+		expect(stats.a.totalCalls).toBe(1);
+		expect(stats.b.totalCalls).toBe(1);
+	});
+
+	it('缺省 assignKey 时回退 contextKey（向后兼容：contextKey 兼作分流键）', async () => {
+		const exp = manager.registerExperiment({
+			owner: 'test',
+			name: 'assign-default',
+			contextKey: (ctx: any) => ctx.model,
+			arms: [
+				{ id: 'a', label: 'A' },
+				{ id: 'b', label: 'B' },
+			],
+			metrics: BIN,
+		})!;
+
+		// 同模型稳定（旧行为：contextKey 即分流键）
+		const armM1 = await exp.select({ model: 'm1' });
+		expect(await exp.select({ model: 'm1' })).toBe(armM1);
+	});
 });
 
 describe('pi-lab: Experiment (standalone)', () => {
@@ -362,7 +401,7 @@ describe('pi-lab: Experiment (standalone)', () => {
 		setupTempHome();
 		experiment = new Experiment(
 			'test-exp-b',
-			'thompson-sampling',
+			'stable-hash',
 			[
 				{ id: 'control', label: 'Control' },
 				{ id: 'treatment', label: 'Treatment' },
@@ -621,67 +660,6 @@ describe('pi-lab: ExperimentStorage', () => {
 	});
 });
 
-describe('pi-lab: bandit algorithm', () => {
-	it('selectArm with 1 arm returns that arm', () => {
-		const states = new Map();
-		const arm = selectArm('thompson-sampling', ['only'], states);
-		expect(arm).toBe('only');
-	});
-
-	it('selectArm returns one of the available arms', () => {
-		const states = new Map();
-		for (let i = 0; i < 50; i++) {
-			const arm = selectArm('thompson-sampling', ['a', 'b'], states);
-			expect(['a', 'b']).toContain(arm);
-		}
-	});
-
-	it('thompson sampling favors high-alpha arm over many trials', () => {
-		const states = new Map();
-		states.set('a', { alpha: 50, beta: 5, totalCalls: 55 });
-		states.set('b', { alpha: 5, beta: 50, totalCalls: 55 });
-
-		let aCount = 0;
-		const trials = 500;
-		for (let i = 0; i < trials; i++) {
-			const arm = selectArm('thompson-sampling', ['a', 'b'], states);
-			if (arm === 'a') aCount++;
-		}
-
-		expect(aCount).toBeGreaterThan(trials * 0.8);
-	});
-
-	it('winProbability with 1 arm returns 100%', () => {
-		const states = new Map();
-		states.set('only', { alpha: 5, beta: 5, totalCalls: 10 });
-		const probs = winProbability(states, 1000);
-		expect(probs.get('only')).toBe(1);
-	});
-
-	it('winProbability reflects strong preference', () => {
-		const states = new Map();
-		states.set('a', { alpha: 80, beta: 5, totalCalls: 85 });
-		states.set('b', { alpha: 5, beta: 80, totalCalls: 85 });
-		const probs = winProbability(states, 2000);
-		expect(probs.get('a') ?? 0).toBeGreaterThan(0.9);
-	});
-
-	it('epsilon-greedy explores', () => {
-		const states = new Map();
-		states.set('a', { alpha: 99, beta: 1, totalCalls: 100 });
-		states.set('b', { alpha: 1, beta: 99, totalCalls: 100 });
-
-		let bCount = 0;
-		const trials = 200;
-		for (let i = 0; i < trials; i++) {
-			const arm = selectArm('epsilon-greedy', ['a', 'b'], states, { epsilon: 0.15 });
-			if (arm === 'b') bCount++;
-		}
-
-		expect(bCount).toBeGreaterThan(5);
-	});
-});
-
 describe('pi-lab: stable hash allocation', () => {
 	let manager: ExperimentManager;
 
@@ -704,7 +682,7 @@ describe('pi-lab: stable hash allocation', () => {
 				{ id: 'b', label: 'B' },
 			],
 			metrics: BIN,
-		});
+		})!;
 
 		const first = await exp.select();
 		for (let i = 0; i < 20; i++) {
@@ -753,22 +731,6 @@ describe('pi-lab: stable hash allocation', () => {
 		];
 		expect(() => stableHashAssign('k', arms)).toThrow('实验臂权重总和必须为正');
 	});
-
-	it('bandit 策略 opt-in 时仍在线采样', async () => {
-		const exp = manager.registerExperiment({
-			owner: 'test',
-			name: 'bandit-optin',
-			contextKey: () => 'global',
-			arms: [
-				{ id: 'a', label: 'A' },
-				{ id: 'b', label: 'B' },
-			],
-			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
-		const arm = await exp.select();
-		expect(['a', 'b']).toContain(arm);
-	});
 });
 
 describe('pi-lab: query analysis', () => {
@@ -786,6 +748,7 @@ describe('pi-lab: query analysis', () => {
 	});
 
 	it('binary metric 返回后验均值与胜出概率', async () => {
+		setRNG(makeSeededRNG(42)); // 固定种子，消除蒙特卡洛胜出概率断言的 flaky
 		const exp = manager.registerExperiment({
 			owner: 'test',
 			name: 'query-binary',
@@ -795,8 +758,7 @@ describe('pi-lab: query analysis', () => {
 				{ id: 'b', label: 'B' },
 			],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
+		})!;
 
 		// a 成功 3 次，b 失败 3 次
 		await exp.record('a', { metrics: { success: 1 } });
@@ -835,8 +797,7 @@ describe('pi-lab: query analysis', () => {
 			contextKey: () => 'global',
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: BIN,
-			strategy: 'thompson-sampling',
-		});
+		})!;
 
 		await expect(exp.query('nope')).rejects.toThrow('未知指标');
 	});
@@ -853,8 +814,7 @@ describe('pi-lab: query analysis', () => {
 			metrics: [
 				{ id: 'error_rate', type: 'binary', direction: 'minimize', isGuardrail: true },
 			],
-			strategy: 'thompson-sampling',
-		});
+		})!;
 
 		// a 报错率低（success=0 表示无错误），b 报错率高
 		for (let i = 0; i < 10; i++) await exp.record('a', { metrics: { error_rate: 0 } });
@@ -874,8 +834,7 @@ describe('pi-lab: query analysis', () => {
 			contextKey: () => 'global',
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: [{ id: 'retries', type: 'count', direction: 'minimize' }],
-			strategy: 'thompson-sampling',
-		});
+		})!;
 		// 3 次观测：0, 2, 4 → Σx=6, n=3
 		await exp.record('a', { metrics: { retries: 0 } });
 		await exp.record('a', { metrics: { retries: 2 } });
@@ -895,8 +854,7 @@ describe('pi-lab: query analysis', () => {
 			contextKey: () => 'global',
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: [{ id: 'latency_ms', type: 'continuous', direction: 'minimize' }],
-			strategy: 'thompson-sampling',
-		});
+		})!;
 		// 4 次观测：100, 120, 110, 130 → mean=115
 		await exp.record('a', { metrics: { latency_ms: 100 } });
 		await exp.record('a', { metrics: { latency_ms: 120 } });
@@ -916,7 +874,7 @@ describe('pi-lab: query analysis', () => {
 			contextKey: () => 'global',
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: [{ id: 'latency_ms', type: 'continuous', direction: 'minimize' }],
-		});
+		})!;
 		await exp.record('a', { metrics: { latency_ms: 100 } });
 
 		const result = await exp.query('latency_ms');
@@ -941,7 +899,7 @@ describe('pi-lab: query analysis', () => {
 				{ id: 'b', label: 'B' },
 			],
 			metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
-		});
+		})!;
 		// 只给 a 记录，b 无数据
 		await exp.record('a', { metrics: { success: 1 } });
 
@@ -1042,7 +1000,7 @@ describe('pi-lab: ingestion sources', () => {
 				{ id: 'b', label: 'B' },
 			],
 			metrics: [{ id: 'match_success', type: 'binary', direction: 'maximize' }],
-		});
+		})!;
 
 		manager.registerIngestionSource('my-tags', tagExtractor);
 
@@ -1068,7 +1026,7 @@ describe('pi-lab: ingestion sources', () => {
 			contextKey: () => 'global',
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: [{ id: 'match_success', type: 'binary', direction: 'maximize' }],
-		});
+		})!;
 		manager.registerIngestionSource('my-tags', tagExtractor);
 
 		// 信号里混入陌生 arm 'b'（可能来自其他实验的同名 arm），应被过滤
@@ -1090,7 +1048,7 @@ describe('pi-lab: ingestion sources', () => {
 			contextKey: () => 'global',
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: [{ id: 'match_success', type: 'binary', direction: 'maximize' }],
-		});
+		})!;
 		manager.registerIngestionSource('my-tags', tagExtractor);
 
 		// extractor 拼写错误（typo_metric）会告警，但事件仍写入、不影响声明指标聚合

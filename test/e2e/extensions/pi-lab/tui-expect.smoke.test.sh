@@ -117,5 +117,5 @@ test_it "expect: panel renders single-column box border [REVIEW]" <<'TEST'
   fi
 
   tui_cleanup
-  mark_for_review "人工验证单列面板：/lab 应出现顶部 ┌── pi-lab ──┐ 框、统计/设置/重置菜单、底部 └─┘ 框，无旧版两列竖线 │"
+  mark_for_review "人工验证两级导航面板：/lab 一级应出现实验列表（插件名:实验名 + arm 摘要，↑↓ 导航 ⏎ 进入），二级操作条 [统计] [设置] [重置] Tab 切换，顶部 ┌── pi-lab ──┐ 框、底部 └─┘ 框"
 TEST

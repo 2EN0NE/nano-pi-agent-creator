@@ -91,13 +91,13 @@ function renderText(component: { render: (w: number) => string[] }, width = 80):
 	return component.render(width).map(stripAnsi).join('\n');
 }
 
-/** 进入 detail 视图：先 render 触发 rebuild，再 ⏎ 选中第一项 Stats */
+/** 进入二级 stats 视图：⏎ 选中一级列表的实验（二级默认操作=统计） */
 function enterDetail(component: {
 	render: (w: number) => string[];
 	handleInput: (d: string) => void;
 }) {
-	component.render(80); // 首次 render 触发 rebuild → 填充 activeSelectLists
-	component.handleInput('\r'); // ⏎ 选中 Stats
+	component.render(80); // 首次 render 触发 rebuild → 填充一级列表
+	component.handleInput('\r'); // ⏎ 选中第一个实验 → 进入二级
 }
 
 // ── Tests ──
@@ -125,15 +125,15 @@ describe('pi-lab panel — headless snapshot', () => {
 			],
 			metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
 		});
-		for (let i = 0; i < 10; i++) await exp.record('a', { metrics: { success: 1 } });
-		for (let i = 0; i < 10; i++) await exp.record('b', { metrics: { success: 0 } });
+		for (let i = 0; i < 10; i++) await exp!.record('a', { metrics: { success: 1 } });
+		for (let i = 0; i < 10; i++) await exp!.record('b', { metrics: { success: 0 } });
 
 		const panel = mountPanel(manager);
 
-		// 初始 menu 视图
+		// 初始 menu 视图：实验名带 owner 前缀（插件名:实验名）
 		const menuText = renderText(panel);
-		expect(menuText).toContain('panel-test');
-		expect(menuText).toContain('统计');
+		expect(menuText).toContain('test:panel-test');
+		expect(menuText).toContain('A vs B');
 
 		// 进入 detail
 		enterDetail(panel);
@@ -161,10 +161,10 @@ describe('pi-lab panel — headless snapshot', () => {
 			],
 		});
 		for (let i = 0; i < 10; i++) {
-			await exp.record('a', { metrics: { success: 1, error_rate: 0 } });
+			await exp!.record('a', { metrics: { success: 1, error_rate: 0 } });
 		}
 		for (let i = 0; i < 10; i++) {
-			await exp.record('b', { metrics: { success: 0, error_rate: 1 } });
+			await exp!.record('b', { metrics: { success: 0, error_rate: 1 } });
 		}
 
 		const panel = mountPanel(manager);
@@ -186,8 +186,8 @@ describe('pi-lab panel — headless snapshot', () => {
 			],
 			metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
 		});
-		for (let i = 0; i < 10; i++) await exp.record('a', { metrics: { success: 1 } });
-		for (let i = 0; i < 10; i++) await exp.record('b', { metrics: { success: 0 } });
+		for (let i = 0; i < 10; i++) await exp!.record('a', { metrics: { success: 1 } });
+		for (let i = 0; i < 10; i++) await exp!.record('b', { metrics: { success: 0 } });
 
 		// accent 色用 ANSI 区分：fg('accent', ...) 返回带 ANSI 的文本
 		const accentTheme = mockTheme();
@@ -223,6 +223,33 @@ describe('pi-lab panel — headless snapshot', () => {
 		expect(renderText(panel)).toContain('指标: latency_ms');
 	});
 
+	it('← 键反向循环切换 metric（首指标 ← 到末指标）', () => {
+		manager.registerExperiment({
+			owner: 'test',
+			name: 'metric-switch-back',
+			contextKey: () => 'global',
+			arms: [{ id: 'a', label: 'A' }],
+			metrics: [
+				{ id: 'success', type: 'binary', direction: 'maximize' },
+				{ id: 'latency_ms', type: 'continuous', direction: 'minimize' },
+				{ id: 'cost', type: 'continuous', direction: 'minimize' },
+			],
+		});
+
+		const panel = mountPanel(manager);
+		enterDetail(panel);
+		expect(renderText(panel)).toContain('指标: success');
+
+		panel.handleInput('\x1b[D'); // ← 键：反向循环到最后一个指标
+		expect(renderText(panel)).toContain('指标: cost');
+
+		panel.handleInput('\x1b[D'); // 再 ←：到倒数第二个
+		expect(renderText(panel)).toContain('指标: latency_ms');
+
+		panel.handleInput('\x1b[D'); // 再 ←：回到第一个（循环）
+		expect(renderText(panel)).toContain('指标: success');
+	});
+
 	it('无数据时显示 No data collected yet', async () => {
 		manager.registerExperiment({
 			owner: 'test',
@@ -252,8 +279,10 @@ describe('pi-lab panel — headless snapshot', () => {
 
 		expect(lines[0].startsWith('┌')).toBe(true);
 		expect(lines[0].endsWith('┐')).toBe(true);
-		expect(lines[lines.length - 1].startsWith('└')).toBe(true);
-		expect(lines[lines.length - 1].endsWith('┘')).toBe(true);
+		// 尾部可能是 MIN_TOTAL_LINES 高度填充的空行，取最后一个非空行验证底边框
+		const lastContent = [...lines].reverse().find((l) => l.trim().length > 0) ?? '';
+		expect(lastContent.startsWith('└')).toBe(true);
+		expect(lastContent.endsWith('┘')).toBe(true);
 	});
 
 	it('视图切换时渲染高度不小于最小高度（防抖动）', async () => {
@@ -278,18 +307,18 @@ describe('pi-lab panel — headless snapshot', () => {
 
 	// ── 设置/重置交互（键盘驱动）──
 
-	/** 进入菜单第 index 项（0=统计 1=设置 2=重置）：render 触发 rebuild，↓ index 次，⏎ 确认 */
+	/** 进入二级操作页第 operationIndex 个操作：⏎ 进入实验（默认统计），Tab operationIndex 次切操作 */
 	function enterMenuItem(
 		component: { render: (w: number) => string[]; handleInput: (d: string) => void },
-		index: number,
+		operationIndex: number,
 	) {
 		component.render(80);
-		for (let i = 0; i < index; i++) component.handleInput('\x1b[B'); // ↓
-		component.handleInput('\r'); // ⏎
+		component.handleInput('\r'); // ⏎ 进入二级（默认 统计）
+		for (let i = 0; i < operationIndex; i++) component.handleInput('\t'); // Tab 切操作
 	}
 
 	it('设置视图选择实验臂后 forceArm 生效', () => {
-		const exp = manager.registerExperiment({
+		manager.registerExperiment({
 			owner: 'test',
 			name: 'settings-force-arm',
 			contextKey: () => 'global',
@@ -321,7 +350,7 @@ describe('pi-lab panel — headless snapshot', () => {
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
 		});
-		exp.forceArm('a');
+		exp!.forceArm('a');
 
 		const panel = mountPanel(manager);
 		enterMenuItem(panel, 1); // 设置
@@ -338,8 +367,8 @@ describe('pi-lab panel — headless snapshot', () => {
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
 		});
-		await exp.record('a', { metrics: { success: 1 } });
-		expect((await exp.stats()).a.totalCalls).toBe(1);
+		await exp!.record('a', { metrics: { success: 1 } });
+		expect((await exp!.stats()).a.totalCalls).toBe(1);
 
 		const panel = mountPanel(manager);
 		enterMenuItem(panel, 2); // 重置
@@ -362,7 +391,7 @@ describe('pi-lab panel — headless snapshot', () => {
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
 		});
-		await exp.record('a', { metrics: { success: 1 } });
+		await exp!.record('a', { metrics: { success: 1 } });
 
 		const panel = mountPanel(manager);
 		enterMenuItem(panel, 2); // 重置
@@ -381,7 +410,7 @@ describe('pi-lab panel — headless snapshot', () => {
 			arms: [{ id: 'a', label: 'A' }],
 			metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
 		});
-		await exp.record('a', { metrics: { success: 1 } });
+		await exp!.record('a', { metrics: { success: 1 } });
 
 		// 让 reset 写盘失败
 		const raw = manager.getExperimentRaw('reset-fail')!;
@@ -395,5 +424,144 @@ describe('pi-lab panel — headless snapshot', () => {
 		await vi.waitFor(() => {
 			expect(renderText(panel)).toContain('重置失败: disk full');
 		});
+	});
+
+	// ── master-detail 两级导航（新增） ──
+
+	it('一级列表 ↑↓ 焦点可流转：选中不同实验进入二级，标题为插件名:实验名', () => {
+		for (const n of ['exp-a', 'exp-b', 'exp-c']) {
+			manager.registerExperiment({
+				owner: 'test',
+				name: n,
+				contextKey: () => 'global',
+				arms: [{ id: 'a', label: 'A' }],
+				metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
+			});
+		}
+
+		const panel = mountPanel(manager);
+		panel.render(80);
+		// 焦点从第一个流转到第三个（旧版 N 个 SelectList 焦点卡死的 bug 回归测试）
+		panel.handleInput('\x1b[B');
+		panel.handleInput('\x1b[B');
+		panel.handleInput('\r'); // ⏎ 进入第三个实验
+
+		const text = renderText(panel);
+		expect(text).toContain('pi-lab · test:exp-c');
+		expect(text).toContain('[统计]');
+		expect(text).toContain('[设置]');
+		expect(text).toContain('[重置]');
+	});
+
+	it('一级列表超过 MAX_VISIBLE 实验时滚动视口不撑高，且选中行动态跟随（居中滚动）', () => {
+		for (let i = 0; i < 12; i++) {
+			manager.registerExperiment({
+				owner: 'test',
+				name: `exp-${i}`,
+				contextKey: () => 'global',
+				arms: [{ id: 'a', label: 'A' }],
+				metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
+			});
+		}
+
+		const panel = mountPanel(manager);
+		const lines = panel.render(80).map(stripAnsi);
+		assertWithinWidth(lines, 80);
+
+		// 12 个实验只显示 MAX_VISIBLE(8) 行（SelectList 内部滚动），面板不随实验数撑高
+		const visibleRows = lines.filter((l) => l.includes('test:exp-')).length;
+		expect(visibleRows).toBeLessThanOrEqual(8);
+		// 初始视口显示前 8 个 + 滚动指示
+		expect(lines.join('\n')).toContain('test:exp-0');
+		expect(lines.join('\n')).toContain('(1/12)');
+
+		// 动态滚动：↓ 9 次选中第 10 个实验（exp-9），视口跟随（居中滚动）且不撑高
+		for (let i = 0; i < 9; i++) panel.handleInput('\x1b[B');
+		const scrolled = panel.render(80).map(stripAnsi);
+		assertWithinWidth(scrolled, 80);
+		expect(scrolled.join('\n')).toContain('test:exp-9');
+		expect(scrolled.join('\n')).toContain('(10/12)');
+		expect(scrolled.filter((l) => l.includes('test:exp-')).length).toBeLessThanOrEqual(8);
+
+		// 滚动后选中的实验可正常进入二级（标题正确）
+		panel.handleInput('\r');
+		expect(renderText(panel)).toContain('pi-lab · test:exp-9');
+	});
+
+	it('二级操作条 Tab 循环切换：统计→设置→重置→统计', () => {
+		manager.registerExperiment({
+			owner: 'test',
+			name: 'op-switch',
+			contextKey: () => 'global',
+			arms: [{ id: 'a', label: 'A' }],
+			metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
+		});
+
+		const panel = mountPanel(manager);
+		enterDetail(panel); // 二级默认 统计
+		expect(renderText(panel)).toContain('[统计]');
+
+		panel.handleInput('\t'); // → 设置
+		expect(renderText(panel)).toContain('强制臂:');
+
+		panel.handleInput('\t'); // → 重置
+		expect(renderText(panel)).toContain('确认清空全部数据');
+
+		panel.handleInput('\t'); // → 统计（循环）
+		expect(renderText(panel)).toContain('指标: success');
+
+		// Shift+Tab 反向
+		panel.handleInput('\x1b[Z');
+		expect(renderText(panel)).toContain('确认清空全部数据');
+	});
+
+	it('二级统计页内容超长时滚动视口不撑高，↑↓ 滚动内容', async () => {
+		// 多模型 × 多 arm：按模型分组时内容行数远超 MAX_CONTENT_LINES
+		const exp = manager.registerExperiment({
+			owner: 'test',
+			name: 'scroll-detail',
+			contextKey: (c: any) => c?.model?.id ?? 'global',
+			arms: [
+				{ id: 'a', label: 'A' },
+				{ id: 'b', label: 'B' },
+			],
+			metrics: [
+				{ id: 'success', type: 'binary', direction: 'maximize' },
+				{ id: 'latency_ms', type: 'continuous', direction: 'minimize' },
+			],
+		})!;
+		for (let m = 0; m < 5; m++) {
+			for (const arm of ['a', 'b'] as const) {
+				await exp.record(
+					arm,
+					{ metrics: { success: 1, latency_ms: 10 } },
+					{ model: { id: `model-${m}` } },
+				);
+			}
+		}
+
+		const panel = mountPanel(manager);
+		enterDetail(panel); // 二级 stats（默认「按模型」分组 → 5 个模型块）
+
+		// 内容超长：出现滚动指示，且总行数有上限（不撑爆终端）
+		const lines = panel.render(80).map(stripAnsi);
+		assertWithinWidth(lines, 80);
+		const text = lines.join('\n');
+		expect(text).toContain('↑↓ 滚动');
+		// 固定部分（边框/标题/操作条/分隔线/帮助）≈ 7 行 + 内容视口 10 + 滚动指示 1
+		expect(lines.length).toBeLessThanOrEqual(20);
+
+		// ↓ 滚动后内容变化（视口向下移动）
+		panel.handleInput('\x1b[B');
+		const scrolledText = renderText(panel);
+		expect(scrolledText).not.toBe(text);
+		// 滚动指示位置更新（不再从第 1 行开始）
+		expect(scrolledText).toMatch(/\(\d+-\d+\/\d+\)/);
+
+		// ←→ 切指标：切到 latency_ms，且 contentScroll 重置回顶部
+		panel.handleInput('\x1b[C');
+		const afterMetricSwitch = renderText(panel);
+		expect(afterMetricSwitch).toContain('指标: latency_ms');
+		expect(afterMetricSwitch).toMatch(/\(1-\d+\/\d+\)/);
 	});
 });
