@@ -13,7 +13,7 @@ SYNC_SCRIPT="$ROOT_DIR/scripts/sync-to-local-pi.ts"
 
 # 清理测试目录
 clean_test_dir() {
-	rm -rf "$ROOT_DIR/.pi/test"
+  rm -rf "$ROOT_DIR/.pi/test"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -135,4 +135,60 @@ test_it "profile mode exclude excludes specified resource" <<'TEST'
   # sandbox 不应出现在 user-install 中
   [[ "$output" == *"sandbox"* ]] && { echo "sandbox should be excluded from user-install"; exit 1; }
   echo "Verified: sandbox excluded"
+TEST
+
+# ── 用例 14：内嵌技能随扩展同步（ADR-0022） ──
+test_it "inline syncs embedded skill declared via pi.skills" <<'TEST'
+  clean_test_dir
+  npx tsx "$SYNC_SCRIPT" --ext pi-logger --target ./.pi/test 2>&1
+  # pi-logger 的 package.json 声明 pi.skills: ["./skills"]，其下 skills/pi-logger/SKILL.md
+  # 应随扩展一起同步到目标 skills/ 目录，无需在 sync-profiles.yaml 中再列一遍
+  [[ -f "$ROOT_DIR/.pi/test/skills/pi-logger/SKILL.md" ]] || { echo "pi-logger embedded skill not synced"; exit 1; }
+  echo "Verified: embedded skill synced to target skills/"
+  clean_test_dir
+TEST
+
+# ── 用例 15：默认安全模式保留 stale（不加 --purge 不删除） ──
+test_it "default sync keeps stale files (no --purge)" <<'TEST'
+  clean_test_dir
+  # 预置一个不在本次同步范围内的 stale 扩展目录
+  mkdir -p "$ROOT_DIR/.pi/test/extensions/stale-ext"
+  echo 'stale' > "$ROOT_DIR/.pi/test/extensions/stale-ext/index.ts"
+  npx tsx "$SYNC_SCRIPT" --ext pi-logger --target ./.pi/test 2>&1
+  [[ -f "$ROOT_DIR/.pi/test/extensions/stale-ext/index.ts" ]] || { echo "stale file was deleted without --purge"; exit 1; }
+  [[ -f "$ROOT_DIR/.pi/test/extensions/pi-logger/index.ts" ]] || { echo "synced resource missing"; exit 1; }
+  echo "Verified: stale kept by default"
+  clean_test_dir
+TEST
+
+# ── 用例 16：--purge 删除 stale、保留本次同步资源 ──
+test_it "--purge deletes stale files not in sync set" <<'TEST'
+  clean_test_dir
+  mkdir -p "$ROOT_DIR/.pi/test/extensions/stale-ext"
+  echo 'stale' > "$ROOT_DIR/.pi/test/extensions/stale-ext/index.ts"
+  npx tsx "$SYNC_SCRIPT" --ext pi-logger --target ./.pi/test --purge 2>&1
+  [[ ! -e "$ROOT_DIR/.pi/test/extensions/stale-ext" ]] || { echo "stale file survived --purge"; exit 1; }
+  [[ -f "$ROOT_DIR/.pi/test/extensions/pi-logger/index.ts" ]] || { echo "synced resource missing after purge"; exit 1; }
+  echo "Verified: --purge removed stale, kept synced"
+  clean_test_dir
+TEST
+
+# ── 用例 17：--dry-run --purge 不落盘删除 ──
+test_it "--dry-run --purge does not delete stale files" <<'TEST'
+  clean_test_dir
+  mkdir -p "$ROOT_DIR/.pi/test/extensions/stale-ext"
+  echo 'stale' > "$ROOT_DIR/.pi/test/extensions/stale-ext/index.ts"
+  npx tsx "$SYNC_SCRIPT" --dry-run --ext pi-logger --target ./.pi/test --purge 2>&1
+  [[ -f "$ROOT_DIR/.pi/test/extensions/stale-ext/index.ts" ]] || { echo "dry-run --purge deleted stale file"; exit 1; }
+  echo "Verified: dry-run --purge did not delete"
+  clean_test_dir
+TEST
+
+# ── 用例 18：--purge 指向 ~/.pi/agent 被安全护栏拒绝 ──
+test_it "--purge against ~/.pi/agent is refused by safety guard" <<'TEST'
+  output=$(npx tsx "$SYNC_SCRIPT" --ext pi-logger --target ~/.pi/agent --purge 2>&1)
+  rc=$?
+  [[ $rc -ne 0 ]] || { echo "Expected non-zero exit when --purge targets ~/.pi/agent"; exit 1; }
+  [[ "$output" == *"Refusing --purge"* ]] || { echo "Missing refusal message"; exit 1; }
+  echo "Verified: --purge against ~/.pi/agent refused"
 TEST

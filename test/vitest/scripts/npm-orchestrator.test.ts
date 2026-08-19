@@ -364,19 +364,37 @@ describe('BridgeBuilder.ensureBridges', () => {
 		expect(result.failed).toBe(0);
 	});
 
-	it('reports failed when src/index.ts is missing', () => {
+	it('skips plain .ts extension when src/index.ts is missing (ADR-0022)', () => {
 		const extDir = join(tmpDir, 'extensions');
 		mkdirSync(extDir, { recursive: true });
-		// 有 pi 字段但无 src/index.ts
-		createDirExt(extDir, 'broken', { pi: { extensions: ['./dist/index.js'] } });
+		// 纯 .ts 扩展：pi.extensions 入口为根 ./index.ts，无 src/ 结构 → 无需桥接（ADR-0022）
+		createDirExt(extDir, 'plain-ts', { pi: { extensions: ['./index.ts'] } });
 
 		const bb = new BridgeBuilder({ dryRun: false });
-		const resources = [makeResource('broken', tmpDir, true)];
+		const resources = [makeResource('plain-ts', tmpDir, true)];
+		const result = bb.ensureBridges(resources);
+
+		expect(result.created).toBe(0);
+		expect(result.skipped).toBe(1);
+		expect(result.failed).toBe(0);
+		expect(result.details[0].status).toBe('skipped');
+		expect(result.details[0].reason).toContain('plain .ts extension');
+	});
+
+	it('fails compiled npm package when src/index.ts is missing', () => {
+		const extDir = join(tmpDir, 'extensions');
+		mkdirSync(extDir, { recursive: true });
+		// 编译型 npm 包：pi.extensions 入口指向 ./dist/index.js，桥接必需 → src/index.ts 缺失是错误
+		createDirExt(extDir, 'compiled', { pi: { extensions: ['./dist/index.js'] } });
+
+		const bb = new BridgeBuilder({ dryRun: false });
+		const resources = [makeResource('compiled', tmpDir, true)];
 		const result = bb.ensureBridges(resources);
 
 		expect(result.created).toBe(0);
 		expect(result.skipped).toBe(0);
 		expect(result.failed).toBe(1);
+		expect(result.details[0].status).toBe('failed');
 		expect(result.details[0].reason).toContain('src/index.ts not found');
 	});
 

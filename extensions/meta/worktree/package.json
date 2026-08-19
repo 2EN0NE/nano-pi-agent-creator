@@ -1,0 +1,24 @@
+{
+	"name": "pi-worktree",
+	"version": "0.1.0",
+	"description": "git worktree-based isolated development switcher for pi — hard-constraint cwd switching via session switch, with create/use/delete/merge/rebase lifecycle commands",
+	"type": "module",
+	"keywords": [
+		"pi-extension",
+		"worktree",
+		"git",
+		"isolation"
+	],
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		],
+		"skills": [
+			"./skills"
+		]
+	},
+	"dependencies": {
+		"@zenone/pi-logger": "file:../pi-logger",
+		"@zenone/pi-config": "file:../pi-config"
+	}
+}

@@ -78,6 +78,11 @@ for file in $CHANGED_FILES; do
   esac
 done
 
+# scripts/ 变更（sync 工具、桥接等基础设施脚本）→ 触发 sync-tool e2e
+if echo "$CHANGED_FILES" | grep -q '^scripts/'; then
+  EXTS="$EXTS sync-tool"
+fi
+
 # 去重
 EXTS=$(echo "$EXTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
 SKILLS=$(echo "$SKILLS" | tr ' ' '\n' | sort -u | tr '\n' ' ')

@@ -46,9 +46,15 @@ npx tsx scripts/sync-to-local-pi.ts --ext sandbox --ext pi-logger --theme nighto
 # 同步技能
 npx tsx scripts/sync-to-local-pi.ts --skill my-skill --target ./.pi/test
 
-# 同步到用户目录
-npx tsx scripts/sync-to-local-pi.ts --ext sandbox --target ~/.pi/agent
+# 同步到用户目录（⚠ 正确方式：用 profile 而非 --target）
+npx tsx scripts/sync-to-local-pi.ts --profile user-install
 ```
+
+> ⚠️ **警告**：`--target` 内联模式**只应指向隔离测试目录**（如 `./.pi/test`），
+> **不要**用 `--target ~/.pi/agent` 直接同步到用户目录——请使用
+> `--profile user-install`（由 `sync-profiles.yaml` 管理资源边界）。
+> 默认行为下 sync 工具**从不删除**目标中任何文件；如需显式清空目标中
+> 不属于本次同步的资源，必须加 `--purge` 参数（会有 WARN 强警告）。
 
 ## 配置文件结构
 
@@ -205,16 +211,17 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 | `@zenone/pi-logger`   | `extensions/meta/pi-logger/` | 统一日志系统，所有扩展必须接入                           |
 | `@zenone/pi-selector` | `extensions/meta/selector/`  | 共享选择器，confir m-destructive、permission-gate 等使用 |
 
-## 自动删除排除项（stale cleanup）
+## 排除项 / 资源变更（stale 处理）
 
-当 Profile 的 `exclude` 列表排除了某些资源，或 Profile 的 include 列表不再包含之前同步过的资源时，同步脚本会**自动删除**目标目录中对应的旧文件/目录，而非仅提示。
+当 Profile 的 `exclude` 列表排除了某些资源，或 Profile 的 include 列表不再包含之前同步过的资源时，目标目录中对应的旧文件/目录会被识别为 **stale**：
 
 删除逻辑：
 
 1. 扫描目标目录下每个资源类型的所有现有项目
 2. 与当前 Profile 要同步的资源列表对比
-3. 不在要同步列表中的项目视为 **stale**，直接删除
-4. Dry-run 模式下仅显示 `[would delete]`，不实际删除
+3. 不在要同步列表中的项目视为 **stale**
+4. **默认不删除**——仅以 `WARN` 提示（控制台 + 日志），提醒你目标目录存在未被本次同步覆盖的资源
+5. 只有显式加 `--purge` 才真正删除；仅 `--dry-run --purge` 组合下显示 `[would delete]` 预览（不带 `--purge` 的 dry-run 不显示删除预览，因为真实运行也不会删除）
 
 此行为适用于所有资源类型：extensions、skills、themes、prompts。
 
@@ -243,3 +250,21 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 | ---------------- | ------------------------- |
 | `~/.pi/agent/`   | Pi 实际读取的全局代理目录 |
 | `<project>/.pi/` | 项目本地目录              |
+
+## 删除语义与 --purge（安全机制）
+
+**默认安全模式（重要）**：sync 工具**永远不删除**目标目录中的任何文件——它只复制/更新本次同步的资源。目标中存在的、但不属于本次同步的资源会被识别为 _stale_ 并以 `WARN` 提示（控制台 + 日志），但**不会删除**。
+
+**显式清空：`--purge`**：如需将目标目录镜像为"仅包含本次同步资源"（删除所有非同步文件），必须显式加 `--purge`：
+
+```bash
+# 清空 ./.pi/test 中不属于 pi-logger 的文件
+npx tsx scripts/sync-to-local-pi.ts --ext pi-logger --target ./.pi/test --purge
+
+# profile 模式下同样有效（清理目标中 profile 未管理的资源）
+npx tsx scripts/sync-to-local-pi.ts --profile user-install --purge
+```
+
+每次使用 `--target`（内联模式）或 `--purge` 时，控制台输出与日志文件
+（`scripts/sync-to-local-pi.log`）都会写入 `WARN` 级别警告，提示该操作的范围
+与清理行为，便于审计追溯。

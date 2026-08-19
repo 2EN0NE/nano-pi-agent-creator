@@ -3,6 +3,14 @@
 	"version": "0.1.0",
 	"description": "Unified logging system for pi extensions — SLF4J/Logback-style logger API, config-driven output, and automatic lifecycle capture for third-party extensions",
 	"type": "module",
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		],
+		"skills": [
+			"./skills"
+		]
+	},
 	"exports": {
 		".": {
 			"import": "./api.ts"

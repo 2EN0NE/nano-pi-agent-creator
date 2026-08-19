@@ -128,7 +128,7 @@ profiles:
             # tooling/ — 工具链与基础设施
             - tmux
             - uv
-            - pi-logger
+            # pi-logger 已迁为内嵌 skill（ADR-0022）
             - e2e-test
         themes: []
         prompts: ['*']

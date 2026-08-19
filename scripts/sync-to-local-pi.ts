@@ -35,10 +35,11 @@ import {
 	rmSync,
 	appendFileSync,
 	readdirSync,
+	realpathSync,
 	type Dirent,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, dirname, resolve, isAbsolute, relative } from 'node:path';
+import { join, dirname, basename, resolve, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as yaml from 'js-yaml';
 import { isNpmPackageDir } from './lib/utils.js';
@@ -109,6 +110,7 @@ interface CLIOptions {
 	inlineThemes: string[];
 	inlinePrompts: string[];
 	inlineTarget: string | null;
+	purge: boolean;
 }
 
 function parseArgs(): CLIOptions {
@@ -124,6 +126,7 @@ function parseArgs(): CLIOptions {
 		inlineThemes: [],
 		inlinePrompts: [],
 		inlineTarget: null,
+		purge: false,
 	};
 
 	for (let i = 0; i < args.length; i++) {
@@ -166,6 +169,9 @@ function parseArgs(): CLIOptions {
 				opts.inlineTarget = args[++i] ?? null;
 				if (opts.inlineTarget) opts.inline = true;
 				break;
+			case '--purge':
+				opts.purge = true;
+				break;
 			case '-h':
 			case '--help':
 				printHelp();
@@ -201,15 +207,23 @@ Inline mode options:
   --theme <name>          Theme name to sync (repeatable)
   --prompt <name>         Prompt name to sync (repeatable)
   --target <dir>     -t   Target directory (required in inline mode)
+  --purge                DELETE target files not covered by this sync (mirror mode)
 
   -h, --help              Show this help
+
+NOTE:
+  By default this tool NEVER deletes anything — it only copies/updates synced
+  resources. Use --purge to explicitly remove target files that are not part
+  of the current sync (with a WARN confirmation). Prefer --profile over
+  --target when syncing to ~/.pi/agent, and always use an isolated dir like
+  ./.pi/test for inline tests.
 
 Examples:
   npx tsx scripts/sync-to-local-pi.ts                     # all profiles (default)
   npx tsx scripts/sync-to-local-pi.ts --profile user-install  # single profile
   npx tsx scripts/sync-to-local-pi.ts --dry-run               # preview all profiles
   npx tsx scripts/sync-to-local-pi.ts --ext sandbox --target ./.pi/test
-  npx tsx scripts/sync-to-local-pi.ts --ext sandbox --ext pi-logger --target ~/.pi/agent
+  npx tsx scripts/sync-to-local-pi.ts --ext sandbox --ext pi-logger --target ./.pi/test --purge
 `);
 }
 
@@ -342,6 +356,15 @@ function expandTargetPath(target: string, projectRoot: string): string {
 		return target;
 	}
 	return resolve(projectRoot, target);
+}
+
+/** realpath 解析（展开符号链接），失败返回 null（目标可能尚不存在）。 */
+function safeRealpath(p: string): string | null {
+	try {
+		return realpathSync(p);
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -782,7 +805,93 @@ function resolveResources(profile: ProfileConfig, projectRoot: string): Resolved
 		}
 	}
 
+	// 内嵌技能（ADR-0022）：随扩展一起同步，见 collectEmbeddedSkills。
+	resources.push(...collectEmbeddedSkills(resources, targetDir));
+
 	return resources;
+}
+
+/**
+ * 递归收集目录下所有含 SKILL.md 的子目录（完整绝对路径）。
+ */
+function collectSkillDirs(dir: string, depth: number, out: string[]): void {
+	if (depth > 6) return;
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (entry.name.startsWith('.')) continue;
+		if (entry.name === 'node_modules') continue;
+		if (!entry.isDirectory()) continue;
+		const fullPath = join(dir, entry.name);
+		if (existsSync(join(fullPath, 'SKILL.md'))) {
+			out.push(fullPath);
+		} else {
+			collectSkillDirs(fullPath, depth + 1, out);
+		}
+	}
+}
+
+/**
+ * 收集内嵌技能（ADR-0022）：目录型扩展根 package.json 的 pi.skills 声明的
+ * 目录，递归查找含 SKILL.md 的子目录，作为技能随扩展一起同步——无需在
+ * sync-profiles.yaml 的 skills 列表中再列一遍。
+ *
+ * 命名：技能名 = 目录名（N1）。与顶层 skills/ 或另一扩展的内嵌技能同名时
+ * fail-fast 报错，不静默覆盖。
+ */
+function collectEmbeddedSkills(
+	resources: ResolvedResource[],
+	targetDir: string,
+): ResolvedResource[] {
+	const embedded: ResolvedResource[] = [];
+	// 已解析的顶层技能名（来自 skills/ 源）
+	const skillNames = new Set(resources.flatMap((r) => (r.type === 'skills' ? [r.name] : [])));
+
+	for (const r of resources) {
+		if (r.type !== 'extensions' || !r.isDirectory) continue;
+		const pkgPath = join(r.sourcePath, 'package.json');
+		if (!existsSync(pkgPath)) continue;
+
+		let pkg: { pi?: { skills?: string[] } };
+		try {
+			pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+		} catch {
+			continue;
+		}
+		const specs = pkg.pi?.skills;
+		if (!Array.isArray(specs)) continue;
+
+		for (const spec of specs) {
+			const skillRoot = resolve(r.sourcePath, spec);
+			const dirs: string[] = [];
+			collectSkillDirs(skillRoot, 0, dirs);
+
+			for (const dir of dirs) {
+				const skillName = basename(dir);
+				if (skillNames.has(skillName)) {
+					console.error(
+						`  ERROR: embedded skill '${skillName}' (from extension '${r.name}') ` +
+							`conflicts with an existing skill. Remove the duplicate from skills/ or rename the embedded skill directory.`,
+					);
+					process.exit(1);
+				}
+				skillNames.add(skillName);
+				embedded.push({
+					type: 'skills',
+					name: skillName,
+					sourcePath: dir,
+					targetPath: join(targetDir, 'skills', skillName),
+					isDirectory: true,
+				});
+			}
+		}
+	}
+
+	return embedded;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -974,6 +1083,8 @@ interface ProfileSummary {
 	newItems: Record<ResourceType, string[]>;
 	updatedItems: Record<ResourceType, string[]>;
 	staleItems: Record<ResourceType, string[]>;
+	/** 本 profile 是否实际执行了 stale 删除（--purge 且非 dry-run） */
+	staleRemoved: boolean;
 	extensionNames: string[];
 	npmCount: number;
 	npmSkippedCount: number;
@@ -1006,6 +1117,7 @@ async function processProfile(
 			newItems: {} as Record<ResourceType, string[]>,
 			updatedItems: {} as Record<ResourceType, string[]>,
 			staleItems: {} as Record<ResourceType, string[]>,
+			staleRemoved: false,
 			extensionNames: [],
 			npmCount: 0,
 			npmSkippedCount: 0,
@@ -1070,7 +1182,7 @@ async function processProfile(
 		themes: 0,
 		prompts: 0,
 	};
-	const staleDeleted: Record<ResourceType, string[]> = {
+	const staleCandidates: Record<ResourceType, string[]> = {
 		extensions: [],
 		skills: [],
 		themes: [],
@@ -1301,7 +1413,7 @@ async function processProfile(
 		if (n > 0) parts.push(`${n} NEW`);
 		if (u > 0) parts.push(`${u} UPDATED`);
 		if (s > 0) parts.push(`${s} skipped`);
-		if (d > 0) parts.push(`${d} deleted`);
+		if (d > 0) parts.push(`${d} stale`);
 		const status = parts.length > 0 ? ` [${parts.join(' | ')}]` : ' [no changes]';
 
 		console.log(`    ${t}/${status}`);
@@ -1323,10 +1435,12 @@ async function processProfile(
 					delPath = join(absTarget, t, c);
 				}
 
-				if (opts.dryRun) {
+				if (opts.dryRun && opts.purge) {
+					// dry-run + purge：仅预览将被删除的项（不实际删除）
 					console.log(`      ⚰️  [would delete] ${delPath}`);
-					staleDeleted[t].push(c);
-				} else {
+					staleCandidates[t].push(c);
+				} else if (!opts.dryRun && opts.purge) {
+					// 显式 --purge（非 dry-run）：清空目标中不属于本次同步的资源（危险操作，WARN 记录）
 					try {
 						if (existsSync(delPath)) {
 							const isDir = statSync(delPath).isDirectory();
@@ -1335,14 +1449,26 @@ async function processProfile(
 							} else {
 								rmSync(delPath, { force: true });
 							}
-							staleDeleted[t].push(c);
-							writeLog('INFO', `[DELETE] ${t}:${c} → ${delPath}`);
+							staleCandidates[t].push(c);
+							writeLog('WARN', `[PURGE DELETE] ${t}:${c} → ${delPath}`);
 						}
 					} catch (err) {
 						console.error(`      ❌ Failed to delete ${delPath}: ${err}`);
 						writeLog('ERROR', `Failed to delete ${delPath}: ${err}`);
 					}
+				} else {
+					// 默认安全模式（无 --purge）或 dry-run 无 purge：不删除，仅记录 stale 并 WARN 提示
+					staleCandidates[t].push(c);
 				}
+			}
+			if (!opts.purge) {
+				console.warn(
+					`      ⚠️  ${t}: ${d} stale item(s) left in place (not deleted — use --purge to clean)`,
+				);
+				writeLog(
+					'WARN',
+					`Profile "${name}" has ${d} stale ${t} item(s) left in place (use --purge to delete)`,
+				);
 			}
 		}
 	}
@@ -1354,10 +1480,10 @@ async function processProfile(
 
 	writeLog('INFO', `Profile "${name}" completed (${resources.length} resources, ${summary})`);
 
-	// Collect stale items per type (actually deleted in non-dry-run mode; would-be-deleted in dry-run mode)
+	// 收集 stale 候选项（是否实际删除由 staleRemoved 标记；默认安全模式仅保留在目标中）
 	const staleItems: Record<ResourceType, string[]> = {} as Record<ResourceType, string[]>;
 	for (const t of RESOURCE_TYPES) {
-		staleItems[t] = staleDeleted[t];
+		staleItems[t] = staleCandidates[t];
 	}
 
 	// Collect extension names for overlap analysis
@@ -1375,6 +1501,7 @@ async function processProfile(
 		newItems,
 		updatedItems,
 		staleItems,
+		staleRemoved: opts.purge && !opts.dryRun,
 		extensionNames,
 		npmCount,
 		npmSkippedCount,
@@ -1402,7 +1529,7 @@ function printFinalSummaryTable(
 	// Table header
 	const sep = `  ${'─'.repeat(18)} ${'─'.repeat(9)} ${'─'.repeat(5)} ${'─'.repeat(7)} ${'─'.repeat(7)} ${'─'.repeat(5)}`;
 	console.log(
-		`  ${'Profile'.padEnd(18)} ${'Resources'.padStart(9)} ${'New'.padStart(5)} ${'Updated'.padStart(7)} ${'Deleted'.padStart(7)} ${'npm'.padStart(5)}`,
+		`  ${'Profile'.padEnd(18)} ${'Resources'.padStart(9)} ${'New'.padStart(5)} ${'Updated'.padStart(7)} ${'Stale'.padStart(7)} ${'npm'.padStart(5)}`,
 	);
 	console.log(sep);
 
@@ -1467,7 +1594,13 @@ function printFinalSummaryTable(
 	}
 	if (allStale.length > 0) {
 		console.log();
-		console.log('  🗑️  Stale items removed:');
+		// 只有实际执行了删除（--purge 且非 dry-run）才标「removed」；默认安全模式 stale 项被保留
+		const anyRemoved = summaries.some((s) => s.staleRemoved);
+		console.log(
+			anyRemoved
+				? '  🗑️  Stale items removed:'
+				: '  ⚠️  Stale items kept (not deleted — use --purge to remove):',
+		);
 		for (const { profile, type, item } of allStale.slice(0, 10)) {
 			console.log(`      ${profile}/${type}/${item}`);
 		}
@@ -1521,6 +1654,35 @@ async function main(): Promise<void> {
 			process.exit(1);
 		}
 
+		// 安全护栏（AGENTS.md「本地同步」约束）：内联 --target 只允许指向隔离测试目录，
+		// 禁止指向 ~/.pi/agent 等真实用户目录。--purge 下会递归删除目标中非本次同步的
+		// 资源，误指向真实用户目录将造成不可逆数据丢失，故带 --purge 时强制阻断。
+		if (opts.purge) {
+			const resolvedTarget = expandTargetPath(opts.inlineTarget, PROJECT_ROOT);
+			// realpath 解析符号链接：防止 --target 指向 ~/.pi/agent 的软链绕过护栏。
+			// 目标可能尚不存在（首次同步），realpath 失败时回退到 resolve 后的路径。
+			const canonicalTarget = safeRealpath(resolvedTarget) ?? resolvedTarget;
+			// 同时阻断 ~/.pi 与 ~/.pi/agent：~/.pi 是后者父级，--purge 清空 ~/.pi 同样危险。
+			const forbiddenRoots = [join(homedir(), '.pi'), join(homedir(), '.pi', 'agent')].map(
+				(p) => safeRealpath(p) ?? p,
+			);
+			const isForbidden = forbiddenRoots.some((root) => {
+				const rel = relative(root, canonicalTarget);
+				return (
+					canonicalTarget === root ||
+					(rel !== '' && !rel.startsWith('..') && !isAbsolute(rel))
+				);
+			});
+			if (isForbidden) {
+				console.error(
+					`  ❌ Refusing --purge against user agent directory: ${resolvedTarget}\n` +
+						`     Inline --target must point to an isolated test dir (e.g. ./.pi/test),\n` +
+						`     never ~/.pi/agent or ~/.pi. Use --profile user-install to sync the real user dir.`,
+				);
+				process.exit(1);
+			}
+		}
+
 		const inlineProfile: ProfileConfig = {
 			description: `Inline sync (${opts.inlineExtensions.length} ext, ${opts.inlineSkills.length} skill, ${opts.inlineThemes.length} theme, ${opts.inlinePrompts.length} prompt)`,
 			target: opts.inlineTarget,
@@ -1529,6 +1691,20 @@ async function main(): Promise<void> {
 			themes: opts.inlineThemes.length > 0 ? opts.inlineThemes : [],
 			prompts: opts.inlinePrompts.length > 0 ? opts.inlinePrompts : [],
 		};
+
+		console.warn(
+			`  ⚠️  Inline mode: syncing to "${opts.inlineTarget}" — does NOT delete anything in target${opts.purge ? '' : ' (use --purge to also clean non-synced files)'}.`,
+		);
+		writeLog(
+			'WARN',
+			`Inline sync to ${opts.inlineTarget}${opts.purge ? ' with --purge (cleanup enabled)' : ' (no deletion)'}`,
+		);
+		if (opts.purge) {
+			console.warn(
+				'  ⚠️  --purge enabled: target directory will be cleaned of resources NOT covered by this sync!',
+			);
+			writeLog('WARN', `--purge enabled for inline sync to ${opts.inlineTarget}`);
+		}
 
 		await processProfile('(inline)', inlineProfile, opts);
 		writeLog('INFO', `Inline sync completed (target: ${inlineProfile.target})`);
@@ -1541,6 +1717,13 @@ async function main(): Promise<void> {
 	// ── Config mode: load profiles from YAML ──────────────────────
 	const config = loadConfig(opts.config);
 	const profiles = selectProfiles(config, opts);
+
+	if (opts.purge) {
+		console.warn(
+			'  ⚠️  --purge enabled: target directories will be cleaned of resources NOT covered by the synced profiles!',
+		);
+		writeLog('WARN', '--purge enabled for profile sync');
+	}
 
 	console.log(`  Config: ${opts.config}`);
 
