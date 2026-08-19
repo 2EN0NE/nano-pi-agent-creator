@@ -1225,7 +1225,7 @@ describe('worktree parseArgs', () => {
 		// parseArgs 是 handlers.ts 的内部函数，通过命令测试间接覆盖
 		// 直接导入不可行（非 export），通过 COMMANDS 常量验证
 		const { COMMANDS } = await import(resolve(EXT_LIB, 'handlers.ts'));
-		expect(COMMANDS).toContain('create [--name <n>] [--branch <b>]');
+		expect(COMMANDS).toContain('create [--name <n>]');
 		expect(COMMANDS).toContain('use <name>  or  main');
 		expect(COMMANDS).toContain('list');
 		expect(COMMANDS).toContain('delete <name>');

@@ -70,10 +70,10 @@ function parseArgs(input: string): { command: string; flags: Record<string, stri
 		if (parts[i].startsWith('--')) {
 			const key = parts[i].slice(2);
 			flags[key] = parts[i + 1] && !parts[i + 1].startsWith('--') ? parts[++i] : '';
-		} else if (!flags._positional) {
-			flags._positional = parts[i];
-		} else {
+		} else if (flags._positional) {
 			extraPositional.push(parts[i]);
+		} else {
+			flags._positional = parts[i];
 		}
 	}
 	if (extraPositional.length > 0) {
@@ -87,7 +87,7 @@ function parseArgs(input: string): { command: string; flags: Record<string, stri
 // ═══════════════════════════════════════════
 
 export const COMMANDS = [
-	'create [--name <n>] [--branch <b>]',
+	'create [--name <n>]',
 	'use <name>  or  main',
 	'list',
 	'delete <name>',
@@ -112,7 +112,8 @@ export function formatHelp(): string {
 		'',
 		'  (no args)  open interactive switcher panel',
 		'',
-		'Names are auto-assigned from zodiac+star pool (e.g. Aries-Hamal).',
+		'Names are auto-assigned from zodiac+star pool (e.g. Aries-Hamal)',
+		'unless --name is given. Branch is always wt/<name>.',
 		'Worktrees created outside the repo in <repo>-worktrees/ directory.',
 	].join('\n');
 }
@@ -325,6 +326,14 @@ async function handleCreate(
 	flags: Record<string, string>,
 	ctx: any,
 ): Promise<void> {
+	// --branch 已移除（分支固定 wt/<name>），显式提示避免用户误以为自定义分支名已生效
+	if (flags.branch) {
+		log.warn('--branch is no longer supported; branch is always wt/<name>', {
+			branch: flags.branch,
+		});
+		ctx.ui.notify('--branch is no longer supported (branch is always wt/<name>)', 'warning');
+	}
+
 	// 1. 名称
 	let name: string | undefined = flags.name || flags._positional;
 	if (!name && ctx.hasUI) {
@@ -351,13 +360,7 @@ async function handleCreate(
 	});
 
 	// 3. 创建
-	const result = createWorktree(
-		repoRoot,
-		name,
-		flags.branch,
-		selections.nodeModulesStrategy,
-		selections,
-	);
+	const result = createWorktree(repoRoot, name, selections.nodeModulesStrategy, selections);
 	if (!result.ok) {
 		ctx.ui.notify(result.message, 'error');
 		return;

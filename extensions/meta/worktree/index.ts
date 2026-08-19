@@ -6,7 +6,7 @@
  *
  * ── 快速开始 ──
  *   /worktree            打开交互切换面板
- *   /worktree create     创建 worktree（自动分配恒星名）
+ *   /worktree create     创建 worktree（--name 指定名字，缺省自动分配恒星名）
  *   /worktree use <name> 切换到已有 worktree
  *   /worktree use main   切回主仓库
  *   /worktree delete     删除 worktree

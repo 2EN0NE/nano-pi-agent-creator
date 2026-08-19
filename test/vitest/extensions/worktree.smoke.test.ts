@@ -195,18 +195,37 @@ describe('worktree extension — create/delete (real git)', () => {
 		expect(list).toContain(wtDir);
 	});
 
-	it('creates worktree with given branch', () => {
-		const result = createWorktree(repoDir, 'e2e-custom-branch', 'feature/test-branch');
+	it('creates worktree with wt/<name> branch', () => {
+		const result = createWorktree(repoDir, 'e2e-custom-branch');
 		expect(result.ok).toBe(true);
 		expect(result.path).toBeTruthy();
 		expect(existsSync(result.path!)).toBe(true);
 
-		// 验证分支
+		// 验证分支：分支名固定为 wt/<name>，与路径名统一
 		const branch = execSync('git rev-parse --abbrev-ref HEAD', {
 			cwd: result.path,
 			encoding: 'utf-8',
 		}).trim();
-		expect(branch).toBe('feature/test-branch');
+		expect(branch).toBe('wt/e2e-custom-branch');
+	});
+
+	it('reuses existing wt/<name> branch when worktree dir is absent', () => {
+		// 场景：wt/<name> 分支已存在（如上次删除 worktree 时仅删目录未删分支），
+		// 但 worktree 目录不存在 → createWorktree 应复用该分支（show-ref 判定），
+		// 而非报 "branch already exists"（回归：旧实现依赖 git 错误文案，跨版本不稳定）
+		const name = 'e2e-reuse-branch';
+		execSync(`git branch wt/${name}`, { cwd: repoDir });
+		expect(existsSync(getWorktreePath(repoDir, name))).toBe(false);
+
+		const result = createWorktree(repoDir, name);
+		expect(result.ok).toBe(true);
+		expect(result.message).toContain('existing branch');
+
+		const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+			cwd: result.path,
+			encoding: 'utf-8',
+		}).trim();
+		expect(branch).toBe(`wt/${name}`);
 	});
 
 	it('pickAvailableName returns unique name', () => {

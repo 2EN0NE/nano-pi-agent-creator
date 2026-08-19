@@ -87,17 +87,17 @@ worktree 的会话创建通过 `SessionManager.create(worktreeCwd, mainSessionDi
 
 ### 保留的命令
 
-| 命令                                   | 行为变化                                                |
-| -------------------------------------- | ------------------------------------------------------- |
-| `/worktree`（无参数）                  | 打开切换器面板（不再是功能菜单，而是列表+操作）         |
-| `create [--name <n>] [--branch <b>]`   | 交互模式（TUI）时弹 node_modules 策略选择。路径变外部。 |
-| `use <name>`                           | 切到 worktree 或 main。TUI 下按 Enter 等同于 use。      |
-| `delete <name>`                        | 强制删除保护二级确认。                                  |
-| `list`                                 | 从 `git worktree list` 读取。                           |
-| `merge --source <name> [--target <b>]` | 不变。                                                  |
-| `clean`                                | 不变。                                                  |
-| `shell`                                | 不变。                                                  |
-| `widget [on\|off]`                     | 不变。                                                  |
+| 命令                                   | 行为变化                                                                      |
+| -------------------------------------- | ----------------------------------------------------------------------------- |
+| `/worktree`（无参数）                  | 打开切换器面板（不再是功能菜单，而是列表+操作）                               |
+| `create [--name <n>]`                  | 交互模式（TUI）时弹 node_modules 策略选择。路径变外部。分支固定 `wt/<name>`。 |
+| `use <name>`                           | 切到 worktree 或 main。TUI 下按 Enter 等同于 use。                            |
+| `delete <name>`                        | 强制删除保护二级确认。                                                        |
+| `list`                                 | 从 `git worktree list` 读取。                                                 |
+| `merge --source <name> [--target <b>]` | 不变。                                                                        |
+| `clean`                                | 不变。                                                                        |
+| `shell`                                | 不变。                                                                        |
+| `widget [on\|off]`                     | 不变。                                                                        |
 
 ### 删除的命令
 
