@@ -116,6 +116,17 @@ pi-lab 是**纯基础设施**——提供测量、存储、统计分析。**不�
 | **指标切换（Metric Switch）** | `◀ metric ▶` 通过 `← →` 键切换分析的指标维度（composite_score / tool_error_rate / bounce_rate 等）。用于 smart-context 分析子 Tab 和 pi-lab 实验详情。           |
 | **二级子 Tab**                | 在一级 Tab 内嵌的子导航栏，用细线与一级 Tab 分开。smart-context 状态 Tab 的信號/分析各为一个二级子 Tab。                                                         |
 
+### 交互模式
+
+| 术语                                | 定义                                                                                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| **三轴模型（Three-Axis Model）**    | TUI 设计的正交分类框架：入口（UI 挂载位置）× 交互模式 × 实现策略，取代按场景一维列表。详见 `docs/adr/0020-tui-interaction-model.md`。 |
+| **交互模式（Interaction Pattern）** | TUI overlay 的交互形态，四类：只读展示、导航选择、表单编辑、确认菜单。                                                                |
+| **master-detail 导航**              | 导航选择类 overlay 的强制两级结构：一级列表选中 → 二级详情/操作；一级列表必带滚动上限。                                               |
+| **滚动视口（Scroll Viewport）**     | 列表类 overlay 的最大可视行数 + 滚动切片，防止内容随数据量线性撑高。                                                                  |
+| **实现策略（Rendering Strategy）**  | 渲染方式：手绘字符串（render 拼行）vs 组件化（Container 组件树）。正交于入口与交互模式。                                              |
+| **Focusable**                       | 横切能力（`focused: boolean` + `CURSOR_MARKER` 硬件光标定位），手绘与组件化均可选加，非分类维度。                                     |
+
 ## Cloud Sessions
 
 | 术语                 | 定义                                                                                                                                                                                                     |
@@ -168,16 +179,17 @@ pi-lab 是**纯基础设施**——提供测量、存储、统计分析。**不�
 
 ## pi-worktree 隔离开发
 
-| 术语                                     | 定义                                                                                                                                                                   |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Worktree / 工作区**                    | git worktree 创建的独立工作目录：共享同一仓库历史与远端，各自持有独立分支与文件状态（git 原生概念）                                                                    |
-| **Main Checkout / 主仓库**               | 仓库的主工作树（默认 clone 目录），不归属任何 worktree。插件以 `ctx.cwd` 是否在受管 worktree 目录下区分身份                                                            |
-| **Managed Worktree / 受管工作区**        | 位于 `<repo>-worktrees/<name>/`（仓库外）且由 pi-worktree 插件管理的工作区；名称来自黄道恒星名池（如 `Aries-Hamal`），分支 `wt/<name>`                                 |
-| **Session Switch / 会话切换**            | 通过 `ctx.switchSession()` 将 Pi 会话替换到目标 cwd 的会话文件，使工具层根目录（bash/read/write/edit）变为 worktree 路径的硬约束机制                                   |
-| **Worktree-Local Rebase / 工作区内变基** | git 约束：不能 rebase 一个正被其他 worktree checkout 的分支，因此变基必须在持有该分支的 worktree 目录内执行。plain `rebase` 与 `rebase-ff` 均遵循此约束                |
-| **Merge Strategy / 收尾合并策略**        | worktree 分支合回主分支的三种方式：`merge`（保留拓扑的 merge commit）、`squash`（压成单提交、线性）、`rebase-ff`（先工作区内变基再 fast-forward，线性无 merge commit） |
-| **Rebase-FF / 变基快进**                 | 收尾合并策略之一：在 worktree 目录内把分支变基到 origin/main，再在主仓库 fast-forward 合并——保证主干历史完全线性干净                                                   |
-| **受管目录外 / Unmanaged**               | 不在 `<repo>-worktrees/` 下的 git worktree（如 pi-dynamic-workflows 的 `.pi/worktrees/`、手动 add 的），插件不识别、不管理                                             |
+| 术语                                     | 定义                                                                                                                                                                                                        |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Worktree / 工作区**                    | git worktree 创建的独立工作目录：共享同一仓库历史与远端，各自持有独立分支与文件状态（git 原生概念）                                                                                                         |
+| **Main Checkout / 主仓库**               | 仓库的主工作树（默认 clone 目录），不归属任何 worktree。插件以 `ctx.cwd` 是否在受管 worktree 目录下区分身份                                                                                                 |
+| **Managed Worktree / 受管工作区**        | 位于 `<repo>-worktrees/<name>/`（仓库外）且由 pi-worktree 插件管理的工作区；名称来自黄道恒星名池（如 `Aries-Hamal`），分支 `wt/<name>`                                                                      |
+| **Session Switch / 会话切换**            | 通过 `ctx.switchSession()` 将 Pi 会话替换到目标 cwd 的会话文件，使工具层根目录（bash/read/write/edit）变为 worktree 路径的硬约束机制                                                                        |
+| **Worktree-Local Rebase / 工作区内变基** | git 约束：不能 rebase 一个正被其他 worktree checkout 的分支，因此变基必须在持有该分支的 worktree 目录内执行。plain `rebase` 与 `rebase-ff` 均遵循此约束                                                     |
+| **Merge Strategy / 收尾合并策略**        | worktree 分支合回主分支的三种方式：`merge`（保留拓扑的 merge commit）、`squash`（压成单提交、线性）、`rebase-ff`（先工作区内变基再 fast-forward，线性无 merge commit）                                      |
+| **Rebase-FF / 变基快进**                 | 收尾合并策略之一：在 worktree 目录内把分支变基到 origin/main，再在主仓库 fast-forward 合并——保证主干历史完全线性干净                                                                                        |
+| **受管目录外 / Unmanaged**               | 不在 `<repo>-worktrees/` 下的 git worktree（如 pi-dynamic-workflows 的 `.pi/worktrees/`、手动 add 的），插件不识别、不管理                                                                                  |
+| **Worktree Skill / worktree 技能**       | 面向 agent（模型）而非终端用户的 worktree 工作流编排指南：教 agent 何时启用 worktree 隔离开发、如何按 create→开发→sync/rebase→merge→clean 生命周期编排，并内置安全护栏（不做远端操作、警惕 print 模式删除） |
 
 ### pi-worktree 职责边界（2026-08-17 确认）
 
@@ -191,3 +203,10 @@ pi-worktree 是**本地 git 工作区生命周期管理**工具。**不做远端
 | **push / 远端发布** | **用户** | 合并成功后插件只提示，不执行 `git push`（认证/权限/远端策略属用户决策域）                                            |
 
 **决策归属**：远端发布（push、PR 创建、远程分支管理）由用户自己完成。插件不自动推、不强推，不在命令中隐含远端副作用。
+
+## Skill 打包与分发
+
+| 术语                          | 定义                                                                                                                                                           |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Embedded Skill / 内嵌技能** | 放置在扩展目录 `skills/` 子目录下、由扩展根 `package.json` 的 `pi.skills` 字段声明、随扩展一起同步分发的 agent 技能（区别于独立存放在 `skills/` 顶层的技能）。 |
+| **pi manifest**               | 扩展根 `package.json` 中的 `pi` 字段，声明扩展入口（`pi.extensions`）与内嵌技能（`pi.skills`），为将来 npm 包化分发做准备。                                    |

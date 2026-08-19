@@ -14,6 +14,10 @@ openspec/
 scripts/sync-to-local-pi.log
 
 .worktrees/
+
+# 本地 linked worktree（如 wt/Virgo-Spica，分支 wt/tui-design）
+wt/
+
 **/dist/
 
 # 临时设计/规划产物

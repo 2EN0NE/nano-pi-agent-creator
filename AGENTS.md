@@ -183,7 +183,7 @@ log.error('错误');
 > 这会从 `extensions/pi-logger/` 通过 `file:` 协议安装到 `node_modules/` 下，
 > 使得 jiti（pi 的扩展加载器）可以解析 `import { createLogger } from "@zenone/pi-logger"`。
 
-日志输出由 pi-logger 的配置文件统一管控（`pi-logger.json`），扩展本身无需关心输出目的地和级别过滤。详细说明见 [skills/pi-logger/SKILL.md](skills/pi-logger/SKILL.md)
+日志输出由 pi-logger 的配置文件统一管控（`pi-logger.json`），扩展本身无需关心输出目的地和级别过滤。详细说明见 [pi-logger 内嵌技能](extensions/meta/pi-logger/skills/pi-logger/SKILL.md)
 
 ### 扩展的配置文件设计
 
@@ -241,6 +241,30 @@ store.reload();
 > ⚠️ **pi-logger 例外**：pi-logger 是其他扩展依赖的基础设施，为避免循环依赖，保留自身配置加载机制，但搜索路径已对齐到标准 `extensions-data/pi-logger/config.json`。
 
 详细 API 说明见 [`extensions/meta/pi-config/README.md`](extensions/meta/pi-config/README.md)。
+
+### 扩展的内嵌 skill 约定
+
+扩展可以自带 agent 技能（skill），使"技能跟着插件走"（ADR-0022）。约定：
+
+- **位置**：技能放在扩展目录的 `skills/<skillName>/SKILL.md` 子目录下。
+- **声明**：扩展根 `package.json` 必须有 `pi` manifest，用 `pi.skills` 声明内嵌技能目录、`pi.extensions` 声明扩展入口（为将来 npm 包化分发做准备）：
+
+```json
+{
+	"name": "my-extension",
+	"type": "module",
+	"pi": {
+		"extensions": ["./index.ts"],
+		"skills": ["./skills"]
+	}
+}
+```
+
+- **发现**：sync 工具同步扩展时，自动读取 `pi.skills`，把声明目录下每个含 `SKILL.md` 的子目录作为内嵌技能同步到目标 `skills/` 目录——**无需在 sync-profiles.yaml 的 skills 列表中再列一遍**（内嵌技能随扩展走：扩展属于哪个 profile，技能就同步到哪个 profile）。
+- **命名**：内嵌技能名 = 目录名（与官方 package 语义一致）。若与 `skills/` 顶层的同名技能冲突，sync 工具 fail-fast 报错，不静默覆盖。
+- **受众**：内嵌技能面向 agent（模型），教 agent 何时/如何使用该扩展，而非面向终端用户的安装/配置说明。
+
+> 现状：`pi-logger` 已迁移为内嵌技能；`e2e-test` 是纯技能（无对应扩展），留在 `skills/tooling/` 不变。
 
 ### 扩展的快捷键设计
 
@@ -432,6 +456,17 @@ export default function (pi: ExtensionAPI) {
 #### 完整 TUI 设计规范
 
 完整的设计规范、颜色使用、键盘交互、边框布局和 TUI 测试方法见 [`docs/tui-design-principles.md`](docs/tui-design-principles.md)。开发扩展 TUI 前请先阅读。
+
+#### 交互模式规范 【强制】
+
+TUI 设计按三轴正交分类，详见 [`docs/tui-interaction-patterns.md`](docs/tui-interaction-patterns.md)：
+
+1. **先选入口**：`setStatus`（状态栏）/ `setWidget`（常驻面板）/ `custom`（临时覆盖层）/ `setHeader`/`setFooter`（慎用）。
+2. **再定交互模式**：只读展示 / 导航选择 / 表单编辑 / 确认菜单，四选一。
+3. **导航选择强制 master-detail 两级导航**：一级列表（选中 → 二级详情/操作），**一级列表必带滚动上限**。禁止把操作菜单与导航列表拍平在同一级。
+4. **实现策略**：规则选择 → 组件化（`Container`/`SelectList`）；不规则复杂布局 → 手绘 `render()`。`Focusable` 是横切能力（硬件光标定位），非分类维度。
+
+> 反例警示：pi-lab 面板曾把「选实验」和「选操作」拍平为每实验内嵌一个 SelectList，导致高度膨胀 + 焦点失效。开发前先读该文档第 6 节反模式清单。
 
 ### TUI 测试强制要求 【强制】
 
@@ -751,11 +786,16 @@ npx tsx scripts/sync-to-local-pi.ts
 npx tsx scripts/sync-to-local-pi.ts --profile user-install
 npx tsx scripts/sync-to-local-pi.ts --profile project
 
-# 开发中快速测试（内联模式）
+# 开发中快速测试（内联模式，只同步不删除）
 npx tsx scripts/sync-to-local-pi.ts --ext foo --target ./.pi/test
 
 # 预览所有 profile 的变更
 npx tsx scripts/sync-to-local-pi.ts --dry-run
 ```
+
+> ⚠️ **安全约束**：`--target` 内联模式**只允许指向隔离测试目录**（如 `./.pi/test`），
+> 禁止指向 `~/.pi/agent` 等真实用户目录——同步到用户目录一律使用 `--profile user-install`。
+> sync 工具**默认从不删除**目标中任何文件；如需显式清空目标中不属于本次同步的资源，
+> 必须加 `--purge` 参数（每次使用 `--target` 或 `--purge` 时控制台与日志都会输出 `WARN` 警告）。
 
 详细用法参考 [docs/sync-tool.md](docs/sync-tool.md)。
