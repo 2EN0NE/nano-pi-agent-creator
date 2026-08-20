@@ -82,7 +82,10 @@ extract_viewport_snapshots() {
 tui_output_contains() {
 	local file="$1"
 	local keyword="$2"
-	extract_visible_text "$file" | grep -qF "$keyword"
+	# 不用 grep -qF：-q 命中即退出会让上游（extract_visible_text 末尾的 cat）
+	# 在 pipefail 下收到 SIGPIPE（exit 141），使管道整体非零，测试误判 FAIL。
+	# grep 读完全部输入（-F + 重定向）则上游正常收尾。
+	extract_visible_text "$file" | grep -F "$keyword" >/dev/null 2>&1
 }
 
 # 在 TUI 视口输出中用正则搜索
@@ -92,7 +95,7 @@ tui_output_contains() {
 tui_output_matches() {
 	local file="$1"
 	local pattern="$2"
-	extract_visible_text "$file" | grep -qE "$pattern"
+	extract_visible_text "$file" | grep -E "$pattern" >/dev/null 2>&1
 }
 
 # 获取匹配关键字的行数
