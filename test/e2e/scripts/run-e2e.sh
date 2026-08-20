@@ -18,6 +18,15 @@
 
 set -euo pipefail
 
+# ── git ident 环境变量 ──
+# /tmp 沙箱仓库的 commit，以及 pi 进程内（HOME 被隔离）的 rebase/merge，
+# 都需要明确的 user 身份。runner 无全局 user，且 pi 的 HOME 隔离使
+# `git config --global` 不可见；环境变量优先级高于配置文件，对两者都生效。
+export GIT_AUTHOR_NAME="CI Bot"
+export GIT_AUTHOR_EMAIL="ci@nano-pi-agent-creator.invalid"
+export GIT_COMMITTER_NAME="CI Bot"
+export GIT_COMMITTER_EMAIL="ci@nano-pi-agent-creator.invalid"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TEST_DIR="$ROOT_DIR/test/e2e"
 RESULTS_DIR="$ROOT_DIR/test/results"
