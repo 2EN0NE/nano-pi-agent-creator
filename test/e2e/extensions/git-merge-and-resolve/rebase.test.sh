@@ -10,6 +10,13 @@
 # ─────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# 统一注入 git 提交身份（环境变量无条件覆盖，与 test/README.md「Git Ident 注入约定」一致）。
+# 本脚本独立于 run-e2e.sh 运行，需自行注入；环境变量优先级高于 git config，且不依赖 HOME。
+export GIT_AUTHOR_NAME="CI Bot"
+export GIT_AUTHOR_EMAIL="ci@nano-pi-agent-creator.invalid"
+export GIT_COMMITTER_NAME="CI Bot"
+export GIT_COMMITTER_EMAIL="ci@nano-pi-agent-creator.invalid"
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TMP_ROOT="${TMPDIR:-/tmp}/git-merge-resolve-e2e-$$"
 PASS=0
@@ -32,8 +39,6 @@ setup_repo() {
 	mkdir -p "$repo"
 	cd "$repo"
 	git init -q
-	git config user.email "test@e2e.local"
-	git config user.name "E2E Test"
 
 	echo "base" >file.txt
 	git add file.txt

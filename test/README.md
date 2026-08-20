@@ -148,6 +148,23 @@ test_it "loads without errors" <<'TEST'
 TEST
 ```
 
+## Git Ident 注入约定
+
+测试沙箱里的 `git commit` / `rebase` / `merge` 需要明确的 user 身份。统一约定：**只用环境变量无条件覆盖**，禁止在测试里写 `git config user.name/email`（local 或 global）。
+
+**根因**：e2e 测试给 pi 进程隔离 HOME（`HOME="$isolated_home"`），`git config --global` 写在真实 `~/.gitconfig` 里、对隔离 HOME 的进程不可见 → `empty ident`。而 `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` 这四个环境变量优先级高于 git config、且不依赖 HOME，能穿透隔离，对 bash 脚本、node 进程、被隔离 HOME 的 pi 进程统一生效。
+
+**两个注入点**：
+
+| 层          | 注入点                           | 方式                                                                    |
+| ----------- | -------------------------------- | ----------------------------------------------------------------------- |
+| e2e（bash） | `test/e2e/scripts/run-e2e.sh`    | 顶层 `export GIT_*`（无条件覆盖）                                       |
+| vitest      | `test/vitest/setup/git-ident.ts` | `process.env.GIT_* = ...`（经 `vitest.config.ts` 的 `setupFiles` 加载） |
+
+**统一身份值**：`CI Bot <ci@nano-pi-agent-creator.invalid>`（`.invalid` 是 RFC 2606 保留域名，声明非真实邮箱）。
+
+**写测试时**：直接 `git commit`，不要 `git config user.*`，也不要给 `execSync`/`spawnSync` 传 `env: {...GIT_*...}`——环境变量已由注入点统一提供。
+
 ## TUI 模式测试
 
 所有 TUI e2e 测试统一使用 **expect** 作为 PTY 后端。

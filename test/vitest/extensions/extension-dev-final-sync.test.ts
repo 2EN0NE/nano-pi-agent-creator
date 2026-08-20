@@ -114,10 +114,8 @@ describe('extension-dev-final-sync full flow', () => {
 			useMockLLM: true,
 		});
 
-		// 1. 初始化 git repo
+		// 1. 初始化 git repo（git 身份由 setupFiles 的 GIT_* 环境变量统一注入）
 		safeGit(['init', '--initial-branch', 'main'], projectSandbox);
-		safeGit(['config', 'user.email', 'test@test.com'], projectSandbox);
-		safeGit(['config', 'user.name', 'Tester'], projectSandbox);
 
 		// 2. 创建 extensions/ 源目录
 		mkdirDir(join(projectSandbox, 'extensions', 'auto'));

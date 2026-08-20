@@ -28,7 +28,6 @@ function createGitRepo(basedir: string, name: string): string {
 	const repoDir = join(basedir, name);
 	mkdirSync(repoDir, { recursive: true });
 	execSync('git init --initial-branch main -q', { cwd: repoDir });
-	execSync('git config user.name "test" && git config user.email "test@test"', { cwd: repoDir });
 	writeFileSync(join(repoDir, 'README.md'), `# ${name}\n`);
 	execSync('git add README.md && git commit -m init -q', { cwd: repoDir });
 	return repoDir;
@@ -38,13 +37,6 @@ function gitCommit(repoDir: string, file: string, content: string): void {
 	writeFileSync(join(repoDir, file), content);
 	execSync(`git add ${file} && git commit -m "update ${file}" -q`, {
 		cwd: repoDir,
-		env: {
-			...process.env,
-			GIT_AUTHOR_NAME: 'test',
-			GIT_AUTHOR_EMAIL: 'test@test',
-			GIT_COMMITTER_NAME: 'test',
-			GIT_COMMITTER_EMAIL: 'test@test',
-		},
 	});
 }
 
@@ -118,13 +110,6 @@ describe('worktree execMerge', () => {
 		writeFileSync(join(repoDir, 'conflict.txt'), 'common base line 1\ncommon base line 2\n');
 		execSync('git add conflict.txt && git commit -m "add conflict.txt base" -q', {
 			cwd: repoDir,
-			env: {
-				...process.env,
-				GIT_AUTHOR_NAME: 'test',
-				GIT_AUTHOR_EMAIL: 'test@test',
-				GIT_COMMITTER_NAME: 'test',
-				GIT_COMMITTER_EMAIL: 'test@test',
-			},
 		});
 
 		// Branch A: modify line 1
@@ -219,13 +204,6 @@ describe('worktree execMerge', () => {
 		writeFileSync(join(repoDir, 'squash-conflict.txt'), 'base line\n');
 		execSync('git add squash-conflict.txt && git commit -m "add squash-conflict base" -q', {
 			cwd: repoDir,
-			env: {
-				...process.env,
-				GIT_AUTHOR_NAME: 'test',
-				GIT_AUTHOR_EMAIL: 'test@test',
-				GIT_COMMITTER_NAME: 'test',
-				GIT_COMMITTER_EMAIL: 'test@test',
-			},
 		});
 
 		// Branch A: modify base file
@@ -333,13 +311,6 @@ describe('worktree execRebase (worktree-local)', () => {
 		writeFileSync(join(repoDir, 'rebase-conflict.txt'), 'common base\n');
 		execSync('git add rebase-conflict.txt && git commit -m "add rebase-conflict base" -q', {
 			cwd: repoDir,
-			env: {
-				...process.env,
-				GIT_AUTHOR_NAME: 'test',
-				GIT_AUTHOR_EMAIL: 'test@test',
-				GIT_COMMITTER_NAME: 'test',
-				GIT_COMMITTER_EMAIL: 'test@test',
-			},
 		});
 
 		// worktree 分支：version A
@@ -398,13 +369,6 @@ describe('worktree execRebase (worktree-local)', () => {
 		writeFileSync(join(repoDir, 'paused-conflict.txt'), 'base\n');
 		execSync('git add paused-conflict.txt && git commit -m "paused base" -q', {
 			cwd: repoDir,
-			env: {
-				...process.env,
-				GIT_AUTHOR_NAME: 'test',
-				GIT_AUTHOR_EMAIL: 'test@test',
-				GIT_COMMITTER_NAME: 'test',
-				GIT_COMMITTER_EMAIL: 'test@test',
-			},
 		});
 		gitCreateBranch(repoDir, 'wt/PausedA');
 		writeFileSync(join(repoDir, 'paused-conflict.txt'), 'version A\n');
@@ -448,13 +412,6 @@ describe('worktree execRebase (worktree-local)', () => {
 		writeFileSync(join(repoDir, 'handler-paused.txt'), 'base\n');
 		execSync('git add handler-paused.txt && git commit -m "handler paused base" -q', {
 			cwd: repoDir,
-			env: {
-				...process.env,
-				GIT_AUTHOR_NAME: 'test',
-				GIT_AUTHOR_EMAIL: 'test@test',
-				GIT_COMMITTER_NAME: 'test',
-				GIT_COMMITTER_EMAIL: 'test@test',
-			},
 		});
 		gitCreateBranch(repoDir, 'wt/HandlerPaused');
 		writeFileSync(join(repoDir, 'handler-paused.txt'), 'version A\n');
@@ -596,13 +553,6 @@ describe('worktree execRebaseFF', () => {
 		writeFileSync(join(repoDir, 'rff-conflict.txt'), 'common base\n');
 		execSync('git add rff-conflict.txt && git commit -m "add rff-conflict base" -q', {
 			cwd: repoDir,
-			env: {
-				...process.env,
-				GIT_AUTHOR_NAME: 'test',
-				GIT_AUTHOR_EMAIL: 'test@test',
-				GIT_COMMITTER_NAME: 'test',
-				GIT_COMMITTER_EMAIL: 'test@test',
-			},
 		});
 
 		// Branch A: modify
@@ -737,13 +687,6 @@ describe('worktree git helpers', () => {
 		writeFileSync(join(bareDir, 'f.txt'), 'f');
 		execSync('git add f.txt && git commit -m init -q', {
 			cwd: bareDir,
-			env: {
-				...process.env,
-				GIT_AUTHOR_NAME: 'test',
-				GIT_AUTHOR_EMAIL: 'test@test',
-				GIT_COMMITTER_NAME: 'test',
-				GIT_COMMITTER_EMAIL: 'test@test',
-			},
 		});
 
 		// 没有 remote 时，getDefaultBranch 检查 origin/HEAD 和 origin/main
@@ -883,13 +826,6 @@ describe('worktree stars name pool', () => {
 		writeFileSync(join(repoDir, 'README.md'), '# pick\n');
 		execSync('git add README.md && git commit -m init -q', {
 			cwd: repoDir,
-			env: {
-				...process.env,
-				GIT_AUTHOR_NAME: 'test',
-				GIT_AUTHOR_EMAIL: 'test@test',
-				GIT_COMMITTER_NAME: 'test',
-				GIT_COMMITTER_EMAIL: 'test@test',
-			},
 		});
 
 		const name1 = pickAvailableName(repoDir);

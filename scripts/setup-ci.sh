@@ -21,14 +21,11 @@ echo "npm:  $(npm -v)"
 echo "cwd:  $(pwd)"
 echo "arch: $(uname -m)"
 
-# ── 1.5. git 身份配置（/tmp 下 sandbox 仓库的 commit 需要；runner 无全局 user）──
+# ── 1.5. git 默认分支（裸 `git init` 的测试脚本 checkout main 依赖；runner 默认可能是 master）──
 echo ""
-echo "--- Configuring git identity (for sandbox repo commits) ---"
-git config --global user.email "ci@nano-pi-agent-creator.invalid"
-git config --global user.name "CI Bot"
+echo "--- Configuring git default branch ---"
 git config --global init.defaultBranch main
-echo "  user.name:  $(git config --global user.name)"
-echo "  user.email: $(git config --global user.email)"
+echo "  init.defaultBranch: $(git config --global init.defaultBranch)"
 
 # ── 2. 验证项目 node_modules/@zenone ──
 echo ""

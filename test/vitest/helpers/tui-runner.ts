@@ -142,13 +142,6 @@ export class TuiRunner {
 			execSync('git commit -m init -q', {
 				cwd: this.sandbox,
 				timeout: 5000,
-				env: {
-					...process.env,
-					GIT_AUTHOR_NAME: 'test',
-					GIT_AUTHOR_EMAIL: 'test@test',
-					GIT_COMMITTER_NAME: 'test',
-					GIT_COMMITTER_EMAIL: 'test@test',
-				},
 			});
 		} catch {
 			// Git init 失败不阻止测试继续

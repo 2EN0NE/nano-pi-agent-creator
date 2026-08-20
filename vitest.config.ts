@@ -4,6 +4,8 @@ export default defineConfig({
 	test: {
 		include: ['test/vitest/**/*.test.ts'],
 		exclude: ['**/node_modules/**', '**/.pi/**', '**/results/**'],
+		// 统一注入测试 git 提交身份（见 test/README.md「Git Ident 注入约定」）
+		setupFiles: ['test/vitest/setup/git-ident.ts'],
 		// e2e 测试可能耗时较长
 		testTimeout: 60_000,
 		hookTimeout: 60_000,

@@ -55,14 +55,10 @@ describe('worktree extension — sandbox loading', () => {
 		});
 		isolatedHome = resolve(sandbox, 'home');
 
-		// 在沙箱 HOME 下创建 git 仓库（CI 无全局 git config，需内联设置）
+		// 在沙箱 HOME 下创建 git 仓库（git 身份由 setupFiles 的 GIT_* 环境变量统一注入）
 		repoDir = join(isolatedHome, 'test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir, encoding: 'utf-8' });
-		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
-			cwd: repoDir,
-			encoding: 'utf-8',
-		});
 		writeFileSync(join(repoDir, 'README.md'), '# Test\n');
 		execSync('git add README.md && git commit -m init', {
 			cwd: repoDir,
@@ -111,10 +107,6 @@ describe('worktree extension — getRepoRoot (real git)', () => {
 		repoDir = join(isolatedHome, 'integration-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
-		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
-			cwd: repoDir,
-			encoding: 'utf-8',
-		});
 		writeFileSync(join(repoDir, 'a.txt'), 'a');
 		execSync('git add a.txt && git commit -m init', { cwd: repoDir });
 	});
@@ -159,10 +151,6 @@ describe('worktree extension — create/delete (real git)', () => {
 		repoDir = join(isolatedHome, 'wt-test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
-		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
-			cwd: repoDir,
-			encoding: 'utf-8',
-		});
 		writeFileSync(join(repoDir, 'README.md'), '# WT Test\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 
@@ -309,10 +297,6 @@ describe('worktree extension — dirty/force/multiple', () => {
 		repoDir = join(isolatedHome, 'dirty-test');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
-		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
-			cwd: repoDir,
-			encoding: 'utf-8',
-		});
 		writeFileSync(join(repoDir, 'README.md'), '# Dirty\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 	});
@@ -379,10 +363,6 @@ describe('worktree extension — session file creation', () => {
 		repoDir = join(isolatedHome, 'session-test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
-		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
-			cwd: repoDir,
-			encoding: 'utf-8',
-		});
 		writeFileSync(join(repoDir, 'README.md'), '# Session test\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 
@@ -781,10 +761,6 @@ describe('worktree extension — fork history', () => {
 		repoDir = join(isolatedHome, 'fork-test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
-		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
-			cwd: repoDir,
-			encoding: 'utf-8',
-		});
 		writeFileSync(join(repoDir, 'README.md'), '# Fork test\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 
@@ -1171,10 +1147,6 @@ describe('worktree extension — delete leave choice', () => {
 		repoDir = join(isolatedHome, 'delete-test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
-		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
-			cwd: repoDir,
-			encoding: 'utf-8',
-		});
 		writeFileSync(join(repoDir, 'README.md'), '# Delete test\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 		execSync('git worktree add -b wt/delete-wt ../delete-test-repo-worktrees/delete-wt main', {
@@ -1254,10 +1226,6 @@ describe('worktree extension — prune', () => {
 		repoDir = join(isolatedHome, 'prune-test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
-		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
-			cwd: repoDir,
-			encoding: 'utf-8',
-		});
 		writeFileSync(join(repoDir, 'README.md'), '# Prune test\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 		execSync('git worktree add -b wt/prune-wt ../prune-test-repo-worktrees/prune-wt main', {
@@ -1344,10 +1312,6 @@ describe('worktree extension — create with clone strategy', () => {
 		repoDir = join(isolatedHome, 'clone-create-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
-		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
-			cwd: repoDir,
-			encoding: 'utf-8',
-		});
 		writeFileSync(join(repoDir, 'README.md'), '# Clone create test\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 
@@ -1464,10 +1428,6 @@ describe('worktree extension — external worktrees (inside repo, e.g. wt/)', ()
 		repoDir = join(isolatedHome, 'ext-wt-test-repo');
 		mkdirSync(repoDir, { recursive: true });
 		execSync('git init --initial-branch main', { cwd: repoDir });
-		execSync('git config user.name "CI Test" && git config user.email "ci@test.local"', {
-			cwd: repoDir,
-			encoding: 'utf-8',
-		});
 		writeFileSync(join(repoDir, 'README.md'), '# Ext WT Test\n');
 		execSync('git add README.md && git commit -m init', { cwd: repoDir });
 	});
