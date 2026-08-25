@@ -32,6 +32,13 @@ pi-lab 是**纯基础设施**——提供测量、存储、统计分析。**不�
 
 **决策归属**：smart-context（或其他消费方）根据 `query()` 返回的分析结论，自己判断是否切换 arm、什么时候切换、按哪个指标判断。pi-lab 不替插件做决策。
 
+### 实验方法论（2026-02 确认）
+
+| 术语                              | 定义                                                                                                                                                                               |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A/A Self-check / AA 自检**      | 验证分流/测量/模型无偏的内置能力：假臂对照（两臂指向同一实现，跑一段看胜出概率是否 ~50/50）+ SRM 检查（实际两臂样本量是否偏离 1:1）。贝叶斯形式为后验校准（AA 后验应收敛到无差异） |
+| **Capability Variant / 能力变体** | A/B 实验臂的一般形态——能力的参数/策略变体（工具集切 or 参数切），区别于「扩展开关」（装/卸扩展是环境级变更、非会话内变体，排除在 pi-lab 之外）                                     |
+
 ### Metric 定义
 
 | 术语                          | 定义                                                                                                                                      |
@@ -45,10 +52,20 @@ pi-lab 是**纯基础设施**——提供测量、存储、统计分析。**不�
 
 ### 信号采集
 
-| 术语                            | 定义                                                                                                                                                                     |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Ingestion Source / 信号入口** | 产生实验事件的三条通道：① `record()` API 同步直报；② 会话树 TAG（插件主动打标 / 规则自动打标，经 pi-session-tree 接口读取，直接读会话文件兜底）；③ pi-log 结构化日志解析 |
-| **Signal Adapter / 信号适配器** | 把各信号入口的原始格式（label 字符串、日志行）解析成统一 Event 的解析器。TAG 与日志两个标准 adapter 内建，另开放 `registerIngestionSource(name, extractor)` 扩展点       |
+| 术语                                   | 定义                                                                                                                                                                                                                                                      |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Ingestion Source / 信号入口**        | 产生实验事件的四条通道：① `record()` API 同步直报；② 会话树 TAG（插件主动打标 / 规则自动打标，经 pi-session-tree 接口读取，直接读会话文件兜底）；③ pi-log 结构化日志解析（`[pi-lab-signal]` 行）；④ 被动信号源（订阅 pi-logger `log` 总线，免消费方埋点） |
+| **Signal Adapter / 信号适配器**        | 把各信号入口的原始格式（label 字符串、日志行、lifecycle 事件）解析成统一 Event 的解析器。TAG、日志、lifecycle 三个标准 adapter 内建，另开放 `registerIngestionSource(name, extractor)` 扩展点                                                             |
+| **Passive Signal Source / 被动信号源** | pi-lab 内建信号源的**总称**，下辖两类：生命周期信号（push）与行为信号（pull）。形态为点对点（采集 → ingest），不对外广播——多组件订阅能力由 pi-logger `log` 总线本身承担                                                                                   |
+| **Lifecycle Signal / 生命周期信号**    | 被动信号源之一。pi 原生执行事件（tool/message/turn/agent/session，统称 lifecycle）的投影（isError、duration、usage），**push 语义**（事件发生即 emit）。由 pi-logger 结构化（`__lifecycle__` details），pi-lab 内建适配器采集；通用、无实验语义           |
+| **Behavioral Signal / 行为信号**       | 被动信号源之一。从会话树结构与用户行为推断的指标（回退、纠正、重复修改），**pull 语义**（turn_end 主动检测）。由 pi-session-tree 出基础原语、各插件实现领域语义                                                                                           |
+
+### 信号归因
+
+| 术语                                     | 定义                                                                                                                   |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Turn-level Attribution / turn 级归因** | 被动信号按 turn 聚合，归因到该 turn 内活跃实验的活跃臂（实验 `select` 时登记，`turn_end` flush）                       |
+| **Shared Observation / 共享观测**        | token 等全局指标属 turn 级观测，被多个活跃实验共享（允许跨实验重复归因），以 `metadata.turnId` 作观测键供未来去重/聚合 |
 
 ### 存储
 
@@ -84,16 +101,18 @@ pi-lab 是**纯基础设施**——提供测量、存储、统计分析。**不�
 
 ## pi-session-tree 会话树查询服务
 
-| 术语                                | 定义                                                                                                                                                           |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Session Tree / 会话树**           | Pi 的 `SessionManager` 以 append-only tree 结构管理会话历史——每个 entry 有 id/parentId/timestamp，支持分支、回滚。pi-session-tree 封装此原始树为可查询的接口。 |
-| **SessionTreeNode / 会话树节点**    | pi-session-tree 的自有抽象，封装 Pi 原生 SessionEntry 并附加计算字段（depth, branchIndex），隔离 Pi 版本变化。                                                 |
-| **Tree Query Service / 树查询服务** | pi-session-tree 的核心定位——提供 8 类查询（节点、路径、结构、聚合、内容、窗口、标注、快照），不包含业务决策逻辑。                                              |
-| **Path / 路径**                     | 从根节点到某个节点的链（祖先链）。核心查询包括 pathToLeaf()、pathBetween()、distance()、LCA()。                                                                |
-| **Branch / 分支**                   | 当用户从某个 entry 回滚并发送新 prompt 时，该 entry 获得多个子节点形成分支。branchCount() 统计分叉点数。                                                       |
-| **Tree Complexity / 会话复杂度**    | 基于 branchCount × maxDepth × compactionCount 的加权综合指标，供应用层判断是否需要切换复杂模型。                                                               |
-| **Annotation / 标注**               | pi-session-tree 通过 `Pi.appendEntry()` 将计算结果（如复杂度分、上下文快照）以 CustomEntry 写回会话树，跨 `/reload` 持久化。                                   |
-| **Snapshot / 快照**                 | 轻量快照（leafId + entry 计数），供 diff() 检测自上次查询以来的增量变化。                                                                                      |
+| 术语                                | 定义                                                                                                                                                                        |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Session Tree / 会话树**           | Pi 的 `SessionManager` 以 append-only tree 结构管理会话历史——每个 entry 有 id/parentId/timestamp，支持分支、回滚。pi-session-tree 封装此原始树为可查询的接口。              |
+| **SessionTreeNode / 会话树节点**    | pi-session-tree 的自有抽象，封装 Pi 原生 SessionEntry 并附加计算字段（depth, branchIndex），隔离 Pi 版本变化。                                                              |
+| **Tree Query Service / 树查询服务** | pi-session-tree 的核心定位——提供 8 类查询（节点、路径、结构、聚合、内容、窗口、标注、快照），不包含业务决策逻辑。                                                           |
+| **Path / 路径**                     | 从根节点到某个节点的链（祖先链）。核心查询包括 pathToLeaf()、pathBetween()、distance()、LCA()。                                                                             |
+| **Branch / 分支**                   | 当用户从某个 entry 回滚并发送新 prompt 时，该 entry 获得多个子节点形成分支。branchCount() 统计分叉点数。                                                                    |
+| **Tree Complexity / 会话复杂度**    | 基于 branchCount × maxDepth × compactionCount 的加权综合指标，供应用层判断是否需要切换复杂模型。                                                                            |
+| **Annotation / 标注**               | pi-session-tree 通过 `Pi.appendEntry()` 将计算结果（如复杂度分、上下文快照）以 CustomEntry 写回会话树，跨 `/reload` 持久化。                                                |
+| **Snapshot / 快照**                 | 轻量快照（leafId + entry 计数），供 diff() 检测自上次查询以来的增量变化。                                                                                                   |
+| **Primitive / 基础原语**            | pi-session-tree 提供的稳定、通用、无实验语义的会话树结构查询（`isDescendant`/`detectDiverge`/`pathToLeaf`/`analyzeComplexity`）。只回答「树结构客观是什么」，不解释实验含义 |
+| **Domain Signal / 领域信号**        | 各插件用基础原语自实现、带实验语义的信号检测（如 `detectRollback = detectDiverge(anchor) → satisfaction=0`）。归插件所有，pi-session-tree 不提供                            |
 
 ### pi-session-tree TUI 渲染层
 

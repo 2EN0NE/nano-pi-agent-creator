@@ -5,8 +5,11 @@
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-# Debug: check if GIT_INDEX_FILE is set
-echo "debug: GIT_INDEX_FILE=${GIT_INDEX_FILE:-<not set>}" >&2
+# git commit 触发 hook 时会设置 GIT_DIR / GIT_INDEX_FILE（指向 worktree 的
+# gitdir/index），这些环境变量会泄漏到 lint-staged 与 npm test 的子进程，
+# 让测试里的 git 操作作用到本仓库（而非 sandbox），污染 index（表现为大量
+# 文件被误删/误增）。在最前面清除，确保后续 git 命令都使用默认仓库。
+unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_PREFIX
 
 # ── 1. 增量 auto-fix ──
 npm run lint:staged
@@ -19,10 +22,11 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# ── 3. 单元测试（清除 GIT_INDEX_FILE 避免干扰 git 操作）──
+# ── 3. 单元测试 ──
 echo "🔍 pre-commit: vitest..."
-unset GIT_INDEX_FILE
-npm test
+# worktree* 测试执行真实 git 操作（worktree/merge/rebase），与 git commit 环境
+# 冲突（不稳定失败）；这些测试仍由 CI 与 pre-push 覆盖。
+npm test -- --exclude '**/worktree*.test.ts'
 if [ $? -ne 0 ]; then
   echo "❌ Unit tests failed. Fix before committing."
   exit 1

@@ -25,6 +25,7 @@ export class Experiment {
 	private _assignKey: ContextKeyFn<any> | string;
 	private _storage: ExperimentStorage;
 	private _forceArmId: string | null = null;
+	private _isAA: boolean;
 	/** 已摄入的异步信号幂等键（去重，跨 /reload 从事件流重建） */
 	private _dedupKeys = new Set<string>();
 	/** query 结果缓存（事件流变化时失效），避免面板每次 render 重跑蒙特卡洛 */
@@ -37,6 +38,7 @@ export class Experiment {
 		metrics: MetricDef[],
 		contextKey: ContextKeyFn<any> | string,
 		assignKey?: ContextKeyFn<any> | string,
+		isAA?: boolean,
 	) {
 		this._name = name;
 		this._strategy = strategy;
@@ -45,6 +47,7 @@ export class Experiment {
 		this._contextKey = contextKey;
 		// 分流键缺省回退分组键（旧行为：contextKey 兼作分流键）
 		this._assignKey = assignKey ?? contextKey;
+		this._isAA = isAA ?? false;
 		this._storage = new ExperimentStorage(name);
 		// 从已加载事件重建去重集合，保证 /reload 后历史 TAG 不会重复摄入
 		for (const e of this._storage.getEvents()) {
@@ -187,6 +190,7 @@ export class Experiment {
 			arms: this._arms,
 			metrics: this._metrics,
 			forceArmId: this._forceArmId,
+			isAA: this._isAA,
 			loadWarning: this._storage.getLoadWarning(),
 		};
 	}
@@ -207,12 +211,14 @@ export class Experiment {
 		metrics: MetricDef[],
 		contextKey: ContextKeyFn<any> | string,
 		assignKey?: ContextKeyFn<any> | string,
+		isAA?: boolean,
 	): void {
 		this._strategy = strategy;
 		this._arms = arms;
 		this._metrics = metrics;
 		this._contextKey = contextKey;
 		this._assignKey = assignKey ?? contextKey;
+		this._isAA = isAA ?? false;
 		this._forceArmId = null;
 		this._queryCache.clear();
 	}

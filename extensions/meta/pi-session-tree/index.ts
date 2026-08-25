@@ -258,6 +258,12 @@ export interface SessionTreeAPI {
 	// Retry detection
 	detectRetry(fromEntryId: string, toEntryId: string): Promise<RetryResult>;
 
+	// Diverge detection
+	/** anchor 是否在当前 leaf 的祖先链上（含自身）——leaf 仍是 anchor 的后代 */
+	isDescendant(anchorId: string): boolean;
+	/** 当前 leaf 是否偏离 anchor 的祖先链（回退/分叉到其他分支） */
+	detectDiverge(anchorId: string): boolean;
+
 	// Tree access
 	getRootNodes(): TreeNode[];
 	/** 当前 leaf 节点 id（无文本 assistant 跳过规则的例外） */
@@ -742,6 +748,23 @@ export function createSessionTree(sessionManager: {
 				confidence: score,
 				method: 'bm25',
 			};
+		},
+
+		// ── Diverge detection ──────────────────────────────
+
+		/** anchor 是否在当前 leaf 的祖先链上（含自身）——leaf 仍是 anchor 的后代 */
+		isDescendant(anchorId: string): boolean {
+			const leafPath = getLeafPath();
+			return leafPath.some((n) => n.id === anchorId);
+		},
+
+		/** 当前 leaf 是否偏离 anchor 的祖先链（回退/分叉到其他分支）。
+		 *  leaf 不可解析（空路径）时保守返回 false——无法判定不视为偏离，
+		 *  避免把「树不可用」误报成「用户回退」（领域层据此上报不满信号）。 */
+		detectDiverge(anchorId: string): boolean {
+			const leafPath = getLeafPath();
+			if (leafPath.length === 0) return false;
+			return !leafPath.some((n) => n.id === anchorId);
 		},
 
 		getRootNodes(): TreeNode[] {

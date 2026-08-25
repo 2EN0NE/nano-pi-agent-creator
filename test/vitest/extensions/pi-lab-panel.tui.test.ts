@@ -240,14 +240,14 @@ describe('pi-lab panel — headless snapshot', () => {
 		enterDetail(panel);
 		expect(renderText(panel)).toContain('指标: success');
 
-		panel.handleInput('\x1b[D'); // ← 键：反向循环到最后一个指标
-		expect(renderText(panel)).toContain('指标: cost');
+		panel.handleInput('\x1b[D'); // ← 键：反向循环到最后一个指标（自动注入的 turn_token_usage）
+		expect(renderText(panel)).toContain('指标: turn_token_usage');
 
-		panel.handleInput('\x1b[D'); // 再 ←：到倒数第二个
-		expect(renderText(panel)).toContain('指标: latency_ms');
+		panel.handleInput('\x1b[D'); // 再 ←：到倒数第二个（自动注入的 tool_latency_ms）
+		expect(renderText(panel)).toContain('指标: tool_latency_ms');
 
-		panel.handleInput('\x1b[D'); // 再 ←：回到第一个（循环）
-		expect(renderText(panel)).toContain('指标: success');
+		panel.handleInput('\x1b[D'); // 再 ←：到倒数第三个（自动注入的 tool_error_rate）
+		expect(renderText(panel)).toContain('指标: tool_error_rate');
 	});
 
 	it('无数据时显示 No data collected yet', async () => {
@@ -563,5 +563,38 @@ describe('pi-lab panel — headless snapshot', () => {
 		const afterMetricSwitch = renderText(panel);
 		expect(afterMetricSwitch).toContain('指标: latency_ms');
 		expect(afterMetricSwitch).toMatch(/\(1-\d+\/\d+\)/);
+	});
+
+	it('AA 自检：SRM 偏离 + 后验校准提示渲染且不超宽', async () => {
+		const exp = manager.registerExperiment({
+			owner: 'test',
+			name: 'aa-check-panel',
+			contextKey: () => 'global',
+			arms: [
+				{ id: 'a', label: 'A' },
+				{ id: 'b', label: 'B' },
+			],
+			metrics: [{ id: 'success', type: 'binary', direction: 'maximize' }],
+			isAA: true,
+		})!;
+		// 双侧均有样本但显著失衡（a=100 成功 vs b=50 失败）：
+		//   - SRM 偏离（[100,50] 失衡，χ² 超阈值）
+		//   - AA 后验校准（minN=50 ≥ MIN_WINNER_SAMPLES，a 胜出概率 ≈1.0 ≥0.95）
+		// 注意：单臂样本（b=0）因最小样本量护栏不再触发 AA 校准（无数据侧无法校准）。
+		for (let i = 0; i < 100; i++) await exp.record('a', { metrics: { success: 1 } });
+		for (let i = 0; i < 50; i++) await exp.record('b', { metrics: { success: 0 } });
+
+		const panel = mountPanel(manager);
+		panel.render(80); // 初始化 menu 视图
+		panel.handleInput('\t'); // 一级切到「汇总」(global) tab
+		panel.handleInput('\r'); // ⏎ 进入实验（tab=global → 渲染 AA 自检）
+
+		const text = renderText(panel);
+		expect(text).toContain('SRM 偏离');
+		expect(text).toContain('AA 自检');
+
+		// 新增渲染行符合 TUI 铁律：80 与窄宽度 40 均不超宽
+		assertWithinWidth(panel.render(80), 80);
+		assertWithinWidth(panel.render(40), 40);
 	});
 });

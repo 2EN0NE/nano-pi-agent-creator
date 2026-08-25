@@ -104,6 +104,8 @@ function contextKey(ctx: { model?: { provider?: string; id?: string } }): string
 // ── 注册（session_start 调用，传入当前 profiles 作为臂） ─────────
 
 export function initExperiments(_ctx: ExtensionContext, profiles: CompactionProfile[]): void {
+	// SAFETY: globalThis.__labApi 由 pi-lab 扩展在加载时挂载（形状见 LabManager 鸭子类型），
+	// 此处经 unknown 桥接访问以保持弱依赖（不 import pi-lab 包）；缺失时下方判空降级。
 	const mgr = (globalThis as unknown as LabManager).__labApi?.getExperimentManager?.();
 	if (!mgr) {
 		log.warn('pi-lab not available — custom-compaction running without experiments');
@@ -262,29 +264,26 @@ export async function reportRecompact(): Promise<void> {
  * 若用 getEntries() 的 index 比较（旧实现 curIdx <= beforeIdx），在
  * 「回退 → 重新输入 prompt」的标准流程中 curIdx > beforeIdx 恒成立，永不命中。
  *
- * @param ctx          扩展上下文（保留签名兼容）
- * @param currentLeafId 当前 leaf id（调用方从 sessionManager.getLeafId() 获取）
- * @param ancestorChain 当前 leaf 的祖先链（含自身，leaf → ... → root），由调用方构建
+ * @param ctx  扩展上下文（保留签名兼容）
+ * @param tree 会话树（鸭子类型，仅需 detectDiverge）；null 表示不可用 → 保守不回退
  * @returns 命中回退返回 true，并已上报满意度；否则 false
  */
 export function detectRollback(
 	_ctx: ExtensionContext,
-	currentLeafId: string | null,
-	ancestorChain: string[],
+	tree: { detectDiverge: (anchorId: string) => boolean } | null,
 ): boolean {
 	if (!_recentCompact) return false;
 	if (_rollbackReported) return false;
 	const { leafBefore, leafAfter } = _recentCompact;
-	if (!leafBefore || !currentLeafId) return false;
-	// 祖先链构建失败（调用方 getAncestorChain 无法解析 parentId 链）→ 无法判定，
-	// 保守不回退，避免误报 satisfaction=0 污染实验数据。
-	if (ancestorChain.length === 0) return false;
+	if (!leafBefore) return false;
+	if (!tree) return false;
 	// 锚点：优先压缩后节点（leafAfter）；压缩未完成（markCompactEnd 未调用）时
 	// 退化为压缩前节点（leafBefore），此时无法区分「正常推进」与「回退到 leafBefore」，
 	// 属异常路径兜底。
 	const anchor = leafAfter ?? leafBefore;
-	// 当前 leaf 的祖先链含锚点 → 仍在压缩后分支（含压缩瞬间 leaf==leafAfter）→ 正常
-	if (ancestorChain.includes(anchor)) return false;
+	// leaf 偏离 anchor 的祖先链 → 用户回退到压缩点之前（不满信号）。
+	// 树判断委托 pi-session-tree 基础原语 detectDiverge（ADR 0023）。
+	if (!tree.detectDiverge(anchor)) return false;
 	_rollbackReported = true;
 	log.info('Rollback detected (current leaf off the post-compaction branch)');
 	void reportSatisfaction(false);

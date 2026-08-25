@@ -10,7 +10,7 @@
  *   - D. analyze (range analysis)
  */
 import { describe, it, expect } from 'vitest';
-import { createSessionTree } from '@zenone/pi-session-tree';
+import { createSessionTree } from '../../../extensions/meta/pi-session-tree/index.js';
 
 // ============================================================================
 // Test helpers — mock SessionManager that returns a minimal tree
@@ -741,5 +741,82 @@ describe('detectRetry', () => {
 		const tree = createSessionTree(sm);
 		const result = await tree.detectRetry('1', '2');
 		expect(result.isRetry).toBe(false);
+	});
+});
+
+// ── Diverge detection ──────────────────────────────────────
+
+describe('isDescendant', () => {
+	it('returns true when anchor is an ancestor of the leaf', () => {
+		const sm = mockSessionManager([
+			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
+			{ id: '2', parentId: '1', type: 'message', timestamp: 't2' },
+			{ id: '3', parentId: '2', type: 'message', timestamp: 't3' },
+		]);
+		const tree = createSessionTree(sm);
+		expect(tree.isDescendant('1')).toBe(true);
+		expect(tree.isDescendant('2')).toBe(true);
+	});
+
+	it('returns true when anchor is the leaf itself', () => {
+		const sm = mockSessionManager([
+			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
+			{ id: '2', parentId: '1', type: 'message', timestamp: 't2' },
+		]);
+		const tree = createSessionTree(sm);
+		expect(tree.isDescendant('2')).toBe(true);
+	});
+
+	it('returns false when leaf diverged onto a sibling branch', () => {
+		const sm = mockSessionManager([
+			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
+			{ id: '2a', parentId: '1', type: 'message', timestamp: 't2' },
+			{ id: '2b', parentId: '1', type: 'message', timestamp: 't2' },
+		]);
+		const tree = createSessionTree(sm);
+		expect(tree.isDescendant('2a')).toBe(false);
+	});
+
+	it('returns false for unknown anchor', () => {
+		const sm = mockSessionManager([
+			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
+		]);
+		const tree = createSessionTree(sm);
+		expect(tree.isDescendant('nope')).toBe(false);
+	});
+});
+
+describe('detectDiverge', () => {
+	it('returns false when leaf stays on anchor branch', () => {
+		const sm = mockSessionManager([
+			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
+			{ id: '2', parentId: '1', type: 'message', timestamp: 't2' },
+		]);
+		const tree = createSessionTree(sm);
+		expect(tree.detectDiverge('1')).toBe(false);
+	});
+
+	it('returns true when leaf diverged onto a sibling branch', () => {
+		const sm = mockSessionManager([
+			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
+			{ id: '2a', parentId: '1', type: 'message', timestamp: 't2' },
+			{ id: '2b', parentId: '1', type: 'message', timestamp: 't2' },
+		]);
+		const tree = createSessionTree(sm);
+		expect(tree.detectDiverge('2a')).toBe(true);
+	});
+
+	it('returns true for unknown anchor', () => {
+		const sm = mockSessionManager([
+			{ id: '1', parentId: null, type: 'message', timestamp: 't1' },
+		]);
+		const tree = createSessionTree(sm);
+		expect(tree.detectDiverge('nope')).toBe(true);
+	});
+
+	it('returns false when leaf cannot be resolved (empty tree) — conservative', () => {
+		const sm = mockSessionManager([]);
+		const tree = createSessionTree(sm);
+		expect(tree.detectDiverge('1')).toBe(false);
 	});
 });

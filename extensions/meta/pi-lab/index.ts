@@ -9,6 +9,7 @@ import { createLogger } from '@zenone/pi-logger';
 import { createSessionTreeWithPi } from '@zenone/pi-session-tree';
 import { getExperimentManager } from './core/manager.js';
 import { logExtractor, tagExtractor } from './core/ingestion.js';
+import { extractLifecycleDelta, TurnAttributor } from './core/lifecycle.js';
 import { showPanel } from './ui/panel.js';
 
 const log = createLogger('pi-lab');
@@ -24,6 +25,12 @@ export default function piLabExtension(pi: ExtensionAPI) {
 	// 内建信号源：会话树 TAG 与 pi-log 日志（registerIngestionSource 扩展点，消费方可注册更多）
 	manager.registerIngestionSource('session-tree-tag', tagExtractor);
 	manager.registerIngestionSource('pi-log', logExtractor);
+
+	// turn 级归因：select 登记活跃臂 → 生命周期事件累积 → turn_end flush 通用过程指标
+	const attributor = new TurnAttributor();
+	manager.setSelectObserver((experimentName, armId) => {
+		attributor.noteSelect(experimentName, armId);
+	});
 
 	log.info('Extension loaded');
 
@@ -79,17 +86,34 @@ export default function piLabExtension(pi: ExtensionAPI) {
 		if (!logSignalSubscribed) {
 			logSignalSubscribed = true;
 			logSignalUnsubscribe = pi.events.on('log', (data: unknown) => {
-				const event = data as { message?: string };
-				if (!event || typeof event.message !== 'string') return;
-				if (!event.message.includes('[pi-lab-signal]')) return;
-				void ingestLogSignal(event.message);
+				const event = data as { message?: string; source?: unknown; details?: unknown };
+				if (!event) return;
+				// [pi-lab-signal] 静默信号（消费方日志上报）
+				if (
+					typeof event.message === 'string' &&
+					event.message.includes('[pi-lab-signal]')
+				) {
+					void ingestLogSignal(event.message);
+					return;
+				}
+				// __lifecycle__ 被动过程信号（pi-logger 结构化事件 → 通用指标增量）
+				const delta = extractLifecycleDelta(event);
+				if (delta) attributor.noteLifecycle(delta);
 			});
 		}
 	});
 
-	// 信号入口接线：turn_end 时从会话树采集 TAG 信号并 ingest 到各实验。
+	// turn 级归因：turn 开始时重置活跃臂与累积
+	pi.on('turn_start', (event: { turnIndex: number }) => {
+		attributor.startTurn(`turn-${event.turnIndex}`);
+	});
+
+	// 信号入口接线：turn_end 时 flush lifecycle 通用指标 + 从会话树采集 TAG 信号。
 	// ctxKey 缺省 'global'（TAG 节点不直接携带 model 信息，完整提取留待后续）。
 	pi.on('turn_end', async (_event, ctx) => {
+		// ① lifecycle 被动信号 flush（turn 级归因，独立于 TAG 采集）
+		await flushLifecycle();
+
 		try {
 			const sm = ctx.sessionManager as Parameters<typeof createSessionTreeWithPi>[0];
 			const tree = createSessionTreeWithPi(sm);
@@ -126,6 +150,34 @@ export default function piLabExtension(pi: ExtensionAPI) {
 		log.debug('Flushing experiment data');
 		await manager.flushAll();
 	});
+
+	// lifecycle 被动信号 flush：把该 turn 聚合的通用指标写入各活跃实验的活跃臂。
+	// 逐实验隔离写盘：遥测类写入 fail-open（单实验失败告警后继续），但不让一个坏实验
+	// 的 appendEvent 抛错拖垮整轮其它实验的归因。
+	async function flushLifecycle(): Promise<void> {
+		const results = attributor.endTurn();
+		if (results.length === 0) return;
+		let flushed = 0;
+		for (const r of results) {
+			try {
+				const exp = manager.getExperimentRaw(r.experimentName);
+				if (!exp) continue;
+				exp.appendEvent({
+					armId: r.armId,
+					ctxKey: r.ctxKey,
+					metrics: r.metrics,
+					metadata: r.metadata,
+				});
+				flushed++;
+			} catch (err) {
+				log.warn('Lifecycle flush failed for experiment', {
+					experimentName: r.experimentName,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+		log.debug('Lifecycle signals flushed', { experiments: flushed });
+	}
 
 	// 日志信号：单条 [pi-lab-signal] 日志行 → 各实验 ingest（静默上报）
 	async function ingestLogSignal(message: string): Promise<void> {

@@ -211,40 +211,44 @@ describe('detectRollback', () => {
 		if (idx < 0) return [];
 		return all.slice(0, idx + 1).reverse();
 	};
+	// 鸭子类型 tree：detectDiverge(anchor) = anchor 不在当前 leaf 祖先链上（pi-session-tree 原语语义）
+	const mockTree = (leaf: string) => ({
+		detectDiverge: (anchor: string) => !chainOf(leaf).includes(anchor),
+	});
 
 	it('returns false when no recent compact record', () => {
-		expect(detectRollback({} as never, 'e5', chainOf('e5'))).toBe(false);
+		expect(detectRollback({} as never, mockTree('e5'))).toBe(false);
 	});
 
 	it('returns false when current leaf is after the compact point (normal progress)', () => {
 		markCompactStart({} as never, 'p1', 'e3', 'auto');
 		markCompactEnd({} as never, 'e4');
-		expect(detectRollback({} as never, 'e5', chainOf('e5'))).toBe(false);
+		expect(detectRollback({} as never, mockTree('e5'))).toBe(false);
 	});
 
 	it('returns true when user moved back before the compact point', () => {
 		markCompactStart({} as never, 'p1', 'e3', 'auto');
 		markCompactEnd({} as never, 'e4');
-		expect(detectRollback({} as never, 'e2', chainOf('e2'))).toBe(true);
+		expect(detectRollback({} as never, mockTree('e2'))).toBe(true);
 	});
 
 	it('reports rollback only once per compact record (one-shot)', () => {
 		markCompactStart({} as never, 'p1', 'e3', 'auto');
 		markCompactEnd({} as never, 'e4');
-		expect(detectRollback({} as never, 'e2', chainOf('e2'))).toBe(true);
-		expect(detectRollback({} as never, 'e2', chainOf('e2'))).toBe(false);
+		expect(detectRollback({} as never, mockTree('e2'))).toBe(true);
+		expect(detectRollback({} as never, mockTree('e2'))).toBe(false);
 	});
 
 	it('clearRecentCompact clears the record (compaction failure path)', () => {
 		markCompactStart({} as never, 'p1', 'e3', 'auto');
 		clearRecentCompact();
-		expect(detectRollback({} as never, 'e2', chainOf('e2'))).toBe(false);
+		expect(detectRollback({} as never, mockTree('e2'))).toBe(false);
 	});
 
-	it('returns false when ancestor chain failed to build (empty)', () => {
+	it('returns false when tree unavailable (null)', () => {
 		markCompactStart({} as never, 'p1', 'e3', 'auto');
 		markCompactEnd({} as never, 'e4');
-		expect(detectRollback({} as never, 'e5', [])).toBe(false);
+		expect(detectRollback({} as never, null)).toBe(false);
 	});
 });
 

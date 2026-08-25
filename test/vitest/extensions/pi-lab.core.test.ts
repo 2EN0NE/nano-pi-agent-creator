@@ -157,6 +157,72 @@ describe('pi-lab: ExperimentManager', () => {
 		expect(['a', 'b']).toContain(arm);
 	});
 
+	it('propagates isAA flag to getInfo', () => {
+		manager.registerExperiment({
+			owner: 'test',
+			name: 'aa-flag',
+			contextKey: () => 'global',
+			arms: [
+				{ id: 'a', label: 'A' },
+				{ id: 'b', label: 'B' },
+			],
+			metrics: BIN,
+			isAA: true,
+		});
+		expect(manager.getExperimentInfo('aa-flag')!.isAA).toBe(true);
+
+		// 未声明 isAA 的实验缺省 false
+		manager.registerExperiment({
+			owner: 'test',
+			name: 'non-aa-flag',
+			contextKey: () => 'global',
+			arms: [{ id: 'a', label: 'A' }],
+			metrics: BIN,
+		});
+		expect(manager.getExperimentInfo('non-aa-flag')!.isAA).toBe(false);
+	});
+
+	it('preserves isAA through definition evolution (updateDef path)', () => {
+		manager.registerExperiment({
+			owner: 'test',
+			name: 'aa-evolve',
+			contextKey: () => 'global',
+			arms: [{ id: 'a', label: 'A' }],
+			metrics: BIN,
+			isAA: true,
+		});
+		// arms 增删触发 definitionDiff.changed → updateDef（须保留 isAA）
+		manager.registerExperiment({
+			owner: 'test',
+			name: 'aa-evolve',
+			contextKey: () => 'global',
+			arms: [
+				{ id: 'a', label: 'A' },
+				{ id: 'b', label: 'B' },
+			],
+			metrics: BIN,
+			isAA: true,
+		});
+		expect(manager.getExperimentInfo('aa-evolve')!.isAA).toBe(true);
+	});
+
+	it('select() notifies select observer with experiment name and arm', async () => {
+		const observed: Array<[string, string]> = [];
+		manager.setSelectObserver((name, armId) => observed.push([name, armId]));
+
+		const exp = manager.registerExperiment({
+			owner: 'test',
+			name: 'observer-test',
+			contextKey: () => 'global',
+			arms: [{ id: 'a', label: 'A' }],
+			metrics: BIN,
+		})!;
+
+		const armId = await exp.select(null);
+		expect(observed).toEqual([['observer-test', armId]]);
+		expect(armId).toBe('a');
+	});
+
 	it('record() 多指标投影为 sum/count', async () => {
 		const exp = manager.registerExperiment({
 			owner: 'test',
