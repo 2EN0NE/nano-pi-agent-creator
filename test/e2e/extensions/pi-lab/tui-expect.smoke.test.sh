@@ -119,3 +119,40 @@ test_it "expect: panel renders single-column box border [REVIEW]" <<'TEST'
   tui_cleanup
   mark_for_review "人工验证两级导航面板：/lab 一级应出现实验列表（插件名:实验名 + arm 摘要，↑↓ 导航 ⏎ 进入），二级操作条 [统计] [设置] [重置] Tab 切换，顶部 ┌── pi-lab ──┐ 框、底部 └─┘ 框"
 TEST
+
+test_it "expect: lifecycle 通用指标自动注入可见 (ticket 02) [REVIEW]" <<'TEST'
+  # MOCK_LLM_TOOL_CALLS=1：mock-llm 返回 1 次 bash 工具调用（cat 不存在文件 → isError=true），
+  # 触发真实 tool_execution_end（isError+duration）+ message_end（usage），
+  # 验证 lifecycle 被动信号源把通用指标按 turn 归因到 lifecycle-exp。
+  MOCK_LLM_TOOL_CALLS=1 tui_expect_test "pi-lab,pi-lab-signals-helper" '
+    send "hi\r"
+    sleep 10
+    send "/lab\r"
+    sleep 3
+    send "\r"
+    sleep 3
+  ' 30
+
+  tui_assert_contains "lifecycle-exp" "lifecycle-exp experiment should appear in /lab list"
+  tui_cleanup
+  mark_for_review "ticket 02：验证 /lab 一级列表出现 lifecycle-exp（通用指标自动注入未崩溃，此前 metrics 缺省会触发 injectLifecycleMetrics 崩溃）；工具调用已触发（cat 命令）。具体指标数值由单测 pi-lab.lifecycle.test.ts（18 用例）覆盖"
+TEST
+
+test_it "expect: AA 自检 SRM + 校准可见 (ticket 03) [REVIEW]" <<'TEST'
+  # aa-check-exp 是 isAA 假臂对照（两臂同一实现），assignKey 固定 → 单臂样本，
+  # 应触发 SRM 偏离告警（χ²）+ AA 后验校准提示（胜出概率 ≥0.95 未收敛无差异）。
+  tui_expect_test "pi-lab,pi-lab-signals-helper" '
+    send "hi\r"
+    sleep 6
+    send "/lab\r"
+    sleep 3
+    send "\033\[B"
+    sleep 1
+    send "\r"
+    sleep 3
+  ' 30
+
+  tui_assert_contains "aa-check-exp" "aa-check-exp experiment should appear in /lab list"
+  tui_cleanup
+  mark_for_review "ticket 03：验证 /lab 一级列表出现 aa-check-exp（isAA 假臂对照注册成功）。SRM/AA 校准逻辑由单测 pi-lab.aa-check.test.ts（10 用例）覆盖"
+TEST

@@ -190,6 +190,18 @@ describe('pi-lab: definitionDiff 纯函数', () => {
 		expect(diff.changed).toBe(true);
 		expect(diff.changes).toContain('contextKey g → h');
 	});
+
+	it('isAA 变化 → 口径变化（触发 updateDef，AA 校准启停不被静默忽略）', () => {
+		const base = { owner: 'o', name: 'x', contextKey: 'g', arms: ARM_A, metrics: BIN };
+		const diff = definitionDiff(base, { ...base, isAA: true });
+		expect(diff.changed).toBe(true);
+		expect(diff.changes).toContain('isAA false → true');
+	});
+
+	it('isAA 未声明与显式 false 视为等价（不误报演进）', () => {
+		const base = { owner: 'o', name: 'x', contextKey: 'g', arms: ARM_A, metrics: BIN };
+		expect(definitionDiff(base, { ...base, isAA: false }).changed).toBe(false);
+	});
 });
 
 describe('pi-lab: 注册三语义', () => {

@@ -68,6 +68,7 @@ interface MockPi {
 	handlers: Map<string, (event: unknown, ctx: unknown) => unknown>;
 	logHandlers: Array<(data: unknown) => void>;
 	unsubscribe: ReturnType<typeof vi.fn>;
+	pi: never;
 }
 
 function makeMockPi(): MockPi {
@@ -232,6 +233,54 @@ describe('pi-lab 运行时接线', () => {
 		expect(
 			getExperimentManager().getExperimentRaw('wiring-tag-empty')!.getEvents(),
 		).toHaveLength(0);
+	});
+
+	it('turn 级归因：select 登记 → __lifecycle__ 累积 → turn_end flush 通用指标', async () => {
+		const mock = makeMockPi();
+		piLabExtension(mock.pi as never);
+		await mock.handlers.get('session_start')!({}, makeSessionCtx());
+
+		const api = getExperimentManager().registerExperiment({
+			owner: 'test',
+			name: 'wiring-lifecycle',
+			contextKey: () => 'global',
+			assignKey: 'fixed-session',
+			arms: [{ id: 'a', label: 'A' }],
+			metrics: [{ id: 'match_success', type: 'binary', direction: 'maximize' }],
+		})!;
+
+		// turn_start 重置归因状态（pi-lab 先注册先执行清空活跃臂）
+		mock.handlers.get('turn_start')!({ turnIndex: 7 }, makeSessionCtx());
+
+		// select 登记活跃臂（触发 selectObserver → noteSelect）
+		const armId = await api.select(null);
+
+		// __lifecycle__ 被动过程信号 → noteLifecycle（tool 错误 + token 用量）
+		mock.logHandlers.forEach((h) =>
+			h({
+				source: '__lifecycle__',
+				details: { toolCallId: 't1', isError: true, duration: 42 },
+			}),
+		);
+		mock.logHandlers.forEach((h) =>
+			h({ source: '__lifecycle__', details: { usage: { totalTokens: 1000 } } }),
+		);
+
+		// turn_end：flushLifecycle 先写事件，TAG 采集返回空 label 提前返回
+		createSessionTreeWithPi.mockReturnValue({ extractLabels: () => [] });
+		await mock.handlers.get('turn_end')!({}, makeSessionCtx());
+
+		const exp = getExperimentManager().getExperimentRaw('wiring-lifecycle')!;
+		expect(exp.getEvents()).toHaveLength(1);
+		const ev = exp.getEvents()[0];
+		expect(ev.armId).toBe(armId);
+		expect(ev.armId).toBe('a');
+		expect(ev.metrics).toEqual({
+			tool_error_rate: 1,
+			tool_latency_ms: 42,
+			turn_token_usage: 1000,
+		});
+		expect(ev.metadata).toEqual({ turnId: 'turn-7' });
 	});
 
 	it('session_shutdown 反注册 log 监听（/reload 防重复订阅）', async () => {

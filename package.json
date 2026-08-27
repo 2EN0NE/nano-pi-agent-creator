@@ -66,7 +66,7 @@
 	"scripts": {
 		"prepare": "husky",
 		"lint": "eslint .",
-		"lint:staged": "lint-staged",
+		"lint:staged": "lint-staged --no-stash",
 		"lint:fix": "eslint . --fix",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",

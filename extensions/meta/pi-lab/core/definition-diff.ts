@@ -86,5 +86,12 @@ export function definitionDiff(oldDef: ExperimentDef, newDef: ExperimentDef): De
 		}
 	}
 
+	// isAA 影响 AA 自检（后验校准）是否启用——变化属口径变化，需触发 updateDef
+	const oldIsAA = oldDef.isAA ?? false;
+	const newIsAA = newDef.isAA ?? false;
+	if (oldIsAA !== newIsAA) {
+		changes.push(`isAA ${oldIsAA} → ${newIsAA}`);
+	}
+
 	return { changed: changes.length > 0, changes };
 }

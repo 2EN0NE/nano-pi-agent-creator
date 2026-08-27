@@ -22,6 +22,7 @@ import type {
 } from '../types.js';
 import { Experiment } from './experiment.js';
 import { definitionDiff } from './definition-diff.js';
+import { injectLifecycleMetrics } from './lifecycle.js';
 import { createLogger } from '@zenone/pi-logger'; // nosemgrep: pi.logger-imported-but-unused
 
 const log = createLogger('pi-lab');
@@ -40,6 +41,8 @@ export class ExperimentManager {
 	private _ingestionSources = new Map<string, IngestionSource>();
 
 	private _status: 'off' | 'collecting' | 'switched' = 'off';
+	/** select 观察者（turn 级归因用）：select 时通知实验名 + 臂 */
+	private _selectObserver: ((experimentName: string, armId: string) => void) | null = null;
 
 	// ── 状态 ──
 
@@ -49,6 +52,11 @@ export class ExperimentManager {
 
 	setStatus(status: 'off' | 'collecting' | 'switched'): void {
 		this._status = status;
+	}
+
+	/** 设置 select 观察者（turn 级归因：select 时登记活跃臂） */
+	setSelectObserver(observer: ((experimentName: string, armId: string) => void) | null): void {
+		this._selectObserver = observer;
 	}
 
 	// ── 双轨注册 API ──
@@ -249,9 +257,10 @@ export class ExperimentManager {
 					existing.updateDef(
 						strategy,
 						def.arms,
-						def.metrics,
+						injectLifecycleMetrics(def.metrics),
 						def.contextKey,
 						def.assignKey,
+						def.isAA,
 					);
 					this._defs.set(def.name, def);
 					this._sources.set(def.name, newSource);
@@ -305,13 +314,17 @@ export class ExperimentManager {
 	/** 构造 Experiment 实例 */
 	private _buildExperiment(def: ExperimentDef): Experiment {
 		const strategy = def.strategy ?? 'stable-hash';
+		// 自动注入通用过程指标（tool_error_rate/tool_latency_ms/turn_token_usage），
+		// 实验已声明的同 id metric 保留实验版本，不覆盖。
+		const metrics = injectLifecycleMetrics(def.metrics);
 		return new Experiment(
 			def.name,
 			strategy,
 			def.arms,
-			def.metrics,
+			metrics,
 			def.contextKey,
 			def.assignKey,
+			def.isAA,
 		);
 	}
 
@@ -341,6 +354,7 @@ export class ExperimentManager {
 		return {
 			select: async (context?: unknown) => {
 				const armId = await experiment.select(context);
+				this._selectObserver?.(experiment.getInfo().name, armId);
 				return armId;
 			},
 			record: async (armId: string, outcome: Outcome, context?: unknown) => {

@@ -27,6 +27,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
 import { showSelect } from '@zenone/pi-selector';
+import { createSessionTreeWithPi } from '@zenone/pi-session-tree';
 import { loadConfig, reloadConfig, setSessionId, getEffectiveProfile } from './config.js';
 import {
 	buildCompactionHandler,
@@ -67,35 +68,6 @@ function getLeafId(ctx: { sessionManager?: { getLeafId?: () => string | null } }
 		return ctx.sessionManager?.getLeafId?.() ?? null;
 	} catch {
 		return null;
-	}
-}
-
-/** 从 sessionManager 构建当前 leaf 的祖先链（含自身，leaf → ... → root）。
- *  用于回退检测：pi 会话 append-only，fork 节点追加在文件末尾，
- *  数组 index 位置比较无法反映「回退到压缩点之前」；祖先链判定才能识别。 */
-function getAncestorChain(
-	ctx: {
-		sessionManager?: {
-			getEntry?: (id: string) => { parentId: string | null } | undefined;
-		};
-	},
-	leafId: string | null,
-): string[] {
-	try {
-		const sm = ctx.sessionManager;
-		if (!sm?.getEntry || !leafId) return [];
-		const chain: string[] = [];
-		let cur: string | null = leafId;
-		const seen = new Set<string>();
-		while (cur && !seen.has(cur)) {
-			chain.push(cur);
-			seen.add(cur);
-			const entry = sm.getEntry(cur);
-			cur = entry?.parentId ?? null;
-		}
-		return chain;
-	} catch {
-		return [];
 	}
 }
 
@@ -423,10 +395,12 @@ export default function (pi: ExtensionAPI) {
 	pi.on('agent_end', async (_event, ctx) => {
 		updateStatus(ctx);
 
-		// 回退信号检测：用户是否回到压缩之前的位置（对最近一次压缩不满）
-		const curLeaf = getLeafId(ctx);
-		const ancestorChain = getAncestorChain(ctx, curLeaf);
-		if (detectRollback(ctx, curLeaf, ancestorChain)) {
+		// 回退信号检测：用户是否回到压缩之前的位置（对最近一次压缩不满）。
+		// 树判断委托 pi-session-tree 的 detectDiverge 基础原语（ADR 0023）。
+		const tree = createSessionTreeWithPi(
+			ctx.sessionManager as Parameters<typeof createSessionTreeWithPi>[0],
+		);
+		if (detectRollback(ctx, tree)) {
 			log.info('Rollback signal reported');
 		}
 

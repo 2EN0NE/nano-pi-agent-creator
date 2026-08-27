@@ -46,11 +46,8 @@ import {
 	visibleWidth,
 } from '@earendil-works/pi-tui';
 import type { ExperimentManager } from '../core/experiment-manager.js';
+import { aaCalibration, checkSRM, MIN_WINNER_SAMPLES } from '../core/aa-check.js';
 import type { ExperimentOperation, MetricDef, PanelTab, PanelView, QueryResult } from '../types.js';
-
-// 胜出高亮的最小样本量护栏：极小样本（如 n=1 vs n=0）胜率可达 100%，
-// 过早高亮为「显著胜出」会误导结论
-const MIN_WINNER_SAMPLES = 10;
 
 // 一级列表最大可视行数（滚动视口上限）：实验数超过时 SelectList 内部滚动，面板不撑高
 const MAX_VISIBLE_EXPERIMENTS = 8;
@@ -331,6 +328,27 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 				const result = exp.query(metricDef.id);
 				renderArmAnalysis(lines, metricDef, result, armLabel);
 				renderInsight(lines, result, armLabel);
+				// AA 自检：SRM（样本比例失配）+ 后验校准（AA 场景胜出概率应 ~50/50）
+				const events = exp.getEvents();
+				const armCounts = info.arms.map(
+					(a) => events.filter((e) => e.armId === a.id).length,
+				);
+				const srm = checkSRM(armCounts);
+				if (!srm.ok) {
+					lines.push(
+						truncateToWidth(`  ${theme.fg('error', '· ' + srm.detail)}`, currentWidth),
+					);
+				}
+				const calib = aaCalibration(
+					result.arms.map((a) => a.winProbability),
+					result.arms.map((a) => a.n),
+					info.isAA,
+				);
+				if (calib) {
+					lines.push(
+						truncateToWidth(`  ${theme.fg('error', '· ' + calib)}`, currentWidth),
+					);
+				}
 			} else {
 				const ctxKeys = exp.getContextKeys();
 				if (ctxKeys.length === 0) {

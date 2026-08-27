@@ -155,6 +155,11 @@ export interface ExperimentDef {
 	metrics: MetricDef[];
 	/** 分配策略，默认 stable-hash */
 	strategy?: AllocationStrategy;
+	/**
+	 * AA 实验标志（可选）：两臂指向同一实现，用于验证分流/测量无偏。
+	 * 声明后 /lab 面板启用后验校准提示（胜出概率应 ~50/50，异常高则告警）。
+	 */
+	isAA?: boolean;
 }
 
 /** Arm 定义（注册时传入） */
