@@ -30,13 +30,19 @@ setup_test_home() {
 	cp -r "$ROOT_DIR/extensions/meta/pi-logger" "$test_home/.pi/extensions/pi-logger"
 	cp "$ROOT_DIR/pi-logger.json" "$test_home/pi-logger.json" 2>/dev/null || true
 
+	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '.../src/tui/helpers.js' 的扩展在沙箱内解析
+	if [[ -d "$ROOT_DIR/src/tui" ]]; then
+		mkdir -p "$test_home/src"
+		cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
+	fi
+
 	for name in "$@"; do
 		case "$name" in
 		tools)
 			cp "$ROOT_DIR/extensions/meta/tools.ts" "$test_home/.pi/extensions/tools.ts"
 			;;
 		ctx-simulator)
-			cp "$ROOT_DIR/test/extensions/tools/helpers/z-ctx-simulator.ts" \
+			cp "$ROOT_DIR/test/e2e/extensions/tools/helpers/z-ctx-simulator.ts" \
 				"$test_home/.pi/extensions/z-ctx-simulator.ts"
 			;;
 		call-observer)

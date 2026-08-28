@@ -30,6 +30,12 @@ setup_sandbox() {
 	cp -r "$ROOT_DIR/extensions/meta/pi-logger" \
 		"$test_home/.pi/extensions/pi-logger"
 
+	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '.../src/tui/helpers.js' 的扩展在沙箱内解析
+	if [[ -d "$ROOT_DIR/src/tui" ]]; then
+		mkdir -p "$test_home/src"
+		cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
+	fi
+
 	# mock-llm：引用共享版本（test/helpers/mock-llm.ts）
 	mkdir -p "$test_home/.pi/extensions/mock-llm"
 	cp "$ROOT_DIR/test/helpers/mock-llm.ts" \

@@ -39,9 +39,9 @@ setup_sandbox() {
 	cp -r "$ROOT_DIR/extensions/security/permission-gate" \
 		"$test_home/.pi/extensions/permission-gate"
 
-	# 拷贝 mock-llm（test/extensions/permission-gate/helpers/mock-llm.ts → index.ts）
+	# 拷贝 mock-llm（test/e2e/extensions/permission-gate/helpers/mock-llm.ts → index.ts）
 	mkdir -p "$test_home/.pi/extensions/mock-llm"
-	cp "$ROOT_DIR/test/extensions/permission-gate/helpers/mock-llm.ts" \
+	cp "$ROOT_DIR/test/e2e/extensions/permission-gate/helpers/mock-llm.ts" \
 		"$test_home/.pi/extensions/mock-llm/index.ts"
 
 	# pi-logger 配置
@@ -55,6 +55,12 @@ setup_sandbox() {
 	if [[ ! -e "$test_home/node_modules/@zenone/pi-logger" ]]; then
 		ln -sf "$ROOT_DIR/extensions/meta/pi-logger" \
 			"$test_home/node_modules/@zenone/pi-logger"
+	fi
+
+	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '../../../src/tui/helpers.js' 的扩展在沙箱内解析
+	if [[ -d "$ROOT_DIR/src/tui" ]]; then
+		mkdir -p "$test_home/src"
+		cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
 	fi
 
 	# 初始化 git
