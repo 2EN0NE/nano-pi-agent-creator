@@ -22,13 +22,15 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
 import { getRepoRoot, isWorktreeCwd, getNameFromCwd } from './lib/paths.js';
 import { getManagedWorktrees } from './lib/paths.js';
-import { handleWorktreeCommand } from './lib/handlers.js';
+import { handleWorktreeCommand, setWorktreePi } from './lib/handlers.js';
 import { initPrefs } from './state.js';
 import { autoApproveProjectTrust } from './lib/session.js';
 
 const log = createLogger('pi-worktree');
 
 export default function worktreeExtension(pi: ExtensionAPI): void {
+	setWorktreePi(pi);
+
 	// ── 生命周期 ──
 
 	pi.on('session_start', (_e, ctx) => {

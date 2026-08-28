@@ -84,7 +84,7 @@ describe('worktree execMerge', () => {
 
 	it('1. execMerge merges feature branch into main', async () => {
 		const { execMerge } = await import(resolve(EXT_LIB, 'handlers.ts'));
-		const result = execMerge(repoDir, 'feature/test-merge', 'main');
+		const result = await execMerge(repoDir, 'feature/test-merge', 'main');
 
 		expect(result.ok).toBe(true);
 		expect(result.message).toContain('Merged');
@@ -128,12 +128,12 @@ describe('worktree execMerge', () => {
 
 		const { execMerge } = await import(resolve(EXT_LIB, 'handlers.ts'));
 
-		const resultA = execMerge(repoDir, 'feature/conflict-a', 'main');
+		const resultA = await execMerge(repoDir, 'feature/conflict-a', 'main');
 		expect(resultA.ok).toBe(true);
 		expect(resultA.conflicts).toEqual([]);
 
 		// Merge B -- should conflict because both branches modified the same line
-		const resultB = execMerge(repoDir, 'feature/conflict-b', 'main');
+		const resultB = await execMerge(repoDir, 'feature/conflict-b', 'main');
 		expect(resultB.ok).toBe(false);
 		expect(resultB.conflicts.length).toBeGreaterThan(0);
 		expect(resultB.conflicts[0].file).toBe('conflict.txt');
@@ -154,7 +154,7 @@ describe('worktree execMerge', () => {
 		writeFileSync(join(repoDir, 'untracked-dirty.txt'), 'dirty');
 
 		const { execMerge } = await import(resolve(EXT_LIB, 'handlers.ts'));
-		const result = execMerge(repoDir, 'feature/dirty-test', 'main');
+		const result = await execMerge(repoDir, 'feature/dirty-test', 'main');
 
 		// dirty 工作区不应阻止 merge（execMerge 有 stash 逻辑）
 		expect(result.ok).toBe(true);
@@ -162,7 +162,7 @@ describe('worktree execMerge', () => {
 
 	it('5. execMerge fails gracefully on non-existent branch', async () => {
 		const { execMerge } = await import(resolve(EXT_LIB, 'handlers.ts'));
-		const result = execMerge(repoDir, 'feature/non-existent', 'main');
+		const result = await execMerge(repoDir, 'feature/non-existent', 'main');
 		expect(result.ok).toBe(false);
 	});
 
@@ -178,7 +178,7 @@ describe('worktree execMerge', () => {
 		gitCommit(repoDir, 'squash3.txt', 'squash content v3');
 		gitCheckout(repoDir, 'main');
 
-		const result = execMerge(repoDir, 'feature/squash-test', 'main', 'squash');
+		const result = await execMerge(repoDir, 'feature/squash-test', 'main', 'squash');
 
 		expect(result.ok).toBe(true);
 		expect(result.message).toContain('squash');
@@ -221,12 +221,12 @@ describe('worktree execMerge', () => {
 
 		// Merge A first (success)
 		const { execMerge: mergeFn } = await import(resolve(EXT_LIB, 'handlers.ts'));
-		const resultA = mergeFn(repoDir, 'feature/squash-a', 'main', 'squash');
+		const resultA = await mergeFn(repoDir, 'feature/squash-a', 'main', 'squash');
 		expect(resultA.ok).toBe(true);
 		expect(resultA.conflicts).toEqual([]);
 
 		// Merge B with squash -- should auto-reset on conflict
-		const resultB = mergeFn(repoDir, 'feature/squash-b', 'main', 'squash');
+		const resultB = await mergeFn(repoDir, 'feature/squash-b', 'main', 'squash');
 		expect(resultB.ok).toBe(false);
 		expect(resultB.conflicts.length).toBeGreaterThan(0);
 		expect(resultB.conflicts[0].file).toBe('squash-conflict.txt');
@@ -244,6 +244,42 @@ describe('worktree execMerge', () => {
 			encoding: 'utf-8',
 		}).trim();
 		expect(branch).toBe('main');
+	});
+
+	it('8. execMerge reports stash-pop conflict after merge succeeds', async () => {
+		gitCheckout(repoDir, 'main');
+		writeFileSync(join(repoDir, 'stash-pop.txt'), 'line 1\nline 2\n');
+		gitCommit(repoDir, 'stash-pop.txt', 'add stash-pop base');
+
+		// feature 分支改 line 2
+		gitCreateBranch(repoDir, 'feature/stash-pop');
+		writeFileSync(join(repoDir, 'stash-pop.txt'), 'line 1\nline 2 feature version\n');
+		gitCommit(repoDir, 'stash-pop.txt', 'feature changes line 2');
+		gitCheckout(repoDir, 'main');
+
+		// main 工作区 dirty：也改同一行 line 2（未提交，触发 execMerge 的 stash 逻辑）
+		writeFileSync(join(repoDir, 'stash-pop.txt'), 'line 1\nline 2 local version\n');
+
+		const { execMerge } = await import(resolve(EXT_LIB, 'handlers.ts'));
+		const result = await execMerge(repoDir, 'feature/stash-pop', 'main');
+
+		// 合并本身成功（merge 提交已创建），但恢复未提交改动（stash pop）冲突
+		expect(result.ok).toBe(false);
+		expect(result.stashPopConflict).toBe(true);
+		expect(result.conflicts.length).toBeGreaterThan(0);
+		expect(result.conflicts[0].file).toBe('stash-pop.txt');
+
+		// 清理：保留合并结果（ours），放弃 dirty 改动，并 drop stash
+		execSync('git checkout --ours -- stash-pop.txt && git add stash-pop.txt', {
+			cwd: repoDir,
+		});
+		execSync('git stash drop', { cwd: repoDir });
+
+		const status = execSync('git status --porcelain', {
+			cwd: repoDir,
+			encoding: 'utf-8',
+		}).trim();
+		expect(status).toBe('');
 	});
 });
 
@@ -526,7 +562,7 @@ describe('worktree execRebaseFF', () => {
 
 	it('1. execRebaseFF rebases and fast-forwards feature branch into main', async () => {
 		const { execRebaseFF } = await import(resolve(EXT_LIB, 'handlers.ts'));
-		const result = execRebaseFF(repoDir, 'feature/rff-success', 'main', wtSuccessDir);
+		const result = await execRebaseFF(repoDir, 'feature/rff-success', 'main', wtSuccessDir);
 
 		expect(result.ok).toBe(true);
 		expect(result.message).toContain('Rebased');
@@ -576,11 +612,11 @@ describe('worktree execRebaseFF', () => {
 
 		// Merge A first via regular merge (from main repo, source is read-only ref)
 		const { execMerge } = await import(resolve(EXT_LIB, 'handlers.ts'));
-		const resultA = execMerge(repoDir, 'feature/rff-ca', 'main');
+		const resultA = await execMerge(repoDir, 'feature/rff-ca', 'main');
 		expect(resultA.ok).toBe(true);
 
 		// Now rebase+ff B should fail with conflict and auto-abort
-		const resultB = execRebaseFF(repoDir, 'feature/rff-cb', 'main', wtCbDir);
+		const resultB = await execRebaseFF(repoDir, 'feature/rff-cb', 'main', wtCbDir);
 		expect(resultB.ok).toBe(false);
 		expect(resultB.conflicts.length).toBeGreaterThan(0);
 		expect(resultB.conflicts[0].file).toBe('rff-conflict.txt');
@@ -615,7 +651,7 @@ describe('worktree execRebaseFF', () => {
 		// Dirty main (not worktree)
 		writeFileSync(join(repoDir, 'rff-untracked.txt'), 'dirty');
 
-		const result = execRebaseFF(repoDir, 'feature/rff-dirty', 'main', wtDirtyDir);
+		const result = await execRebaseFF(repoDir, 'feature/rff-dirty', 'main', wtDirtyDir);
 
 		// Dirty main should not block (gets stashed)
 		expect(result.ok).toBe(true);
@@ -623,7 +659,7 @@ describe('worktree execRebaseFF', () => {
 
 	it('4. execRebaseFF fails when sourceDir does not exist', async () => {
 		const { execRebaseFF } = await import(resolve(EXT_LIB, 'handlers.ts'));
-		const result = execRebaseFF(
+		const result = await execRebaseFF(
 			repoDir,
 			'feature/rff-nonexistent',
 			'main',

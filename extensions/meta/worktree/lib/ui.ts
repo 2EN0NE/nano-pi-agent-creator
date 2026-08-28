@@ -1250,85 +1250,109 @@ export async function showOperationSubmenu(ctx: any, worktreeName: string): Prom
  *  [L] Launch terminal at worktree
  *  [A] Abort
  */
+export interface ConflictPanelAction {
+	action: 'agent' | 'shell' | 'abort' | 'stay';
+}
+
 export async function showConflictPanel(
 	ctx: any,
 	conflicts: Array<{ file: string; lines: string }>,
 	_repoRoot: string,
 	stashMsg?: string,
-): Promise<void> {
-	if (!ctx.hasUI) return;
+	variant: 'merge' | 'stash-pop' = 'merge',
+): Promise<ConflictPanelAction> {
+	if (!ctx.hasUI) return { action: 'stay' };
 
-	await (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<string | null>(
-		(_tui, theme, _kb, done) => ({
-			render(w: number): string[] {
-				const lines: string[] = [];
-				lines.push(truncateToWidth(theme.fg('error', theme.bold(' Conflict detected')), w));
-				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
+	const isStashPop = variant === 'stash-pop';
 
-				// 冲突文件列表
-				lines.push(truncateToWidth(theme.fg('warning', ' Conflicting files:'), w));
-				const shown = conflicts.slice(0, 10);
-				for (const c of shown) {
-					lines.push(truncateToWidth(`   ${theme.fg('text', c.file)}`, w));
-				}
-				if (conflicts.length > 10) {
+	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<ConflictPanelAction>(
+		(tui, theme, _kb, done) => {
+			const options: Array<{ value: ConflictPanelAction['action']; label: string }> =
+				isStashPop
+					? [
+							{ value: 'agent', label: '让 Agent 尝试修复' },
+							{ value: 'shell', label: '打开终端自己解决' },
+							{ value: 'stay', label: '停留（稍后手动处理）' },
+						]
+					: [
+							{ value: 'agent', label: '让 Agent 尝试修复' },
+							{ value: 'shell', label: '打开终端自己解决' },
+							{ value: 'abort', label: '中止并回滚' },
+							{ value: 'stay', label: '停留（稍后手动处理）' },
+						];
+			let cursor = 0;
+
+			return {
+				render(w: number): string[] {
+					const th = theme;
+					const lines: string[] = [];
 					lines.push(
 						truncateToWidth(
-							`   ${theme.fg('dim', `... and ${conflicts.length - 10} more`)}`,
+							th.fg(
+								'error',
+								th.bold(isStashPop ? ' 恢复未提交改动时冲突' : ' 检测到合并冲突'),
+							),
 							w,
 						),
 					);
-				}
+					lines.push(truncateToWidth(th.fg('dim', '─'.repeat(w)), w));
 
-				if (stashMsg) {
-					lines.push(truncateToWidth(theme.fg('dim', stashMsg), w));
-				}
+					// 冲突文件列表
+					lines.push(truncateToWidth(th.fg('warning', ' 冲突文件：'), w));
+					const shown = conflicts.slice(0, 10);
+					for (const c of shown) {
+						lines.push(truncateToWidth(`   ${th.fg('text', c.file)}`, w));
+					}
+					if (conflicts.length > 10) {
+						lines.push(
+							truncateToWidth(
+								`   ${th.fg('dim', `... 还有 ${conflicts.length - 10} 个`)}`,
+								w,
+							),
+						);
+					}
 
-				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
-				lines.push(
-					truncateToWidth(` ${theme.fg('accent', '[L]')} Launch terminal at worktree`, w),
-				);
-				lines.push(
-					truncateToWidth(
-						` ${theme.fg('error', '[A]')} Abort -- rollback to before merge/rebase`,
-						w,
-					),
-				);
-				lines.push(
-					truncateToWidth(
-						` ${theme.fg('dim', '[Esc]')} Dismiss (stay in conflict state)`,
-						w,
-					),
-				);
-				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
-				lines.push(
-					truncateToWidth(
-						theme.fg(
-							'dim',
-							'After resolving, run /worktree continue or /worktree abort',
-						),
-						w,
-					),
-				);
-				return lines;
-			},
-			handleInput(data: string): void {
-				if (data === 'l' || data === 'L') {
-					// L → launch terminal at worktree
-					done('launch');
-					return;
-				}
-				if (data === 'a' || data === 'A') {
-					done('abort');
-					return;
-				}
-				if (matchesKey(data, 'escape')) {
-					done(null);
-					return;
-				}
-			},
-			invalidate(): void {},
-		}),
+					if (stashMsg) {
+						lines.push(truncateToWidth(th.fg('dim', stashMsg), w));
+					}
+
+					lines.push(truncateToWidth(th.fg('dim', '─'.repeat(w)), w));
+					for (let i = 0; i < options.length; i++) {
+						const opt = options[i];
+						const arrow = i === cursor ? th.fg('accent', '>') : ' ';
+						const label =
+							i === cursor ? th.fg('accent', opt.label) : th.fg('text', opt.label);
+						lines.push(truncateToWidth(` ${arrow} ${label}`, w));
+					}
+					lines.push(truncateToWidth(th.fg('dim', '─'.repeat(w)), w));
+					lines.push(
+						truncateToWidth(th.fg('dim', ' 上下键导航  Enter 确认  Esc 停留'), w),
+					);
+					return lines;
+				},
+				handleInput(data: string): void {
+					const kb = getKeybindings();
+					if (kb.matches(data, 'tui.select.up') || matchesKey(data, 'up')) {
+						cursor = Math.max(0, cursor - 1);
+						tui.requestRender();
+						return;
+					}
+					if (kb.matches(data, 'tui.select.down') || matchesKey(data, 'down')) {
+						cursor = Math.min(options.length - 1, cursor + 1);
+						tui.requestRender();
+						return;
+					}
+					if (matchesKey(data, 'enter') || matchesKey(data, 'space')) {
+						done({ action: options[cursor].value });
+						return;
+					}
+					if (matchesKey(data, 'escape')) {
+						done({ action: 'stay' });
+					}
+				},
+				invalidate(): void {},
+			};
+		},
 	);
 }
 
@@ -1404,4 +1428,128 @@ export async function showPostMergeGuide(
 			invalidate(): void {},
 		}),
 	);
+}
+
+// ═══════════════════════════════════════════
+// merge 成功后的两选项面板（中文，对齐 OperationSubmenu 交互风格）
+// ═══════════════════════════════════════════
+
+export interface MergeSuccessResult {
+	action: 'switch' | 'menu' | 'dismiss';
+}
+
+/**
+ * merge 成功后显示两选项面板：
+ *   - 「切换到 <target>」：切到合并目标分支（复用 handleUse）
+ *   - 「回到主菜单」：重新进入 WorktreeSwitcherPanel 主列表
+ *   - Esc：关闭面板，原地不动（成功合并后已切回合并前的原分支，而非 target）
+ *
+ * 仅当 merge 从面板触发（fromPanel）时调用；命令触发则直接 notify 一句。
+ */
+export async function showMergeSuccessPanel(
+	ctx: any,
+	sourceBranch: string,
+	targetBranch: string,
+): Promise<MergeSuccessResult> {
+	if (!ctx.hasUI) return { action: 'dismiss' };
+
+	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<MergeSuccessResult>(
+		(tui, theme, _kb, done) => {
+			const options: Array<{ value: MergeSuccessResult['action']; label: string }> = [
+				{ value: 'switch', label: `切换到 ${targetBranch}` },
+				{ value: 'menu', label: '回到主菜单' },
+			];
+			let cursor = 0;
+
+			return {
+				render(w: number): string[] {
+					const th = theme;
+					const lines: string[] = [];
+					lines.push(
+						truncateToWidth(
+							th.fg('success', th.bold(` 已合并 ${sourceBranch} -> ${targetBranch}`)),
+							w,
+						),
+					);
+					lines.push(truncateToWidth(th.fg('dim', '─'.repeat(w)), w));
+					for (let i = 0; i < options.length; i++) {
+						const opt = options[i];
+						const arrow = i === cursor ? th.fg('accent', '>') : ' ';
+						const label =
+							i === cursor ? th.fg('accent', opt.label) : th.fg('text', opt.label);
+						lines.push(truncateToWidth(` ${arrow} ${label}`, w));
+					}
+					lines.push(truncateToWidth(th.fg('dim', '─'.repeat(w)), w));
+					lines.push(
+						truncateToWidth(th.fg('dim', ' 上下键导航  Enter 确认  Esc 关闭'), w),
+					);
+					return lines;
+				},
+				handleInput(data: string): void {
+					const kb = getKeybindings();
+					if (kb.matches(data, 'tui.select.up') || matchesKey(data, 'up')) {
+						cursor = Math.max(0, cursor - 1);
+						tui.requestRender();
+						return;
+					}
+					if (kb.matches(data, 'tui.select.down') || matchesKey(data, 'down')) {
+						cursor = Math.min(options.length - 1, cursor + 1);
+						tui.requestRender();
+						return;
+					}
+					if (matchesKey(data, 'enter') || matchesKey(data, 'space')) {
+						done({ action: options[cursor].value });
+						return;
+					}
+					if (matchesKey(data, 'escape')) {
+						done({ action: 'dismiss' });
+					}
+				},
+				invalidate(): void {},
+			};
+		},
+	);
+}
+
+// ═══════════════════════════════════════════
+// 冲突解决内嵌提示词（ticket 10）
+// ═══════════════════════════════════════════
+
+/**
+ * 内嵌 `resolving-merge-conflicts` 技能的 5 步提示词（中文），
+ * 避免 worktree 插件与独立技能运行时耦合。
+ *
+ * 第 5 步按 merge/rebase 定制：merge 走 `git commit`，rebase 走 `git rebase --continue`
+ * （并提醒多轮冲突）。squash 冲突不适用（已回滚，不弹冲突面板）。
+ */
+export function buildConflictResolvePrompt(opts: {
+	strategy: 'merge' | 'rebase' | 'stash-pop';
+	sourceBranch: string;
+	targetBranch: string;
+	conflicts: Array<{ file: string; lines?: string }>;
+}): string {
+	const finishStep =
+		opts.strategy === 'rebase'
+			? '继续 rebase：git add 已解决的文件，然后 git rebase --continue，直到所有 commit 都 rebase 完。'
+			: opts.strategy === 'stash-pop'
+				? '完成修复：git add 所有已解决的文件即可（合并本身已完成，无需 commit——这些只是恢复的未提交改动）。'
+				: '完成 merge：git add 所有已解决的文件，然后 git commit。';
+
+	const headline =
+		opts.strategy === 'stash-pop'
+			? `git 合并已成功（${opts.sourceBranch} -> ${opts.targetBranch}），但恢复你的未提交改动（stash pop）时冲突，请按以下步骤解决：`
+			: `当前存在 git ${opts.strategy} 冲突（${opts.sourceBranch} -> ${opts.targetBranch}），请按以下步骤解决：`;
+
+	return [
+		headline,
+		'',
+		'1. 查看当前 git 状态、历史，以及所有冲突文件。',
+		'2. 找到每个冲突的主要来源，理解每处改动的原因与原始意图（读 commit message、PR、issue）。',
+		'3. 逐个 hunk 解决：尽量保留双方意图；无法兼容时，选择符合本次合并目标的方案并说明取舍；不要发明新行为；只 resolve，不要 --abort。',
+		'4. 运行项目的自动化检查（先 typecheck，再 test，再 format），修复合并导致的问题。',
+		'5. ' + finishStep,
+		'',
+		'冲突文件：',
+		...opts.conflicts.map((c) => '  - ' + c.file),
+	].join('\n');
 }
