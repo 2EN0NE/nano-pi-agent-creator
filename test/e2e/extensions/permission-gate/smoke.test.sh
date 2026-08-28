@@ -21,66 +21,66 @@ ROOT_DIR="${ROOT_DIR:?must be set by test runner}"
 # Helper: 搭建隔离测试沙箱
 # ====================================================================
 setup_sandbox() {
-	local test_home="$1"
-	local scenario="$2"
-	shift 2 || true
+  local test_home="$1"
+  local scenario="$2"
+  shift 2 || true
 
-	local home_dir="$test_home/home"
-	mkdir -p "$home_dir/.pi/agent/extensions" \
-		"$test_home/.pi/extensions" \
-		"$test_home/.pi/logs" \
-		"$test_home/.pi/extensions-data/permission-gate"
+  local home_dir="$test_home/home"
+  mkdir -p "$home_dir/.pi/agent/extensions" \
+    "$test_home/.pi/extensions" \
+    "$test_home/.pi/logs" \
+    "$test_home/.pi/extensions-data/permission-gate"
 
-	# 拷贝 pi-logger
-	cp -r "$ROOT_DIR/extensions/meta/pi-logger" \
-		"$test_home/.pi/extensions/pi-logger"
+  # 拷贝 pi-logger
+  cp -r "$ROOT_DIR/extensions/meta/pi-logger" \
+    "$test_home/.pi/extensions/pi-logger"
 
-	# 拷贝 permission-gate
-	cp -r "$ROOT_DIR/extensions/security/permission-gate" \
-		"$test_home/.pi/extensions/permission-gate"
+  # 拷贝 permission-gate
+  cp -r "$ROOT_DIR/extensions/security/permission-gate" \
+    "$test_home/.pi/extensions/permission-gate"
 
-	# 拷贝 mock-llm（test/e2e/extensions/permission-gate/helpers/mock-llm.ts → index.ts）
-	mkdir -p "$test_home/.pi/extensions/mock-llm"
-	cp "$ROOT_DIR/test/e2e/extensions/permission-gate/helpers/mock-llm.ts" \
-		"$test_home/.pi/extensions/mock-llm/index.ts"
+  # 拷贝 mock-llm（test/e2e/extensions/permission-gate/helpers/mock-llm.ts → index.ts）
+  mkdir -p "$test_home/.pi/extensions/mock-llm"
+  cp "$ROOT_DIR/test/e2e/extensions/permission-gate/helpers/mock-llm.ts" \
+    "$test_home/.pi/extensions/mock-llm/index.ts"
 
-	# pi-logger 配置
-	if [[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]]; then
-		cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" \
-			"$test_home/.pi/pi-logger.json"
-	fi
+  # pi-logger 配置
+  if [[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]]; then
+    cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" \
+      "$test_home/.pi/pi-logger.json"
+  fi
 
-	# node_modules 本地包链接
-	mkdir -p "$test_home/node_modules/@zenone"
-	if [[ ! -e "$test_home/node_modules/@zenone/pi-logger" ]]; then
-		ln -sf "$ROOT_DIR/extensions/meta/pi-logger" \
-			"$test_home/node_modules/@zenone/pi-logger"
-	fi
+  # node_modules 本地包链接
+  mkdir -p "$test_home/node_modules/@zenone"
+  if [[ ! -e "$test_home/node_modules/@zenone/pi-logger" ]]; then
+    ln -sf "$ROOT_DIR/extensions/meta/pi-logger" \
+      "$test_home/node_modules/@zenone/pi-logger"
+  fi
 
-	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '../../../src/tui/helpers.js' 的扩展在沙箱内解析
-	if [[ -d "$ROOT_DIR/src/tui" ]]; then
-		mkdir -p "$test_home/src"
-		cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
-	fi
+  # 拷贝共享 TUI 辅助模块（src/tui/），供 import '../../../src/tui/helpers.js' 的扩展在沙箱内解析
+  if [[ -d "$ROOT_DIR/src/tui" ]]; then
+    mkdir -p "$test_home/src"
+    cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
+  fi
 
-	# 初始化 git
-	if ! git -C "$test_home" rev-parse --git-dir &>/dev/null; then
-		git -C "$test_home" init --initial-branch main &>/dev/null || true
-	fi
+  # 初始化 git
+  if ! git -C "$test_home" rev-parse --git-dir &>/dev/null; then
+    git -C "$test_home" init --initial-branch main &>/dev/null || true
+  fi
 
-	# 写入项目级 permission-gate 配置（场景不同，配置不同）
-	write_config "$test_home" "$scenario"
+  # 写入项目级 permission-gate 配置（场景不同，配置不同）
+  write_config "$test_home" "$scenario"
 }
 
 write_config() {
-	local test_home="$1"
-	local scenario="$2"
-	local config_file="$test_home/.pi/extensions-data/permission-gate/config.json"
+  local test_home="$1"
+  local scenario="$2"
+  local config_file="$test_home/.pi/extensions-data/permission-gate/config.json"
 
-	case "$scenario" in
-	auto_approve)
-		# 阈值足够高 → 自动放行
-		cat >"$config_file" <<'JSON'
+  case "$scenario" in
+  auto_approve)
+    # 阈值足够高 → 自动放行
+    cat >"$config_file" <<'JSON'
 {
   "enabled": true,
   "dynamicPolicyEnabled": true,
@@ -98,10 +98,10 @@ write_config() {
   "approvalCounts": {}
 }
 JSON
-		;;
-	threshold_exceeded)
-		# 阈值 0 → 立即超限 → block（no-UI 模式）
-		cat >"$config_file" <<'JSON'
+    ;;
+  threshold_exceeded)
+    # 阈值 0 → 立即超限 → block（no-UI 模式）
+    cat >"$config_file" <<'JSON'
 {
   "enabled": true,
   "dynamicPolicyEnabled": true,
@@ -119,10 +119,10 @@ JSON
   "approvalCounts": {}
 }
 JSON
-		;;
-	out_of_scope)
-		# scope 指向不相关目录 → 不自动放行
-		cat >"$config_file" <<'JSON'
+    ;;
+  out_of_scope)
+    # scope 指向不相关目录 → 不自动放行
+    cat >"$config_file" <<'JSON'
 {
   "enabled": true,
   "dynamicPolicyEnabled": true,
@@ -140,48 +140,48 @@ JSON
   "approvalCounts": {}
 }
 JSON
-		;;
-	esac
+    ;;
+  esac
 }
 
 # ====================================================================
 # Helper: 在隔离沙箱中运行 pi
 # ====================================================================
 run_pi() {
-	local test_home="$1"
-	local prompt="${2:-hi}"
+  local test_home="$1"
+  local prompt="${2:-hi}"
 
-	local stdout_file="$test_home/pi-stdout.log"
+  local stdout_file="$test_home/pi-stdout.log"
 
-	cd "$test_home"
-	set +e
-	HOME="$test_home/home" pi -a --no-session -p "$prompt" \
-		>"$stdout_file" 2>&1
-	local ec=$?
-	set -e
-	cd "$ROOT_DIR"
+  cd "$test_home"
+  set +e
+  HOME="$test_home/home" pi -a --no-session -p "$prompt" \
+    >"$stdout_file" 2>&1
+  local ec=$?
+  set -e
+  cd "$ROOT_DIR"
 
-	echo "=== pi exit code: $ec ==="
-	return $ec
+  echo "=== pi exit code: $ec ==="
+  return $ec
 }
 
 # ====================================================================
 # Helper: 输出权限相关日志
 # ====================================================================
 dump_perm_logs() {
-	local test_home="$1"
-	local log_dir="$test_home/.pi/logs"
+  local test_home="$1"
+  local log_dir="$test_home/.pi/logs"
 
-	echo "=== PERMISSION-GATE LOG ==="
-	if [[ -d "$log_dir" ]]; then
-		for f in "$log_dir"/permission-gate*.log; do
-			if [[ -f "$f" ]]; then
-				cat "$f"
-			fi
-		done
-	fi
-	echo "=== STDOUT (last 40 lines) ==="
-	tail -40 "$test_home/pi-stdout.log" 2>/dev/null || echo "(no stdout)"
+  echo "=== PERMISSION-GATE LOG ==="
+  if [[ -d "$log_dir" ]]; then
+    for f in "$log_dir"/permission-gate*.log; do
+      if [[ -f "$f" ]]; then
+        cat "$f"
+      fi
+    done
+  fi
+  echo "=== STDOUT (last 40 lines) ==="
+  tail -40 "$test_home/pi-stdout.log" 2>/dev/null || echo "(no stdout)"
 }
 
 # ====================================================================

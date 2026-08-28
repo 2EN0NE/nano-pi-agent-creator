@@ -22,31 +22,31 @@ ROOT_DIR="${ROOT_DIR:?must be set by test runner}"
 # Helper: copy ctx-simulator to a test home (it's in test/helpers/, not extensions/)
 # ====================================================================
 setup_test_home() {
-	local test_home="$1"
-	shift
-	mkdir -p "$test_home/.pi/extensions" "$test_home/.pi/logs"
+  local test_home="$1"
+  shift
+  mkdir -p "$test_home/.pi/extensions" "$test_home/.pi/logs"
 
-	# Always copy pi-logger (needed for log output)
-	cp -r "$ROOT_DIR/extensions/meta/pi-logger" "$test_home/.pi/extensions/pi-logger"
-	cp "$ROOT_DIR/pi-logger.json" "$test_home/pi-logger.json" 2>/dev/null || true
+  # Always copy pi-logger (needed for log output)
+  cp -r "$ROOT_DIR/extensions/meta/pi-logger" "$test_home/.pi/extensions/pi-logger"
+  cp "$ROOT_DIR/pi-logger.json" "$test_home/pi-logger.json" 2>/dev/null || true
 
-	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '.../src/tui/helpers.js' 的扩展在沙箱内解析
-	if [[ -d "$ROOT_DIR/src/tui" ]]; then
-		mkdir -p "$test_home/src"
-		cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
-	fi
+  # 拷贝共享 TUI 辅助模块（src/tui/），供 import '.../src/tui/helpers.js' 的扩展在沙箱内解析
+  if [[ -d "$ROOT_DIR/src/tui" ]]; then
+    mkdir -p "$test_home/src"
+    cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
+  fi
 
-	for name in "$@"; do
-		case "$name" in
-		tools)
-			cp "$ROOT_DIR/extensions/meta/tools.ts" "$test_home/.pi/extensions/tools.ts"
-			;;
-		ctx-simulator)
-			cp "$ROOT_DIR/test/e2e/extensions/tools/helpers/z-ctx-simulator.ts" \
-				"$test_home/.pi/extensions/z-ctx-simulator.ts"
-			;;
-		call-observer)
-			cat >"$test_home/.pi/extensions/call-observer.ts" <<'OBSERVER'
+  for name in "$@"; do
+    case "$name" in
+    tools)
+      cp "$ROOT_DIR/extensions/meta/tools.ts" "$test_home/.pi/extensions/tools.ts"
+      ;;
+    ctx-simulator)
+      cp "$ROOT_DIR/test/e2e/extensions/tools/helpers/z-ctx-simulator.ts" \
+        "$test_home/.pi/extensions/z-ctx-simulator.ts"
+      ;;
+    call-observer)
+      cat >"$test_home/.pi/extensions/call-observer.ts" <<'OBSERVER'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createLogger } from "@zenone/pi-logger";
 const log = createLogger("call-observer");
@@ -59,44 +59,44 @@ export default function (pi: ExtensionAPI) {
   });
 }
 OBSERVER
-			;;
-		esac
-	done
+      ;;
+    esac
+  done
 }
 
 # ====================================================================
 # Helper: run pi in test home and capture output
 # ====================================================================
 run_pi() {
-	local test_home="$1"
-	local slug="$2"
-	local prompt="${3:-hi}"
+  local test_home="$1"
+  local slug="$2"
+  local prompt="${3:-hi}"
 
-	cd "$test_home"
-	set +e
-	pi -a --no-session -p "$prompt" \
-		>"$ROOT_DIR/.pi/tmp/${slug}-stdout.log" 2>&1
-	local ec=$?
-	set -e
-	cd "$ROOT_DIR"
-	echo "pi exit: $ec"
+  cd "$test_home"
+  set +e
+  pi -a --no-session -p "$prompt" \
+    >"$ROOT_DIR/.pi/tmp/${slug}-stdout.log" 2>&1
+  local ec=$?
+  set -e
+  cd "$ROOT_DIR"
+  echo "pi exit: $ec"
 }
 
 # ====================================================================
 # Helper: dump test results
 # ====================================================================
 dump_logs() {
-	local test_home="$1"
-	echo "=== EXTENSIONS DIR ==="
-	ls -la "$test_home/.pi/extensions/" 2>/dev/null || echo "(no dir)"
-	echo "=== LOG FILES ==="
-	ls -la "$test_home/.pi/logs/" 2>/dev/null || echo "(no logs)"
-	for f in "$test_home/.pi/logs/"*.log; do
-		[[ -f "$f" ]] || continue
-		local bn=$(basename "$f")
-		echo "--- $bn ---"
-		cat "$f"
-	done
+  local test_home="$1"
+  echo "=== EXTENSIONS DIR ==="
+  ls -la "$test_home/.pi/extensions/" 2>/dev/null || echo "(no dir)"
+  echo "=== LOG FILES ==="
+  ls -la "$test_home/.pi/logs/" 2>/dev/null || echo "(no logs)"
+  for f in "$test_home/.pi/logs/"*.log; do
+    [[ -f "$f" ]] || continue
+    local bn=$(basename "$f")
+    echo "--- $bn ---"
+    cat "$f"
+  done
 }
 
 # ====================================================================

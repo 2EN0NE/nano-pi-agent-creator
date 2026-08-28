@@ -14,80 +14,80 @@ test_describe "ci-watch extension"
 # Helper：搭建隔离测试沙箱
 # ====================================================================
 setup_sandbox() {
-	local test_home="$1"
+  local test_home="$1"
 
-	local home_dir="$test_home/home"
-	mkdir -p "$home_dir/.pi/agent/extensions" \
-		"$test_home/.pi/extensions" \
-		"$test_home/.pi/logs"
+  local home_dir="$test_home/home"
+  mkdir -p "$home_dir/.pi/agent/extensions" \
+    "$test_home/.pi/extensions" \
+    "$test_home/.pi/logs"
 
-	# ci-watch：带 dist 的目录扩展
-	mkdir -p "$test_home/.pi/extensions/ci-watch"
-	cp -r "$ROOT_DIR/extensions/verification/ci-watch/dist" \
-		"$test_home/.pi/extensions/ci-watch/dist"
+  # ci-watch：带 dist 的目录扩展
+  mkdir -p "$test_home/.pi/extensions/ci-watch"
+  cp -r "$ROOT_DIR/extensions/verification/ci-watch/dist" \
+    "$test_home/.pi/extensions/ci-watch/dist"
 
-	# pi-logger：日志基础设施
-	cp -r "$ROOT_DIR/extensions/meta/pi-logger" \
-		"$test_home/.pi/extensions/pi-logger"
+  # pi-logger：日志基础设施
+  cp -r "$ROOT_DIR/extensions/meta/pi-logger" \
+    "$test_home/.pi/extensions/pi-logger"
 
-	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '.../src/tui/helpers.js' 的扩展在沙箱内解析
-	if [[ -d "$ROOT_DIR/src/tui" ]]; then
-		mkdir -p "$test_home/src"
-		cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
-	fi
+  # 拷贝共享 TUI 辅助模块（src/tui/），供 import '.../src/tui/helpers.js' 的扩展在沙箱内解析
+  if [[ -d "$ROOT_DIR/src/tui" ]]; then
+    mkdir -p "$test_home/src"
+    cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
+  fi
 
-	# mock-llm：引用共享版本（test/helpers/mock-llm.ts）
-	mkdir -p "$test_home/.pi/extensions/mock-llm"
-	cp "$ROOT_DIR/test/helpers/mock-llm.ts" \
-		"$test_home/.pi/extensions/mock-llm/index.ts"
+  # mock-llm：引用共享版本（test/helpers/mock-llm.ts）
+  mkdir -p "$test_home/.pi/extensions/mock-llm"
+  cp "$ROOT_DIR/test/helpers/mock-llm.ts" \
+    "$test_home/.pi/extensions/mock-llm/index.ts"
 
-	# pi-logger 配置
-	[[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]] && {
-		cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" \
-			"$test_home/.pi/pi-logger.json"
-	}
+  # pi-logger 配置
+  [[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]] && {
+    cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" \
+      "$test_home/.pi/pi-logger.json"
+  }
 
-	# node_modules 本地包链接（@zenone/pi-logger）
-	mkdir -p "$test_home/node_modules/@zenone"
-	[[ ! -e "$test_home/node_modules/@zenone/pi-logger" ]] && {
-		ln -sf "$ROOT_DIR/extensions/meta/pi-logger" \
-			"$test_home/node_modules/@zenone/pi-logger"
-	}
+  # node_modules 本地包链接（@zenone/pi-logger）
+  mkdir -p "$test_home/node_modules/@zenone"
+  [[ ! -e "$test_home/node_modules/@zenone/pi-logger" ]] && {
+    ln -sf "$ROOT_DIR/extensions/meta/pi-logger" \
+      "$test_home/node_modules/@zenone/pi-logger"
+  }
 
-	# 初始化 git（某些事件需要 git 目录）
-	git -C "$test_home" init --initial-branch main &>/dev/null || true
+  # 初始化 git（某些事件需要 git 目录）
+  git -C "$test_home" init --initial-branch main &>/dev/null || true
 }
 
 # ====================================================================
 # Helper：在隔离沙箱中运行 pi
 # ====================================================================
 run_pi() {
-	local test_home="$1"
-	local prompt="${2:-hi}"
+  local test_home="$1"
+  local prompt="${2:-hi}"
 
-	local stdout_file="$test_home/pi-stdout.log"
+  local stdout_file="$test_home/pi-stdout.log"
 
-	cd "$test_home"
-	set +e
-	HOME="$test_home/home" pi -a --no-session -p "$prompt" \
-		>"$stdout_file" 2>&1
-	local ec=$?
-	set -e
-	cd "$ROOT_DIR"
+  cd "$test_home"
+  set +e
+  HOME="$test_home/home" pi -a --no-session -p "$prompt" \
+    >"$stdout_file" 2>&1
+  local ec=$?
+  set -e
+  cd "$ROOT_DIR"
 
-	echo "=== pi exit code: $ec ==="
-	return $ec
+  echo "=== pi exit code: $ec ==="
+  return $ec
 }
 
 # ====================================================================
 # Helper：输出沙箱日志
 # ====================================================================
 dump_logs() {
-	local test_home="$1"
-	echo "=== STDOUT ==="
-	cat "$test_home/pi-stdout.log" 2>/dev/null || echo "(no stdout)"
-	echo "=== LOGS ==="
-	ls "$test_home/.pi/logs/" 2>/dev/null && cat "$test_home/.pi/logs/"*.log 2>/dev/null | head -50 || echo "(no logs)"
+  local test_home="$1"
+  echo "=== STDOUT ==="
+  cat "$test_home/pi-stdout.log" 2>/dev/null || echo "(no stdout)"
+  echo "=== LOGS ==="
+  ls "$test_home/.pi/logs/" 2>/dev/null && cat "$test_home/.pi/logs/"*.log 2>/dev/null | head -50 || echo "(no logs)"
 }
 
 # ====================================================================
