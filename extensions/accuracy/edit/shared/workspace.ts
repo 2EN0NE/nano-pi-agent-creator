@@ -49,7 +49,7 @@ export function createVirtualWorkspace(cwd: string): Workspace {
 			await ensureLoaded(absolutePath);
 			const content = state.get(absolutePath);
 			if (content === null || content === undefined) {
-				throw new Error(`File not found: ${absolutePath.replace(`${cwd}/`, '')}`);
+				throw new Error(`文件未找到：${absolutePath.replace(`${cwd}/`, '')}`);
 			}
 			return content;
 		},
@@ -59,7 +59,7 @@ export function createVirtualWorkspace(cwd: string): Workspace {
 		deleteFile: async (absolutePath) => {
 			await ensureLoaded(absolutePath);
 			if (state.get(absolutePath) === null) {
-				throw new Error(`File not found: ${absolutePath.replace(`${cwd}/`, '')}`);
+				throw new Error(`文件未找到：${absolutePath.replace(`${cwd}/`, '')}`);
 			}
 			state.set(absolutePath, null);
 		},
@@ -80,7 +80,7 @@ export function normalizeToLF(text: string): string {
 export function resolvePatchPath(cwd: string, filePath: string): string {
 	const trimmed = filePath.trim();
 	if (!trimmed) {
-		throw new Error('Patch path cannot be empty');
+		throw new Error('补丁路径不能为空');
 	}
 	return trimmed.startsWith('/') ? resolve(trimmed) : resolve(cwd, trimmed);
 }

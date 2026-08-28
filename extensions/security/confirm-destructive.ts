@@ -29,7 +29,7 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			if (!confirmed) {
-				ctx.ui.notify('Clear cancelled', 'info');
+				ctx.ui.notify('已取消清除', 'info');
 				log.info('User cancelled clear session');
 				return { cancel: true };
 			}
@@ -53,7 +53,7 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			if (!confirmed) {
-				ctx.ui.notify('Switch cancelled', 'info');
+				ctx.ui.notify('已取消切换', 'info');
 				log.info('User cancelled session switch due to unsaved work');
 				return { cancel: true };
 			}
@@ -71,16 +71,16 @@ export default function (pi: ExtensionAPI) {
 
 		const choice = await showSelect(
 			ctx,
-			`Fork from entry ${event.entryId.slice(0, 8)}?`,
+			`从条目 ${event.entryId.slice(0, 8)} 分叉？`,
 			[
-				{ value: 'yes', label: 'Yes, create fork' },
-				{ value: 'no', label: 'No, stay in current session' },
+				{ value: 'yes', label: '是，创建分叉' },
+				{ value: 'no', label: '否，留在当前会话' },
 			],
 			{ mode: 'danger' },
 		);
 
 		if (choice?.value !== 'yes') {
-			ctx.ui.notify('Fork cancelled', 'info');
+			ctx.ui.notify('已取消分叉', 'info');
 			log.info('User cancelled fork from entry %s', event.entryId.slice(0, 8));
 			return { cancel: true };
 		}

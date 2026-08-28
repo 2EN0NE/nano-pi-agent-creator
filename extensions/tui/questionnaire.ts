@@ -24,6 +24,7 @@ import {
 	wrapTextWithAnsi,
 	visibleWidth,
 } from '@earendil-works/pi-tui';
+import { topBorder } from '../../src/tui/helpers.js';
 import { Type } from 'typebox';
 import { createLogger } from '@zenone/pi-logger';
 
@@ -70,35 +71,32 @@ interface RenderOption extends QuestionOption {
 // ── Schema ──
 
 const QuestionOptionSchema = Type.Object({
-	value: Type.String({ description: 'The value returned when selected' }),
-	label: Type.String({ description: 'Display label for the option' }),
-	description: Type.Optional(
-		Type.String({ description: 'Optional description shown below label' }),
-	),
+	value: Type.String({ description: '选中时返回的值' }),
+	label: Type.String({ description: '选项的显示标签' }),
+	description: Type.Optional(Type.String({ description: '标签下方显示的可选描述' })),
 });
 
 const QuestionSchema = Type.Object({
-	id: Type.String({ description: 'Unique identifier for this question' }),
+	id: Type.String({ description: '此问题的唯一标识' }),
 	label: Type.Optional(
 		Type.String({
-			description:
-				"Short contextual label for tab bar, e.g. 'Scope', 'Priority' (defaults to Q1, Q2)",
+			description: "标签栏的简短上下文标签，例如 'Scope'、'Priority'（默认 Q1、Q2）",
 		}),
 	),
-	prompt: Type.String({ description: 'The full question text to display' }),
+	prompt: Type.String({ description: '要显示的完整问题文本' }),
 	options: Type.Array(QuestionOptionSchema, {
-		description: 'Available options to choose from',
+		description: '可供选择的选项',
 	}),
 	allowOther: Type.Optional(
 		Type.Boolean({
-			description: "Allow 'Type something' option (default: true)",
+			description: "允许 '输入其他' 选项（默认：true）",
 		}),
 	),
 });
 
 const QuestionnaireParams = Type.Object({
 	questions: Type.Array(QuestionSchema, {
-		description: 'Questions to ask the user',
+		description: '向用户提出的问题',
 	}),
 });
 
@@ -151,17 +149,17 @@ function buildContent(questions: Question[], answers: Answer[]): string {
 export default function questionnaire(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: 'questionnaire',
-		label: 'Questionnaire',
+		label: '问卷',
 		description:
-			'Ask the user one or more questions. For single questions, shows a simple option list. For multiple questions, shows a tab-based interface with navigation between questions and a submit review step.',
+			'向用户提出一个或多个问题。单个问题时显示简单选项列表；多个问题时显示带导航与提交确认步骤的标签页界面。',
 		parameters: QuestionnaireParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (ctx.mode !== 'tui') {
-				return errorResult('Error: UI not available (running in non-interactive mode)');
+				return errorResult('错误：UI 不可用（正在非交互模式运行）');
 			}
 			if (params.questions.length === 0) {
-				return errorResult('Error: No questions provided');
+				return errorResult('错误：未提供问题');
 			}
 
 			// Normalize questions with defaults
@@ -199,14 +197,14 @@ export default function questionnaire(pi: ExtensionAPI) {
 				return new Text(text?.type === 'text' ? text.text : '', 0, 0);
 			}
 			if (details.cancelled) {
-				return new Text(theme.fg('warning', 'Cancelled'), 0, 0);
+				return new Text(theme.fg('warning', '已取消'), 0, 0);
 			}
 			const lines = details.answers.map((a) => {
 				if (a.wasCustom) {
-					return `${theme.fg('success', '✓ ')}${theme.fg('accent', a.id)}: ${theme.fg('muted', '(wrote) ')}${a.label}`;
+					return `${theme.fg('success', '[OK] ')}${theme.fg('accent', a.id)}: ${theme.fg('muted', '(wrote) ')}${a.label}`;
 				}
 				const display = a.index ? `${a.index}. ${a.label}` : a.label;
-				let result = `${theme.fg('success', '✓ ')}${theme.fg('accent', a.id)}: ${display}`;
+				let result = `${theme.fg('success', '[OK] ')}${theme.fg('accent', a.id)}: ${display}`;
 				if (a.supplement) {
 					result += `\n  ${theme.fg('dim', 'supplement:')} ${a.supplement}`;
 				}
@@ -357,7 +355,7 @@ async function handleMultiQuestion(
 			if (!q) return [];
 			const opts: RenderOption[] = [...q.options];
 			if (q.allowOther) {
-				opts.push({ value: '__other__', label: 'Type something.', isOther: true });
+				opts.push({ value: '__other__', label: '输入其他。', isOther: true });
 			}
 			return opts;
 		}
@@ -377,7 +375,7 @@ async function handleMultiQuestion(
 				if (answer) {
 					const opts: RenderOption[] = [...q.options];
 					if (q.allowOther) {
-						opts.push({ value: '__other__', label: 'Type something.', isOther: true });
+						opts.push({ value: '__other__', label: '输入其他。', isOther: true });
 					}
 					// If answer was custom, point to the "Type something." option
 					if (answer.wasCustom) {
@@ -629,8 +627,8 @@ async function handleMultiQuestion(
 				}
 			};
 
-			// Top border
-			add(theme.fg('accent', '─'.repeat(width)));
+			// Top border（标题嵌入，ADR-0023）
+			add(theme.fg('accent', topBorder('── questionnaire ', width)));
 
 			// Tab bar
 			{
@@ -650,7 +648,7 @@ async function handleMultiQuestion(
 				// Submit tab
 				const canSubmit = allAnswered();
 				const isSubmitTab = currentTab === questions.length;
-				const submitText = ' ✓ Submit ';
+				const submitText = ' [确定] 提交 ';
 				const submitStyled = isSubmitTab
 					? theme.bg('selectedBg', theme.fg('text', submitText))
 					: theme.fg(canSubmit ? 'success' : 'dim', submitText);
@@ -673,7 +671,7 @@ async function handleMultiQuestion(
 					add(` ${editorLine}`);
 				}
 				add('');
-				add(theme.fg('dim', ' Enter to submit changes · Esc to cancel custom input'));
+				add(theme.fg('dim', ' Enter 提交修改 · Esc 取消自定义输入'));
 			} else if (supplementMode && q) {
 				// ── Supplement mode (Tab) ──
 				add(theme.fg('text', ` ${q.prompt}`));
@@ -688,12 +686,10 @@ async function handleMultiQuestion(
 					(isEmpty ? theme.fg('dim', placeholder) : theme.fg('text', supplementText));
 				add(inputLine);
 				add('');
-				add(
-					theme.fg('dim', ' Enter to confirm supplement · Esc to cancel · Type to input'),
-				);
+				add(theme.fg('dim', ' Enter 确认补充 · Esc 取消 · 输入内容'));
 			} else if (currentTab === questions.length) {
 				// ── Submit tab ──
-				add(theme.fg('accent', theme.bold(' Ready to submit')));
+				add(theme.fg('accent', theme.bold(' 准备提交')));
 				add('');
 				for (const question of questions) {
 					const answer = answers.get(question.id);
@@ -716,7 +712,7 @@ async function handleMultiQuestion(
 				}
 				add('');
 				if (allAnswered()) {
-					add(theme.fg('success', ' Press Enter to submit · Esc to cancel'));
+					add(theme.fg('success', ' 按 Enter 提交 · Esc 取消'));
 				} else {
 					const missing = questions
 						.filter((q) => !answers.has(q.id))
@@ -734,9 +730,9 @@ async function handleMultiQuestion(
 			// Bottom help bar
 			add('');
 			if (customInputMode) {
-				add(theme.fg('dim', ' Enter submit · Esc cancel · Type freely'));
+				add(theme.fg('dim', ' Enter 提交 · Esc 取消 · 自由输入'));
 			} else if (supplementMode) {
-				add(theme.fg('dim', ' Enter add supplement · Esc cancel supplement · Type freely'));
+				add(theme.fg('dim', ' Enter 添加补充 · Esc 取消补充 · 自由输入'));
 			} else if (currentTab === questions.length) {
 				// Already handled above; add a short reminder
 				if (allAnswered()) {
@@ -811,7 +807,11 @@ function renderOptions(
 		const isOther = opt.isOther === true;
 		const prefix = isSelected ? theme.fg('accent', ' › ') : '   ';
 		const color = isSelected ? 'accent' : 'text';
-		const label = isOther ? (showInputIndicator ? `${opt.label} ✎` : opt.label) : opt.label;
+		const label = isOther
+			? showInputIndicator
+				? `${opt.label} [输入]`
+				: opt.label
+			: opt.label;
 		add(`${prefix}${theme.fg(color, `${i + 1}. ${label}`)}`);
 		if (opt.description) {
 			addContent(`     ${theme.fg('muted', opt.description)}`, '     ');

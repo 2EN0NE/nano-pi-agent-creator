@@ -92,7 +92,7 @@ function extractSelectPair(
 
 describe('review.ts 模式选择', () => {
 	const source = readSource('review.ts');
-	const pair = extractSelectPair(source, "'选择审查模式：'");
+	const pair = extractSelectPair(source, "'Review Mode:'");
 
 	it('找到了模式选择调用', () => {
 		expect(pair).not.toBeNull();
@@ -113,7 +113,7 @@ describe('review.ts 模式选择', () => {
 
 describe('test-analysis.ts 模式选择', () => {
 	const source = readSource('test-analysis.ts');
-	const pair = extractSelectPair(source, "'选择分析模式：'");
+	const pair = extractSelectPair(source, "'Analysis Mode:'");
 
 	it('找到了模式选择调用', () => {
 		expect(pair).not.toBeNull();
@@ -146,26 +146,46 @@ describe('整体验证', () => {
 		return false;
 	}
 
-	it('review.ts 的所有 ctx.ui.select 都有匹配的 choice 比较', () => {
+	/**
+	 * 提取从第 i 行开始的选项数组 `[...]`（支持跨行数组，如 selectPanel 的多行选项）。
+	 * 返回去除引号后的选项列表；未找到闭合 `]` 时返回 null。
+	 */
+	function extractOptions(lines: string[], i: number): string[] | null {
+		const openIdx = lines[i].indexOf('[');
+		if (openIdx < 0) return null;
+
+		let buf = lines[i].slice(openIdx);
+		let j = i;
+		while (!buf.includes(']') && j < lines.length - 1) {
+			j++;
+			buf += lines[j];
+		}
+
+		const bracketMatch = buf.match(/\[([^\]]+)\]/);
+		if (!bracketMatch) return null;
+
+		return bracketMatch[1]
+			.split(',')
+			.map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
+			.filter(Boolean);
+	}
+
+	it('review.ts 的所有 select 调用都有匹配的 choice 比较', () => {
 		const source = readSource('review.ts');
 		const lines = source.split('\n');
 
 		// 找所有 select 调用
 		for (let i = 0; i < lines.length; i++) {
 			if (
+				!lines[i].includes('selectPanel(ctx, ') &&
 				!lines[i].includes('ctx.ui.select(') &&
 				!lines[i].includes('ctx.ui.picker(') &&
 				!lines[i].includes('ctx.ui.menu(')
 			)
 				continue;
 
-			const bracketMatch = lines[i].match(/\[([^\]]+)\]/);
-			if (!bracketMatch) continue;
-
-			const options = bracketMatch[1]
-				.split(',')
-				.map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
-				.filter(Boolean);
+			const options = extractOptions(lines, i);
+			if (!options) continue;
 
 			// 跳过动作选择器（无 choice === 'X' 精确比较的行）
 			if (!hasChoiceComparison(lines, i)) continue;
@@ -184,25 +204,21 @@ describe('整体验证', () => {
 		}
 	});
 
-	it('test-analysis.ts 的所有 ctx.ui.select 都有匹配的 choice 比较', () => {
+	it('test-analysis.ts 的所有 select 调用都有匹配的 choice 比较', () => {
 		const source = readSource('test-analysis.ts');
 		const lines = source.split('\n');
 
 		for (let i = 0; i < lines.length; i++) {
 			if (
+				!lines[i].includes('selectPanel(ctx, ') &&
 				!lines[i].includes('ctx.ui.select(') &&
 				!lines[i].includes('ctx.ui.picker(') &&
 				!lines[i].includes('ctx.ui.menu(')
 			)
 				continue;
 
-			const bracketMatch = lines[i].match(/\[([^\]]+)\]/);
-			if (!bracketMatch) continue;
-
-			const options = bracketMatch[1]
-				.split(',')
-				.map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
-				.filter(Boolean);
+			const options = extractOptions(lines, i);
+			if (!options) continue;
 
 			// 跳过动作选择器（无 choice === 'X' 精确比较的行）
 			if (!hasChoiceComparison(lines, i)) continue;

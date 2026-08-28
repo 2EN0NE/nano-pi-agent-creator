@@ -49,60 +49,60 @@ function getBlockedCommandMessage(command: string): string | null {
 
 	if (pipCommandPattern.test(command)) {
 		return [
-			'Error: pip is disabled. Use uv instead:',
+			'错误：pip 已被禁用。请改用 uv：',
 			'',
-			'  To install a package for a script: uv run --with PACKAGE python script.py',
-			'  To add a dependency to the project: uv add PACKAGE',
+			'  为脚本安装包：uv run --with PACKAGE python script.py',
+			'  为项目添加依赖：uv add PACKAGE',
 			'',
 		].join('\n');
 	}
 
 	if (pip3CommandPattern.test(command)) {
 		return [
-			'Error: pip3 is disabled. Use uv instead:',
+			'错误：pip3 已被禁用。请改用 uv：',
 			'',
-			'  To install a package for a script: uv run --with PACKAGE python script.py',
-			'  To add a dependency to the project: uv add PACKAGE',
+			'  为脚本安装包：uv run --with PACKAGE python script.py',
+			'  为项目添加依赖：uv add PACKAGE',
 			'',
 		].join('\n');
 	}
 
 	if (poetryCommandPattern.test(command)) {
 		return [
-			'Error: poetry is disabled. Use uv instead:',
+			'错误：poetry 已被禁用。请改用 uv：',
 			'',
-			'  To initialize a project: uv init',
-			'  To add a dependency: uv add PACKAGE',
-			'  To sync dependencies: uv sync',
-			'  To run commands: uv run COMMAND',
+			'  初始化项目：uv init',
+			'  添加依赖：uv add PACKAGE',
+			'  同步依赖：uv sync',
+			'  运行命令：uv run COMMAND',
 			'',
 		].join('\n');
 	}
 
 	if (pythonPipPattern.test(command)) {
 		return [
-			"Error: 'python -m pip' is disabled. Use uv instead:",
+			"错误：'python -m pip' 已被禁用。请改用 uv：",
 			'',
-			'  To install a package for a script: uv run --with PACKAGE python script.py',
-			'  To add a dependency to the project: uv add PACKAGE',
+			'  为脚本安装包：uv run --with PACKAGE python script.py',
+			'  为项目添加依赖：uv add PACKAGE',
 			'',
 		].join('\n');
 	}
 
 	if (pythonVenvPattern.test(command)) {
 		return [
-			"Error: 'python -m venv' is disabled. Use uv instead:",
+			"错误：'python -m venv' 已被禁用。请改用 uv：",
 			'',
-			'  To create a virtual environment: uv venv',
+			'  创建虚拟环境：uv venv',
 			'',
 		].join('\n');
 	}
 
 	if (pythonPyCompilePattern.test(command)) {
 		return [
-			"Error: 'python -m py_compile' is disabled because it writes .pyc files to __pycache__.",
+			"错误：'python -m py_compile' 已被禁用，因为它会向 __pycache__ 写入 .pyc 文件。",
 			'',
-			'  To verify syntax without bytecode output: uv run python -m ast path/to/file.py >/dev/null',
+			'  验证语法而不产生字节码输出：uv run python -m ast path/to/file.py >/dev/null',
 			'',
 		].join('\n');
 	}

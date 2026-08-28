@@ -5,6 +5,7 @@
  */
 
 import { getKeybindings, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { topBorder } from '../../../src/tui/helpers.js';
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
 import { createHash } from 'node:crypto';
@@ -378,15 +379,20 @@ export class TwoTabPanel {
 		const th = this.theme_;
 		const lines: string[] = [];
 
+		// 顶边框（标题嵌入，ADR-0023）
+		lines.push(
+			truncateToWidth(th.fg('accent', topBorder('── Permission Gate ', width)), width),
+		);
+
 		// Tab 头
 		const stratLabel =
 			this.activeTab === 'strategies'
-				? th.fg('accent', th.bold('[Strategies]'))
-				: th.fg('dim', '[Strategies]');
+				? th.fg('accent', th.bold('[策略]'))
+				: th.fg('dim', '[策略]');
 		const histLabel =
 			this.activeTab === 'history'
-				? th.fg('accent', th.bold('[History]'))
-				: th.fg('dim', '[History]');
+				? th.fg('accent', th.bold('[历史]'))
+				: th.fg('dim', '[历史]');
 		const tabLine = '  ' + stratLabel + '  ' + histLabel;
 		lines.push(truncateToWidth(tabLine, width));
 
@@ -396,10 +402,10 @@ export class TwoTabPanel {
 		// 过滤栏
 		const filterText = this.currentFilter;
 		const filterLine = this.isFiltering
-			? `/ ${filterText}${th.fg('dim', '_')}   (ESC to clear)`
+			? `/ ${filterText}${th.fg('dim', '_')}   (ESC 清除)`
 			: filterText
-				? `Filter: ${th.fg('accent', filterText)}   (/ edit, ESC clear)`
-				: `/ filter   (Tab switch, Ctrl+Shift+O expand, ESC close)`;
+				? `过滤: ${th.fg('accent', filterText)}   (/ 编辑, ESC 清除)`
+				: `/ 过滤   (Tab 切换, Ctrl+Shift+O 展开, ESC 关闭)`;
 		lines.push(truncateToWidth('  ' + filterLine, width));
 		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
 
@@ -410,8 +416,7 @@ export class TwoTabPanel {
 		const endIdx = Math.min(startIdx + maxVisible, list.length);
 
 		if (list.length === 0) {
-			const msg =
-				this.activeTab === 'strategies' ? 'No strategies found' : 'No history entries';
+			const msg = this.activeTab === 'strategies' ? '未找到策略' : '没有历史记录';
 			lines.push(truncateToWidth('  ' + th.fg('dim', msg), width));
 		} else {
 			for (let i = startIdx; i < endIdx; i++) {
@@ -446,7 +451,7 @@ export class TwoTabPanel {
 			const item = list[this.selectedIndex];
 			if (item) {
 				lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
-				lines.push(truncateToWidth(th.fg('accent', th.bold('  Expanded Detail:')), width));
+				lines.push(truncateToWidth(th.fg('accent', th.bold('  展开详情：')), width));
 				const detailLines = this.renderExpandedDetail(item, width);
 				for (const dl of detailLines) {
 					lines.push(truncateToWidth(dl, width));
@@ -458,8 +463,8 @@ export class TwoTabPanel {
 		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
 		const footer =
 			this.activeTab === 'strategies'
-				? '↑↓ navigate  / filter  x delete  Tab switch  Ctrl+Shift+O expand  Esc close'
-				: '↑↓ navigate  / filter  Tab switch  Ctrl+Shift+O expand  Esc close';
+				? '↑↓ 导航  / 过滤  x 删除  Tab 切换  Ctrl+Shift+O 展开  Esc 关闭'
+				: '↑↓ 导航  / 过滤  Tab 切换  Ctrl+Shift+O 展开  Esc 关闭';
 		lines.push(truncateToWidth('  ' + th.fg('dim', footer), width));
 
 		// 填充到最小高度，防止 overlay 高度变化导致溢出渲染到屏幕顶部。
@@ -561,35 +566,33 @@ export class TwoTabPanel {
 
 		if ('dimension' in item) {
 			const s = item as StrategyDisplayItem;
-			lines.push(truncateToWidth(pad + th.fg('accent', `Dimension: ${s.dimension}`), width));
-			lines.push(truncateToWidth(pad + th.fg('text', `Key: ${s.displayKey}`), width));
+			lines.push(truncateToWidth(pad + th.fg('accent', `维度: ${s.dimension}`), width));
+			lines.push(truncateToWidth(pad + th.fg('text', `键: ${s.displayKey}`), width));
 			const statusPart = s.isActive
-				? th.fg('success', '  (auto-approves next match)')
-				: th.fg('warning', '  (threshold reached)');
+				? th.fg('success', '  （下次匹配自动放行）')
+				: th.fg('warning', '  （已达阈值）');
 			lines.push(
 				truncateToWidth(
-					pad +
-						th.fg('text', `Count: ${s.count} / Threshold: ${s.threshold}`) +
-						statusPart,
+					pad + th.fg('text', `计数: ${s.count} / 阈值: ${s.threshold}`) + statusPart,
 					width,
 				),
 			);
 		} else {
 			const h = item as HistoryDisplayItem;
 			const e = h.entry;
-			lines.push(truncateToWidth(pad + th.fg('accent', `Action: ${e.action}`), width));
+			lines.push(truncateToWidth(pad + th.fg('accent', `动作: ${e.action}`), width));
 			lines.push(
 				truncateToWidth(
-					pad + th.fg('text', `Dimension: ${normalizeDim(e.dim)?.join(', ') ?? 'N/A'}`),
+					pad + th.fg('text', `维度: ${normalizeDim(e.dim)?.join(', ') ?? 'N/A'}`),
 					width,
 				),
 			);
-			lines.push(truncateToWidth(pad + th.fg('text', `Tool: ${e.tool}`), width));
-			lines.push(truncateToWidth(pad + th.fg('text', `Directory: ${e.dir}`), width));
-			lines.push(truncateToWidth(pad + th.fg('dim', `Time: ${e.ts}`), width));
+			lines.push(truncateToWidth(pad + th.fg('text', `工具: ${e.tool}`), width));
+			lines.push(truncateToWidth(pad + th.fg('text', `目录: ${e.dir}`), width));
+			lines.push(truncateToWidth(pad + th.fg('dim', `时间: ${e.ts}`), width));
 
 			// 子命令（当前条目的 cmd）
-			const cmdLabel = pad + th.fg('text', 'Command: ');
+			const cmdLabel = pad + th.fg('text', '命令: ');
 			const cmdDisplay = sanitizeInline(e.cmd);
 			const cmdAvail = width - visibleWidth(cmdLabel);
 			if (visibleWidth(cmdDisplay) <= cmdAvail) {
@@ -608,7 +611,7 @@ export class TwoTabPanel {
 
 			// 原始复合命令（如有）
 			if (e.originalCommand && e.originalCommand !== e.cmd) {
-				const origLabel = pad + th.fg('text', 'Original: ');
+				const origLabel = pad + th.fg('text', '原始命令: ');
 				const origDisplay = sanitizeInline(e.originalCommand);
 				const origAvail = width - visibleWidth(origLabel);
 				if (visibleWidth(origDisplay) <= origAvail) {
@@ -628,7 +631,7 @@ export class TwoTabPanel {
 
 			// 拆解后的命令列表（如有）
 			if (e.subCommands && e.subCommands.length > 1) {
-				const subsLabel = pad + th.fg('dim', `Sub-commands: ${e.subCommands.join(' | ')}`);
+				const subsLabel = pad + th.fg('dim', `子命令: ${e.subCommands.join(' | ')}`);
 				lines.push(truncateToWidth(subsLabel, width));
 			}
 		}
@@ -651,6 +654,8 @@ export async function showTwoTabPanel(
 	updateCounts: (c: Record<string, number>) => void,
 ): Promise<void> {
 	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+		// SAFETY: ctx.ui.custom 回调的 theme 形参在 pi 运行时恒为 Theme 实例，
+		// 此处仅窄化声明类型为 PanelTheme（PanelTheme 是 Theme 的语义色子集），无运行时转换。
 		const th = theme as unknown as PanelTheme;
 		const panel = new TwoTabPanel({
 			tui,

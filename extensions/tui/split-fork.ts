@@ -102,14 +102,10 @@ async function createForkedSession(ctx: ExtensionCommandContext): Promise<string
 export default function (pi: ExtensionAPI): void {
 	log.debug('registerCommand: split-fork');
 	pi.registerCommand('split-fork', {
-		description:
-			'Fork this session into a new pi process in a right-hand Ghostty split. Usage: /split-fork [optional prompt]',
+		description: '将会话分叉到右侧 Ghostty 分屏中的新 pi 进程。用法：/split-fork [可选提示词]',
 		handler: async (args, ctx) => {
 			if (process.platform !== 'darwin') {
-				ctx.ui.notify(
-					'/split-fork currently requires macOS (Ghostty AppleScript).',
-					'warning',
-				);
+				ctx.ui.notify('/split-fork 目前需要 macOS（Ghostty AppleScript）。', 'warning');
 				return;
 			}
 
@@ -128,28 +124,25 @@ export default function (pi: ExtensionAPI): void {
 			if (result.code !== 0) {
 				const reason =
 					result.stderr?.trim() || result.stdout?.trim() || 'unknown osascript error';
-				ctx.ui.notify(`Failed to launch Ghostty split: ${reason}`, 'error');
+				ctx.ui.notify(`启动 Ghostty 分屏失败：${reason}`, 'error');
 				if (forkedSessionFile) {
-					ctx.ui.notify(`Forked session was created: ${forkedSessionFile}`, 'info');
+					ctx.ui.notify(`已创建分叉会话：${forkedSessionFile}`, 'info');
 				}
 				return;
 			}
 
 			if (forkedSessionFile) {
 				const fileName = path.basename(forkedSessionFile);
-				const suffix = prompt ? ' and sent prompt' : '';
-				ctx.ui.notify(`Forked to ${fileName} in a new Ghostty split${suffix}.`, 'info');
+				const suffix = prompt ? ' 并发送提示词' : '';
+				ctx.ui.notify(`已分叉到 ${fileName}（新的 Ghostty 分屏）${suffix}。`, 'info');
 				if (wasBusy) {
 					ctx.ui.notify(
-						'Forked from current committed state (in-flight turn continues in original session).',
+						'已从当前已提交状态分叉（正在进行的轮次在原会话中继续）。',
 						'info',
 					);
 				}
 			} else {
-				ctx.ui.notify(
-					'Opened a new Ghostty split (no persisted session to fork).',
-					'warning',
-				);
+				ctx.ui.notify('已打开新的 Ghostty 分屏（没有可分叉的持久化会话）。', 'warning');
 			}
 		},
 	});

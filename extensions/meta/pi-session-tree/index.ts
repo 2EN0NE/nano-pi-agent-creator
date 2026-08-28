@@ -843,12 +843,12 @@ export default function piSessionTreeExtension(pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand('tree-stats', {
-		description: 'Show session tree structure metrics',
+		description: '显示会话树结构指标',
 		handler: treeStatsHandler,
 	});
 
 	pi.registerCommand('custom-session-tree', {
-		description: 'Open session tree inspector TUI panel',
+		description: '打开会话树检查器 TUI 面板',
 		handler: sessionTreeHandler,
 	});
 
@@ -856,15 +856,15 @@ export default function piSessionTreeExtension(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: 'session_tree_resolve',
-		label: 'Resolve Session Tree Expression',
+		label: '解析会话树表达式',
 		description:
-			'Resolve a session tree expression (like "@~3:user" or "m1..@") to node info. Returns the node id, type, role, and summary.',
+			'解析会话树表达式（如 "@~3:user" 或 "m1..@"）为节点信息。返回节点 id、类型、角色和摘要。',
 		parameters: {
 			type: 'object',
 			properties: {
 				expr: {
 					type: 'string',
-					description: 'Session tree expression, e.g. @, @~3:user, @^^compaction, m1',
+					description: '会话树表达式，例如 @、@~3:user、@^^compaction、m1',
 				},
 			},
 			required: ['expr'],
@@ -875,13 +875,13 @@ export default function piSessionTreeExtension(pi: ExtensionAPI) {
 			const result = tree.resolve(params.expr as string);
 			if (!result)
 				return {
-					content: [{ type: 'text', text: 'Expression resolved to nothing.' }],
+					content: [{ type: 'text', text: '表达式未解析到任何内容。' }],
 					details: {},
 				};
 			if ('from' in result) {
 				return {
 					content: [
-						{ type: 'text', text: `Range from ${result.from.id} to ${result.to.id}` },
+						{ type: 'text', text: `范围从 ${result.from.id} 到 ${result.to.id}` },
 					],
 					details: {},
 				};
@@ -913,15 +913,15 @@ export default function piSessionTreeExtension(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: 'session_tree_query',
-		label: 'Query Session Tree Range',
+		label: '查询会话树范围',
 		description:
-			'Resolve a range expression (like "@~3:user..@" or "m1..@") and return the nodes plus a structured analysis (counts, user questions, tool calls, compactions, branch points).',
+			'解析范围表达式（如 "@~3:user..@" 或 "m1..@"）并返回节点及结构化分析（计数、用户问题、工具调用、压缩、分支点）。',
 		parameters: {
 			type: 'object',
 			properties: {
 				expr: {
 					type: 'string',
-					description: 'Range expression, e.g. @~3..@, m1..@, @^^compaction..@',
+					description: '范围表达式，例如 @~3..@、m1..@、@^^compaction..@',
 				},
 			},
 			required: ['expr'],

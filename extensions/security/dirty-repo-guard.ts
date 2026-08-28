@@ -41,16 +41,16 @@ async function checkDirtyRepo(
 	log.info('Prompting user: %d uncommitted file(s), action=%s', changedFiles, action);
 	const choice = await showSelect(
 		ctx,
-		`You have ${changedFiles} uncommitted file(s). ${action} anyway?`,
+		`你有 ${changedFiles} 个未提交文件。${action} 仍要继续吗？`,
 		[
-			{ value: 'proceed', label: 'Yes, proceed anyway' },
-			{ value: 'cancel', label: 'No, let me commit first' },
+			{ value: 'proceed', label: '是，仍然继续' },
+			{ value: 'cancel', label: '否，让我先提交' },
 		],
 		{ mode: 'warning' },
 	);
 
 	if (choice?.value !== 'proceed') {
-		ctx.ui.notify('Commit your changes first', 'warning');
+		ctx.ui.notify('请先提交你的更改', 'warning');
 		log.info('User cancelled %s due to dirty repo (%d files)', action, changedFiles);
 		return { cancel: true };
 	}
@@ -59,7 +59,7 @@ async function checkDirtyRepo(
 
 export default function (pi: ExtensionAPI) {
 	pi.on('session_before_switch', async (event, ctx) => {
-		const action = event.reason === 'new' ? 'new session' : 'switch session';
+		const action = event.reason === 'new' ? '新建会话' : '切换会话';
 		log.debug('session_before_switch: action=%s', action);
 		return checkDirtyRepo(pi, ctx, action);
 	});

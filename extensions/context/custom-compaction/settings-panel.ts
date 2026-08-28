@@ -44,6 +44,7 @@ import {
 	type ProfileFieldView,
 } from './settings-ui.js';
 import { getAllAdapters } from './mechanisms/index.js';
+import { selectPanel } from '../../../src/tui/select-panel.js';
 
 // ── Profile 字段编辑器（原生对话框） ────────────────────────────
 
@@ -85,7 +86,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 				modelOptions.push(`${label}${p.model === spec ? ' [X]' : ''}`);
 			}
 
-			const choice = await ctx.ui.select('选择摘要模型', modelOptions);
+			const choice = await selectPanel(ctx, '摘要模型', modelOptions);
 			if (choice === undefined) return false;
 			if (choice.startsWith('当前')) {
 				p.model = 'current';
@@ -136,11 +137,14 @@ const PROFILE_FIELDS: ProfileField[] = [
 			});
 			suggestionOptions.push('---', '自定义输入...');
 
-			const choice = await ctx.ui.select(
-				'选择匹配模型（当前: ' +
-					currentVal +
-					'）\n当前模型匹配该模式时此 profile 自动激活。',
+			const choice = await selectPanel(
+				ctx,
+				`匹配模型（当前：${currentVal}）`,
 				suggestionOptions,
+				{
+					description:
+						'This profile auto-activates when the current model matches this pattern.',
+				},
 			);
 			if (choice === undefined) return false;
 
@@ -190,7 +194,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 				const checked = t === p.trigger.type ? ' [X]' : '';
 				return `${label}${checked} - ${desc}`;
 			});
-			const choice = await ctx.ui.select('选择触发类型', options);
+			const choice = await selectPanel(ctx, '触发类型', options);
 			if (choice === undefined) return false;
 
 			for (const t of ['context_percent', 'fixed', 'reserve'] as const) {
@@ -268,7 +272,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 				const checked = t === p.mechanism.type ? ' [X]' : '';
 				return `${label}${checked}`;
 			});
-			const choice = await ctx.ui.select('选择压缩机制', baseOptions);
+			const choice = await selectPanel(ctx, '压缩机制', baseOptions);
 			if (choice === undefined) return false;
 
 			for (const t of mechTypes) {
@@ -282,7 +286,7 @@ const PROFILE_FIELDS: ProfileField[] = [
 									? `[X] ${a.name} - ${a.description}`
 									: `  ${a.name} - ${a.description}`,
 							);
-							const adpChoice = await ctx.ui.select('选择适配器', adpOptions);
+							const adpChoice = await selectPanel(ctx, '适配器', adpOptions);
 							if (adpChoice) {
 								for (const a of adapters) {
 									if (adpChoice.includes(a.name)) {
@@ -442,7 +446,10 @@ function diffProfileFields(
 			// 复合字段：子字段级比较，只输出变化的子字段。
 			// 否则整个 trigger/mechanism（含合并视图继承的低层字段值）
 			// 会被 updateProfileFields 固化到活跃层，遮蔽低层配置。
+			// SAFETY: trigger/mechanism 复合字段在配置中恒为对象或 undefined，
+			// ?? {} 兜底后转 Record 仅用于 Object.keys 遍历与值比较，无运行时类型风险。
 			const b = (before[key] ?? {}) as unknown as Record<string, unknown>;
+			// SAFETY: 同上——复合字段兜底后转 Record 仅用于键遍历与值比较，无运行时类型风险。
 			const a = (after[key] ?? {}) as unknown as Record<string, unknown>;
 			const subDiff: Record<string, unknown> = {};
 			for (const sk of Object.keys(a)) {
@@ -588,7 +595,7 @@ export async function openSettingsPanel(ctx: ExtensionCommandContext): Promise<v
 
 		// 主面板
 		const action = await ctx.ui.custom<SettingsUIAction>(
-			(_tui, _theme, _kb, done) => new SettingsComponent(data, done, 'main'),
+			(_tui, theme, _kb, done) => new SettingsComponent(data, done, theme, 'main'),
 		);
 		if (!action || action.type === 'close') break;
 
@@ -600,8 +607,8 @@ export async function openSettingsPanel(ctx: ExtensionCommandContext): Promise<v
 		if (action.type === 'edit-profile') {
 			// 字段面板
 			const fieldAction = await ctx.ui.custom<SettingsUIAction>(
-				(_tui, _theme, _kb, done) =>
-					new SettingsComponent(data, done, 'fields', action.profileId),
+				(_tui, theme, _kb, done) =>
+					new SettingsComponent(data, done, theme, 'fields', action.profileId),
 			);
 			if (!fieldAction || fieldAction.type === 'close') continue; // 返回主面板
 

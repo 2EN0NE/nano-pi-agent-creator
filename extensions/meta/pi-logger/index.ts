@@ -23,10 +23,10 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { resolveConfigPaths } from '@zenone/pi-config';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
+import { TitleBar } from '../../../src/tui/helpers.js';
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import type { SelectItem } from '@earendil-works/pi-tui';
 import { Container, SelectList, Text } from '@earendil-works/pi-tui';
@@ -164,21 +164,20 @@ async function interactiveSelectLogger(ctx: ExtensionCommandContext): Promise<st
 	const items: SelectItem[] = [
 		{
 			value: '__default__',
-			label: 'default (for all loggers)',
-			description: `Current level: ${config.defaultLevel}`,
+			label: '默认（所有日志器）',
+			description: `当前级别：${config.defaultLevel}`,
 		},
 		...[...sourceSet].sort().map((s) => ({
 			value: s,
 			label: s,
-			description: `Current: ${config.loggers[s] ?? `inherited (${config.defaultLevel})`}`,
+			description: `当前：${config.loggers[s] ?? `继承（${config.defaultLevel}）`}`,
 		})),
 	];
 
 	return await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
 		container.addChild(
-			new Text(theme.fg('accent', theme.bold('Select Logger to Configure')), 1, 0),
+			new TitleBar('选择要配置的日志器', (s: string) => theme.fg('accent', theme.bold(s))),
 		);
 		const selectList = new SelectList(items, Math.min(items.length, 12), {
 			selectedPrefix: (t) => theme.fg('accent', t),
@@ -216,9 +215,9 @@ function levelDescription(level: LogLevel): string {
 		case 'warn':
 			return 'Warnings and errors only';
 		case 'error':
-			return 'Errors only';
+			return '仅错误';
 		case 'off':
-			return 'Suppress all logging';
+			return '禁止所有日志';
 	}
 }
 
@@ -237,17 +236,10 @@ async function interactiveSelectLevel(
 
 	return await ctx.ui.custom<LogLevel | null>((tui, theme, _kb, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
 		container.addChild(
-			new Text(
-				theme.fg(
-					'accent',
-					theme.bold(
-						`Set Log Level for "${loggerName === '__default__' ? 'default' : loggerName}"`,
-					),
-				),
-				1,
-				0,
+			new TitleBar(
+				`Set Log Level for "${loggerName === '__default__' ? 'default' : loggerName}"`,
+				(s: string) => theme.fg('accent', theme.bold(s)),
 			),
 		);
 		const selectList = new SelectList(items, Math.min(items.length, 10), {
@@ -289,26 +281,27 @@ async function interactivePersist(
 	const items: SelectItem[] = [
 		{
 			value: 'project',
-			label: 'Save to project config',
-			description: `Write to project: ${projectPath}`,
+			label: '保存到项目配置',
+			description: `写入项目：${projectPath}`,
 		},
 		{
 			value: 'global',
-			label: 'Save to global config',
-			description: `Write to user global: ${globalPath}`,
+			label: '保存到全局配置',
+			description: `写入用户全局：${globalPath}`,
 		},
 		{
 			value: 'none',
-			label: 'Session only',
+			label: '仅本次会话',
 			description: "Don't persist, apply to current session only",
 		},
 	];
 
 	const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
 		container.addChild(
-			new Text(theme.fg('accent', theme.bold('Persist Log Level Change?')), 1, 0),
+			new TitleBar('Persist Log Level Change?', (s: string) =>
+				theme.fg('accent', theme.bold(s)),
+			),
 		);
 		const selectList = new SelectList(items, items.length, {
 			selectedPrefix: (t) => theme.fg('accent', t),
@@ -345,7 +338,7 @@ async function interactivePersist(
 	});
 
 	if (!result || result === 'none') {
-		ctx.ui.notify('Log level change applied to current session only', 'info');
+		ctx.ui.notify('日志级别更改仅应用于当前会话', 'info');
 		return;
 	}
 
@@ -381,7 +374,7 @@ async function interactivePersist(
 	reloadConfiguration(ctx.cwd);
 	await initFileAppender(getRuntimeConfig());
 
-	ctx.ui.notify(`Log level saved to ${configPath}`, 'info');
+	ctx.ui.notify(`日志级别已保存到 ${configPath}`, 'info');
 }
 
 async function logCommandHandler(args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -395,9 +388,9 @@ async function logCommandHandler(args: string, ctx: ExtensionCommandContext): Pr
 			if (sub === 'reload') {
 				reloadConfiguration(ctx.cwd);
 				if (ctx.hasUI) {
-					ctx.ui.notify('Logger config reloaded', 'info');
+					ctx.ui.notify('日志器配置已重新加载', 'info');
 				} else {
-					console.log('Logger config reloaded');
+					console.log('日志器配置已重新加载');
 				}
 				return;
 			}
@@ -409,9 +402,9 @@ async function logCommandHandler(args: string, ctx: ExtensionCommandContext): Pr
 				if (loggerName && newLevel && LOG_LEVELS.includes(newLevel)) {
 					setLoggerLevel(loggerName, newLevel);
 					if (ctx.hasUI) {
-						ctx.ui.notify(`Logger level set: ${loggerName} = ${newLevel}`, 'info');
+						ctx.ui.notify(`日志器级别已设置：${loggerName} = ${newLevel}`, 'info');
 					} else {
-						console.log(`Logger level set: ${loggerName} = ${newLevel}`);
+						console.log(`日志器级别已设置：${loggerName} = ${newLevel}`);
 					}
 					return;
 				}
@@ -421,9 +414,9 @@ async function logCommandHandler(args: string, ctx: ExtensionCommandContext): Pr
 					const config = getEffectiveConfig();
 					const level = config.loggers[loggerName] ?? 'inherited';
 					if (ctx.hasUI) {
-						ctx.ui.notify(`Level for "${loggerName}": ${level}`, 'info');
+						ctx.ui.notify(`"${loggerName}" 的级别：${level}`, 'info');
 					} else {
-						console.log(`Level for "${loggerName}": ${level}`);
+						console.log(`"${loggerName}" 的级别：${level}`);
 					}
 					return;
 				}
@@ -453,10 +446,10 @@ async function logCommandHandler(args: string, ctx: ExtensionCommandContext): Pr
 				cfgLines.push(`  ${name}: ${level}`);
 			}
 			cfgLines.push(
-				`File appender: ${cfg.appenders.file.enabled ? 'enabled' : 'disabled'}`,
+				`文件输出: ${cfg.appenders.file.enabled ? '启用' : '禁用'}`,
 				`  path: ${cfg.appenders.file.path}`,
 				`  level: ${cfg.appenders.file.level}`,
-				`Console appender: ${cfg.appenders.console.enabled ? 'enabled' : 'disabled'}`,
+				`控制台输出: ${cfg.appenders.console.enabled ? '启用' : '禁用'}`,
 				`  level: ${cfg.appenders.console.level}`,
 				`  color: ${cfg.appenders.console.color}`,
 			);
@@ -475,18 +468,18 @@ async function logCommandHandler(args: string, ctx: ExtensionCommandContext): Pr
 			const events = getTail(count);
 			if (events.length === 0) {
 				if (ctx.hasUI) {
-					ctx.ui.notify('No log entries in buffer', 'info');
+					ctx.ui.notify('缓冲区中没有日志条目', 'info');
 				} else {
-					console.log('No log entries in buffer');
+					console.log('缓冲区中没有日志条目');
 				}
 				return;
 			}
 			const lines = events.map(formatTailEvent);
 			const text = lines.join('\n');
 			if (ctx.hasUI) {
-				ctx.ui.notify(`Last ${events.length} log entries:\n${text}`, 'info');
+				ctx.ui.notify(`最近 ${events.length} 条日志：\n${text}`, 'info');
 			} else {
-				console.log(`Last ${events.length} log entries:\n${text}`);
+				console.log(`最近 ${events.length} 条日志：\n${text}`);
 			}
 			return;
 		}
@@ -499,15 +492,13 @@ async function logCommandHandler(args: string, ctx: ExtensionCommandContext): Pr
 				} else {
 					console.log(`Log directory: ${logDir}  (files: <source>_<date>.log)`);
 				}
+			} else if (ctx.hasUI) {
+				ctx.ui.notify(
+					'Log directory not initialized. Ensure file appender is enabled.',
+					'warning',
+				);
 			} else {
-				if (ctx.hasUI) {
-					ctx.ui.notify(
-						'Log directory not initialized. Ensure file appender is enabled.',
-						'warning',
-					);
-				} else {
-					console.log('Log directory not initialized. Ensure file appender is enabled.');
-				}
+				console.log('Log directory not initialized. Ensure file appender is enabled.');
 			}
 			return;
 		}
@@ -626,7 +617,7 @@ export default function loggerExtension(pi: ExtensionAPI) {
 
 	// 1. Register CLI flags
 	pi.registerFlag('log-level', {
-		description: 'Set default log level (trace, debug, info, warn, error, off)',
+		description: '设置默认日志级别（trace、debug、info、warn、error、off）',
 		type: 'string',
 	});
 
@@ -660,7 +651,7 @@ export default function loggerExtension(pi: ExtensionAPI) {
 
 	// 3. Register /log command
 	pi.registerCommand('log', {
-		description: 'Control the pi-logger system (config, level, tail, path, set-output)',
+		description: '控制 pi-logger 系统（config、level、tail、path、set-output）',
 		handler: logCommandHandler,
 	});
 

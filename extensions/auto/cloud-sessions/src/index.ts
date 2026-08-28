@@ -12,6 +12,7 @@ import {
 	type CloudSessionsConfig,
 } from './config.js';
 import { Sync, type SyncResult } from './sync.js';
+import { selectPanel } from './select-panel.js';
 import {
 	needsCwdFix,
 	fixCwdMismatch,
@@ -37,10 +38,12 @@ function shortReason(error: unknown): string {
 	const nodeCode = (err as NodeJS.ErrnoException).code;
 
 	// System-level errors (stable, not locale-dependent)
-	if (nodeCode === 'ENOENT') return 'git not found (is it installed?)';
-	if (nodeCode === 'EACCES' || nodeCode === 'EPERM') return 'permission denied';
+	if (nodeCode === 'ENOENT') return '未找到 git（是否已安装？）';
+	if (nodeCode === 'EACCES' || nodeCode === 'EPERM') return '权限被拒绝';
 
 	// execFile errors carry status (exit code) and stderr
+	// SAFETY: execFile 抛出的是 Node.js ExecException（含可选 status/stderr 字段），
+	// 此处窄化为 Record 后按可选字段读取，缺失时 undefined 安全降级。
 	const errAny = err as unknown as Record<string, unknown>;
 	const stderr = errAny.stderr as string | undefined;
 	const status = errAny.status as number | undefined;
@@ -52,19 +55,19 @@ function shortReason(error: unknown): string {
 			text.includes('403') ||
 			text.includes('401')
 		) {
-			return 'auth failed (run `gh auth login`)';
+			return '认证失败（运行 `gh auth login`）';
 		}
 		if (text.includes('could not resolve host') || text.includes('timed out')) {
-			return 'network unreachable';
+			return '网络不可达';
 		}
 		if (text.includes('terminal prompts disabled')) {
-			return 'credentials required (run `gh auth login`)';
+			return '需要凭据（运行 `gh auth login`）';
 		}
 	}
 
 	// Git exit codes (stable regardless of locale)
 	if (typeof status === 'number') {
-		if (status === 128) return 'git fatal error';
+		if (status === 128) return 'git 致命错误';
 	}
 
 	// Fallback: first line of message, truncated
@@ -76,7 +79,7 @@ function summarize(result: SyncResult): string {
 	const parts: string[] = [];
 	if (result.pushed.length) parts.push(`↑${result.pushed.length}`);
 	if (result.pulled.length) parts.push(`↓${result.pulled.length}`);
-	if (parts.length === 0) return 'up to date';
+	if (parts.length === 0) return '已是最新';
 	return parts.join(' ');
 }
 
@@ -92,10 +95,10 @@ async function runSync(
 		try {
 			const config = await loadConfig();
 			if (!isProviderConfigured(config)) {
-				setStatus(STATUS_KEY, cs('|sessions: not configured', 'dim'));
+				setStatus(STATUS_KEY, cs('|sessions: 未配置', 'dim'));
 				return null;
 			}
-			setStatus(STATUS_KEY, cs(`|sessions: syncing (${config.provider})`, 'accent'));
+			setStatus(STATUS_KEY, cs(`|sessions: 同步中 (${config.provider})`, 'accent'));
 			const sync = new Sync(config);
 			const pm = await loadProjectMatchConfig();
 			const result = await sync.run(pm);
@@ -107,9 +110,9 @@ async function runSync(
 			return result;
 		} catch (error) {
 			const reason = shortReason(error);
-			setStatus(STATUS_KEY, cs(`|sessions: sync error (${reason})`, 'warning'));
+			setStatus(STATUS_KEY, cs(`|sessions: 同步错误 (${reason})`, 'warning'));
 			if (!lastSyncFailed) {
-				notifyUser?.(`cloud-sessions sync failed: ${reason}`, 'warning');
+				notifyUser?.(`cloud-sessions 同步失败：${reason}`, 'warning');
 			}
 			lastSyncFailed = true;
 			throw error;
@@ -245,7 +248,14 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 		if (!originalCwd) return;
 
 		const diff = formatCwdDiff(originalCwd, ctx.cwd);
-		const choice = await ctx.ui.select(diff, ['是 - 修复 cwd 并切换', '否 - 取消切换']);
+		const choice = await selectPanel(
+			ctx,
+			'CWD 不匹配',
+			['是 - 修复 cwd 并切换', '否 - 取消切换'],
+			{
+				description: diff,
+			},
+		);
 
 		if (choice === '是 - 修复 cwd 并切换') {
 			const result: FixCwdResult = fixCwdMismatch(
@@ -294,10 +304,9 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 		if (!mismatch) return;
 
 		const diff = formatCwdDiff(mismatch.originalCwd, ctx.cwd);
-		const choice = await ctx.ui.select(`如需使用 /tree 和文件引用功能，请修复 cwd\n\n${diff}`, [
-			'是 - 修复 cwd',
-			'否 - 忽略',
-		]);
+		const choice = await selectPanel(ctx, 'CWD 不匹配', ['是 - 修复 cwd', '否 - 忽略'], {
+			description: '要使用 /tree 和文件引用，请修复 cwd。\n\n' + diff,
+		});
 
 		if (choice === '是 - 修复 cwd') {
 			const result: FixCwdResult = fixCwdMismatch(
@@ -343,29 +352,28 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 
 	// ── Unified /cloud-sessions command ──
 	pi.registerCommand('cloud-sessions', {
-		description:
-			'TUI panel for cloud sessions: sync, configure backend, view status, and edit settings',
+		description: '云会话 TUI 面板：同步、配置后端、查看状态和编辑设置',
 		handler: async (_args, ctx) => {
 			if (typeof (ctx as any).mode !== 'string' || (ctx as any).mode !== 'tui') {
-				ctx.ui.notify('/cloud-sessions requires TUI mode.', 'warning');
+				ctx.ui.notify('/cloud-sessions 需要 TUI 模式。', 'warning');
 				return;
 			}
 
 			// ── Setup helper (uses overlay UI) ──
 			async function runSetup(cfg: CloudSessionsConfig): Promise<boolean> {
-				const provider = await ctx.ui.select('Cloud sessions backend', ['git', 'icloud']);
+				const provider = await selectPanel(ctx, '云会话后端', ['git', 'icloud']);
 				if (!provider) return false;
 
 				if (provider === 'git') {
 					const repo = await ctx.ui.input(
-						'Private git repo URL',
+						'私有 git 仓库 URL',
 						'git@github.com:you/pi-sessions.git',
 					);
 					if (!repo) {
-						ctx.ui.notify('Setup cancelled: repo is required.', 'warning');
+						ctx.ui.notify('已取消设置：必须提供仓库。', 'warning');
 						return false;
 					}
-					const branch = (await ctx.ui.input('Branch', 'main')) || 'main';
+					const branch = (await ctx.ui.input('分支', 'main')) || 'main';
 					await writeConfig({ provider: 'git', git: { repo, branch } });
 				} else {
 					const dir =
@@ -405,43 +413,43 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 				const fields: { id: FieldId; label: string; hint: string }[] = [
 					{
 						id: 'autoPush',
-						label: 'Auto push: {v}',
+						label: '自动推送：{v}',
 						hint: 'Automatically push sessions after each turn.',
 					},
 					{
 						id: 'pullOnStart',
-						label: 'Pull on start: {v}',
+						label: '启动时拉取：{v}',
 						hint: 'Pull from remote sessions when pi starts.',
 					},
 					{
 						id: 'pollIntervalMs',
-						label: 'Poll interval (ms): {v}',
+						label: '轮询间隔（毫秒）：{v}',
 						hint: 'How often to check for remote changes. 0 = disable polling.',
 					},
 					{
 						id: 'pushDebounceMs',
-						label: 'Push debounce (ms): {v}',
+						label: '推送防抖（毫秒）：{v}',
 						hint: 'Delay in ms before pushing after a turn ends.',
 					},
 					{
 						id: 'suffixSegments',
-						label: 'Suffix segments: {v}',
-						hint: 'Match projects by last N path segments. 0 = disabled.',
+						label: '后缀分段: {v}',
+						hint: '按最后 N 段路径匹配项目。0 = 禁用。',
 					},
 					{
 						id: 'gitRemote',
-						label: 'Git remote match: {v}',
+						label: 'Git 远程匹配：{v}',
 						hint: 'Match sessions by git remote URL via .project-map.json.',
 					},
 					{
 						id: 'save',
-						label: '[ Save ]',
-						hint: 'Save all changes and close the panel.',
+						label: '[ 保存 ]',
+						hint: '保存所有更改并关闭面板。',
 					},
 					{
 						id: 'cancel',
-						label: '[ Cancel ]',
-						hint: 'Discard changes and close the panel.',
+						label: '[ 取消 ]',
+						hint: '放弃更改并关闭面板。',
 					},
 				];
 
@@ -449,7 +457,7 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 					const id = field.id;
 					if (id === 'save' || id === 'cancel') return field.label;
 					const val = (edited as Record<string, unknown>)[id];
-					const display = typeof val === 'boolean' ? (val ? 'ON' : 'OFF') : String(val);
+					const display = typeof val === 'boolean' ? (val ? '开' : '关') : String(val);
 					return field.label.replace('{v}', display);
 				}
 
@@ -540,20 +548,13 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 								`${theme.fg('dim', '  ')}${padRight(theme.fg('muted', focusedField.hint), 2)}`,
 							);
 						} else if (editingField) {
-							add(
-								padRight(
-									theme.fg(
-										'muted',
-										'Type digits, Enter to confirm, Esc to cancel.',
-									),
-								),
-							);
+							add(padRight(theme.fg('muted', '输入数字，Enter 确认，Esc 取消。')));
 						} else {
 							add(
 								theme.fg(
 									'dim',
 									padRight(
-										'Up/Down navigate  Enter toggle/edit  Ctrl+Shift+O details  Esc close',
+										'Up/Down 导航  Enter 开关/编辑  Ctrl+Shift+O 详情  Esc 关闭',
 									),
 								),
 							);
@@ -694,20 +695,20 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 				const actionFields: { id: MainAction; label: string; hint: string }[] = [
 					{
 						id: 'sync',
-						label: '[ Sync Now ]',
-						hint: 'Sync sessions immediately (pull + push).',
+						label: '[ 立即同步 ]',
+						hint: '立即同步会话（拉取 + 推送）。',
 					},
 					{
 						id: 'reconfigure',
-						label: '[ Reconfigure Backend ]',
-						hint: 'Change provider (git/icloud) or repo details.',
+						label: '[ 重新配置后端 ]',
+						hint: '更改提供商（git/icloud）或仓库详情。',
 					},
 					{
 						id: 'settings',
-						label: '[ Advanced Settings ]',
-						hint: 'Edit auto-push, polling, project matching, and more.',
+						label: '[ 高级设置 ]',
+						hint: '编辑自动推送、轮询、项目匹配等。',
 					},
-					{ id: 'close', label: '[ Close ]', hint: 'Close the panel.' },
+					{ id: 'close', label: '[ 关闭 ]', hint: '关闭面板。' },
 				];
 
 				const configured = isProviderConfigured(cfg);
@@ -776,12 +777,7 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 							add(theme.fg('muted', hint));
 
 							// ── Footer help bar ──
-							add(
-								theme.fg(
-									'dim',
-									padRight('Up/Down navigate  Enter confirm  Esc close'),
-								),
-							);
+							add(theme.fg('dim', padRight('Up/Down 导航  Enter 确认  Esc 关闭')));
 
 							const padCount = Math.max(0, MIN_HEIGHT - lines.length);
 							// 必须用空格而非空字符串，否则旧渲染内容无法清除导致残影

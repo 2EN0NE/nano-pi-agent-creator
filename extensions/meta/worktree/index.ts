@@ -79,7 +79,7 @@ export default function worktreeExtension(pi: ExtensionAPI): void {
 	// ── 命令 ──
 
 	pi.registerCommand('worktree', {
-		description: 'Manage git worktrees. Use /worktree for interactive panel.',
+		description: '管理 git worktree。使用 /worktree 打开交互面板。',
 		handler: async (args, ctx) => {
 			await handleWorktreeCommand(args, ctx);
 		},

@@ -41,7 +41,7 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		if (ctx.hasUI) {
-			ctx.ui.notify(`Watching ${triggerFile}`, 'info');
+			ctx.ui.notify(`正在监视 ${triggerFile}`, 'info');
 		}
 		log.debug('File trigger initialized, watching %s', triggerFile);
 	});

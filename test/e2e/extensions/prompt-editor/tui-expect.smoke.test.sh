@@ -61,3 +61,8 @@ test_it "expect: /prompt shows assembly panel [REVIEW]" <<'TEST'
   tui_cleanup
   mark_for_review "验证 /prompt 在 TUI 模式下触发了 prompt 组装面板："$'\n'"1. 输出中包含'Prompt Assembly'或'prompt'相关文字"$'\n'"2. 面板组件列表正常渲染"$'\n'"3. 可正常退出（Esc/Ctrl+C）"
 TEST
+
+# 注：方向键响应（含应用模式 \x1bOB/\x1bOA 序列）由 headless 测试覆盖：
+#   test/vitest/extensions/prompt-editor.keys.test.ts
+# 原因：expect 裸 PTY 环境下 pi-tui 对 theme 渲染组件的移动后重绘存在调度限制
+#       （doRender 不触发），屏幕断言不可靠；headless 直接驱动 handleInput 更可靠。

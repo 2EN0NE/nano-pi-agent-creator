@@ -192,6 +192,13 @@ export function createSandbox(options: SandboxOptions = {}): string {
 		}
 	}
 
+	// 拷贝共享 TUI 辅助模块（src/tui/），供 import '<root>/src/tui/helpers.js' 的扩展在沙箱内解析
+	//（沙箱扩展目录是 .pi/extensions/<name>，相对路径 ../../../src/tui 即沙箱根/src/tui）。
+	const srcTuiSrc = resolve(ROOT_DIR, 'src/tui');
+	if (existsSync(srcTuiSrc)) {
+		cpSync(srcTuiSrc, resolve(testHome, 'src/tui'), { recursive: true });
+	}
+
 	const piLoggerCfg = resolve(ROOT_DIR, 'extensions/meta/pi-logger/pi-logger.json');
 	if (existsSync(piLoggerCfg)) {
 		cpSync(piLoggerCfg, resolve(testHome, '.pi/pi-logger.json'));

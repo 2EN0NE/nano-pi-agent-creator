@@ -182,6 +182,13 @@ tui_setup_sandbox_home() {
 	export HOME="$test_home/home"
 	[[ -f "$test_home/.pi/pi-logger.json" ]] && cp "$test_home/.pi/pi-logger.json" "$HOME/.pi/agent/"
 
+	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '<root>/src/tui/helpers.js' 的扩展在沙箱内解析
+	#（扩展在 $HOME/.pi/agent/extensions/<name>，相对路径 ../../../src/tui 即 $HOME/.pi/src/tui）。
+	if [[ -d "$ROOT_DIR/src/tui" ]]; then
+		mkdir -p "$HOME/.pi/src"
+		cp -r "$ROOT_DIR/src/tui" "$HOME/.pi/src/tui"
+	fi
+
 	# 关键：扩展复制到用户级目录 + node_modules 链接。
 	# pi 可能在沙箱外目录启动（cwd 参数），此时项目级 .pi/extensions 不可达；
 	# 用户级 ~/.pi/agent/extensions 保证扩展被发现。删除项目级副本避免双路径重复加载（flag 冲突）。

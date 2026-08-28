@@ -21,6 +21,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ModelRegistry,
+	Theme,
 } from '@earendil-works/pi-coding-agent';
 import { BorderedLoader } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
@@ -38,6 +39,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from '@earendil-works/pi-tui';
+import { bottomBorder, makeThemeColors, topBorder } from '../../src/tui/helpers.js';
 
 // Structured output format for question extraction
 interface ExtractedQuestion {
@@ -194,7 +196,7 @@ function parseExtractionResult(text: string): ExtractionResult | null {
 /**
  * Interactive Q&A component for answering extracted questions
  */
-class QnAComponent implements Component {
+export class QnAComponent implements Component {
 	private questions: ExtractedQuestion[];
 	private answers: string[];
 	private currentIndex: number = 0;
@@ -207,26 +209,34 @@ class QnAComponent implements Component {
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
-	// Colors - using proper reset sequences
-	private dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
-	private bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
-	private cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
-	private green = (s: string) => `\x1b[32m${s}\x1b[0m`;
-	private yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
-	private gray = (s: string) => `\x1b[90m${s}\x1b[0m`;
+	// Colors — themed via makeThemeColors（禁用硬编码 ANSI，见 ADR-0023）
+	private dim!: (s: string) => string;
+	private bold!: (s: string) => string;
+	private cyan!: (s: string) => string;
+	private green!: (s: string) => string;
+	private yellow!: (s: string) => string;
+	private red!: (s: string) => string;
+	private gray!: (s: string) => string;
 
-	constructor(questions: ExtractedQuestion[], tui: TUI, onDone: (result: string | null) => void) {
+	constructor(
+		questions: ExtractedQuestion[],
+		tui: TUI,
+		theme: Theme,
+		onDone: (result: string | null) => void,
+	) {
 		this.questions = questions;
 		this.answers = questions.map(() => '');
 		this.tui = tui;
 		this.onDone = onDone;
+
+		Object.assign(this, makeThemeColors(theme));
 
 		// Create a minimal theme for the editor
 		const editorTheme: EditorTheme = {
 			borderColor: this.dim,
 			selectList: {
 				selectedPrefix: this.cyan,
-				selectedText: (s: string) => `\x1b[44m${s}\x1b[0m`,
+				selectedText: (s: string) => theme.bg('selectedBg', s),
 				description: this.gray,
 				scrollInfo: this.dim,
 				noMatch: this.yellow,
@@ -378,31 +388,23 @@ class QnAComponent implements Component {
 		const boxWidth = Math.min(width - 4, 120); // Allow wider box
 		const contentWidth = boxWidth - 4; // 2 chars padding on each side
 
-		// Helper to create horizontal lines (dim the whole thing at once)
-		const horizontalLine = (count: number) => '─'.repeat(count);
-
-		// Helper to create a box line
+		// 纯横线范式（ADR-0023）：无角无竖线，内容行缩进 + truncate 兜底
 		const boxLine = (content: string, leftPad: number = 2): string => {
-			const paddedContent = ' '.repeat(leftPad) + content;
-			const contentLen = visibleWidth(paddedContent);
-			const rightPad = Math.max(0, boxWidth - contentLen - 2);
-			return this.dim('│') + paddedContent + ' '.repeat(rightPad) + this.dim('│');
+			return ' '.repeat(leftPad) + truncateToWidth(content, Math.max(0, boxWidth - leftPad));
 		};
 
-		const emptyBoxLine = (): string => {
-			return this.dim('│') + ' '.repeat(boxWidth - 2) + this.dim('│');
-		};
+		const emptyBoxLine = (): string => '';
 
 		const padToWidth = (line: string): string => {
 			const len = visibleWidth(line);
 			return line + ' '.repeat(Math.max(0, width - len));
 		};
 
-		// Title
-		lines.push(padToWidth(this.dim('╭' + horizontalLine(boxWidth - 2) + '╮')));
+		// 顶边框：纯横线 + 插件名（ADR-0023）
+		lines.push(padToWidth(this.dim(topBorder('── answer ', boxWidth))));
 		const title = `${this.bold(this.cyan('Questions'))} ${this.dim(`(${this.currentIndex + 1}/${this.questions.length})`)}`;
 		lines.push(padToWidth(boxLine(title)));
-		lines.push(padToWidth(this.dim('├' + horizontalLine(boxWidth - 2) + '┤')));
+		lines.push(padToWidth(this.dim(' ' + bottomBorder(boxWidth - 2) + ' ')));
 
 		// Progress indicator
 		const progressParts: string[] = [];
@@ -459,15 +461,15 @@ class QnAComponent implements Component {
 
 		// Confirmation dialog or footer with controls
 		if (this.showingConfirmation) {
-			lines.push(padToWidth(this.dim('├' + horizontalLine(boxWidth - 2) + '┤')));
-			const confirmMsg = `${this.yellow('Submit all answers?')} ${this.dim('(Enter/y to confirm, Esc/n to cancel)')}`;
+			lines.push(padToWidth(this.dim(' ' + bottomBorder(boxWidth - 2) + ' ')));
+			const confirmMsg = `${this.yellow('提交所有答案？')} ${this.dim('（Enter/y 确认，Esc/n 取消）')}`;
 			lines.push(padToWidth(boxLine(truncateToWidth(confirmMsg, contentWidth))));
 		} else {
-			lines.push(padToWidth(this.dim('├' + horizontalLine(boxWidth - 2) + '┤')));
-			const controls = `${this.dim('Tab/Enter')} next · ${this.dim('Shift+Tab')} prev · ${this.dim('Shift+Enter')} newline · ${this.dim('Esc')} cancel`;
+			lines.push(padToWidth(this.dim(' ' + bottomBorder(boxWidth - 2) + ' ')));
+			const controls = `${this.dim('Tab/Enter')} 下一个 · ${this.dim('Shift+Tab')} 上一个 · ${this.dim('Shift+Enter')} 换行 · ${this.dim('Esc')} 取消`;
 			lines.push(padToWidth(boxLine(truncateToWidth(controls, contentWidth))));
 		}
-		lines.push(padToWidth(this.dim('╰' + horizontalLine(boxWidth - 2) + '╯')));
+		lines.push(padToWidth(this.dim(bottomBorder(boxWidth))));
 
 		this.cachedWidth = width;
 		this.cachedLines = lines;
@@ -482,12 +484,12 @@ export default function (pi: ExtensionAPI) {
 		log.debug('answerHandler triggered', { hasUI: ctx.hasUI, hasModel: !!ctx.model });
 
 		if (!ctx.hasUI) {
-			ctx.ui.notify('answer requires interactive mode', 'error');
+			ctx.ui.notify('answer 需要交互模式', 'error');
 			return;
 		}
 
 		if (!ctx.model) {
-			ctx.ui.notify('No model selected', 'error');
+			ctx.ui.notify('未选择模型', 'error');
 			return;
 		}
 
@@ -501,10 +503,7 @@ export default function (pi: ExtensionAPI) {
 				const msg = entry.message;
 				if ('role' in msg && msg.role === 'assistant') {
 					if (msg.stopReason !== 'stop') {
-						ctx.ui.notify(
-							`Last assistant message incomplete (${msg.stopReason})`,
-							'error',
-						);
+						ctx.ui.notify(`上一条助手消息不完整 (${msg.stopReason})`, 'error');
 						return;
 					}
 					const textParts = msg.content
@@ -519,7 +518,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (!lastAssistantText) {
-			ctx.ui.notify('No assistant messages found', 'error');
+			ctx.ui.notify('未找到助手消息', 'error');
 			return;
 		}
 
@@ -536,7 +535,7 @@ export default function (pi: ExtensionAPI) {
 				const loader = new BorderedLoader(
 					tui,
 					theme,
-					`Extracting questions using ${extractionModel.id}...`,
+					`正在使用 ${extractionModel.id} 提取问题...`,
 				);
 				loader.onAbort = () => done({ status: 'cancelled' });
 
@@ -567,7 +566,7 @@ export default function (pi: ExtensionAPI) {
 					if (response.stopReason === 'error') {
 						return {
 							status: 'error',
-							message: response.errorMessage ?? 'question extraction failed',
+							message: response.errorMessage ?? '问题提取失败',
 						};
 					}
 
@@ -579,7 +578,7 @@ export default function (pi: ExtensionAPI) {
 					if (!result) {
 						return {
 							status: 'error',
-							message: 'question extraction returned invalid JSON',
+							message: '问题提取返回无效 JSON',
 						};
 					}
 
@@ -604,29 +603,29 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		if (extractionOutcome.status === 'cancelled') {
-			ctx.ui.notify('Cancelled', 'info');
+			ctx.ui.notify('已取消', 'info');
 			return;
 		}
 		if (extractionOutcome.status === 'error') {
 			log.error('Question extraction failed', { message: extractionOutcome.message });
-			ctx.ui.notify(`Question extraction failed: ${extractionOutcome.message}`, 'error');
+			ctx.ui.notify(`问题提取失败: ${extractionOutcome.message}`, 'error');
 			return;
 		}
 
 		const extractionResult = extractionOutcome.result;
 		if (extractionResult.questions.length === 0) {
 			log.info('No questions found in last assistant message');
-			ctx.ui.notify('No questions found in the last message', 'info');
+			ctx.ui.notify('上一条消息中未找到问题', 'info');
 			return;
 		}
 
 		// Show the Q&A component
-		const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
-			return new QnAComponent(extractionResult.questions, tui, done);
+		const answersResult = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+			return new QnAComponent(extractionResult.questions, tui, theme, done);
 		});
 
 		if (answersResult === null) {
-			ctx.ui.notify('Cancelled', 'info');
+			ctx.ui.notify('已取消', 'info');
 			return;
 		}
 
@@ -642,7 +641,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand('answer', {
-		description: 'Extract questions from last assistant message into interactive Q&A',
+		description: '从最后一条 assistant 消息提取问题到交互式问答',
 		handler: (_args, ctx) => answerHandler(ctx),
 	});
 

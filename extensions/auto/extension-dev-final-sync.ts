@@ -800,7 +800,7 @@ async function performSync(ctx: ExtensionContext): Promise<void> {
 
 			if (tscResult === null) {
 				log.info('Skipping sync — tsc is not available');
-				notifyTitle = '⚠️ tsc 不可用，跳过同步（可运行 npm install 后重试）';
+				notifyTitle = '⚠️ tsc 不可用，跳过同步（可运行 npm install 后重试）'; // tui-exempt: 通知文案（ADR-0023）
 				notifyLevel = 'warning';
 			} else {
 				const validExts: string[] = [];
@@ -810,7 +810,7 @@ async function performSync(ctx: ExtensionContext): Promise<void> {
 				}
 
 				if (validExts.length === 0) {
-					notifyTitle = `⚠️ ${changed.join(', ')} 有编译错误，未同步`;
+					notifyTitle = `⚠️ ${changed.join(', ')} 有编译错误，未同步`; // tui-exempt: 通知文案（ADR-0023）
 					notifyLevel = 'warning';
 				} else {
 					const synced: string[] = [];
@@ -861,7 +861,7 @@ async function performSync(ctx: ExtensionContext): Promise<void> {
 		}
 	} catch (err) {
 		log.error('Sync error', { error: String(err) });
-		notifyTitle = '❌ 同步过程出错（见日志）';
+		notifyTitle = '❌ 同步过程出错（见日志）'; // tui-exempt: 通知文案（ADR-0023）
 		notifyLevel = 'warning';
 	}
 

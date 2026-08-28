@@ -75,7 +75,7 @@ function start(ctx?: ExtensionContext): void {
 		}
 		caffeinate = undefined;
 		lastError = error.message;
-		notify(ctx, `No Sleep: failed to caffeinate: ${error.message}`, 'error');
+		notify(ctx, `No Sleep：启动 caffeinate 失败：${error.message}`, 'error');
 	});
 
 	child.once('exit', (code, signal) => {
@@ -86,10 +86,10 @@ function start(ctx?: ExtensionContext): void {
 
 		if (code && code !== 0) {
 			lastError = `caffeinate exited with code ${code}`;
-			notify(ctx, `No Sleep: caffeinate stopped unexpectedly (${lastError}).`, 'warning');
+			notify(ctx, `No Sleep：caffeinate 意外停止（${lastError}）。`, 'warning');
 		} else if (signal) {
 			lastError = `caffeinate exited after signal ${signal}`;
-			notify(ctx, `No Sleep: caffeinate stopped unexpectedly (${lastError}).`, 'warning');
+			notify(ctx, `No Sleep：caffeinate 意外停止（${lastError}）。`, 'warning');
 		}
 	});
 }
@@ -128,13 +128,13 @@ function reconcile(ctx?: ExtensionContext): void {
 
 function describeState(): string {
 	if (!MACOS) {
-		return 'No Sleep is inactive: caffeinate is only available on macOS.';
+		return 'No Sleep 未激活：caffeinate 仅在 macOS 上可用。';
 	}
 
 	const state = caffeinate ? `active (pid ${caffeinate.pid ?? 'unknown'})` : 'idle';
 	const display = readBooleanEnv('PI_NO_SLEEP_DISPLAY', false) ? 'yes' : 'no';
 	return [
-		`No Sleep is ${enabled ? 'enabled' : 'disabled'}.`,
+		`No Sleep 已${enabled ? '启用' : '禁用'}。`,
 		`scope: ${scope}`,
 		`state: ${state}`,
 		`keeps display awake: ${display}`,
@@ -177,7 +177,7 @@ export default function noSleepExtension(pi: ExtensionAPI) {
 
 	log.debug('registerCommand: no-sleep');
 	pi.registerCommand('no-sleep', {
-		description: 'Show or change macOS sleep-prevention status',
+		description: '显示或更改 macOS 防睡眠状态',
 		handler: async (args, ctx) => {
 			const command = args.trim().toLowerCase();
 
@@ -197,7 +197,7 @@ export default function noSleepExtension(pi: ExtensionAPI) {
 				scope = 'session';
 				reconcile(ctx);
 			} else if (command && command !== 'status') {
-				notify(ctx, 'Usage: /no-sleep [status|on|off|toggle|agent|session]', 'warning');
+				notify(ctx, '用法：/no-sleep [status|on|off|toggle|agent|session]', 'warning');
 				return;
 			}
 

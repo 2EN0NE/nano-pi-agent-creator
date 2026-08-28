@@ -88,7 +88,7 @@ const formatNotification = (text: string | null): { title: string; body: string 
 	const simplified = text ? simpleMarkdown(text) : '';
 	const normalized = simplified.replace(/\s+/g, ' ').trim();
 	if (!normalized) {
-		return { title: 'Ready for input', body: '' };
+		return { title: '准备接收输入', body: '' };
 	}
 
 	const maxBody = 200;

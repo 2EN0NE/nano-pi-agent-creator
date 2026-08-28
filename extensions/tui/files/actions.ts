@@ -109,7 +109,7 @@ export const editPath = async (
 	const editorCmd = process.env.VISUAL || process.env.EDITOR;
 	if (!editorCmd) {
 		log.warn('editPath 跳过：未设置 \$VISUAL/\$EDITOR');
-		ctx.ui.notify('No editor configured. Set \$VISUAL or \$EDITOR.', 'warning');
+		ctx.ui.notify('未配置编辑器。请设置 $VISUAL 或 $EDITOR。', 'warning');
 		return;
 	}
 
@@ -135,7 +135,7 @@ export const editPath = async (
 
 	if (updated === null) {
 		log.info('editPath 取消编辑', { 文件: target.displayPath });
-		ctx.ui.notify('Edit cancelled', 'info');
+		ctx.ui.notify('编辑已取消', 'info');
 		return;
 	}
 
@@ -147,7 +147,7 @@ export const editPath = async (
 			文件: target.displayPath,
 			错误: String(err),
 		});
-		ctx.ui.notify(`Failed to save ${target.displayPath}`, 'error');
+		ctx.ui.notify(`保存 ${target.displayPath} 失败`, 'error');
 	}
 };
 
@@ -482,7 +482,7 @@ export const openFilesDiff = async (
 			diffResult.code === 0 ? '(两个文件内容一致)' : diffResult.stdout || '(diff 无输出)';
 		await showDiffInPiPanel(
 			ctx,
-			`文件对比: ${left.displayPath} ↔ ${right.displayPath}`,
+			`文件对比: ${left.displayPath} vs ${right.displayPath}`,
 			diffText,
 		);
 		log.debug('openFilesDiff pi 面板展示完成');

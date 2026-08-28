@@ -21,25 +21,26 @@ import {
 	Input,
 	Markdown,
 	truncateToWidth,
-	visibleWidth,
 	type Focusable,
 	type KeybindingsManager,
 	type OverlayHandle,
 	type TUI,
 } from '@earendil-works/pi-tui';
+import { bottomBorder, topBorder } from '../../src/tui/helpers.js';
+import { selectPanel } from '../../src/tui/select-panel.js';
 
 const BTW_ENTRY_TYPE = 'btw-thread-entry';
 const BTW_RESET_TYPE = 'btw-thread-reset';
 
 const BTW_SYSTEM_PROMPT = [
-	"You are BTW, a side-channel assistant embedded in the user's coding agent.",
-	'You have access to the main conversation context — use it to give informed answers.',
-	'Help with focused questions, planning, and quick explorations.',
-	'Be direct and practical.',
+	'你是 BTW，一个嵌入用户编码 agent 的侧通道助手。',
+	'你可以访问主对话上下文 — 用它给出有依据的回答。',
+	'帮助回答聚焦问题、做规划、快速探索。',
+	'直接而务实。',
 ].join(' ');
 
 const BTW_SUMMARY_PROMPT =
-	'Summarize this side conversation for handoff into the main conversation. Keep key decisions, findings, risks, and next actions. Output only the summary.';
+	'摘要本次侧对话以便交接给主对话。保留关键决策、发现、风险和后续行动。只输出摘要。';
 
 type SessionThinkingLevel = 'off' | AiThinkingLevel;
 
@@ -211,7 +212,7 @@ function notify(
 	}
 }
 
-class BtwOverlay extends Container implements Focusable {
+export class BtwOverlay extends Container implements Focusable {
 	private readonly input: Input;
 	private readonly tui: TUI;
 	private readonly theme: ExtensionContext['ui']['theme'];
@@ -280,15 +281,15 @@ class BtwOverlay extends Container implements Focusable {
 	}
 
 	private frameLine(content: string, innerWidth: number): string {
-		const truncated = truncateToWidth(content, innerWidth, '');
-		const padding = Math.max(0, innerWidth - visibleWidth(truncated));
-		return `${this.theme.fg('borderMuted', '│')}${truncated}${' '.repeat(padding)}${this.theme.fg('borderMuted', '│')}`;
+		// 纯横线范式（ADR-0023）：无竖线，2 空格缩进 + truncate 兜底（与边框同宽）
+		return '  ' + truncateToWidth(content, innerWidth, '');
 	}
 
 	private borderLine(innerWidth: number, edge: 'top' | 'bottom'): string {
-		const left = edge === 'top' ? '┌' : '└';
-		const right = edge === 'top' ? '┐' : '┘';
-		return this.theme.fg('borderMuted', `${left}${'─'.repeat(innerWidth)}${right}`);
+		if (edge === 'top') {
+			return this.theme.fg('borderMuted', topBorder('── btw ', innerWidth + 2));
+		}
+		return this.theme.fg('borderMuted', bottomBorder(innerWidth + 2));
 	}
 
 	override render(width: number): string[] {
@@ -314,11 +315,8 @@ class BtwOverlay extends Container implements Focusable {
 		const lines = [
 			this.borderLine(innerWidth, 'top'),
 			this.frameLine(this.theme.fg('accent', this.theme.bold(' BTW side chat ')), innerWidth),
-			this.frameLine(
-				this.theme.fg('dim', 'Separate side conversation. Esc closes.'),
-				innerWidth,
-			),
-			this.theme.fg('borderMuted', `├${'─'.repeat(innerWidth)}┤`),
+			this.frameLine(this.theme.fg('dim', '独立的侧边对话。Esc 关闭。'), innerWidth),
+			this.theme.fg('borderMuted', ' ' + bottomBorder(innerWidth) + ' '),
 		];
 
 		for (const line of visibleTranscript) {
@@ -328,12 +326,10 @@ class BtwOverlay extends Container implements Focusable {
 			lines.push(this.frameLine('', innerWidth));
 		}
 
-		lines.push(this.theme.fg('borderMuted', `├${'─'.repeat(innerWidth)}┤`));
+		lines.push(this.theme.fg('borderMuted', ' ' + bottomBorder(innerWidth) + ' '));
 		lines.push(this.frameLine(this.theme.fg('warning', status), innerWidth));
-		lines.push(
-			`${this.theme.fg('borderMuted', '│')}${inputLine}${this.theme.fg('borderMuted', '│')}`,
-		);
-		lines.push(this.frameLine(this.theme.fg('dim', 'Enter submit · Esc close'), innerWidth));
+		lines.push(inputLine);
+		lines.push(this.frameLine(this.theme.fg('dim', 'Enter 发送 · Esc 关闭'), innerWidth));
 		lines.push(this.borderLine(innerWidth, 'bottom'));
 
 		return lines;
@@ -347,7 +343,7 @@ export default function (pi: ExtensionAPI) {
 	let pendingError: string | null = null;
 	let pendingToolCalls: ToolCallInfo[] = [];
 	let sideBusy = false;
-	let overlayStatus = 'Ready';
+	let overlayStatus = '就绪';
 	let overlayDraft = '';
 	let overlayRuntime: OverlayRuntime | null = null;
 	let activeSideSession: SideSessionRuntime | null = null;
@@ -406,7 +402,7 @@ export default function (pi: ExtensionAPI) {
 	): string[] {
 		const lines: string[] = [];
 		for (const tc of toolCalls) {
-			const icon = tc.status === 'running' ? '⚙' : tc.status === 'error' ? '✗' : '✓';
+			const icon = tc.status === 'running' ? '..' : tc.status === 'error' ? '失败' : '成功';
 			const color =
 				tc.status === 'error' ? 'error' : tc.status === 'done' ? 'success' : 'dim';
 			const label = theme.fg(color, `${icon} `) + theme.fg('toolTitle', tc.toolName);
@@ -434,7 +430,7 @@ export default function (pi: ExtensionAPI) {
 		theme: ExtensionContext['ui']['theme'],
 	): string[] {
 		if (thread.length === 0 && !pendingQuestion && !pendingAnswer && !pendingError) {
-			return [theme.fg('dim', 'No BTW messages yet. Type a question below.')];
+			return [theme.fg('dim', '还没有 BTW 消息。请在下方输入问题。')];
 		}
 
 		const lines: string[] = [];
@@ -464,7 +460,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (pendingError) {
-				lines.push(theme.fg('error', `❌ ${pendingError}`));
+				lines.push(theme.fg('error', `[ERROR] ${pendingError}`));
 			} else if (pendingAnswer) {
 				lines.push('');
 				const mdLines = renderMarkdownLines(pendingAnswer, width);
@@ -546,7 +542,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function resetThread(
-		ctx: ExtensionContext | ExtensionCommandContext,
+		_ctx: ExtensionContext | ExtensionCommandContext,
 		persist = true,
 	): Promise<void> {
 		thread = [];
@@ -556,7 +552,7 @@ export default function (pi: ExtensionAPI) {
 		pendingToolCalls = [];
 		sideBusy = false;
 		setOverlayDraft('');
-		setOverlayStatus('Ready');
+		setOverlayStatus('就绪');
 		await disposeSideSession();
 		if (persist) {
 			const details: BtwResetDetails = { timestamp: Date.now() };
@@ -573,7 +569,7 @@ export default function (pi: ExtensionAPI) {
 		pendingError = null;
 		pendingToolCalls = [];
 		sideBusy = false;
-		overlayStatus = 'Ready';
+		overlayStatus = '就绪';
 		overlayDraft = '';
 		const branch = ctx.sessionManager.getBranch();
 		let lastResetIndex = -1;
@@ -634,8 +630,8 @@ export default function (pi: ExtensionAPI) {
 					}
 					setOverlayStatus(
 						event.type === 'message_end'
-							? 'Finalizing side response...'
-							: 'Streaming side response...',
+							? '正在完成侧边回复...'
+							: '正在流式生成侧边回复...',
 						true,
 					);
 					return;
@@ -652,7 +648,7 @@ export default function (pi: ExtensionAPI) {
 					} catch {
 						// Ignore tool tracking failures
 					}
-					setOverlayStatus(`Running tool: ${toolName}...`, true);
+					setOverlayStatus(`运行工具：${toolName}...`, true);
 					return;
 				}
 				case 'tool_execution_end': {
@@ -663,11 +659,11 @@ export default function (pi: ExtensionAPI) {
 					if (tc) {
 						tc.status = (event as { isError?: boolean }).isError ? 'error' : 'done';
 					}
-					setOverlayStatus('Streaming side response...', true);
+					setOverlayStatus('正在流式生成侧边回复...', true);
 					return;
 				}
 				case 'turn_end': {
-					setOverlayStatus('Finalizing side response...', true);
+					setOverlayStatus('正在完成侧边回复...', true);
 					return;
 				}
 				default:
@@ -792,7 +788,7 @@ export default function (pi: ExtensionAPI) {
 	async function summarizeThread(ctx: ExtensionContext, items: BtwDetails[]): Promise<string> {
 		const model = ctx.model;
 		if (!model) {
-			throw new Error('No active model selected.');
+			throw new Error('未选择活跃模型。');
 		}
 
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
@@ -812,13 +808,13 @@ export default function (pi: ExtensionAPI) {
 			await session.prompt(formatThread(items), { source: 'extension' });
 			const response = getLastAssistantMessage(session);
 			if (!response) {
-				throw new Error('Summary finished without a response.');
+				throw new Error('摘要请求结束但没有响应。');
 			}
 			if (response.stopReason === 'aborted') {
-				throw new Error('Summary request was aborted.');
+				throw new Error('摘要请求已中止。');
 			}
 			if (response.stopReason === 'error') {
-				throw new Error(response.errorMessage || 'Summary request failed.');
+				throw new Error(response.errorMessage || '摘要请求失败。');
 			}
 
 			return extractText(response.content) || '(No summary generated)';
@@ -836,7 +832,7 @@ export default function (pi: ExtensionAPI) {
 		ctx: ExtensionContext | ExtensionCommandContext,
 	): Promise<void> {
 		if (thread.length === 0) {
-			notify(ctx, 'No BTW thread to summarize.', 'warning');
+			notify(ctx, '没有可摘要的 BTW 线程。', 'warning');
 			return;
 		}
 
@@ -851,7 +847,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			await resetThread(ctx);
-			notify(ctx, 'Injected BTW summary into main chat.', 'info');
+			notify(ctx, '已将 BTW 摘要注入主对话。', 'info');
 		} catch (error) {
 			notify(ctx, error instanceof Error ? error.message : String(error), 'error');
 		}
@@ -869,11 +865,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const choice = await ctx.ui.select('Close BTW:', [
-			'Keep side thread',
-			'Inject summary into main chat',
-		]);
-		if (choice === 'Inject summary into main chat') {
+		const choice = await selectPanel(ctx, '关闭 BTW:', ['保留侧边线程', '将摘要注入主对话']);
+		if (choice === '将摘要注入主对话') {
 			await injectSummaryIntoMain(ctx);
 		}
 	}
@@ -881,8 +874,8 @@ export default function (pi: ExtensionAPI) {
 	async function runBtwPrompt(ctx: ExtensionCommandContext, question: string): Promise<void> {
 		const model = ctx.model;
 		if (!model) {
-			setOverlayStatus('No active model selected.');
-			notify(ctx, 'No active model selected.', 'error');
+			setOverlayStatus('未选择活跃模型。');
+			notify(ctx, '未选择活跃模型。', 'error');
 			return;
 		}
 
@@ -895,13 +888,13 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (sideBusy) {
-			notify(ctx, 'BTW is still processing the previous message.', 'warning');
+			notify(ctx, 'BTW 仍在处理上一条消息。', 'warning');
 			return;
 		}
 
 		const side = await ensureSideSession(ctx);
 		if (!side) {
-			notify(ctx, 'Unable to create BTW side session.', 'error');
+			notify(ctx, '无法创建 BTW 侧边会话。', 'error');
 			return;
 		}
 
@@ -910,20 +903,20 @@ export default function (pi: ExtensionAPI) {
 		pendingAnswer = '';
 		pendingError = null;
 		pendingToolCalls = [];
-		setOverlayStatus('Streaming side response...');
+		setOverlayStatus('正在流式生成侧边回复...');
 		syncOverlay();
 
 		try {
 			await side.session.prompt(question, { source: 'extension' });
 			const response = getLastAssistantMessage(side.session);
 			if (!response) {
-				throw new Error('BTW request finished without a response.');
+				throw new Error('BTW 请求结束但没有响应。');
 			}
 			if (response.stopReason === 'aborted') {
-				throw new Error('BTW request aborted.');
+				throw new Error('BTW 请求已中止。');
 			}
 			if (response.stopReason === 'error') {
-				throw new Error(response.errorMessage || 'BTW request failed.');
+				throw new Error(response.errorMessage || 'BTW 请求失败。');
 			}
 
 			const answer = extractText(response.content) || '(No text response)';
@@ -943,7 +936,7 @@ export default function (pi: ExtensionAPI) {
 			pendingQuestion = null;
 			pendingAnswer = '';
 			pendingToolCalls = [];
-			setOverlayStatus('Ready for the next side question.');
+			setOverlayStatus('准备接收下一条侧边问题。');
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			pendingError = message;
@@ -961,7 +954,7 @@ export default function (pi: ExtensionAPI) {
 	): Promise<void> {
 		const question = rawValue.trim();
 		if (!question) {
-			setOverlayStatus('Enter a question first.');
+			setOverlayStatus('请先输入问题。');
 			return;
 		}
 
@@ -975,31 +968,30 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand('btw', {
-		description:
-			'Open a simple BTW side-chat popover. `/btw <text>` asks immediately, `/btw` opens the side thread.',
+		description: '打开一个 BTW 侧聊弹出窗口。`/btw <文本>` 立即提问，`/btw` 打开侧线程。',
 		handler: async (args, ctx) => {
 			const question = args.trim();
 
 			if (!question) {
 				if (thread.length > 0 && ctx.hasUI) {
-					const choice = await ctx.ui.select('BTW side chat:', [
-						'Continue previous conversation',
-						'Start fresh',
+					const choice = await selectPanel(ctx, 'BTW side chat:', [
+						'继续之前的对话',
+						'重新开始',
 					]);
-					if (choice === 'Continue previous conversation') {
+					if (choice === '继续之前的对话') {
 						// Dispose session so it's recreated with fresh main context on next submit
 						await disposeSideSession();
 						setOverlayStatus('Continuing BTW thread.');
 						await ensureOverlay(ctx);
-					} else if (choice === 'Start fresh') {
+					} else if (choice === '重新开始') {
 						await resetThread(ctx, true);
-						setOverlayStatus('Ready');
+						setOverlayStatus('就绪');
 						await ensureOverlay(ctx);
 					}
 					// null = user cancelled (Esc), do nothing
 				} else {
 					await resetThread(ctx, true);
-					setOverlayStatus('Ready');
+					setOverlayStatus('就绪');
 					await ensureOverlay(ctx);
 				}
 				return;

@@ -482,7 +482,7 @@ async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: a
 		// clone 当前会话到 worktree 目录
 		const sourceFile: string | undefined = ctx.sessionManager?.getSessionFile?.();
 		if (!sourceFile || !existsSync(sourceFile)) {
-			ctx.ui.notify('No active session file to clone from.', 'error');
+			ctx.ui.notify('没有可克隆的活跃会话文件。', 'error');
 			return;
 		}
 		// 检查是否已有 clone 版本（sourceCwd = 当前会话实际 cwd，可能是一个 worktree 而非 main）
@@ -493,7 +493,7 @@ async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: a
 			try {
 				const overwrite = await ctx.ui.confirm?.(
 					`Worktree '${target}' already has a cloned session from this project.\n` +
-						'Overwrite with current session? [Y] Yes [N] Keep existing [Esc] Cancel',
+						'用当前会话覆盖？[Y] 是 [N] 保留现有 [Esc] 取消',
 				);
 				if (overwrite === false) {
 					// 保留现有 clone 会话（sourceCwd 可能是 worktree，须与 hasClonedSession 检测一致）
@@ -545,7 +545,7 @@ async function handleFork(repoRoot: string, target: string, ctx: any): Promise<v
 	// 克隆当前会话到目标 worktree
 	const sourceFile: string | undefined = ctx.sessionManager?.getSessionFile?.();
 	if (!sourceFile || !existsSync(sourceFile)) {
-		ctx.ui.notify('No active session to clone from. Creating new session.', 'warning');
+		ctx.ui.notify('没有可克隆的活跃会话，创建新会话。', 'warning');
 		const sessionFile = createSession(targetCwd, repoRoot, target);
 		await switchToSession(ctx, targetCwd, sessionFile);
 		return;
@@ -601,7 +601,7 @@ async function handleDelete(
 		const existingSession = findExistingSession(repoRoot, repoRoot, 'main');
 		const choice = await askDeleteLeaveChoice(ctx, Boolean(existingSession));
 		if (choice === 'cancel') {
-			ctx.ui.notify('Deletion cancelled.', 'info');
+			ctx.ui.notify('已取消删除。', 'info');
 			return;
 		}
 		const mainSessionFile =
@@ -1210,7 +1210,7 @@ export async function handleMerge(
 			ctx,
 			allWorktrees,
 			currentName,
-			'Select source to merge:',
+			'选择要合并的来源：',
 			repoRoot,
 		);
 		if (
@@ -1429,7 +1429,7 @@ export async function handleRebase(
 			ctx,
 			allWorktrees,
 			currentName,
-			'Select source to rebase:',
+			'选择要变基的来源：',
 			repoRoot,
 		);
 		if (
@@ -1592,7 +1592,7 @@ async function handleClean(
 			detail: merged.map((m) => `  ${m.name} (${m.branch})`).join('\n'),
 		});
 		if (!confirmed) {
-			ctx.ui.notify('Cleaning cancelled.', 'info');
+			ctx.ui.notify('已取消清理。', 'info');
 			return;
 		}
 	}
@@ -1641,8 +1641,8 @@ async function handlePrune(
 	const lines: string[] = [];
 	lines.push(
 		dryRun
-			? 'Prune (dry run): would remove git worktree metadata for missing directories.'
-			: 'Pruned git worktree metadata.',
+			? '修剪（预演）：将移除缺失目录的 git worktree 元数据。'
+			: '已修剪 git worktree 元数据。',
 	);
 	if (orphanSessions.length > 0) {
 		lines.push('Orphaned session directories (not deleted — clean manually):');
@@ -1687,8 +1687,8 @@ async function handleContinue(repoRoot: string, ctx: any): Promise<void> {
 		const conflictFiles = getConflictFiles(mergeDir);
 		if (conflictFiles.length > 0) {
 			ctx.ui.notify(
-				'Merge conflict still present. Resolve conflicts first, then /worktree continue.\n' +
-					'  Or use /worktree abort to cancel.',
+				'仍存在合并冲突，请先解决冲突，再 /worktree continue。\n' +
+					'  或使用 /worktree abort 取消。',
 				'warning',
 			);
 			return;
@@ -1825,7 +1825,7 @@ function handleWidget(flags: Record<string, string>, ctx: any): void {
 function handleShell(repoRoot: string, ctx: any, targetName?: string): void {
 	const name = targetName || _getCurrentName(repoRoot, ctx.cwd);
 	if (!name) {
-		ctx.ui.notify('No active worktree. Switch to one first.', 'warning');
+		ctx.ui.notify('没有活跃的工作树，请先切换到其中一个。', 'warning');
 		return;
 	}
 

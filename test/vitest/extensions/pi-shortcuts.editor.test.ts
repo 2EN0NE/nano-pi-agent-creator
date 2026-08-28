@@ -66,7 +66,7 @@ describe('pi-shortcuts editor — headless snapshot', () => {
 		const snapshot = renderLines(component, 80);
 		assertWithinWidth(snapshot, 80);
 		const text = snapshot.join('\n');
-		expect(text).toContain('快捷键设置');
+		expect(text).toContain('Shortcuts');
 		expect(text).toContain('全局');
 		expect(text).toContain('快捷键');
 		expect(text).toContain('前缀键');
@@ -91,9 +91,12 @@ describe('pi-shortcuts editor — headless snapshot', () => {
 		reg.register({ name: 'files', keys: ['f'], description: '文件浏览器', handler: () => {} });
 		const { component } = mountEditor(reg);
 		const text = renderLines(component, 80).join('\n');
-		expect(text).toContain('┌');
-		expect(text).toContain('└');
+		expect(text).not.toContain('┌');
+		expect(text).not.toContain('┐');
+		expect(text).not.toContain('└');
+		expect(text).not.toContain('┘');
 		expect(text).not.toContain('│'); // 用户要求：不要左右竖线
+		expect(text).toContain('──'); // 顶边框纯横线前缀
 	});
 
 	it('Tab 切换到快捷键 Tab，展示动态插件快捷键列表', () => {
@@ -172,7 +175,7 @@ describe('pi-shortcuts editor — headless snapshot', () => {
 		component.handleInput('\r'); // Enter
 		const snapshot = renderLines(component, 80);
 		assertWithinWidth(snapshot, 80);
-		expect(snapshot.join('\n')).toContain('改前缀键');
+		expect(snapshot.join('\n')).toContain('编辑前缀');
 	});
 
 	it('快捷键 Tab 按 Enter 进入改子键编辑态', () => {
@@ -190,7 +193,7 @@ describe('pi-shortcuts editor — headless snapshot', () => {
 		component.handleInput('\r'); // Enter
 		const snapshot = renderLines(component, 80);
 		assertWithinWidth(snapshot, 80);
-		expect(snapshot.join('\n')).toContain('改子键');
+		expect(snapshot.join('\n')).toContain('编辑子键');
 	});
 
 	it('Esc 关闭', () => {

@@ -25,6 +25,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from '@earendil-works/pi-tui';
+import { topBorder } from '../../src/tui/helpers.js';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -92,11 +93,11 @@ function sliceByColumn(line: string, startCol: number, length: number, strict = 
 const DOW_NAMES: DowKey[] = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 const TOD_BUCKETS: { key: TodKey; label: string; from: number; to: number }[] = [
-	{ key: 'after-midnight', label: 'After midnight (0–5)', from: 0, to: 5 },
-	{ key: 'morning', label: 'Morning (6–11)', from: 6, to: 11 },
-	{ key: 'afternoon', label: 'Afternoon (12–16)', from: 12, to: 16 },
-	{ key: 'evening', label: 'Evening (17–21)', from: 17, to: 21 },
-	{ key: 'night', label: 'Night (22–23)', from: 22, to: 23 },
+	{ key: 'after-midnight', label: '凌晨 (0–5)', from: 0, to: 5 },
+	{ key: 'morning', label: '上午 (6–11)', from: 6, to: 11 },
+	{ key: 'afternoon', label: '下午 (12–16)', from: 12, to: 16 },
+	{ key: 'evening', label: '傍晚 (17–21)', from: 17, to: 21 },
+	{ key: 'night', label: '夜间 (22–23)', from: 22, to: 23 },
 ];
 
 function todBucketForHour(hour: number): TodKey {
@@ -1058,9 +1059,9 @@ function renderGraphLines(
 
 	// Label only Mon/Wed/Fri like GitHub (saves space)
 	const labelByRow = new Map<number, string>([
-		[0, 'Mon'],
-		[2, 'Wed'],
-		[4, 'Fri'],
+		[0, '一'],
+		[2, '三'],
+		[4, '五'],
 	]);
 
 	const lines: string[] = [];
@@ -1606,8 +1607,9 @@ class BreakdownComponent implements Component {
 			return selected ? bold(`[${label}]`) : dim(` ${label} `);
 		};
 
-		const header =
-			`${bold('Session breakdown')}  ${tab(7, 0)}${tab(30, 1)}${tab(90, 2)}  ` +
+		const titleLine = bold(topBorder('── Session breakdown ', width));
+		const tabsLine =
+			`  ${tab(7, 0)}${tab(30, 1)}${tab(90, 2)}  ` +
 			`${metricTab('sessions', 'sess')}${metricTab('messages', 'msg')}${metricTab('tokens', 'tok')}  ` +
 			`${viewTab('model', 'model')}${viewTab('cwd', 'cwd')}${viewTab('dow', 'dow')}${viewTab('tod', 'tod')}`;
 
@@ -1688,7 +1690,8 @@ class BreakdownComponent implements Component {
 						: renderTodTable(range, metric.kind);
 
 		const lines: string[] = [];
-		lines.push(truncateToWidth(header, width));
+		lines.push(truncateToWidth(titleLine, width));
+		lines.push(truncateToWidth(tabsLine, width));
 		lines.push(truncateToWidth(dim('←/→ range · ↑/↓ view · tab metric · q to close'), width));
 		lines.push('');
 		lines.push(truncateToWidth(summary, width));
@@ -1765,8 +1768,7 @@ class BreakdownComponent implements Component {
 
 export default function sessionBreakdownExtension(pi: ExtensionAPI) {
 	pi.registerCommand('session-breakdown', {
-		description:
-			'Interactive breakdown of last 7/30/90 days of ~/.pi session usage (sessions/messages/tokens + cost by model)',
+		description: '交互式统计近 7/30/90 天的 ~/.pi 会话用量（会话数/消息数/token + 按模型成本）',
 		handler: async (_args, ctx: ExtensionContext) => {
 			if (!ctx.hasUI) {
 				// Non-interactive fallback: just notify.
@@ -1843,10 +1845,7 @@ export default function sessionBreakdownExtension(pi: ExtensionAPI) {
 			});
 
 			if (!data) {
-				ctx.ui.notify(
-					aborted ? 'Cancelled' : 'Failed to analyze sessions',
-					aborted ? 'info' : 'error',
-				);
+				ctx.ui.notify(aborted ? '已取消' : '分析会话失败', aborted ? 'info' : 'error');
 				return;
 			}
 

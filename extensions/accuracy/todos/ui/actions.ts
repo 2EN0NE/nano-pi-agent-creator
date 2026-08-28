@@ -1,17 +1,17 @@
-import { type Theme, DynamicBorder, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
+import { type Theme, getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import {
 	Container,
 	Markdown,
 	SelectList,
 	Text,
 	truncateToWidth,
-	visibleWidth,
 	type Component,
 	type SelectItem,
 } from '@earendil-works/pi-tui';
 import { matchesKey, Key } from '@earendil-works/pi-tui';
+import { bottomBorder, topBorder } from '../../../../src/tui/helpers.js';
 import type { TodoRecord, TodoMenuAction, TodoOverlayAction } from '../types.js';
-import { formatTodoId, isTodoDone, isTodoClosed } from '../storage.js';
+import { formatTodoId, isTodoDone, isTodoClosed, todoStatusLabel } from '../storage.js';
 
 // ── Action Menu ──────────────────────────────────────
 
@@ -22,55 +22,50 @@ export interface TodoMenuHandlers {
 
 export class TodoActionMenuComponent extends Container {
 	private selectList: SelectList;
+	private titleText: string;
 
 	constructor(theme: Theme, todo: TodoRecord, handlers: TodoMenuHandlers) {
 		super();
 		const done = isTodoDone(todo.status);
 		const closed = isTodoClosed(todo.status);
 		const resolved = done || closed;
-		const title = todo.title || '(untitled)';
+		const title = todo.title || '(无标题)';
+		this.titleText = `待办操作 ${formatTodoId(todo.id)} "${title}"`;
 		const options: SelectItem[] = [
-			{ value: 'view', label: 'view', description: 'View todo' },
+			{ value: 'view', label: '查看', description: '查看待办详情' },
 			...(resolved
 				? []
 				: [
-						{ value: 'work', label: 'work', description: 'Work on todo' },
-						{ value: 'refine', label: 'refine', description: 'Refine task' },
+						{ value: 'work', label: '处理', description: '开始处理待办' },
+						{ value: 'refine', label: '细化', description: '细化任务' },
 					]),
 			// Status transitions
 			...(closed
-				? [{ value: 'reopen', label: 'reopen', description: 'Restore todo' }]
+				? [{ value: 'reopen', label: '恢复', description: '恢复待办' }]
 				: done
 					? [
-							{ value: 'reopen', label: 'reopen', description: 'Reopen todo' },
-							{ value: 'close', label: 'close', description: 'Hide todo' },
+							{ value: 'reopen', label: '恢复', description: '重新打开待办' },
+							{ value: 'close', label: '隐藏', description: '隐藏待办' },
 						]
 					: [
-							{ value: 'done', label: 'done', description: 'Mark as completed' },
-							{ value: 'close', label: 'close', description: 'Hide todo' },
+							{ value: 'done', label: '完成', description: '标记为已完成' },
+							{ value: 'close', label: '隐藏', description: '隐藏待办' },
 						]),
 			...(todo.assigned_to_session && !resolved
-				? [{ value: 'release', label: 'release', description: 'Release assignment' }]
+				? [{ value: 'release', label: '释放', description: '释放分配' }]
 				: []),
 			{
 				value: 'copyPath',
-				label: 'copy path',
-				description: 'Copy absolute path to clipboard',
+				label: '复制路径',
+				description: '复制绝对路径到剪贴板',
 			},
 			{
 				value: 'copyText',
-				label: 'copy text',
-				description: 'Copy title and body to clipboard',
+				label: '复制文本',
+				description: '复制标题和正文到剪贴板',
 			},
-			{ value: 'delete', label: 'delete', description: 'Delete todo (hard delete)' },
+			{ value: 'delete', label: '删除', description: '删除待办（硬删除）' },
 		];
-
-		this.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
-		this.addChild(
-			new Text(
-				theme.fg('accent', theme.bold(`Actions for ${formatTodoId(todo.id)} "${title}"`)),
-			),
-		);
 
 		this.selectList = new SelectList(options, options.length, {
 			selectedPrefix: (text) => theme.fg('accent', text),
@@ -84,8 +79,11 @@ export class TodoActionMenuComponent extends Container {
 		this.selectList.onCancel = () => handlers.onCancel();
 
 		this.addChild(this.selectList);
-		this.addChild(new Text(theme.fg('dim', 'Enter to confirm  Esc back')));
-		this.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
+		this.addChild(new Text(theme.fg('dim', '回车 确认  Esc 返回')));
+	}
+
+	getTitle(): string {
+		return `── ${this.titleText} `;
 	}
 
 	handleInput(keyData: string): void {
@@ -105,16 +103,15 @@ export interface DeleteConfirmHandlers {
 
 export class TodoDeleteConfirmComponent extends Container {
 	private selectList: SelectList;
+	private titleText: string;
 
 	constructor(theme: Theme, message: string, handlers: DeleteConfirmHandlers) {
 		super();
+		this.titleText = message;
 		const options: SelectItem[] = [
-			{ value: 'yes', label: 'Yes' },
-			{ value: 'no', label: 'No' },
+			{ value: 'yes', label: '是' },
+			{ value: 'no', label: '否' },
 		];
-
-		this.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
-		this.addChild(new Text(theme.fg('accent', message)));
 
 		this.selectList = new SelectList(options, options.length, {
 			selectedPrefix: (text) => theme.fg('accent', text),
@@ -128,8 +125,11 @@ export class TodoDeleteConfirmComponent extends Container {
 		this.selectList.onCancel = () => handlers.onConfirm(false);
 
 		this.addChild(this.selectList);
-		this.addChild(new Text(theme.fg('dim', 'Enter to confirm  Esc cancel')));
-		this.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
+		this.addChild(new Text(theme.fg('dim', '回车 确认  Esc 取消')));
+	}
+
+	getTitle(): string {
+		return `── ${this.titleText} `;
 	}
 
 	handleInput(keyData: string): void {
@@ -172,7 +172,7 @@ export class TodoDetailOverlayComponent implements Component {
 
 	private getMarkdownText(): string {
 		const body = this.todo.body?.trim();
-		return body || '_No details yet._';
+		return body || '_暂无详情。_';
 	}
 
 	private getMaxHeight(): number {
@@ -242,13 +242,9 @@ export class TodoDetailOverlayComponent implements Component {
 		lines.push(this.buildActionLine(innerWidth));
 
 		const borderColor = (text: string) => this.theme.fg('borderMuted', text);
-		const top = borderColor(`${'─'.repeat(innerWidth + 2)}`);
-		const bottom = borderColor(`├${'─'.repeat(innerWidth)}┤`);
-		const framedLines = lines.map((line) => {
-			const truncated = truncateToWidth(line, innerWidth);
-			const padding = Math.max(0, innerWidth - visibleWidth(truncated));
-			return borderColor('│') + truncated + ' '.repeat(padding) + borderColor('│');
-		});
+		const top = borderColor(topBorder('── Todo ', innerWidth + 2));
+		const bottom = borderColor(bottomBorder(innerWidth + 2));
+		const framedLines = lines.map((line) => '  ' + truncateToWidth(line, innerWidth));
 
 		return [top, ...framedLines, bottom].map((line) => truncateToWidth(line, width));
 	}
@@ -261,37 +257,27 @@ export class TodoDetailOverlayComponent implements Component {
 		const titleText = this.todo.title
 			? ` ${this.todo.title} `
 			: ` Todo ${formatTodoId(this.todo.id)} `;
-		const titleWidth = visibleWidth(titleText);
-		if (titleWidth >= width) {
-			return truncateToWidth(this.theme.fg('accent', titleText.trim()), width);
-		}
-		const leftWidth = Math.max(0, Math.floor((width - titleWidth) / 2));
-		const rightWidth = Math.max(0, width - titleWidth - leftWidth);
-		return (
-			this.theme.fg('borderMuted', '─'.repeat(leftWidth)) +
-			this.theme.fg('accent', titleText) +
-			this.theme.fg('borderMuted', '─'.repeat(rightWidth))
-		);
+		return truncateToWidth(this.theme.fg('accent', titleText.trim()), width);
 	}
 
 	private buildMetaLine(width: number): string {
 		const status = this.todo.status || 'open';
 		const resolved = isTodoDone(status) || isTodoClosed(status);
 		const statusColor = resolved ? 'dim' : 'success';
-		const tagText = this.todo.tags.length ? this.todo.tags.join(', ') : 'no tags';
+		const tagText = this.todo.tags.length ? this.todo.tags.join(', ') : '无标签';
 		const line =
 			this.theme.fg('accent', formatTodoId(this.todo.id)) +
 			this.theme.fg('muted', ' | ') +
-			this.theme.fg(statusColor, status) +
+			this.theme.fg(statusColor, todoStatusLabel(status)) +
 			this.theme.fg('muted', ' | ') +
 			this.theme.fg('muted', tagText);
 		return truncateToWidth(line, width);
 	}
 
 	private buildActionLine(width: number): string {
-		const enter = this.theme.fg('accent', 'enter') + this.theme.fg('muted', ' work on todo');
-		const esc = this.theme.fg('dim', 'esc back');
-		const nav = this.theme.fg('dim', 'up/down move  left/right page');
+		const enter = this.theme.fg('accent', '回车') + this.theme.fg('muted', ' 处理待办');
+		const esc = this.theme.fg('dim', '退出 返回');
+		const nav = this.theme.fg('dim', '上下 移动  左右 翻页');
 		const pieces = [enter, esc, nav];
 
 		let line = pieces.join(this.theme.fg('muted', ' | '));

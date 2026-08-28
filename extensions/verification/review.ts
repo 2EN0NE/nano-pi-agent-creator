@@ -37,6 +37,8 @@ import { createLogger } from '@zenone/pi-logger';
 
 const log = createLogger('review');
 import { DynamicBorder, BorderedLoader } from '@earendil-works/pi-coding-agent';
+import { TitleBar } from '../../src/tui/helpers.js';
+import { selectPanel } from '../../src/tui/select-panel.js';
 import {
 	Container,
 	fuzzyFilter,
@@ -1089,8 +1091,9 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			const result = await ctx.ui.custom<ReviewPresetValue | null>(
 				(tui, theme, _kb, done) => {
 					const container = new Container();
-					container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-					container.addChild(new Text(theme.fg('accent', theme.bold('选择审查预设'))));
+					container.addChild(
+						new TitleBar('Review Preset', (str) => theme.fg('accent', theme.bold(str))),
+					);
 
 					const selectList = new SelectList(items, Math.min(items.length, 10), {
 						selectedPrefix: (text) => theme.fg('accent', text),
@@ -1236,8 +1239,9 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 		const result = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
 			const container = new Container();
-			container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-			container.addChild(new Text(theme.fg('accent', theme.bold('选择基分支'))));
+			container.addChild(
+				new TitleBar('Base Branch', (str) => theme.fg('accent', theme.bold(str))),
+			);
 
 			const searchInput = new Input();
 			container.addChild(searchInput);
@@ -1340,8 +1344,9 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		const result = await ctx.ui.custom<{ sha: string; title: string } | null>(
 			(tui, theme, keybindings, done) => {
 				const container = new Container();
-				container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-				container.addChild(new Text(theme.fg('accent', theme.bold('选择要审查的提交'))));
+				container.addChild(
+					new TitleBar('Commits to Review', (str) => theme.fg('accent', theme.bold(str))),
+				);
 
 				const searchInput = new Input();
 				container.addChild(searchInput);
@@ -1909,7 +1914,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 						'Loop fixing complete: no blocking findings remain after %d passes',
 						pass,
 					);
-					ctx.ui.notify('Loop fixing complete: no blocking findings remain.', 'info');
+					ctx.ui.notify('循环修复完成：无阻塞问题。', 'info');
 					return;
 				}
 
@@ -1981,7 +1986,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 	// Register the /review command
 	pi.registerCommand('review', {
-		description: 'Review code changes (PR, uncommitted, branch, commit, or folder)',
+		description: '审查代码变更（PR、未提交、分支、提交或文件夹）',
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify('审查需要交互模式', 'error');
@@ -2068,14 +2073,14 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 				if (messageCount > 0) {
 					// Existing session - ask user which mode they want
-					const choice = await ctx.ui.select('选择审查模式：', ['新分支', '当前会话']);
+					const choice = await selectPanel(ctx, 'Review Mode:', ['新分支', '当前会话']);
 
 					if (choice === undefined) {
 						if (fromSelector) {
 							target = null;
 							continue;
 						}
-						ctx.ui.notify('Review cancelled', 'info');
+						ctx.ui.notify('审查已取消', 'info');
 						return;
 					}
 
@@ -2328,7 +2333,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 		endReviewInProgress = true;
 		try {
-			const choice = await ctx.ui.select('完成审查：', [
+			const choice = await selectPanel(ctx, 'Finish Review:', [
 				'仅返回',
 				'返回并修复发现项',
 				'返回并总结',
@@ -2357,7 +2362,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 	// Register the /end-review command
 	pi.registerCommand('end-review', {
-		description: 'Complete review and return to original position',
+		description: '完成审查并返回原位置',
 		handler: async (_args, ctx) => {
 			await runEndReview(ctx);
 		},

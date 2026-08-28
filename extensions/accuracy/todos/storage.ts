@@ -39,7 +39,7 @@ export function normalizeTodoId(id: string): string {
 export function validateTodoId(id: string): { id: string } | { error: string } {
 	const normalized = normalizeTodoId(id);
 	if (!normalized || !TODO_ID_PATTERN.test(normalized)) {
-		return { error: 'Invalid todo id. Expected TODO-<hex>.' };
+		return { error: '无效待办 id。应为 TODO-<hex>。' };
 	}
 	return { id: normalized.toLowerCase() };
 }
@@ -181,7 +181,7 @@ export function validateTodoStatus(status: string): { status: string } | { error
 	const normalized = status.toLowerCase().trim();
 	if (!VALID_TODO_STATUSES.includes(normalized as any)) {
 		return {
-			error: `Invalid status "${status}". Must be one of: ${VALID_TODO_STATUSES.join(', ')}`,
+			error: `无效状态 "${status}"。必须是以下之一: ${VALID_TODO_STATUSES.join(', ')}`,
 		};
 	}
 	return { status: normalized };
@@ -212,6 +212,52 @@ export function isTodoResolved(status: string): boolean {
 
 export function getTodoStatus(todo: TodoFrontMatter): string {
 	return todo.status || 'open';
+}
+
+// ── 术语中文化映射（统一词汇，见 CONTEXT.md「todos 待办插件」节）──
+
+/** 状态显示名：open→待办、done→已完成、close→已关闭（未知回退为待办）。 */
+export function todoStatusLabel(status: string): string {
+	const s = status.toLowerCase();
+	if (s === 'done') return '已完成';
+	if (s === 'close') return '已关闭';
+	return '待办';
+}
+
+/** 排序字段显示名：created-at→创建时间、title→标题。 */
+export function sortFieldLabel(field: string): string {
+	return field === 'title' ? '标题' : '创建时间';
+}
+
+/** 排序方向显示名：asc→升序、desc→降序。 */
+export function sortDirectionLabel(direction: string): string {
+	return direction === 'asc' ? '升序' : '降序';
+}
+
+/** 作用域显示名：session→会话、project→项目、global→全局。 */
+export function scopeLabel(scope: string): string {
+	if (scope === 'project') return '项目';
+	if (scope === 'global') return '全局';
+	return '会话';
+}
+
+/** tab 显示名：session→会话、project→项目、global→全局、settings→设置。 */
+export function tabLabel(tab: string): string {
+	switch (tab) {
+		case 'project':
+			return '项目';
+		case 'global':
+			return '全局';
+		case 'settings':
+			return '设置';
+		default:
+			return '会话';
+	}
+}
+
+/** 组件显示样式：summary→摘要、details→详情。 */
+export function widgetDisplayLabel(display: string): string {
+	return display === 'details' ? '详情' : '摘要';
 }
 
 function findJsonObjectEnd(content: string): number {
@@ -355,7 +401,7 @@ export async function generateTodoId(todosDir: string): Promise<string> {
 		const id = crypto.randomBytes(4).toString('hex');
 		if (!existsSync(getTodoPath(todosDir, id))) return id;
 	}
-	throw new Error('Failed to generate unique todo id');
+	throw new Error('生成唯一待办 id 失败');
 }
 
 export async function listTodos(
@@ -527,7 +573,9 @@ export async function filterTodosAsync(
 
 function buildTodoSearchText(todo: TodoFrontMatter): string {
 	const tags = todo.tags.join(' ');
-	const assignment = todo.assigned_to_session ? `assigned:${todo.assigned_to_session}` : '';
+	const assignment = todo.assigned_to_session
+		? `assigned:${todo.assigned_to_session} 已分配:${todo.assigned_to_session}`
+		: '';
 	return `${formatTodoId(todo.id)} ${todo.id} ${todo.title} ${tags} ${todo.status} ${assignment}`.trim();
 }
 
@@ -571,32 +619,32 @@ async function acquireLock(
 			};
 		} catch (error: any) {
 			if (error?.code !== 'EEXIST') {
-				return { error: `Failed to acquire lock: ${error?.message ?? 'unknown error'}` };
+				return { error: `获取锁失败: ${error?.message ?? '未知错误'}` };
 			}
 			const stats = await fs.stat(lockPath).catch(() => null);
 			const lockAge = stats ? now - stats.mtimeMs : LOCK_TTL_MS + 1;
 			if (lockAge <= LOCK_TTL_MS) {
 				const info = await readLockInfo(lockPath);
-				const owner = info?.session ? ` (session ${info.session})` : '';
+				const owner = info?.session ? `（会话 ${info.session}）` : '';
 				return {
-					error: `Todo ${displayTodoId(id)} is locked${owner}. Try again later.`,
+					error: `待办 ${displayTodoId(id)} 已被锁定${owner}。请稍后重试。`,
 				};
 			}
 			if (!ctx.hasUI) {
 				return {
-					error: `Todo ${displayTodoId(id)} lock is stale; rerun in interactive mode to steal it.`,
+					error: `待办 ${displayTodoId(id)} 的锁已过期；请在交互模式下重新运行以抢占。`,
 				};
 			}
 			const ok = await ctx.ui.confirm(
-				'Todo locked',
-				`Todo ${displayTodoId(id)} appears locked. Steal the lock?`,
+				'待办已锁定',
+				`待办 ${displayTodoId(id)} 似乎被锁定。是否抢占锁？`,
 			);
-			if (!ok) return { error: `Todo ${displayTodoId(id)} remains locked.` };
+			if (!ok) return { error: `待办 ${displayTodoId(id)} 仍被锁定。` };
 			await fs.unlink(lockPath).catch(() => undefined);
 		}
 	}
 
-	return { error: `Failed to acquire lock for todo ${displayTodoId(id)}.` };
+	return { error: `获取待办 ${displayTodoId(id)} 的锁失败。` };
 }
 
 export async function withTodoLock<T>(
@@ -623,11 +671,11 @@ export function clearAssignmentIfClosed(todo: TodoFrontMatter): void {
 }
 
 export function getTodoTitle(todo: TodoFrontMatter): string {
-	return todo.title || '(untitled)';
+	return todo.title || '(无标题)';
 }
 
 export function formatAssignmentSuffix(todo: TodoFrontMatter): string {
-	return todo.assigned_to_session ? ` (assigned: ${todo.assigned_to_session})` : '';
+	return todo.assigned_to_session ? `（已分配: ${todo.assigned_to_session}）` : '';
 }
 
 export function renderAssignmentSuffix(
@@ -638,8 +686,8 @@ export function renderAssignmentSuffix(
 	if (!todo.assigned_to_session) return '';
 	const isCurrent = todo.assigned_to_session === currentSessionId;
 	const color = isCurrent ? 'success' : 'dim';
-	const suffix = isCurrent ? ', current' : '';
-	return theme.fg(color, ` (assigned: ${todo.assigned_to_session}${suffix})`);
+	const suffix = isCurrent ? '，当前' : '';
+	return theme.fg(color, `（已分配: ${todo.assigned_to_session}${suffix}）`);
 }
 
 export function splitTodosByAssignment(todos: TodoFrontMatter[]): {
@@ -666,9 +714,9 @@ export function splitTodosByAssignment(todos: TodoFrontMatter[]): {
 
 export function buildRefinePrompt(todoId: string, title: string): string {
 	return (
-		`let's refine task ${formatTodoId(todoId)} "${title}": ` +
-		'Ask me for the missing details needed to refine the todo together. Do not rewrite the todo yet and do not make assumptions. ' +
-		'Avoid asking me to paste the issue again, since I gave it to you already. Ask clear, concrete questions and wait for my answers before drafting any structured description.\n\n'
+		`细化任务 ${formatTodoId(todoId)} "${title}": ` +
+		'请向我询问共同细化待办所需的缺失细节。先不要重写待办，也不要做出假设。' +
+		'请不要让我再次粘贴问题，因为我已经给过你了。请提出清晰、具体的问题，并在草拟任何结构化描述之前等待我的回答。\n\n'
 	);
 }
 
@@ -678,22 +726,22 @@ export function formatTodoHeading(todo: TodoFrontMatter): string {
 }
 
 export function formatTodoList(todos: TodoFrontMatter[]): string {
-	if (!todos.length) return 'No todos.';
+	if (!todos.length) return '无待办。';
 	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
 	const lines: string[] = [];
 	const pushSection = (label: string, sectionTodos: TodoFrontMatter[]) => {
 		lines.push(`${label} (${sectionTodos.length}):`);
 		if (!sectionTodos.length) {
-			lines.push('  none');
+			lines.push('  无');
 			return;
 		}
 		for (const todo of sectionTodos) {
 			lines.push(`  ${formatTodoHeading(todo)}`);
 		}
 	};
-	pushSection('Assigned todos', assignedTodos);
-	pushSection('Open todos', openTodos);
-	pushSection('Closed todos', closedTodos);
+	pushSection('已分配的待办', assignedTodos);
+	pushSection('待处理待办', openTodos);
+	pushSection('已关闭的待办', closedTodos);
 	return lines.join('\n');
 }
 
@@ -743,11 +791,11 @@ export async function updateTodoStatus(
 	if ('error' in validated) return { error: validated.error };
 	const normalizedId = validated.id;
 	const filePath = getTodoPath(todosDir, normalizedId);
-	if (!existsSync(filePath)) return { error: `Todo ${displayTodoId(id)} not found` };
+	if (!existsSync(filePath)) return { error: `未找到待办 ${displayTodoId(id)}` };
 
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
-		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
+		if (!existing) return { error: `未找到待办 ${displayTodoId(id)}` } as const;
 		const statusValidation = validateTodoStatus(status);
 		if ('error' in statusValidation) return statusValidation;
 		existing.status = statusValidation.status;
@@ -770,18 +818,18 @@ export async function claimTodoAssignment(
 	if ('error' in validated) return { error: validated.error };
 	const normalizedId = validated.id;
 	const filePath = getTodoPath(todosDir, normalizedId);
-	if (!existsSync(filePath)) return { error: `Todo ${displayTodoId(id)} not found` };
+	if (!existsSync(filePath)) return { error: `未找到待办 ${displayTodoId(id)}` };
 	const sessionId = ctx.sessionManager.getSessionId();
 
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
-		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
+		if (!existing) return { error: `未找到待办 ${displayTodoId(id)}` } as const;
 		if (isTodoResolved(existing.status))
-			return { error: `Todo ${displayTodoId(id)} is already resolved` } as const;
+			return { error: `待办 ${displayTodoId(id)} 已解决` } as const;
 		const assigned = existing.assigned_to_session;
 		if (assigned && assigned !== sessionId && !force) {
 			return {
-				error: `Todo ${displayTodoId(id)} is already assigned to session ${assigned}. Use force to override.`,
+				error: `待办 ${displayTodoId(id)} 已分配给会话 ${assigned}。使用 force 覆盖。`,
 			} as const;
 		}
 		if (assigned !== sessionId) {
@@ -805,17 +853,17 @@ export async function releaseTodoAssignment(
 	if ('error' in validated) return { error: validated.error };
 	const normalizedId = validated.id;
 	const filePath = getTodoPath(todosDir, normalizedId);
-	if (!existsSync(filePath)) return { error: `Todo ${displayTodoId(id)} not found` };
+	if (!existsSync(filePath)) return { error: `未找到待办 ${displayTodoId(id)}` };
 	const sessionId = ctx.sessionManager.getSessionId();
 
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
-		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
+		if (!existing) return { error: `未找到待办 ${displayTodoId(id)}` } as const;
 		const assigned = existing.assigned_to_session;
 		if (!assigned) return existing;
 		if (assigned !== sessionId && !force) {
 			return {
-				error: `Todo ${displayTodoId(id)} is assigned to session ${assigned}. Use force to release.`,
+				error: `待办 ${displayTodoId(id)} 已分配给会话 ${assigned}。使用 force 释放。`,
 			} as const;
 		}
 		existing.assigned_to_session = undefined;
@@ -836,11 +884,11 @@ export async function deleteTodo(
 	if ('error' in validated) return { error: validated.error };
 	const normalizedId = validated.id;
 	const filePath = getTodoPath(todosDir, normalizedId);
-	if (!existsSync(filePath)) return { error: `Todo ${displayTodoId(id)} not found` };
+	if (!existsSync(filePath)) return { error: `未找到待办 ${displayTodoId(id)}` };
 
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
-		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
+		if (!existing) return { error: `未找到待办 ${displayTodoId(id)}` } as const;
 		await fs.unlink(filePath);
 		return existing;
 	});

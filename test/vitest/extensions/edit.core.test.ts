@@ -31,7 +31,7 @@ describe('edit: matcher — applyEditsToNormalizedContent', () => {
 	it('rejects empty oldText', () => {
 		expect(() =>
 			applyEditsToNormalizedContent('hello', [{ oldText: '', newText: 'world' }], 'test.txt'),
-		).toThrow('oldText must not be empty');
+		).toThrow('oldText 不能为空');
 	});
 
 	it('throws when oldText not found', () => {
@@ -41,13 +41,13 @@ describe('edit: matcher — applyEditsToNormalizedContent', () => {
 				[{ oldText: 'nope', newText: 'world' }],
 				'test.txt',
 			),
-		).toThrow('Could not find');
+		).toThrow('找不到精确文本');
 	});
 
 	it('throws when oldText is ambiguous (multiple matches)', () => {
 		expect(() =>
 			applyEditsToNormalizedContent('a a a', [{ oldText: 'a', newText: 'b' }], 'test.txt'),
-		).toThrow('Found 3 occurrences');
+		).toThrow('找到 3 处相同文本');
 	});
 
 	it('fuzzy match: trailing whitespace difference', () => {
@@ -97,7 +97,7 @@ describe('edit: matcher — applyEditsToNormalizedContent', () => {
 				'test.txt',
 				{ requireWholeLines: true },
 			),
-		).toThrow('Could not find');
+		).toThrow('找不到精确文本');
 	});
 
 	it('multiple edits on same file work sequentially', () => {
@@ -125,7 +125,7 @@ describe('edit: matcher — applyEditsToNormalizedContent', () => {
 				],
 				'test.txt',
 			),
-		).toThrow('overlap');
+		).toThrow('重叠');
 	});
 
 	it('identical content throws no-change error', () => {
@@ -135,14 +135,14 @@ describe('edit: matcher — applyEditsToNormalizedContent', () => {
 				[{ oldText: 'hello', newText: 'hello' }],
 				'test.txt',
 			),
-		).toThrow('No changes');
+		).toThrow('没有发生变更');
 	});
 
 	it('replacement that produces same result throws', () => {
 		// 'a' → 'a' with extra whitespace normalization
 		expect(() =>
 			applyEditsToNormalizedContent(' a ', [{ oldText: 'a', newText: 'a' }], 'test.txt'),
-		).toThrow('No changes');
+		).toThrow('没有发生变更');
 	});
 
 	it('respects requireWholeLines: trailing newline consumption', () => {
@@ -309,7 +309,7 @@ describe('edit: row-script — @REPLACE', () => {
 		writeFileSync(file, 'old\n');
 
 		const result = await editor.execute(`[test.txt]\n@REPLACE\n-old\n+new`, dir);
-		expect(result.results[0].message).toContain('Edited');
+		expect(result.results[0].message).toContain('已编辑');
 		rmSync(dir, { recursive: true });
 	});
 
@@ -319,7 +319,7 @@ describe('edit: row-script — @REPLACE', () => {
 		writeFileSync(file, 'line1\n');
 
 		const result = await editor.execute(`[test.txt]\n@APPEND\n+appended`, dir);
-		expect(result.results[0].message).toContain('Edited');
+		expect(result.results[0].message).toContain('已编辑');
 		rmSync(dir, { recursive: true });
 	});
 
@@ -329,7 +329,7 @@ describe('edit: row-script — @REPLACE', () => {
 		writeFileSync(file, 'keep\ndelete\nkeep\n');
 
 		const result = await editor.execute(`[test.txt]\n@DEL 2-2`, dir);
-		expect(result.results[0].message).toContain('Edited');
+		expect(result.results[0].message).toContain('已编辑');
 		rmSync(dir, { recursive: true });
 	});
 
@@ -339,7 +339,7 @@ describe('edit: row-script — @REPLACE', () => {
 		writeFileSync(file, 'b\nc\n');
 
 		const result = await editor.execute(`[test.txt]\n@INS.PRE 1\n+a`, dir);
-		expect(result.results[0].message).toContain('Edited');
+		expect(result.results[0].message).toContain('已编辑');
 		rmSync(dir, { recursive: true });
 	});
 
@@ -352,7 +352,7 @@ describe('edit: row-script — @REPLACE', () => {
 			'[test.txt]\n@REPLACE\n-a\n+x\n@DEL 3-3\n@APPEND\n+z',
 			dir,
 		);
-		expect(result.results[0].message).toContain('Edited');
+		expect(result.results[0].message).toContain('已编辑');
 		rmSync(dir, { recursive: true });
 	});
 
@@ -380,7 +380,7 @@ describe('edit: classic — exact matching', () => {
 			dir,
 		);
 		expect(result.results[0].success).toBe(true);
-		expect(result.results[0].message).toContain('Edited');
+		expect(result.results[0].message).toContain('已编辑');
 		rmSync(dir, { recursive: true });
 	});
 

@@ -199,7 +199,7 @@ function createSandboxedBashOps(): BashOperations {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag('no-sandbox', {
-		description: 'Disable OS-level sandboxing for bash commands',
+		description: '禁用 bash 命令的 OS 级沙箱',
 		type: 'boolean',
 		default: false,
 	});
@@ -218,7 +218,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		...localBash,
-		label: 'bash (sandboxed)',
+		label: 'bash（沙箱）',
 		async execute(id, params, signal, onUpdate, _ctx) {
 			if (!sandboxEnabled || !sandboxInitialized) {
 				return localBash.execute(id, params, signal, onUpdate);
@@ -241,7 +241,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (noSandbox) {
 			sandboxEnabled = false;
-			ctx.ui.notify('Sandbox disabled via --no-sandbox', 'warning');
+			ctx.ui.notify('沙箱已通过 --no-sandbox 禁用', 'warning');
 			return;
 		}
 
@@ -249,14 +249,14 @@ export default function (pi: ExtensionAPI) {
 
 		if (!config.enabled) {
 			sandboxEnabled = false;
-			ctx.ui.notify('Sandbox disabled via config', 'info');
+			ctx.ui.notify('沙箱已通过配置禁用', 'info');
 			return;
 		}
 
 		const platform = process.platform;
 		if (platform !== 'darwin' && platform !== 'linux') {
 			sandboxEnabled = false;
-			ctx.ui.notify(`Sandbox not supported on ${platform}`, 'warning');
+			ctx.ui.notify(`沙箱不支持 ${platform} 平台`, 'warning');
 			return;
 		}
 
@@ -282,16 +282,13 @@ export default function (pi: ExtensionAPI) {
 				'sandbox',
 				ctx.ui.theme.fg(
 					'accent',
-					`|sandbox: ${networkCount} domains, ${writeCount} write paths`,
+					`|沙箱: ${networkCount} 个域名, ${writeCount} 条写入路径`,
 				),
 			);
-			ctx.ui.notify('Sandbox initialized', 'info');
+			ctx.ui.notify('沙箱已初始化', 'info');
 		} catch (err) {
 			sandboxEnabled = false;
-			ctx.ui.notify(
-				`Sandbox initialization failed: ${err instanceof Error ? err.message : err}`,
-				'error',
-			);
+			ctx.ui.notify(`沙箱初始化失败：${err instanceof Error ? err.message : err}`, 'error');
 		}
 	});
 
@@ -306,25 +303,25 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand('sandbox', {
-		description: 'Show sandbox configuration',
+		description: '显示沙箱配置',
 		handler: async (_args, ctx) => {
 			if (!sandboxEnabled) {
-				ctx.ui.notify('Sandbox is disabled', 'info');
+				ctx.ui.notify('沙箱已禁用', 'info');
 				return;
 			}
 
 			const config = loadConfig(ctx.cwd);
 			const lines = [
-				'Sandbox Configuration:',
+				'沙箱配置：',
 				'',
-				'Network:',
-				`  Allowed: ${config.network?.allowedDomains?.join(', ') || '(none)'}`,
-				`  Denied: ${config.network?.deniedDomains?.join(', ') || '(none)'}`,
+				'网络：',
+				`  允许：${config.network?.allowedDomains?.join(', ') || '（无）'}`,
+				`  拒绝：${config.network?.deniedDomains?.join(', ') || '（无）'}`,
 				'',
-				'Filesystem:',
-				`  Deny Read: ${config.filesystem?.denyRead?.join(', ') || '(none)'}`,
-				`  Allow Write: ${config.filesystem?.allowWrite?.join(', ') || '(none)'}`,
-				`  Deny Write: ${config.filesystem?.denyWrite?.join(', ') || '(none)'}`,
+				'文件系统：',
+				`  拒绝读取：${config.filesystem?.denyRead?.join(', ') || '（无）'}`,
+				`  允许写入：${config.filesystem?.allowWrite?.join(', ') || '（无）'}`,
+				`  拒绝写入：${config.filesystem?.denyWrite?.join(', ') || '（无）'}`,
 			];
 			ctx.ui.notify(lines.join('\n'), 'info');
 		},

@@ -154,10 +154,10 @@ describe('buildWidgetContent — close items hidden', () => {
 		expect(lines.some((l) => l.includes('Closed task'))).toBe(false);
 	});
 
-	it('shows "Todos: none" when only close items exist', () => {
+	it('shows "Todos: 无" when only close items exist', () => {
 		const todos = [makeTodo({ id: '11111111', title: 'All closed', status: 'close' })];
 		const lines = buildWidgetContent(todos, theme, undefined, defaultCfg);
-		expect(lines.some((l) => l.includes('Todos: none'))).toBe(true);
+		expect(lines.some((l) => l.includes('Todos: 无'))).toBe(true);
 	});
 });
 
@@ -207,9 +207,9 @@ describe('buildWidgetContent — completion stats', () => {
 			makeTodo({ id: '33333333', title: 'Task 3', status: 'open' }),
 		];
 		const lines = buildWidgetContent(todos, theme, undefined, defaultCfg);
-		// Summary mode shows "2 pending | 1 done" format (no assignment, so no "in progress")
-		expect(lines.some((l) => l.includes('pending') && l.includes('2'))).toBe(true);
-		expect(lines.some((l) => l.includes('done') && l.includes('1'))).toBe(true);
+		// Summary mode shows "2 待处理 | 1 已完成" format (no assignment, so no "进行中")
+		expect(lines.some((l) => l.includes('待处理') && l.includes('2'))).toBe(true);
+		expect(lines.some((l) => l.includes('已完成') && l.includes('1'))).toBe(true);
 	});
 
 	it('shows 100% when all are done', () => {
@@ -219,7 +219,7 @@ describe('buildWidgetContent — completion stats', () => {
 		];
 		const lines = buildWidgetContent(todos, theme, undefined, defaultCfg);
 		// All done means 0 pending, 2 done. The output includes counts.
-		expect(lines.some((l) => l.includes('done') && l.includes('2'))).toBe(true);
+		expect(lines.some((l) => l.includes('已完成') && l.includes('2'))).toBe(true);
 	});
 
 	it('total counts only open + done, not close', () => {
@@ -230,7 +230,7 @@ describe('buildWidgetContent — completion stats', () => {
 		];
 		const lines = buildWidgetContent(todos, theme, undefined, defaultCfg);
 		// close should not be in the counts
-		expect(lines.some((l) => l.includes('closed'))).toBe(false);
+		expect(lines.some((l) => l.includes('已关闭'))).toBe(false);
 	});
 });
 

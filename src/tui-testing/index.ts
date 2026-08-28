@@ -71,3 +71,24 @@ export function dispatchInput(tui: TUI, data: string): void {
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	(tui as any).handleInput(data);
 }
+
+/**
+ * 纯文本 mock theme（headless 测试用）。
+ *
+ * 所有颜色/样式方法透传文本，便于用 `stripAnsi`/`assertWithinWidth` 断言纯文本布局。
+ * 各测试文件原逐字重复 `const mockTheme = { fg: (_,t)=>t, bg: (_,t)=>t, bold: t=>t }`，
+ * 统一由此函数提供（ADR-0023 的 headless 三层验收依赖它做无颜色断言）。
+ *
+ * @example
+ * ```typescript
+ * const theme = makeMockTheme();
+ * const component = new MyComponent(theme);
+ * ```
+ */
+export function makeMockTheme(): any {
+	return {
+		fg: (_c: unknown, text: string) => text,
+		bg: (_c: unknown, text: string) => text,
+		bold: (text: string) => text,
+	};
+}

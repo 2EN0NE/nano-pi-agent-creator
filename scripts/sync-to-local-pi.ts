@@ -176,6 +176,7 @@ function parseArgs(): CLIOptions {
 			case '--help':
 				printHelp();
 				process.exit(0);
+				break;
 			default:
 				console.error(`Unknown argument: ${args[i]}`);
 				printHelp();
@@ -1209,6 +1210,45 @@ async function processProfile(
 			case 'SKIP':
 				skipByType[resource.type]++;
 				break;
+		}
+	}
+
+	// ── 共享 TUI 辅助模块（src/tui/）同步 ──
+	// 扩展 import '<root>/src/tui/helpers.js'（相对路径）。同步到目标目录后
+	// 扩展位于 <target>/extensions/<name>（或 <target>/extensions/<name>/index.ts），
+	// 相对路径上溯 2-3 级解析到 <target 父目录>/src/tui（如 ~/.pi/src/tui），
+	// 故 src/tui 需同步到 dirname(targetDir)/src/tui（e2e 沙箱 run_pi_and_check 同此约定）。
+	// ⚠ targetDir 可能是符号链接（如 worktree 的 .pi -> 主仓库 .pi）：扩展实际位于
+	// realpath 解析后的位置，其 import 相对路径基于该位置，故目标须取
+	// dirname(realpathSync(targetDir))/src/tui，否则 src/tui 同步目标错位导致
+	// 扩展解析到旧版 helpers（如 topBorder 缺失 → 渲染崩溃）。
+	const srcTuiDir = join(PROJECT_ROOT, 'src/tui');
+	if (existsSync(srcTuiDir)) {
+		let realTargetDir = targetDir;
+		try {
+			realTargetDir = realpathSync(targetDir);
+		} catch {
+			// targetDir 尚不存在，保持原值（首次同步场景）
+		}
+		const targetSrcTuiDir = join(dirname(realTargetDir), 'src/tui');
+		// 项目内 profile（target 在项目根下）的目标即源码 src/tui，无需同步
+		let srcTuiSame = false;
+		try {
+			srcTuiSame = realpathSync(targetSrcTuiDir) === realpathSync(srcTuiDir);
+		} catch {
+			srcTuiSame = targetSrcTuiDir === srcTuiDir;
+		}
+		if (srcTuiSame) {
+			// 源码就在原地，扩展相对路径天然解析，跳过
+		} else if (!opts.dryRun) {
+			mkdirSync(dirname(targetSrcTuiDir), { recursive: true });
+			cpSync(srcTuiDir, targetSrcTuiDir, { recursive: true });
+			console.log(`      📦 [src/tui] → ${relative(PROJECT_ROOT, targetSrcTuiDir)}`);
+			writeLog('INFO', `[src/tui] → ${targetSrcTuiDir}`);
+		} else {
+			console.log(
+				`      📦 [src/tui] → ${relative(PROJECT_ROOT, targetSrcTuiDir)} (dry-run)`,
+			);
 		}
 	}
 

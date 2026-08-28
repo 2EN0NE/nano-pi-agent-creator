@@ -74,19 +74,19 @@ export const TodoParams = Type.Object({
 		'claim',
 		'release',
 	] as const),
-	id: Type.Optional(Type.String({ description: 'Todo id (TODO-<hex> or raw hex filename)' })),
-	title: Type.Optional(Type.String({ description: 'Short summary shown in lists' })),
-	status: Type.Optional(Type.String({ description: 'Todo status' })),
-	tags: Type.Optional(Type.Array(Type.String({ description: 'Todo tag' }))),
+	id: Type.Optional(Type.String({ description: '待办 id（TODO-<hex> 或原始 hex 文件名）' })),
+	title: Type.Optional(Type.String({ description: '列表显示的简短摘要' })),
+	status: Type.Optional(Type.String({ description: '待办状态' })),
+	tags: Type.Optional(Type.Array(Type.String({ description: '待办标签' }))),
 	body: Type.Optional(
 		Type.String({
-			description: 'Long-form details (markdown). Update replaces; append adds.',
+			description: '长格式详情（markdown）。update 替换；append 追加。',
 		}),
 	),
-	force: Type.Optional(Type.Boolean({ description: "Override another session's assignment" })),
+	force: Type.Optional(Type.Boolean({ description: '覆盖其他会话的分配' })),
 	scope: Type.Optional(
 		StringEnum(['session', 'project', 'global'] as const, {
-			description: 'Scope for list: "session" (default), "project", or "global"',
+			description: '列表作用域："session"（默认）、"project" 或 "global"',
 		}),
 	),
 });

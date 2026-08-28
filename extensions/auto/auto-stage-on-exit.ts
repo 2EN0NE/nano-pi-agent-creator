@@ -88,12 +88,9 @@ async function stageFiles(
 
 	if (ctx.hasUI) {
 		if (code === 0) {
-			ctx.ui.notify(
-				`Auto-staged ${files.length} file(s) that changed during the session`,
-				'info',
-			);
+			ctx.ui.notify(`已自动暂存 ${files.length} 个会话期间变更的文件`, 'info');
 		} else {
-			ctx.ui.notify('Auto-stage: git add failed', 'error');
+			ctx.ui.notify('自动暂存：git add 失败', 'error');
 		}
 	}
 

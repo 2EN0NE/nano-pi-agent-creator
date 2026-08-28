@@ -46,7 +46,7 @@ export function createClassicEditor() {
 		signal?: AbortSignal,
 	): Promise<{ results: ClassicResult[]; combinedDiff: string; firstChangedLine?: number }> {
 		if (edits.length === 0) {
-			throw new Error('No edits provided.');
+			throw new Error('未提供编辑。');
 		}
 
 		const workspace = createVirtualWorkspace(cwd);
@@ -55,7 +55,7 @@ export function createClassicEditor() {
 		try {
 			await applyClassicEdits(edits, workspace, cwd, signal, { collectDiff: false });
 		} catch (err: any) {
-			throw new Error(`Preflight failed.\n${err.message ?? String(err)}`);
+			throw new Error(`预检失败。\n${err.message ?? String(err)}`);
 		}
 
 		// Real execution
@@ -111,7 +111,7 @@ async function applyClassicEdits(
 	for (const absPath of editOrder) {
 		const group = fileGroups.get(absPath)!;
 
-		if (signal?.aborted) throw new Error('Operation aborted');
+		if (signal?.aborted) throw new Error('操作已中止');
 
 		const originalContent = await workspace.readText(absPath);
 
@@ -130,7 +130,7 @@ async function applyClassicEdits(
 		const appliedPairs = new Set<string>();
 
 		for (const { index, edit } of group) {
-			if (signal?.aborted) throw new Error('Operation aborted');
+			if (signal?.aborted) throw new Error('操作已中止');
 
 			const pos = content.indexOf(edit.oldText, searchOffset);
 
@@ -140,7 +140,7 @@ async function applyClassicEdits(
 					results[index] = {
 						path: edit.path,
 						success: true,
-						message: `Skipped redundant edit in ${edit.path}.`,
+						message: `在 ${edit.path} 中跳过冗余编辑。`,
 					};
 					continue;
 				}
@@ -148,7 +148,7 @@ async function applyClassicEdits(
 				results[index] = {
 					path: edit.path,
 					success: false,
-					message: `Could not find the exact text in ${edit.path}.`,
+					message: `在 ${edit.path} 中找不到精确文本。`,
 				};
 				continue;
 			}
@@ -161,7 +161,7 @@ async function applyClassicEdits(
 			results[index] = {
 				path: edit.path,
 				success: true,
-				message: `Edited ${edit.path}.`,
+				message: `已编辑 ${edit.path}。`,
 			};
 		}
 

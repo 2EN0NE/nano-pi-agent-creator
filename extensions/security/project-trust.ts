@@ -46,19 +46,19 @@ export default function (pi: ExtensionAPI) {
 
 		const choice = await showSelect(
 			ctx as unknown as ExtensionContext,
-			`Project trust for:\n${event.cwd}`,
+			`项目信任：\n${event.cwd}`,
 			[
-				{ value: 'trust-remember', label: 'Trust and remember' },
-				{ value: 'trust-note-remember', label: 'Trust with note and remember' },
-				{ value: 'trust-session', label: 'Trust this session' },
-				{ value: 'no-trust', label: 'Do not trust this session' },
-				{ value: 'undecided', label: 'Let built-in prompt decide' },
+				{ value: 'trust-remember', label: '信任并记住' },
+				{ value: 'trust-note-remember', label: '信任并附注记住' },
+				{ value: 'trust-session', label: '信任本次会话' },
+				{ value: 'no-trust', label: '不信任本次会话' },
+				{ value: 'undecided', label: '让内置提示决定' },
 			],
 		);
 
 		if (choice?.value === 'trust-note-remember') {
-			const note = await ctx.ui.input('Project trust note', 'Optional note for this demo');
-			ctx.ui.notify(note ? `Recorded demo note: ${note}` : 'No demo note entered', 'info');
+			const note = await ctx.ui.input('项目信任备注', '此演示的可选备注');
+			ctx.ui.notify(note ? `已记录演示备注：${note}` : '未输入演示备注', 'info');
 			return { trusted: 'yes', remember: true };
 		}
 		if (choice?.value === 'trust-remember') {
@@ -75,6 +75,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on('session_start', (_event, ctx) => {
 		log.debug('event: session_start');
-		ctx.ui.notify(`project-trust example loaded after trust resolution in ${ctx.cwd}`, 'info');
+		ctx.ui.notify(`project-trust 示例已在信任解析后加载，位置：${ctx.cwd}`, 'info');
 	});
 }

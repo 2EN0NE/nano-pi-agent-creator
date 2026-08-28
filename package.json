@@ -68,6 +68,7 @@
 		"lint": "eslint .",
 		"lint:staged": "lint-staged --no-stash",
 		"lint:fix": "eslint . --fix",
+		"lint:tui": "tsx scripts/check-tui-compliance.ts",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",

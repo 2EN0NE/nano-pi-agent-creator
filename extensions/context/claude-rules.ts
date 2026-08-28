@@ -62,7 +62,7 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
 		ruleFiles = findMarkdownFiles(rulesDir);
 
 		if (ruleFiles.length > 0) {
-			ctx.ui.notify(`Found ${ruleFiles.length} rule(s) in .claude/rules/`, 'info');
+			ctx.ui.notify(`在 .claude/rules/ 中找到 ${ruleFiles.length} 条规则`, 'info');
 		}
 	});
 
@@ -80,13 +80,13 @@ export default function claudeRulesExtension(pi: ExtensionAPI) {
 				event.systemPrompt +
 				`
 
-## Project Rules
+## 项目规则
 
-The following project rules are available in .claude/rules/:
+以下项目规则位于 .claude/rules/：
 
 ${rulesList}
 
-When working on tasks related to these rules, use the read tool to load the relevant rule files for guidance.
+处理与这些规则相关的任务时，使用 read 工具加载相关规则文件作为指导。
 `,
 		};
 	});

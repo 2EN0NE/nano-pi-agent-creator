@@ -64,13 +64,11 @@ export function showPalette(
 		// ── 边框（无左右竖线）──
 
 		function renderTopBorder(): void {
-			const topName = ' 扩展快捷键 ';
-			const topFill = Math.max(0, width - 2 - 2 - visibleWidth(topName));
+			const topName = ' Shortcuts ';
+			const topFill = Math.max(0, width - 2 - visibleWidth(topName));
 			container.addChild(
 				new Text(
-					accent('\u250c\u2500\u2500') +
-						dim(topName) +
-						accent('\u2500'.repeat(topFill) + '\u2510'),
+					accent('\u2500\u2500') + dim(topName) + accent('\u2500'.repeat(topFill)),
 					0,
 					0,
 				),
@@ -84,13 +82,7 @@ export function showPalette(
 		}
 
 		function renderBottomBorder(): void {
-			container.addChild(
-				new Text(
-					accent('\u2514' + '\u2500'.repeat(Math.max(0, width - 2)) + '\u2518'),
-					0,
-					0,
-				),
-			);
+			container.addChild(new Text(accent('\u2500'.repeat(Math.max(0, width))), 0, 0));
 		}
 
 		function renderItem(

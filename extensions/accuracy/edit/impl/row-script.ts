@@ -76,7 +76,7 @@ export interface ParsedPlan {
 
 function normalizePath(path: string): string {
 	const trimmed = path.trim();
-	if (!trimmed) throw new Error('File path cannot be empty.');
+	if (!trimmed) throw new Error('文件路径不能为空。');
 	return trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
 }
 
@@ -88,9 +88,9 @@ function parseRowScript(text: string): RawFileScript[] {
 
 	function finishOp() {
 		if (!currentOp) return;
-		if (!currentFile) throw new Error('Internal parser error');
+		if (!currentFile) throw new Error('内部解析器错误');
 		if ('rows' in currentOp && currentOp.rows.length === 0) {
-			throw new Error(`${currentOp.kind} in ${currentFile.path} has no + rows.`);
+			throw new Error(`${currentFile.path} 中的 ${currentOp.kind} 没有 + 行。`);
 		}
 		if ('groups' in currentOp && currentOp.groups.length === 0) {
 			const opName =
@@ -99,19 +99,19 @@ function parseRowScript(text: string): RawFileScript[] {
 					: currentOp.kind === 'insertBeforeAnchor'
 						? '@INS.BEFORE'
 						: '@INS.AFTER';
-			throw new Error(`${opName} in ${currentFile.path} has no + or - rows.`);
+			throw new Error(`${currentFile.path} 中的 ${opName} 没有 + 或 - 行。`);
 		}
 		currentFile.ops.push(currentOp);
 		currentOp = undefined;
 	}
 
 	function requireFile(lineNumber: number): RawFileScript {
-		if (!currentFile) throw new Error(`Line ${lineNumber}: expected [filename] header`);
+		if (!currentFile) throw new Error(`第 ${lineNumber} 行：应为 [filename] 头部`);
 		return currentFile;
 	}
 
 	function pushGroup(marker: RowGroup['marker'], linesToAdd: string[]): void {
-		if (!currentOp || !('groups' in currentOp)) throw new Error('Internal parser error');
+		if (!currentOp || !('groups' in currentOp)) throw new Error('内部解析器错误');
 		if (marker === '@@') {
 			currentOp.groups.push({ marker, lines: [] });
 			return;
@@ -148,7 +148,7 @@ function parseRowScript(text: string): RawFileScript[] {
 			if (insertMatch) {
 				const line = Number(insertMatch[2]);
 				if (!Number.isSafeInteger(line) || line < 1)
-					throw new Error(`Line ${lineNumber}: insert line must be >= 1.`);
+					throw new Error(`第 ${lineNumber} 行：插入行号必须 >= 1。`);
 				currentOp =
 					insertMatch[1].toUpperCase() === 'PRE'
 						? { kind: 'insertBefore', line, rows: [] }
@@ -180,27 +180,27 @@ function parseRowScript(text: string): RawFileScript[] {
 				const startLine = Number(delMatch[1]);
 				const endLine = delMatch[2] === undefined ? startLine : Number(delMatch[2]);
 				if (startLine < 1 || endLine < startLine)
-					throw new Error(`Line ${lineNumber}: invalid range.`);
+					throw new Error(`第 ${lineNumber} 行：无效范围。`);
 				file.ops.push({ kind: 'delete', startLine, endLine });
 				continue;
 			}
 
-			throw new Error(`Line ${lineNumber}: unknown operation ${trimmed}`);
+			throw new Error(`第 ${lineNumber} 行：未知操作 ${trimmed}`);
 		}
 
 		if (raw.startsWith('+') || raw.startsWith('-')) {
 			requireFile(lineNumber);
-			if (!currentOp) throw new Error(`Line ${lineNumber}: row appears before an operation.`);
+			if (!currentOp) throw new Error(`第 ${lineNumber} 行：行出现在操作之前。`);
 			const marker = raw[0] as '+' | '-';
 			const body = raw.slice(1);
 
 			if ('rows' in currentOp) {
 				if (marker !== '+')
-					throw new Error(`Line ${lineNumber}: ${currentOp.kind} only accepts + rows.`);
+					throw new Error(`第 ${lineNumber} 行：${currentOp.kind} 只接受 + 行。`);
 				currentOp.rows.push(body);
 				continue;
 			}
-			if (!('groups' in currentOp)) throw new Error(`Line ${lineNumber}: unexpected row.`);
+			if (!('groups' in currentOp)) throw new Error(`第 ${lineNumber} 行：意外的行。`);
 			pushGroup(marker, [body]);
 			continue;
 		}
@@ -211,15 +211,13 @@ function parseRowScript(text: string): RawFileScript[] {
 			continue;
 		}
 
-		throw new Error(`Line ${lineNumber}: invalid row script line.`);
+		throw new Error(`第 ${lineNumber} 行：无效的行脚本行。`);
 	}
 
 	finishOp();
-	if (files.length === 0)
-		throw new Error('Row edit script must contain at least one [filename] section.');
+	if (files.length === 0) throw new Error('行编辑脚本必须至少包含一个 [filename] 节。');
 	for (const file of files) {
-		if (file.ops.length === 0)
-			throw new Error(`File section [${file.path}] has no operations.`);
+		if (file.ops.length === 0) throw new Error(`文件节 [${file.path}] 没有操作。`);
 	}
 	return files;
 }
@@ -233,7 +231,7 @@ function getReplacePairs(
 	op: Extract<RawRowOperation, { kind: 'replace' }>,
 ): Array<{ oldLines: string[]; newLines: string[] }> {
 	const groups = op.groups.filter((g) => g.marker === '@@' || g.lines.length > 0);
-	if (groups.length === 0) throw new Error(`@REPLACE in ${path} has no rows.`);
+	if (groups.length === 0) throw new Error(`${path} 中的 @REPLACE 没有行。`);
 
 	const hasContext = groups.some((g) => g.marker === ' ' || g.marker === '@@');
 	if (hasContext) return getContextualReplacePairs(path, groups);
@@ -242,17 +240,15 @@ function getReplacePairs(
 	if (changeGroups.length === 1) {
 		if (changeGroups[0].marker === '-')
 			return [{ oldLines: changeGroups[0].lines, newLines: [] }];
-		throw new Error(`@REPLACE in ${path} has + rows but no - rows.`);
+		throw new Error(`${path} 中的 @REPLACE 有 + 行但没有 - 行。`);
 	}
-	if (changeGroups.length % 2 !== 0)
-		throw new Error(`@REPLACE in ${path} has odd number of +/- blocks.`);
+	if (changeGroups.length % 2 !== 0) throw new Error(`${path} 中的 @REPLACE 有奇数个 +/- 块。`);
 
 	const pairs: Array<{ oldLines: string[]; newLines: string[] }> = [];
 	for (let i = 0; i < changeGroups.length; i += 2) {
 		const a = changeGroups[i];
 		const b = changeGroups[i + 1];
-		if (a.marker === b.marker)
-			throw new Error(`@REPLACE in ${path}: expected paired + and - blocks.`);
+		if (a.marker === b.marker) throw new Error(`${path} 中的 @REPLACE：应为配对的 + 和 - 块。`);
 		pairs.push({
 			oldLines: a.marker === '-' ? a.lines : b.lines,
 			newLines: a.marker === '+' ? a.lines : b.lines,
@@ -295,12 +291,12 @@ function getContextualReplacePairs(
 			}
 		}
 
-		if (!hasChange) throw new Error(`@REPLACE hunk ${i + 1} in ${path} has no + or - rows.`);
+		if (!hasChange) throw new Error(`${path} 中的 @REPLACE 块 ${i + 1} 没有 + 或 - 行。`);
 		if (oldLines.length === 0)
-			throw new Error(`@REPLACE hunk ${i + 1} in ${path} has no - or context rows.`);
+			throw new Error(`${path} 中的 @REPLACE 块 ${i + 1} 没有 - 或上下文行。`);
 		pairs.push({ oldLines, newLines });
 	}
-	if (pairs.length === 0) throw new Error(`@REPLACE in ${path} has no rows.`);
+	if (pairs.length === 0) throw new Error(`${path} 中的 @REPLACE 没有行。`);
 	return pairs;
 }
 
@@ -314,7 +310,7 @@ function applyRowOperations(path: string, content: string, ops: RawRowOperation[
 				const index = op.kind === 'insertBefore' ? op.line - 1 : op.line;
 				if (index < 0 || index > doc.lines.length) {
 					throw new Error(
-						`${op.kind === 'insertBefore' ? '@INS.PRE' : '@INS.POST'} ${op.line} is outside ${path}; file has ${doc.lines.length} line(s).`,
+						`${op.kind === 'insertBefore' ? '@INS.PRE' : '@INS.POST'} ${op.line} 超出 ${path} 范围；文件有 ${doc.lines.length} 行。`,
 					);
 				}
 				doc.lines.splice(index, 0, ...op.rows);
@@ -328,7 +324,7 @@ function applyRowOperations(path: string, content: string, ops: RawRowOperation[
 			case 'delete':
 				if (op.endLine > doc.lines.length) {
 					throw new Error(
-						`@DEL ${op.startLine}-${op.endLine} is outside ${path}; file has ${doc.lines.length} line(s).`,
+						`@DEL ${op.startLine}-${op.endLine} 超出 ${path} 范围；文件有 ${doc.lines.length} 行。`,
 					);
 				}
 				doc.lines.splice(op.startLine - 1, op.endLine - op.startLine + 1);
@@ -369,7 +365,7 @@ function applyRowOperations(path: string, content: string, ops: RawRowOperation[
 				);
 				if (groups.length !== 2 || groups[0].marker === groups[1].marker) {
 					throw new Error(
-						`${op.kind === 'insertBeforeAnchor' ? '@INS.BEFORE' : '@INS.AFTER'} in ${path} needs one - anchor and one + insert.`,
+						`${path} 中的 ${op.kind === 'insertBeforeAnchor' ? '@INS.BEFORE' : '@INS.AFTER'} 需要一个 - 锚点和一个 + 插入。`,
 					);
 				}
 				const anchorText = (groups[0].marker === '-' ? groups[0] : groups[1]).lines.join(
@@ -414,11 +410,10 @@ function joinContent(doc: { lines: string[]; finalNewline: boolean }): string {
 
 function parsePatch(patchText: string): PatchOperation[] {
 	const lines = normalizeToLF(patchText).trim().split('\n');
-	if (lines.length < 2) throw new Error('Patch is empty or invalid');
-	if (lines[0].trim() !== '*** Begin Patch')
-		throw new Error("First line must be '*** Begin Patch'");
+	if (lines.length < 2) throw new Error('补丁为空或无效');
+	if (lines[0].trim() !== '*** Begin Patch') throw new Error("第一行必须是 '*** Begin Patch'");
 	if (lines[lines.length - 1].trim() !== '*** End Patch')
-		throw new Error("Last line must be '*** End Patch'");
+		throw new Error("最后一行必须是 '*** End Patch'");
 
 	const operations: PatchOperation[] = [];
 	let i = 1;
@@ -438,7 +433,7 @@ function parsePatch(patchText: string): PatchOperation[] {
 			while (i <= lastContentLine) {
 				const next = lines[i];
 				if (next.trim().startsWith('*** ')) break;
-				if (!next.startsWith('+')) throw new Error(`Invalid add-file line: '${next}'`);
+				if (!next.startsWith('+')) throw new Error(`无效的添加文件行：'${next}'`);
 				contentLines.push(next.slice(1));
 				i++;
 			}
@@ -463,7 +458,7 @@ function parsePatch(patchText: string): PatchOperation[] {
 			const path = normalizePath(line.slice('*** Update File: '.length));
 			i++;
 			if (i <= lastContentLine && lines[i].trim().startsWith('*** Move to: ')) {
-				throw new Error('Patch move operations are not supported.');
+				throw new Error('不支持补丁移动操作。');
 			}
 			const chunks: import('../shared/matcher.js').UpdateChunk[] = [];
 			while (i <= lastContentLine) {
@@ -476,12 +471,12 @@ function parsePatch(patchText: string): PatchOperation[] {
 				chunks.push(parsed.chunk);
 				i = parsed.nextIndex;
 			}
-			if (chunks.length === 0) throw new Error(`Update file hunk for '${path}' is empty`);
+			if (chunks.length === 0) throw new Error(`'${path}' 的更新文件块为空`);
 			operations.push({ kind: 'update', path, chunks });
 			continue;
 		}
 
-		throw new Error(`Invalid hunk header: '${line}'`);
+		throw new Error(`无效的块头：'${line}'`);
 	}
 
 	return operations;
@@ -501,8 +496,7 @@ function parseUpdateChunk(
 	else if (first.startsWith('@@ ')) {
 		changeContext = first.slice(3);
 		i++;
-	} else if (!allowMissingContext)
-		throw new Error(`Expected @@ context marker, got: '${lines[i]}'`);
+	} else if (!allowMissingContext) throw new Error(`应为 @@ 上下文标记，实际是：'${lines[i]}'`);
 
 	const oldLines: string[] = [];
 	const newLines: string[] = [];
@@ -513,7 +507,7 @@ function parseUpdateChunk(
 		const raw = lines[i];
 		const trimmed = raw.trimEnd();
 		if (trimmed === '*** End of File') {
-			if (parsed === 0) throw new Error('Update hunk has no lines');
+			if (parsed === 0) throw new Error('更新块没有行');
 			isEndOfFile = true;
 			i++;
 			break;
@@ -534,13 +528,13 @@ function parseUpdateChunk(
 			newLines.push(body);
 		} else if (marker === '-') oldLines.push(body);
 		else if (marker === '+') newLines.push(body);
-		else if (parsed === 0) throw new Error(`Unexpected hunk line: '${raw}'`);
+		else if (parsed === 0) throw new Error(`意外的块行：'${raw}'`);
 		else break;
 		parsed++;
 		i++;
 	}
 
-	if (parsed === 0) throw new Error('Update hunk has no lines');
+	if (parsed === 0) throw new Error('更新块没有行');
 	return { chunk: { changeContext, oldLines, newLines, isEndOfFile }, nextIndex: i };
 }
 
@@ -617,7 +611,7 @@ async function buildRowPlan(text: string, cwd: string): Promise<ParsedPlan> {
 		}
 	}
 
-	if (changes.length === 0) throw new Error('Row edit script produced no changes.');
+	if (changes.length === 0) throw new Error('行编辑脚本没有产生变更。');
 	return { mode: 'rows', changes };
 }
 
@@ -642,7 +636,7 @@ async function buildPatchPlan(text: string, cwd: string): Promise<ParsedPlan> {
 
 		if (op.kind === 'delete') {
 			const original = await maybeReadExisting(absolutePath);
-			if (original === null) throw new Error(`Cannot delete ${op.path}: file not found.`);
+			if (original === null) throw new Error(`无法删除 ${op.path}：文件未找到。`);
 			changes.push({
 				path: op.path,
 				absolutePath,
@@ -665,7 +659,7 @@ async function buildPatchPlan(text: string, cwd: string): Promise<ParsedPlan> {
 		});
 	}
 
-	if (changes.length === 0) throw new Error('Patch produced no changes.');
+	if (changes.length === 0) throw new Error('补丁没有产生变更。');
 	return { mode: 'patch', changes };
 }
 
@@ -675,7 +669,7 @@ async function readExisting(path: string, absolutePath: string): Promise<string>
 		const raw = await readFile(absolutePath, 'utf-8');
 		return normalizeToLF(raw);
 	} catch (err: any) {
-		throw new Error(`Could not read ${path}: ${err.code ?? err.message}`);
+		throw new Error(`无法读取 ${path}：${err.code ?? err.message}`);
 	}
 }
 
@@ -699,24 +693,24 @@ async function applyPlanToWorkspace(
 	for (const change of plan.changes) {
 		if (change.kind === 'add') {
 			await workspace.writeText(change.absolutePath, change.newText);
-			results.push({ path: change.path, kind: 'add', message: `Added ${change.path}.` });
+			results.push({ path: change.path, kind: 'add', message: `已添加 ${change.path}。` });
 			continue;
 		}
 		if (change.kind === 'delete') {
 			await workspace.deleteFile(change.absolutePath);
-			results.push({ path: change.path, kind: 'delete', message: `Deleted ${change.path}.` });
+			results.push({ path: change.path, kind: 'delete', message: `已删除 ${change.path}。` });
 			continue;
 		}
 		// update
 		const current = await workspace.readText(change.absolutePath);
 		if (current !== change.oldText) {
-			throw new Error(`File ${change.path} changed since preflight.`);
+			throw new Error(`文件 ${change.path} 在预检后已变更。`);
 		}
 		await workspace.writeText(change.absolutePath, change.newText);
 		const r: RowScriptResult = {
 			path: change.path,
 			kind: 'update',
-			message: `Edited ${change.path}.`,
+			message: `已编辑 ${change.path}。`,
 		};
 		if (collectDiff) {
 			const diffResult = generateDiffString(change.oldText, change.newText);

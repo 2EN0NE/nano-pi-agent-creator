@@ -4,7 +4,8 @@ import {
 	copyToClipboard,
 	rawKeyHint,
 } from '@earendil-works/pi-coding-agent';
-import { Input, truncateToWidth, type Component } from '@earendil-works/pi-tui';
+import { Input, parseKey, truncateToWidth, type Component } from '@earendil-works/pi-tui';
+import { topBorder, bottomBorder } from '../../../../src/tui/helpers.js';
 import { TabBar } from './tab-bar.js';
 import { SettingsPanel } from './settings.js';
 import { TodoActionMenuComponent, TodoDeleteConfirmComponent } from './actions.js';
@@ -22,6 +23,11 @@ import {
 	releaseTodoAssignment,
 	deleteTodo,
 	listAllTodos,
+	todoStatusLabel,
+	sortFieldLabel,
+	sortDirectionLabel,
+	scopeLabel,
+	tabLabel,
 } from '../storage.js';
 import { getConfig, reloadConfig } from '../config.js';
 
@@ -36,10 +42,10 @@ export interface PanelHandlers {
 type PanelMode = 'list' | 'action-menu' | 'delete-confirm' | 'settings';
 
 const ALL_TABS: Array<{ id: TabId; label: string }> = [
-	{ id: 'session', label: 'Session' },
-	{ id: 'project', label: 'Project' },
-	{ id: 'global', label: 'Global' },
-	{ id: 'settings', label: 'Settings' },
+	{ id: 'session', label: '会话' },
+	{ id: 'project', label: '项目' },
+	{ id: 'global', label: '全局' },
+	{ id: 'settings', label: '设置' },
 ];
 
 export class TodoPanel implements Component {
@@ -68,6 +74,7 @@ export class TodoPanel implements Component {
 		handlers: PanelHandlers,
 		allTodos: TodoFrontMatter[],
 		currentSessionId?: string,
+		private framed = false,
 	) {
 		this.theme = theme;
 		this.ctx = ctx;
@@ -114,13 +121,7 @@ export class TodoPanel implements Component {
 	}
 
 	private getCurrentScopeLabel(): string {
-		return this.activeTab === 'session'
-			? 'Session'
-			: this.activeTab === 'project'
-				? 'Project'
-				: this.activeTab === 'global'
-					? 'Global'
-					: '';
+		return scopeLabel(this.activeTab);
 	}
 
 	private switchTab(tabId: TabId): void {
@@ -180,7 +181,7 @@ export class TodoPanel implements Component {
 		const filePath = getTodoPath(todosDir, todo.id);
 		const record = await ensureTodoExists(filePath, todo.id);
 		if (!record) {
-			this.ctx.ui.notify(`Todo ${formatTodoId(todo.id)} not found`, 'error');
+			this.ctx.ui.notify(`未找到待办 ${formatTodoId(todo.id)}`, 'error');
 			return;
 		}
 		this.actionMenu = new TodoActionMenuComponent(this.theme, record, {
@@ -201,11 +202,11 @@ export class TodoPanel implements Component {
 		action: TodoMenuAction,
 	): Promise<void> {
 		if (action === 'work') {
-			this.handlers.onWorkOnTodo(record.id, record.title || '(untitled)');
+			this.handlers.onWorkOnTodo(record.id, record.title || '(无标题)');
 			return;
 		}
 		if (action === 'refine') {
-			this.handlers.onRefineTodo(record.id, record.title || '(untitled)');
+			this.handlers.onRefineTodo(record.id, record.title || '(无标题)');
 			return;
 		}
 		if (action === 'view') {
@@ -218,21 +219,21 @@ export class TodoPanel implements Component {
 			const absolutePath = import.meta.url ? filePath : filePath;
 			try {
 				copyToClipboard(absolutePath);
-				this.ctx.ui.notify(`Copied: ${absolutePath}`, 'info');
+				this.ctx.ui.notify(`已复制: ${absolutePath}`, 'info');
 			} catch (error) {
-				this.ctx.ui.notify(`Path: ${absolutePath}`, 'info');
+				this.ctx.ui.notify(`路径: ${absolutePath}`, 'info');
 			}
 			this.mode = 'list';
 			this.tui.requestRender();
 			return;
 		}
 		if (action === 'copyText') {
-			const title = record.title || '(untitled)';
+			const title = record.title || '(无标题)';
 			const body = record.body?.trim() || '';
 			const text = body ? `# ${title}\n\n${body}` : `# ${title}`;
 			try {
 				copyToClipboard(text);
-				this.ctx.ui.notify(`Copied: "${title}"`, 'info');
+				this.ctx.ui.notify(`已复制: "${title}"`, 'info');
 			} catch {
 				this.ctx.ui.notify(`"${title}"`, 'info');
 			}
@@ -248,8 +249,8 @@ export class TodoPanel implements Component {
 				this.ctx.ui.notify(result.error, 'error');
 			} else {
 				const label =
-					action === 'done' ? 'Completed' : action === 'close' ? 'Closed' : 'Reopened';
-				this.ctx.ui.notify(`${label} todo ${formatTodoId(record.id)}`, 'info');
+					action === 'done' ? '已完成' : action === 'close' ? '已关闭' : '已恢复';
+				this.ctx.ui.notify(`${label}待办 ${formatTodoId(record.id)}`, 'info');
 			}
 			await this.refreshData();
 			this.mode = 'list';
@@ -263,7 +264,7 @@ export class TodoPanel implements Component {
 			if ('error' in result) {
 				this.ctx.ui.notify(result.error, 'error');
 			} else {
-				this.ctx.ui.notify(`Released todo ${formatTodoId(record.id)}`, 'info');
+				this.ctx.ui.notify(`已释放待办 ${formatTodoId(record.id)}`, 'info');
 			}
 			await this.refreshData();
 			this.mode = 'list';
@@ -274,7 +275,7 @@ export class TodoPanel implements Component {
 		if (action === 'delete') {
 			this.deleteConfirm = new TodoDeleteConfirmComponent(
 				this.theme,
-				`Delete todo ${formatTodoId(record.id)}? This cannot be undone.`,
+				`删除待办 ${formatTodoId(record.id)}？此操作不可撤销。`,
 				{
 					onConfirm: async (confirmed) => {
 						if (!confirmed) {
@@ -287,7 +288,7 @@ export class TodoPanel implements Component {
 						if ('error' in delResult) {
 							this.ctx.ui.notify(delResult.error, 'error');
 						} else {
-							this.ctx.ui.notify(`Deleted todo ${formatTodoId(record.id)}`, 'info');
+							this.ctx.ui.notify(`已删除待办 ${formatTodoId(record.id)}`, 'info');
 						}
 						await this.refreshData();
 						this.mode = 'list';
@@ -353,15 +354,18 @@ export class TodoPanel implements Component {
 			this.deleteConfirm?.handleInput(keyData);
 		} else if (this.mode === 'settings') {
 			// Esc / Left / Right: exit settings and switch to the corresponding tab
-			if (keyData === '\x1b' || keyData === 'Escape') {
+			// parseKey 统一归一（\x1b[C/\x1bOC/ArrowRight 等各终端序列 → right/left），
+			// 修复应用模式（DECCKM）终端发 \x1bOC/\x1bOD 时左右键无反应的问题。
+			const key = parseKey(keyData) ?? keyData;
+			if (key === 'escape') {
 				this.exitSettings();
 				return;
 			}
-			if (keyData === '\x1b[C' || keyData === 'ArrowRight') {
+			if (key === 'right') {
 				this.tabBar.cycleNext();
 				return;
 			}
-			if (keyData === '\x1b[D' || keyData === 'ArrowLeft') {
+			if (key === 'left') {
 				this.tabBar.cyclePrev();
 				return;
 			}
@@ -370,44 +374,47 @@ export class TodoPanel implements Component {
 	}
 
 	private handleListInput(keyData: string): void {
-		if (keyData === '\x1b[C' || keyData === 'ArrowRight') {
+		// parseKey 统一归一（\x1b[C/\x1bOC/ArrowRight 等各终端序列 → right/left），
+		// 修复应用模式（DECCKM）终端发 \x1bOC/\x1bOD 时左右键无反应的问题（同 prompt-editor）。
+		const key = parseKey(keyData) ?? keyData;
+		if (key === 'right') {
 			this.tabBar.cycleNext();
 			return;
 		}
-		if (keyData === '\x1b[D' || keyData === 'ArrowLeft') {
+		if (key === 'left') {
 			this.tabBar.cyclePrev();
 			return;
 		}
-		if (keyData === '\x1bs') {
+		if (key === 'alt+s') {
 			this.cycleSortField();
 			return;
 		}
-		if (keyData === '\x1bd') {
+		if (key === 'alt+d') {
 			this.cycleSortDirection();
 			return;
 		}
 		if (this.filteredTodos.length === 0) {
-			if (keyData === '\x1b' || keyData === 'Escape') this.handlers.onClose();
+			if (key === 'escape') this.handlers.onClose();
 			return;
 		}
-		if (keyData === 'ArrowUp' || keyData === '\x1b[A') {
+		if (key === 'up') {
 			this.selectedIndex =
 				this.selectedIndex === 0 ? this.filteredTodos.length - 1 : this.selectedIndex - 1;
 			this.tui.requestRender();
 			return;
 		}
-		if (keyData === 'ArrowDown' || keyData === '\x1b[B') {
+		if (key === 'down') {
 			this.selectedIndex =
 				this.selectedIndex === this.filteredTodos.length - 1 ? 0 : this.selectedIndex + 1;
 			this.tui.requestRender();
 			return;
 		}
-		if (keyData === '\r' || keyData === '\n' || keyData === 'Enter') {
+		if (key === 'enter') {
 			const selected = this.filteredTodos[this.selectedIndex];
 			if (selected) void this.openActionMenu(selected);
 			return;
 		}
-		if (keyData === '\x1b' || keyData === 'Escape') {
+		if (key === 'escape') {
 			this.handlers.onClose();
 			return;
 		}
@@ -423,6 +430,12 @@ export class TodoPanel implements Component {
 
 	render(width: number): string[] {
 		const lines: string[] = [];
+		// 顶边框标题统一在最上（tab 栏之前），按 mode 取标题文本——
+		// 与其他插件一致（标题嵌入顶部横线作为面板隔离），修复 settings/action-menu
+		// 标题曾出现在 tab 栏之后的错位。
+		if (this.framed) {
+			lines.push(this.theme.fg('accent', topBorder(this.getTitle(), width)));
+		}
 		const tabLines = this.tabBar.render(width);
 		lines.push(...tabLines);
 		lines.push('');
@@ -437,7 +450,26 @@ export class TodoPanel implements Component {
 			if (this.settingsPanel) lines.push(...this.settingsPanel.render(width));
 		}
 
+		if (this.framed) {
+			lines.push(this.theme.fg('accent', bottomBorder(width)));
+		}
+
 		return lines;
+	}
+
+	private getTitle(): string {
+		switch (this.mode) {
+			case 'list':
+			case 'settings':
+				// settings 只是 todos 的一个 tab，标题与其他 tab 保持一致（插件名）
+				return '── Todos ';
+			case 'action-menu':
+				return this.actionMenu?.getTitle() ?? '── Todos ';
+			case 'delete-confirm':
+				return this.deleteConfirm?.getTitle() ?? '── Todos ';
+			default:
+				return '── Todos ';
+		}
 	}
 
 	private renderList(width: number): string[] {
@@ -450,27 +482,27 @@ export class TodoPanel implements Component {
 		const totalCount = allTodos.length;
 		const scopeInfo = this.theme.fg(
 			'accent',
-			this.theme.bold(`${scope} Todos (${openCount}/${totalCount})`),
+			this.theme.bold(`${scope} 待办 (${openCount}/${totalCount})`),
 		);
-		const sortLabel = this.sortConfig.field === 'created-at' ? 'Created' : 'Title';
-		const sortDir = this.sortConfig.direction === 'asc' ? 'Asc' : 'Desc';
+		const sortLabel = sortFieldLabel(this.sortConfig.field);
+		const sortDir = sortDirectionLabel(this.sortConfig.direction);
 		const sortHint = this.theme.fg(
 			'dim',
-			` Sort: ${sortLabel} ${sortDir}  (${rawKeyHint('alt+s', 'field')}, ${rawKeyHint('alt+d', 'direction')})`,
+			` 排序: ${sortLabel} ${sortDir}  (${rawKeyHint('alt+s', '字段')}, ${rawKeyHint('alt+d', '方向')})`,
 		);
 
 		lines.push(truncateToWidth(scopeInfo + sortHint, width));
 		lines.push('');
 
-		const searchLabel = this.theme.fg('muted', 'Search: ');
+		const searchLabel = this.theme.fg('muted', '搜索: ');
 		const searchValue = this.searchQuery
 			? this.searchQuery
-			: this.theme.fg('dim', 'type to filter...');
+			: this.theme.fg('dim', '输入过滤...');
 		lines.push(truncateToWidth(`${searchLabel}${searchValue}`, width));
 		lines.push('');
 
 		if (this.filteredTodos.length === 0) {
-			lines.push(this.theme.fg('dim', '  No todos'));
+			lines.push(this.theme.fg('dim', '  无待办'));
 			return lines.map((l) => truncateToWidth(l, width));
 		}
 
@@ -500,9 +532,9 @@ export class TodoPanel implements Component {
 				prefix +
 				this.theme.fg('accent', todo.id) +
 				' ' +
-				this.theme.fg(statusColor, todo.status || 'open') +
+				this.theme.fg(statusColor, todoStatusLabel(todo.status)) +
 				' ' +
-				this.theme.fg(titleColor, todo.title || '(untitled)') +
+				this.theme.fg(titleColor, todo.title || '(无标题)') +
 				this.theme.fg('muted', tagText) +
 				assignmentText;
 			lines.push(truncateToWidth(line, width));
@@ -518,15 +550,13 @@ export class TodoPanel implements Component {
 
 		lines.push('');
 		// Accent divider separating list content from footer
-		lines.push(
-			truncateToWidth(this.theme.fg('accent', '─'.repeat(Math.min(width, 80))), width),
-		);
+		lines.push(truncateToWidth(this.theme.fg('accent', '─'.repeat(Math.max(0, width))), width));
 		lines.push('');
 		lines.push(
 			truncateToWidth(
 				this.theme.fg(
 					'dim',
-					`Left/Right: switch tab  Enter: actions  ${rawKeyHint('alt+s', 'sort field')}  ${rawKeyHint('alt+d', 'sort direction')}  Esc: close`,
+					`左右: 切换标签  回车: 操作  ${rawKeyHint('alt+s', '排序字段')}  ${rawKeyHint('alt+d', '排序方向')}  Esc: 关闭`,
 				),
 				width,
 			),

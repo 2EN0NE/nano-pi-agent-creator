@@ -61,12 +61,11 @@ interface PersistedGoalState {
 const CreateGoalParams = Type.Object({
 	objective: Type.String({
 		description:
-			'Required. The concrete objective to start pursuing. This starts a new active goal when no unfinished goal exists. If the previous goal is complete, it is replaced.',
+			'必填。要开始追求的具体目标。当没有未完成目标时，这会启动一个新的活动目标。如果前一个目标已完成，则会被替换。',
 	}),
 	token_budget: Type.Optional(
 		Type.Number({
-			description:
-				'Optional positive integer token budget for the new goal. Omit unless explicitly requested.',
+			description: '可选的正整数 token 预算。除非明确要求，否则省略。',
 		}),
 	),
 });
@@ -107,7 +106,7 @@ function validateObjective(input: string): string {
 function validateTokenBudget(value: number | undefined): number | undefined {
 	if (value === undefined) return undefined;
 	if (!Number.isInteger(value) || value <= 0) {
-		throw new Error('goal budgets must be positive integers when provided');
+		throw new Error('目标预算必须是正整数（当提供时）');
 	}
 	return value;
 }
@@ -513,7 +512,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 
 	function editGoalObjective(objectiveInput: string): Goal {
 		if (!goal) {
-			throw new Error('cannot edit goal because no goal exists');
+			throw new Error('无法编辑目标，因为没有目标存在');
 		}
 		const objective = validateObjective(objectiveInput);
 		if (goal.status === 'active') accountElapsed();
@@ -678,13 +677,13 @@ export default function goalExtension(pi: ExtensionAPI) {
 				return;
 			}
 			const pause = await ctx.ui.confirm(
-				'Pause active goal?',
-				'Operation aborted. Pause this goal instead of automatically continuing?',
+				'暂停活动目标？',
+				'操作已中止。是否改为暂停此目标而不是自动继续？',
 			);
 			if (pause) {
 				setGoalStatus('paused');
 				persist('status');
-				showGoalMessage(`Goal paused\n\n${goalSummary(goal)}`);
+				showGoalMessage(`目标已暂停\n\n${goalSummary(goal)}`);
 				updateStatus(ctx);
 				return;
 			}
@@ -724,13 +723,13 @@ export default function goalExtension(pi: ExtensionAPI) {
 
 	log.debug('registerCommand: goal');
 	pi.registerCommand('goal', {
-		description: 'Set or view the goal for a long-running task',
+		description: '设置或查看长期任务的目标',
 		getArgumentCompletions: (prefix: string) => {
 			const items = [
-				{ value: 'clear', label: 'clear', description: 'clear the current goal' },
-				{ value: 'edit', label: 'edit', description: 'edit the current goal objective' },
-				{ value: 'pause', label: 'pause', description: 'pause the current goal' },
-				{ value: 'resume', label: 'resume', description: 'resume the current goal' },
+				{ value: 'clear', label: 'clear', description: '清除当前目标' },
+				{ value: 'edit', label: 'edit', description: '编辑当前目标描述' },
+				{ value: 'pause', label: 'pause', description: '暂停当前目标' },
+				{ value: 'resume', label: 'resume', description: '恢复当前目标' },
 			];
 			const filtered = items.filter((item) => item.value.startsWith(prefix.trimStart()));
 			return filtered.length > 0 ? filtered : null;
@@ -742,7 +741,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 				showGoalMessage(
 					snapshot
 						? goalSummary(snapshot)
-						: 'Usage: /goal <objective>\n\nNo goal is currently set.',
+						: '用法：/goal <目标描述>\n\n当前没有设置目标。',
 				);
 				updateStatus(ctx);
 				return;
@@ -848,10 +847,9 @@ export default function goalExtension(pi: ExtensionAPI) {
 	log.debug('registerTool: get_goal');
 	pi.registerTool({
 		name: 'get_goal',
-		label: 'Get Goal',
-		description:
-			'Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.',
-		promptSnippet: 'Get the current long-running thread goal and its usage/budget state',
+		label: '获取目标',
+		description: '获取当前线程的目标，包括状态、预算、token 与已用时间，以及剩余 token 预算。',
+		promptSnippet: '获取当前长期线程目标及其用量/预算状态',
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const snapshot = currentGoalSnapshot();
@@ -866,14 +864,14 @@ export default function goalExtension(pi: ExtensionAPI) {
 	log.debug('registerTool: create_goal');
 	pi.registerTool({
 		name: 'create_goal',
-		label: 'Create Goal',
+		label: '创建目标',
 		description:
-			'Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Set token_budget only when an explicit token budget is requested. Fails if an unfinished goal exists; if the previous goal is complete, it is replaced.',
-		promptSnippet: 'Create a new active long-running thread goal when explicitly requested',
+			'仅当用户或系统/开发者指令明确要求时才创建目标；不要从普通任务推断目标。仅当明确请求 token 预算时才设置 token_budget。若存在未完成目标则失败；若前一个目标已完成则被替换。',
+		promptSnippet: '当明确要求时创建新的活动长期线程目标',
 		promptGuidelines: [
-			'Use create_goal only when the user explicitly asks to create a long-running goal; do not infer goals from ordinary tasks.',
-			'Use update_goal with status complete only when the active goal is actually achieved and no required work remains.',
-			'Use update_goal with status blocked only when the strict blocked audit is satisfied.',
+			'仅当用户明确要求创建长期目标时才使用 create_goal；不要从普通任务推断目标。',
+			'仅当活动目标真正达成且没有剩余必需工作时，才用 status complete 调用 update_goal。',
+			'仅当严格的阻塞审计满足时，才用 status blocked 调用 update_goal。',
 		],
 		parameters: CreateGoalParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -896,19 +894,18 @@ export default function goalExtension(pi: ExtensionAPI) {
 	log.debug('registerTool: update_goal');
 	pi.registerTool({
 		name: 'update_goal',
-		label: 'Update Goal',
+		label: '更新目标',
 		description:
-			'Update the existing goal. Use this tool only to mark the goal achieved or genuinely blocked. Set status to complete only when the objective has actually been achieved and no required work remains. Set status to blocked only when the same blocking condition has repeated for at least three consecutive goal turns and the agent is at an impasse. Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.',
-		promptSnippet:
-			'Mark the current goal complete or blocked after verifying the required conditions',
+			'更新现有目标。仅用此工具将目标标记为已达成或确实被阻塞。仅当目标真正达成且没有剩余必需工作时，才将 status 设为 complete。仅当相同的阻塞条件已连续重复至少三个目标轮次且 agent 陷入僵局时，才将 status 设为 blocked。不要仅仅因为预算即将耗尽或你正在停止工作就将目标标记为完成。',
+		promptSnippet: '在验证所需条件后，将当前目标标记为完成或阻塞',
 		promptGuidelines: [
-			'Use update_goal only to mark the active goal complete or blocked after verifying the required conditions; never use it for pause, resume, budget-limit, or usage-limit changes.',
+			'仅在验证所需条件后，用 update_goal 将活动目标标记为完成或阻塞；切勿将其用于暂停、恢复、预算限制或用量限制的变更。',
 		],
 		parameters: UpdateGoalParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (params.status !== 'complete' && params.status !== 'blocked') {
 				throw new Error(
-					'update_goal can only mark the existing goal complete or blocked; pause, resume, budget-limited, and usage-limited status changes are controlled by the user or system',
+					'update_goal 只能将现有目标标记为完成或阻塞；暂停、恢复、预算受限和用量受限的状态变更由用户或系统控制',
 				);
 			}
 			setGoalStatus(params.status);

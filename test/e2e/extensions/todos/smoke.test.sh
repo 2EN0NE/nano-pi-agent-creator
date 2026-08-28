@@ -44,56 +44,63 @@ TEST
 # 验证 agent_end 事件中生成的提醒信息。
 
 setup_completion_sandbox() {
-	local test_home="$1"
-	shift
+  local test_home="$1"
+  shift
 
-	local home_dir="$test_home/home"
-	mkdir -p "$home_dir/.pi/agent/extensions" \
-		"$home_dir/.pi/extensions" \
-		"$home_dir/.pi/logs" \
-		"$test_home/.pi/todos"
+  local home_dir="$test_home/home"
+  mkdir -p "$home_dir/.pi/agent/extensions" \
+    "$home_dir/.pi/extensions" \
+    "$home_dir/.pi/logs" \
+    "$test_home/.pi/todos"
 
-	# Copy pi-logger to HOME (pi discovers extensions in ~/.pi/extensions/)
-	cp -r "$ROOT_DIR/extensions/meta/pi-logger" \
-		"$home_dir/.pi/extensions/pi-logger"
+  # Copy pi-logger to HOME (pi discovers extensions in ~/.pi/extensions/)
+  cp -r "$ROOT_DIR/extensions/meta/pi-logger" \
+    "$home_dir/.pi/extensions/pi-logger"
 
-	# Copy todos to HOME
-	cp -r "$ROOT_DIR/extensions/accuracy/todos" \
-		"$home_dir/.pi/extensions/todos"
+  # Copy todos to HOME
+  cp -r "$ROOT_DIR/extensions/accuracy/todos" \
+    "$home_dir/.pi/extensions/todos"
 
-	# Copy mock-llm-completion to HOME
-	mkdir -p "$home_dir/.pi/extensions/mock-llm-completion"
-	cp "$ROOT_DIR/test/e2e/extensions/todos/helpers/mock-llm-completion.ts" \
-		"$home_dir/.pi/extensions/mock-llm-completion/index.ts"
+  # Copy mock-llm-completion to HOME
+  mkdir -p "$home_dir/.pi/extensions/mock-llm-completion"
+  cp "$ROOT_DIR/test/e2e/extensions/todos/helpers/mock-llm-completion.ts" \
+    "$home_dir/.pi/extensions/mock-llm-completion/index.ts"
 
-	# Copy pi-logger config to HOME
-	if [[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]]; then
-		cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" \
-			"$home_dir/.pi/pi-logger.json"
-	fi
+  # Copy pi-logger config to HOME
+  if [[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]]; then
+    cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" \
+      "$home_dir/.pi/pi-logger.json"
+  fi
 
-	# Link @zenone/pi-logger for todos import
-	mkdir -p "$test_home/node_modules/@zenone"
-	if [[ ! -e "$test_home/node_modules/@zenone/pi-logger" ]]; then
-		ln -sf "$ROOT_DIR/extensions/meta/pi-logger" \
-			"$test_home/node_modules/@zenone/pi-logger"
-	fi
+  # Link @zenone/pi-logger for todos import
+  mkdir -p "$test_home/node_modules/@zenone"
+  if [[ ! -e "$test_home/node_modules/@zenone/pi-logger" ]]; then
+    ln -sf "$ROOT_DIR/extensions/meta/pi-logger" \
+      "$test_home/node_modules/@zenone/pi-logger"
+  fi
 
-	# Link @zenone/pi-config for todos config
-	if [[ -d "$ROOT_DIR/extensions/meta/pi-config" ]]; then
-		if [[ ! -e "$test_home/node_modules/@zenone/pi-config" ]]; then
-			ln -sf "$ROOT_DIR/extensions/meta/pi-config" \
-				"$test_home/node_modules/@zenone/pi-config"
-		fi
-	fi
+  # Link @zenone/pi-config for todos config
+  if [[ -d "$ROOT_DIR/extensions/meta/pi-config" ]]; then
+    if [[ ! -e "$test_home/node_modules/@zenone/pi-config" ]]; then
+      ln -sf "$ROOT_DIR/extensions/meta/pi-config" \
+        "$test_home/node_modules/@zenone/pi-config"
+    fi
+  fi
 
-	# Init git (todos uses cwd)
-	if ! git -C "$test_home" rev-parse --git-dir &>/dev/null; then
-		git -C "$test_home" init --initial-branch main &>/dev/null || true
-	fi
+  # Copy shared TUI helpers (src/tui/) for todos' relative imports
+  # (extensions at $home_dir/.pi/extensions/todos/, ../../../../src/tui = $home_dir/src/tui)
+  if [[ -d "$ROOT_DIR/src/tui" ]]; then
+    mkdir -p "$home_dir/src"
+    cp -r "$ROOT_DIR/src/tui" "$home_dir/src/tui"
+  fi
 
-	# Create a pending todo file to trigger the reminder
-	cat >"$test_home/.pi/todos/deadbeef.md" <<'TODOEOF'
+  # Init git (todos uses cwd)
+  if ! git -C "$test_home" rev-parse --git-dir &>/dev/null; then
+    git -C "$test_home" init --initial-branch main &>/dev/null || true
+  fi
+
+  # Create a pending todo file to trigger the reminder
+  cat >"$test_home/.pi/todos/deadbeef.md" <<'TODOEOF'
 {
   "id": "deadbeef",
   "title": "Test pending task",

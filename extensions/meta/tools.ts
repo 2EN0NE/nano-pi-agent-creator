@@ -15,8 +15,9 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, ToolInfo } from '@earendil-works/pi-coding-agent';
-import { getSettingsListTheme } from '@earendil-works/pi-coding-agent';
+import { getSettingsListTheme, DynamicBorder } from '@earendil-works/pi-coding-agent';
 import { Container, type SettingItem, SettingsList } from '@earendil-works/pi-tui';
+import { topBorder } from '../../src/tui/helpers.js';
 import { createLogger } from '@zenone/pi-logger';
 
 const log = createLogger('tools');
@@ -73,7 +74,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 		persistState();
 		log.info('auto-enabled new tool', { tool: toolName });
 		if (ctx?.hasUI) {
-			ctx.ui.notify(`New tool "${toolName}" auto-enabled — use /tools to manage.`, 'info');
+			ctx.ui.notify(`新工具 "${toolName}" 已自动启用——使用 /tools 管理。`, 'info');
 		}
 	}
 
@@ -172,7 +173,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 	// Register /tools command
 	log.debug('registerCommand: tools');
 	pi.registerCommand('tools', {
-		description: 'Enable/disable tools',
+		description: '启用/禁用工具',
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== 'tui') {
 				ctx.ui.notify('/tools requires TUI mode', 'error');
@@ -255,10 +256,13 @@ export default function toolsExtension(pi: ExtensionAPI) {
 
 				// Status header showing current enablement
 				const statusHeader = new (class {
-					render(_width: number) {
+					render(width: number) {
 						const { enabled, total } = getToolCounts();
 						return [
-							theme.fg('accent', theme.bold('Tool Configuration')),
+							theme.fg(
+								'accent',
+								theme.bold(topBorder('── Tool Configuration ', width)),
+							),
 							`  ${theme.fg('muted', `Enabled tools: ${enabled}/${total}`)}`,
 							'',
 						];
@@ -298,6 +302,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 				);
 
 				container.addChild(settingsList);
+				container.addChild(new DynamicBorder((s) => theme.fg('accent', s)));
 
 				const component = {
 					render(width: number) {

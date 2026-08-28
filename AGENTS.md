@@ -381,20 +381,25 @@ bash test/e2e/scripts/run-e2e.sh --ext quit    # 同时跑 smoke + tui
 
 ### TUI 设计约定
 
-#### 不要使用 Emoji/图标
+#### 字符白名单：禁双宽 emoji，放行单宽箭头
 
-TUI 组件的渲染**禁止使用 emoji 和 Unicode 图标字符**（如 📋📜✅❌⭐🔍▼▊→ 等）。原因：
+TUI 组件的渲染**禁止使用双宽 emoji 和 Unicode 图标字符**（如 📋📜✅❌⭐🔍▼▊⚙✎☑☐✓✗ 等）。原因：
 
-1. **宽度不确定性**：emojii 在不同终端的显示宽度不同（单宽或双宽），`visibleWidth()` 和 `truncateToWidth()` 可能无法正确处理，导致 `Rendered line exceeds terminal width` 崩溃
+1. **宽度不确定性**：emoji 在不同终端的显示宽度不同（单宽或双宽），`visibleWidth()` 和 `truncateToWidth()` 可能无法正确处理，导致 `Rendered line exceeds terminal width` 崩溃
 2. **可读性**：部分终端/字体不支持 emoji，显示为方块
 3. **搜索/过滤不便**：emoji 无法用文字匹配
+
+**例外**：单宽箭头 `↑↓←→`（宽度恒为 1，仅用于键盘导航提示）**允许**。
 
 **替代方案**：一律使用纯文本表示：
 
 - `[Strategies]` 代替 `[📋 Strategies]`
-- `OK/BLOCK` 代替 `✅/❌`
-- `>` (大于号) 代替 `→` 表示选中
+- `OK/BLOCK` 代替 `✅/❌`、`✓/✗`
+- `>` (大于号) 表示选中
+- `[x]`/`[ ]` 代替 `☑/☐`
 - `_` (下划线) 代替 `▊` 表示光标
+
+> 详见 ADR-0023（字符白名单 + 纯横线边框范式）。门禁脚本 `scripts/check-tui-compliance.ts` 强制检测双宽 emoji（含 `✓/✗`）、硬编码颜色、`.length` 对齐误用与方角边框（`┌┐└┘`，树形 connector 豁免）。
 
 #### `truncateToWidth` 安全网
 
@@ -405,22 +410,22 @@ import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 // ✅ 正确: 每行都经过 truncateToWidth
 lines.push(truncateToWidth(th.fg('accent', title), width));
-lines.push(truncateToWidth('│  ' + content, width));
+lines.push(truncateToWidth('  ' + content, width));
 
 // ❌ 错误: 不包裹可能导致崩溃
 lines.push(th.fg('accent', title));
 ```
 
-#### 边框对齐技巧与适用场景
+#### 纯横线边框与内容行写法
 
-单列竖边框盒（`│ 内容 │`）保证右边框不错位的范式：**固定框宽 + `visibleWidth` 精确补右空格 + `wrapTextWithAnsi` 先换行 + `padToWidth` 统一行长**。标杆实现见 `extensions/tui/answer.ts` 的 `QnAComponent.render()`，`btw.ts` 的 `frameLine()`、`todos/ui/actions.ts` 的 `framedLines` 已同构。
+纯横线范式（ADR-0023）：**顶边框 `── 插件名` + 横线填满、内容行缩进 + `truncateToWidth` 兜底、内部分隔线左右各缩进 1 格、底边框纯横线**。标杆实现见 `extensions/tui/answer.ts`、`quit.ts`、`btw.ts`、`todos/ui/actions.ts` 等（均已迁移）。
 
-- **适用**：单列竖边框盒、左对齐补右空格（无竖框退化版）。
-- **不适用/需改造**：左右分栏两端对齐、多列表格、滚动视口、固定宽居中卡片。
+- **内容行**：统一 `row = (content) => indent + truncateToWidth(content, W)`，无竖线无 rightPad 对齐计算。
+- **特殊场景**：左右分栏两端对齐、多列表格、滚动视口、固定宽居中卡片需各自处理列宽/视口。
 - **需加固**：内容含 tab / emoji / 嵌套第三方组件输出时，必须额外 `truncateToWidth` 兜底。
-- **口径统一**：对齐补空格只用 `visibleWidth`，禁止混用 `.length`（`quit.ts` 有此隐患）。
+- **口径统一**：对齐/截断只用 `visibleWidth`，禁止混用 `.length`。
 
-完整清单见 [`docs/tui-design-principles.md` 第 7.5 节](docs/tui-design-principles.md#75-边框对齐技巧与适用场景)。
+完整清单见 [`docs/tui-design-principles.md` 第 7 节](docs/tui-design-principles.md#7-边框与布局) 与 [ADR-0023](docs/adr/0023-tui-visual-spec-completion.md)。
 
 #### 普通测试辅助扩展示例
 

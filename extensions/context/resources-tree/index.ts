@@ -291,7 +291,7 @@ export default function (pi: ExtensionAPI): void {
 	// ── Command & Shortcut ──────────────────────────────────────
 
 	pi.registerCommand('resource-tree', {
-		description: 'Open resource tree settings panel',
+		description: '打开资源树设置面板',
 		handler: async (_args, ctx) => {
 			openSettings(ctx);
 		},

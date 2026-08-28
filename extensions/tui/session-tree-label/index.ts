@@ -48,13 +48,13 @@ const DEFAULT_CONFIG: PluginConfig = {
 	labels: [
 		{
 			key: 'g',
-			label: 'GOOD',
+			label: '好',
 			aliases: ['good', 'g'],
 			description: '回答质量好',
 		},
 		{
 			key: 'b',
-			label: 'BAD',
+			label: '差',
 			aliases: ['bad', 'b'],
 			description: '回答质量差',
 		},
@@ -115,8 +115,7 @@ function safeAppendLabelChange(ctx: ExtensionContext, targetId: string, label: s
 	const sm = ctx.sessionManager as Record<string, unknown>;
 	if (typeof sm.appendLabelChange !== 'function') {
 		throw new Error(
-			'sessionManager.appendLabelChange is not available — ' +
-				'this pi version may not support label entries',
+			'sessionManager.appendLabelChange 不可用 — ' + '此 pi 版本可能不支持标签条目',
 		);
 	}
 	(sm.appendLabelChange as (targetId: string, label: string | undefined) => string)(
@@ -154,7 +153,7 @@ function applyLabelToLeaf(ctx: ExtensionContext, labelCfg: LabelConfig): boolean
 
 	try {
 		safeAppendLabelChange(ctx, targetId, labelCfg.label);
-		safeNotify(ctx, `✓ ${labelCfg.label}`, 'info');
+		safeNotify(ctx, `[完成] ${labelCfg.label}`, 'info');
 		log.info('Label applied', { targetId, label: labelCfg.label });
 		return true;
 	} catch (err) {
