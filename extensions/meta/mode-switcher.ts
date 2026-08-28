@@ -22,8 +22,10 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 import { createLogger } from '@zenone/pi-logger';
 import { resolveConfigPaths } from '@zenone/pi-config';
+import { selectPanel } from '../../src/tui/select-panel.js';
 
 const log = createLogger('mode-switcher');
 
@@ -608,7 +610,7 @@ async function applyMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: string):
 	const spec = runtime.data.modes[mode];
 	if (!spec) {
 		if (ctx.hasUI) {
-			ctx.ui.notify(`Unknown mode: ${mode}`, 'warning');
+			ctx.ui.notify(`未知模式：${mode}`, 'warning');
 		}
 		return;
 	}
@@ -628,7 +630,7 @@ async function applyMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: string):
 				modelAppliedOk = ok;
 				if (!ok && ctx.hasUI) {
 					ctx.ui.notify(
-						`No API key available for ${spec.provider}/${spec.modelId}`,
+						`没有可用的 API 密钥：${spec.provider}/${spec.modelId}`,
 						'warning',
 					);
 				}
@@ -636,7 +638,7 @@ async function applyMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: string):
 				modelAppliedOk = false;
 				if (ctx.hasUI) {
 					ctx.ui.notify(
-						`Mode "${mode}" references unknown model ${spec.provider}/${spec.modelId}`,
+						`模式 "${mode}" 引用了未知模型 ${spec.provider}/${spec.modelId}`,
 						'warning',
 					);
 				}
@@ -664,12 +666,12 @@ async function applyMode(pi: ExtensionAPI, ctx: ExtensionContext, mode: string):
 	}
 }
 
-const MODE_UI_CONFIGURE = 'Configure modes…';
-const MODE_UI_ADD = 'Add mode…';
-const MODE_UI_BACK = 'Back';
+const MODE_UI_CONFIGURE = '配置模式…';
+const MODE_UI_ADD = '添加模式…';
+const MODE_UI_BACK = '返回';
 
 const ALL_THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
-const THINKING_UNSET_LABEL = "(don't change)";
+const THINKING_UNSET_LABEL = '（不更改）';
 
 function isDefaultModeName(name: string): boolean {
 	return (DEFAULT_MODE_ORDER as readonly string[]).includes(name);
@@ -693,10 +695,10 @@ function validateModeNameOrError(
 	existing: Record<string, ModeSpec>,
 	opts?: { allowExisting?: boolean },
 ): string | null {
-	if (!name) return 'Mode name cannot be empty';
-	if (/\s/.test(name)) return 'Mode name cannot contain whitespace';
-	if (isReservedModeName(name)) return `Mode name \"${name}\" is reserved`;
-	if (!opts?.allowExisting && existing[name]) return `Mode \"${name}\" already exists`;
+	if (!name) return '模式名称不能为空';
+	if (/\s/.test(name)) return '模式名称不能包含空白字符';
+	if (isReservedModeName(name)) return `模式名称 \"${name}\" 已被保留`;
+	if (!opts?.allowExisting && existing[name]) return `模式 \"${name}\" 已存在`;
 	return null;
 }
 
@@ -708,10 +710,10 @@ async function handleModeChoiceUI(
 	// Special behavior: when we're in "custom" and select another mode,
 	// offer to either *use* it (switch) or *store* the current custom selection into it.
 	if (runtime.currentMode === CUSTOM_MODE_NAME && choice !== CUSTOM_MODE_NAME) {
-		const action = await ctx.ui.select(`Mode \"${choice}\"`, ['use', 'store']);
+		const action = await selectPanel(ctx, `模式 \"${choice}\"`, ['使用', '存储']);
 		if (!action) return;
 
-		if (action === 'use') {
+		if (action === '使用') {
 			await applyMode(pi, ctx, choice);
 			return;
 		}
@@ -721,7 +723,7 @@ async function handleModeChoiceUI(
 		const overlay = customOverlay ?? getCurrentSelectionSpec(pi, ctx);
 		await storeSelectionIntoMode(pi, ctx, choice, overlay);
 		await applyMode(pi, ctx, choice);
-		ctx.ui.notify(`Stored ${CUSTOM_MODE_NAME} into \"${choice}\"`, 'info');
+		ctx.ui.notify(`已将 ${CUSTOM_MODE_NAME} 存储到 \"${choice}\"`, 'info');
 		return;
 	}
 
@@ -734,7 +736,7 @@ async function selectModeUI(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 	while (true) {
 		await ensureRuntime(pi, ctx);
 		const names = orderedModeNames(runtime.data.modes);
-		const choice = await ctx.ui.select(`Mode (current: ${runtime.currentMode})`, [
+		const choice = await selectPanel(ctx, `模式（当前：${runtime.currentMode}）`, [
 			...names,
 			MODE_UI_CONFIGURE,
 		]);
@@ -756,11 +758,7 @@ async function configureModesUI(pi: ExtensionAPI, ctx: ExtensionContext): Promis
 	while (true) {
 		await ensureRuntime(pi, ctx);
 		const names = orderedModeNames(runtime.data.modes);
-		const choice = await ctx.ui.select('Configure modes', [
-			...names,
-			MODE_UI_ADD,
-			MODE_UI_BACK,
-		]);
+		const choice = await selectPanel(ctx, '配置模式', [...names, MODE_UI_ADD, MODE_UI_BACK]);
 		if (!choice || choice === MODE_UI_BACK) return;
 
 		if (choice === MODE_UI_ADD) {
@@ -780,7 +778,7 @@ async function addModeUI(pi: ExtensionAPI, ctx: ExtensionContext): Promise<strin
 	await ensureRuntime(pi, ctx);
 
 	while (true) {
-		const raw = await ctx.ui.input('New mode name', 'e.g. docs, review, planning');
+		const raw = await ctx.ui.input('新模式名称', '例如 docs, review, planning');
 		if (raw === undefined) return undefined;
 
 		const name = normalizeModeNameInput(raw);
@@ -798,7 +796,7 @@ async function addModeUI(pi: ExtensionAPI, ctx: ExtensionContext): Promise<strin
 			thinkingLevel: selection.thinkingLevel,
 		};
 		await persistRuntime(pi, ctx);
-		ctx.ui.notify(`Added mode \"${name}\"`, 'info');
+		ctx.ui.notify(`已添加模式 \"${name}\"`, 'info');
 		return name;
 	}
 }
@@ -814,26 +812,27 @@ async function editModeUI(pi: ExtensionAPI, ctx: ExtensionContext, mode: string)
 		if (!spec) return;
 
 		const modelLabel =
-			spec.provider && spec.modelId ? `${spec.provider}/${spec.modelId}` : '(no model)';
+			spec.provider && spec.modelId ? `${spec.provider}/${spec.modelId}` : '（无模型）';
 		const thinkingLabel = spec.thinkingLevel ?? THINKING_UNSET_LABEL;
 
-		const actions = ['Change name', 'Change model', 'Change thinking level'];
-		if (!isDefaultModeName(modeName)) actions.push('Delete mode');
+		const actions = ['更改名称', '更改模型', '更改思维等级'];
+		if (!isDefaultModeName(modeName)) actions.push('删除模式');
 		actions.push(MODE_UI_BACK);
 
-		const action = await ctx.ui.select(
-			`Edit mode \"${modeName}\"  model: ${modelLabel}  thinking: ${thinkingLabel}`,
+		const action = await selectPanel(
+			ctx,
+			`编辑模式 \"${modeName}\"  模型: ${modelLabel}  思维: ${thinkingLabel}`,
 			actions,
 		);
 		if (!action || action === MODE_UI_BACK) return;
 
-		if (action === 'Change name') {
+		if (action === '更改名称') {
 			const renamed = await renameModeUI(pi, ctx, modeName);
 			if (renamed) modeName = renamed;
 			continue;
 		}
 
-		if (action === 'Change model') {
+		if (action === '更改模型') {
 			const selected = await pickModelForModeUI(ctx, spec);
 			if (!selected) continue;
 			spec.provider = selected.provider;
@@ -849,15 +848,12 @@ async function editModeUI(pi: ExtensionAPI, ctx: ExtensionContext, mode: string)
 				spec.thinkingLevel !== 'off'
 			) {
 				spec.thinkingLevel = 'off';
-				ctx.ui.notify(
-					`Model "${spec.modelId}" does not support reasoning — thinking level reset to off`,
-					'warning',
-				);
+				ctx.ui.notify(`模型 "${spec.modelId}" 不支持推理——思维等级已重置为 off`, 'warning');
 			}
 
 			runtime.data.modes[modeName] = spec;
 			await persistRuntime(pi, ctx);
-			ctx.ui.notify(`Updated model for \"${modeName}\"`, 'info');
+			ctx.ui.notify(`已更新模式 \"${modeName}\" 的模型`, 'info');
 
 			if (runtime.currentMode === modeName) {
 				await applyMode(pi, ctx, modeName);
@@ -865,7 +861,7 @@ async function editModeUI(pi: ExtensionAPI, ctx: ExtensionContext, mode: string)
 			continue;
 		}
 
-		if (action === 'Change thinking level') {
+		if (action === '更改思维等级') {
 			// Determine whether the currently configured model supports reasoning,
 			// so the thinking level picker only shows applicable options.
 			const modelForThinking =
@@ -888,7 +884,7 @@ async function editModeUI(pi: ExtensionAPI, ctx: ExtensionContext, mode: string)
 
 			runtime.data.modes[modeName] = spec;
 			await persistRuntime(pi, ctx);
-			ctx.ui.notify(`Updated thinking level for \"${modeName}\"`, 'info');
+			ctx.ui.notify(`已更新模式 \"${modeName}\" 的思维等级`, 'info');
 
 			if (runtime.currentMode === modeName) {
 				await applyMode(pi, ctx, modeName);
@@ -896,8 +892,8 @@ async function editModeUI(pi: ExtensionAPI, ctx: ExtensionContext, mode: string)
 			continue;
 		}
 
-		if (action === 'Delete mode') {
-			const ok = await ctx.ui.confirm('Delete mode', `Delete mode \"${modeName}\"?`);
+		if (action === '删除模式') {
+			const ok = await ctx.ui.confirm('删除模式', `删除模式 \"${modeName}\"？`);
 			if (!ok) continue;
 
 			delete runtime.data.modes[modeName];
@@ -911,7 +907,7 @@ async function editModeUI(pi: ExtensionAPI, ctx: ExtensionContext, mode: string)
 				runtime.lastRealMode = 'default';
 			}
 			requestEditorRender?.();
-			ctx.ui.notify(`Deleted mode \"${modeName}\"`, 'info');
+			ctx.ui.notify(`已删除模式 \"${modeName}\"`, 'info');
 			return;
 		}
 	}
@@ -938,14 +934,14 @@ async function renameModeUI(
 	if (!ctx.hasUI) return undefined;
 
 	if (isDefaultModeName(oldName)) {
-		ctx.ui.notify(`Cannot rename default mode \"${oldName}\"`, 'warning');
+		ctx.ui.notify(`无法重命名默认模式 \"${oldName}\"`, 'warning');
 		return oldName;
 	}
 
 	await ensureRuntime(pi, ctx);
 
 	while (true) {
-		const raw = await ctx.ui.input(`Rename mode \"${oldName}\"`, oldName);
+		const raw = await ctx.ui.input(`重命名模式 \"${oldName}\"`, oldName);
 		if (raw === undefined) return undefined;
 
 		const newName = normalizeModeNameInput(raw);
@@ -964,7 +960,7 @@ async function renameModeUI(
 		if (runtime.lastRealMode === oldName) runtime.lastRealMode = newName;
 		requestEditorRender?.();
 
-		ctx.ui.notify(`Renamed \"${oldName}\" → \"${newName}\"`, 'info');
+		ctx.ui.notify(`已将 \"${oldName}\" 重命名为 \"${newName}\"`, 'info');
 		return newName;
 	}
 }
@@ -981,7 +977,7 @@ async function pickModelForModeUI(
 			? ctx.modelRegistry.find(spec.provider, spec.modelId)
 			: ctx.model;
 
-	// Use the session's resolved model scope (pi >= 0.83) so the selector
+	// SAFETY: Use the session's resolved model scope (pi >= 0.83) so the selector
 	// shows only models allowed by the current scope; falls back to empty
 	// (all models usable) when no scoping is configured. `?? []` guards the
 	// runtime: ModelSelectorComponent reads scopedModels.length in its
@@ -1024,10 +1020,8 @@ async function pickThinkingLevelForModeUI(
 	// Prefer the effective default by ordering it first.
 	const ordered = [effectiveDefault, ...options.filter((x) => x !== effectiveDefault)];
 
-	const label = supportsThinking
-		? 'Thinking level'
-		: 'Thinking level (model does not support reasoning)';
-	const choice = await ctx.ui.select(label, ordered);
+	const label = supportsThinking ? '思维等级' : '思维等级（模型不支持推理）';
+	const choice = await selectPanel(ctx, label, ordered);
 	if (!choice) return undefined;
 	if (choice === THINKING_UNSET_LABEL) return null;
 	if (availableLevels.includes(choice as ThinkingLevel)) return choice as ThinkingLevel;
@@ -1109,14 +1103,18 @@ class PromptEditor extends CustomEditor {
 		const minRightBorder = 1; // keep at least one border cell on the right
 		const maxLabelLen = Math.max(
 			0,
-			width - prefix.length - labelLeftSpace.length - labelRightSpace.length - minRightBorder,
+			width -
+				visibleWidth(prefix) -
+				visibleWidth(labelLeftSpace) -
+				visibleWidth(labelRightSpace) -
+				minRightBorder,
 		);
 		if (maxLabelLen <= 0) return lines;
-		if (label.length > maxLabelLen) label = label.slice(0, maxLabelLen);
+		label = truncateToWidth(label, maxLabelLen, '');
 
 		const labelChunk = `${labelLeftSpace}${label}${labelRightSpace}`;
 
-		const remaining = width - prefix.length - labelChunk.length;
+		const remaining = width - visibleWidth(prefix) - visibleWidth(labelChunk);
 		if (remaining < 0) return lines;
 
 		const right = '─'.repeat(Math.max(0, remaining));
@@ -1189,23 +1187,19 @@ export default function (pi: ExtensionAPI) {
 				if (!target) {
 					if (!ctx.hasUI) return;
 					const names = orderedModeNames(runtime.data.modes);
-					const selected = await ctx.ui.select(
-						'Store current selection into mode',
-						names,
-					);
+					const selected = await selectPanel(ctx, '将当前选择存储到模式', names);
 					if (!selected) return;
 					target = selected;
 				}
 
 				if (target === CUSTOM_MODE_NAME) {
-					if (ctx.hasUI)
-						ctx.ui.notify(`Cannot store into "${CUSTOM_MODE_NAME}"`, 'warning');
+					if (ctx.hasUI) ctx.ui.notify(`无法存储到 "${CUSTOM_MODE_NAME}"`, 'warning');
 					return;
 				}
 
 				const selection = customOverlay ?? getCurrentSelectionSpec(pi, ctx);
 				await storeSelectionIntoMode(pi, ctx, target, selection);
-				if (ctx.hasUI) ctx.ui.notify(`Stored current selection into "${target}"`, 'info');
+				if (ctx.hasUI) ctx.ui.notify(`已将当前选择存储到 "${target}"`, 'info');
 				return;
 			}
 

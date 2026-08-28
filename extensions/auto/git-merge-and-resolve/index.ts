@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { Container, SelectList, Text, type SelectItem } from '@earendil-works/pi-tui';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
+import { TitleBar } from '../../../src/tui/helpers.js';
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -168,47 +169,45 @@ async function handleCommand(_args: string, ctx: ExtensionCommandContext): Promi
 
 async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 	while (true) {
-		const onOffLabel = (val: boolean) => (val ? '[ON]' : '[OFF]');
+		const onOffLabel = (val: boolean) => (val ? '[开]' : '[关]');
 
 		const items: SelectItem[] = [
 			{
 				value: '__toggle_enabled',
-				label: `Auto Sync  ${onOffLabel(_config.enabled)}`,
+				label: `自动同步  ${onOffLabel(_config.enabled)}`,
 				description: _config.enabled
-					? `Enabled — fetch & ${_config.strategy} on agent_end`
-					: 'Disabled — no automatic action',
+					? `已启用 — agent_end 时 fetch 并 ${_config.strategy}`
+					: '已禁用 — 无自动操作',
 			},
 			{
 				value: '__toggle_strategy',
-				label: `Strategy  [${_config.strategy.toUpperCase()}]`,
+				label: `策略  [${_config.strategy.toUpperCase()}]`,
 				description:
 					_config.strategy === 'rebase'
-						? 'Rebase — linear history, no extra merge commits'
-						: 'Merge — preserve branch topology with merge commits',
+						? 'Rebase — 线性历史，无额外合并提交'
+						: 'Merge — 保留分支拓扑与合并提交',
 			},
 			{
 				value: '__toggle_notifications',
-				label: `Notifications  ${onOffLabel(_config.notifications)}`,
-				description: _config.notifications
-					? 'Conflict/merge info sent to conversation'
-					: 'Silent — no messages',
+				label: `通知  ${onOffLabel(_config.notifications)}`,
+				description: _config.notifications ? '冲突/合并信息发送到会话' : '静默 — 无消息',
 			},
 			{
 				value: '__toggle_widget',
-				label: `Status Widget  ${onOffLabel(_config.showWidget)}`,
-				description: _config.showWidget ? 'Shown at bottom of TUI' : 'Hidden',
+				label: `状态组件  ${onOffLabel(_config.showWidget)}`,
+				description: _config.showWidget ? '显示在 TUI 底部' : '隐藏',
 			},
 		];
 
 		const selected = await makeSelection(
 			ctx,
-			'Git Merge and Resolve Control Panel',
+			'Git Merge and Resolve 控制面板',
 			items,
-			'up/down navigate, enter toggle, esc close',
+			'up/down 导航, enter 开关, esc 关闭',
 		);
 
 		if (!selected) {
-			ctx.ui.notify('Git Merge and Resolve closed', 'info');
+			ctx.ui.notify('Git Merge and Resolve 已关闭', 'info');
 			return;
 		}
 
@@ -216,30 +215,27 @@ async function showMainMenu(ctx: ExtensionCommandContext): Promise<void> {
 			case '__toggle_enabled':
 				_config.enabled = !_config.enabled;
 				saveConfig(ctx.cwd, _config, 'project');
-				ctx.ui.notify(`Auto sync ${_config.enabled ? 'enabled' : 'disabled'}`, 'info');
+				ctx.ui.notify(`自动同步 ${_config.enabled ? '已启用' : '已禁用'}`, 'info');
 				updateWidget(ctx);
 				break;
 
 			case '__toggle_strategy':
 				_config.strategy = _config.strategy === 'rebase' ? 'merge' : 'rebase';
 				saveConfig(ctx.cwd, _config, 'project');
-				ctx.ui.notify(`Strategy set to ${_config.strategy}`, 'info');
+				ctx.ui.notify(`策略已设为 ${_config.strategy}`, 'info');
 				updateWidget(ctx);
 				break;
 
 			case '__toggle_notifications':
 				_config.notifications = !_config.notifications;
 				saveConfig(ctx.cwd, _config, 'project');
-				ctx.ui.notify(
-					`Notifications ${_config.notifications ? 'enabled' : 'disabled'}`,
-					'info',
-				);
+				ctx.ui.notify(`通知 ${_config.notifications ? '已启用' : '已禁用'}`, 'info');
 				break;
 
 			case '__toggle_widget':
 				_config.showWidget = !_config.showWidget;
 				saveConfig(ctx.cwd, _config, 'project');
-				ctx.ui.notify(`Status widget ${_config.showWidget ? 'shown' : 'hidden'}`, 'info');
+				ctx.ui.notify(`状态组件 ${_config.showWidget ? '已显示' : '已隐藏'}`, 'info');
 				updateWidget(ctx);
 				break;
 		}
@@ -257,8 +253,7 @@ async function makeSelection(
 ): Promise<string | null> {
 	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
-		container.addChild(new Text(theme.fg('accent', theme.bold(title)), 1, 0));
+		container.addChild(new TitleBar(title, (s: string) => theme.fg('accent', theme.bold(s))));
 
 		const selectList = new SelectList(items, Math.min(items.length, 10), {
 			selectedPrefix: (t) => theme.fg('accent', t),
@@ -335,7 +330,7 @@ export default function (pi: ExtensionAPI) {
 
 	// Register /git-merge-and-resolve command
 	pi.registerCommand('git-merge-and-resolve', {
-		description: 'Open Git Merge and Resolve control panel',
+		description: '打开 Git Merge and Resolve 控制面板',
 		handler: handleCommand,
 	});
 

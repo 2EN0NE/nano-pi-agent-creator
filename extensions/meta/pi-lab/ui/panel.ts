@@ -96,16 +96,17 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 		// ── 顶部边框（标题写在边框线上）──
 
 		function renderTopBorder(title: string) {
-			// 标题过长（如 custom-compaction:profile-satisfaction）时截断，避免窄终端顶边框超宽
-			const maxTitleWidth = Math.max(0, currentWidth - 6); // 预留 "┌──" + "  " + "┐"
+			// 纯横线范式（ADR-0023）：`── ` + 标题 + ` ` + 横线填满，无角
+			const topPrefix = '\u2500\u2500 '; // "── "
+			const maxTitleWidth = Math.max(0, currentWidth - visibleWidth(topPrefix) - 1);
 			const safeTitle = truncateToWidth(title, maxTitleWidth, '');
-			const topName = ` ${safeTitle} `;
-			const topFill = Math.max(0, currentWidth - 4 - visibleWidth(topName));
+			const topFill = Math.max(
+				0,
+				currentWidth - visibleWidth(topPrefix) - visibleWidth(safeTitle) - 1,
+			);
 			container.addChild(
 				new Text(
-					accent('\u250c\u2500\u2500') +
-						dim(topName) +
-						accent('\u2500'.repeat(topFill) + '\u2510'),
+					accent(topPrefix) + dim(safeTitle) + accent(' ' + '\u2500'.repeat(topFill)),
 					0,
 					0,
 				),
@@ -385,7 +386,7 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 				{ value: '__auto__', label: '(自动)' },
 				...info.arms.map((a) => ({ value: a.id, label: a.label ?? a.id })),
 			];
-			const list = new SelectList(items, items.length, {
+			const list = new SelectList(items, Math.min(items.length, 8), {
 				selectedPrefix: (s: string) => accent('> ' + s),
 				selectedText: (s: string) => accent(s),
 				description: (s: string) => dim(s),
@@ -528,14 +529,8 @@ export function showPanel(ctx: ExtensionCommandContext, manager: ExperimentManag
 					0,
 				),
 			);
-			// 底部边框 └─┘
-			container.addChild(
-				new Text(
-					accent('\u2514' + '\u2500'.repeat(Math.max(0, currentWidth - 2)) + '\u2518'),
-					0,
-					0,
-				),
-			);
+			// 底部边框（纯横线）
+			container.addChild(new Text(accent('\u2500'.repeat(currentWidth)), 0, 0));
 		}
 
 		// ── 重建 ──

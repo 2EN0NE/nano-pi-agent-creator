@@ -595,7 +595,7 @@ const renderSessionMessage: MessageRenderer = (message, { expanded }, theme) => 
 	}
 
 	const box = new Box(1, 1, (t) => theme.bg('customMessageBg', t));
-	const labelBase = theme.fg('customMessageLabel', `\x1b[1m[${message.customType}]\x1b[22m`);
+	const labelBase = theme.bold(theme.fg('customMessageLabel', `[${message.customType}]`));
 	const senderText = formatSenderInfo(senderInfo);
 	const label = senderText ? `${labelBase} ${theme.fg('dim', `from ${senderText}`)}` : labelBase;
 	box.addChild(new Text(label, 0, 0));
@@ -778,8 +778,9 @@ async function handleCommand(
 			return;
 		}
 
-		// Access internal session manager to rewind (type assertion to access non-readonly methods)
 		try {
+			// SAFETY: 访问内部 sessionManager 的 rewindTo（非 readonly 方法），
+			// 该方法在 pi 运行时恒存在，仅用于将 session tree 回退到指定 entry。
 			const sessionManager = ctx.sessionManager as unknown as {
 				rewindTo(id: string): void;
 			};
@@ -1032,7 +1033,7 @@ function updateStatus(ctx: ExtensionContext | null, enabled: boolean): void {
 		return;
 	}
 	const sessionId = ctx.sessionManager.getSessionId();
-	ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg('dim', `| session ${sessionId}`));
+	ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg('dim', `| 会话 ${sessionId}`));
 }
 
 function updateSessionEnv(ctx: ExtensionContext | null, enabled: boolean): void {
@@ -1180,7 +1181,7 @@ function registerSessionTool(pi: ExtensionAPI, state: SocketState): void {
 	log.debug('registerTool');
 	pi.registerTool({
 		name: 'send_to_session',
-		label: 'Send To Session', // 发送到会话
+		label: '发送到会话',
 		description: `通过控制 socket 与另一个运行中的 pi 会话交互。
 
 操作（Actions）：
@@ -1560,7 +1561,7 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 					(details?.error as string) || result.content[0]?.type === 'text'
 						? (result.content[0] as { type: 'text'; text: string }).text
 						: '未知错误';
-				return new Text(theme.fg('error', '✗ ') + theme.fg('error', errorMsg), 0, 0);
+				return new Text(theme.fg('error', '[FAIL] ') + theme.fg('error', errorMsg), 0, 0);
 			}
 
 			// Detect action from details structure
@@ -1572,7 +1573,7 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 			// get_message or turn_end result with message
 			if (hasMessage) {
 				const message = details.message as ExtractedMessage;
-				const icon = theme.fg('success', '✓');
+				const icon = theme.fg('success', '[OK]');
 
 				if (expanded) {
 					const container = new Container();
@@ -1607,7 +1608,7 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 			if (hasSummary) {
 				const summary = details.summary as string;
 				const model = details.model as string | undefined;
-				const icon = theme.fg('success', '✓');
+				const icon = theme.fg('success', '[OK]');
 
 				if (expanded) {
 					const container = new Container();
@@ -1633,7 +1634,7 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 			// clear result
 			if (hasCleared) {
 				const alreadyAtRoot = details.alreadyAtRoot as boolean | undefined;
-				const icon = theme.fg('success', '✓');
+				const icon = theme.fg('success', '[OK]');
 				const msg = alreadyAtRoot ? '会话已在初始状态' : '会话已清除';
 				return new Text(icon + ' ' + theme.fg('muted', msg), 0, 0);
 			}
@@ -1641,7 +1642,7 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 			// send result (no wait or message_processed)
 			if (details && 'delivered' in details) {
 				const mode = details.mode as string | undefined;
-				const icon = theme.fg('success', '✓');
+				const icon = theme.fg('success', '[OK]');
 				let text = icon + theme.fg('muted', ' 消息已送达');
 				if (mode) text += theme.fg('dim', ` (${mode})`);
 				return new Text(text, 0, 0);
@@ -1650,7 +1651,7 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 			// Fallback - just show the text content
 			const text = result.content[0];
 			const content = text?.type === 'text' ? text.text : '（无输出）';
-			return new Text(theme.fg('success', '✓ ') + theme.fg('muted', content), 0, 0);
+			return new Text(theme.fg('success', '[OK] ') + theme.fg('muted', content), 0, 0);
 		},
 	});
 }
@@ -1663,7 +1664,7 @@ function registerListSessionsTool(pi: ExtensionAPI): void {
 	log.debug('registerTool');
 	pi.registerTool({
 		name: 'list_sessions',
-		label: 'List Sessions', // 列出会话
+		label: '列出会话',
 		description:
 			'列出暴露控制 socket 的活跃会话（可附带会话名称）。仅用于发现；在 shell/bash 中获取当前会话 ID 请使用 $PI_SESSION_ID。',
 		parameters: Type.Object({}),

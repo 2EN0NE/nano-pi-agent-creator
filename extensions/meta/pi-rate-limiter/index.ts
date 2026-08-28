@@ -39,9 +39,11 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionCommandContext,
+	Theme,
 } from '@earendil-works/pi-coding-agent';
-import { getSettingsListTheme } from '@earendil-works/pi-coding-agent';
-import { Container, type SettingItem, SettingsList } from '@earendil-works/pi-tui';
+import { getSettingsListTheme, DynamicBorder } from '@earendil-works/pi-coding-agent';
+import { Container, type SettingItem, SettingsList, Text } from '@earendil-works/pi-tui';
+import { TitleBar } from '../../../src/tui/helpers.js';
 import { AdaptiveLearner } from './adaptive-learner.js';
 import { GlobalRateLimiter } from './global-state.js';
 import { estimateTokensAccurate } from './token-counter.js';
@@ -177,21 +179,23 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 		};
 	}
 
-	// ANSI color codes for status-line coloring
-	const C = {
-		green: '\x1b[92m', // bright green
-		yellow: '\x1b[93m', // bright yellow
-		red: '\x1b[91m', // bright red
-		reset: '\x1b[0m',
-	};
-
-	function colorizeByUsage(text: string, percent: number): string {
-		if (percent >= 0.8) return C.red + text + C.reset;
-		if (percent >= 0.6) return C.yellow + text + C.reset;
-		return C.green + text + C.reset;
+	// 状态栏着色走 theme 语义色（setStatus 接受 theme.fg 生成的字符串，禁用硬编码 ANSI）
+	// theme 由调用方显式传入，不读模块级 activeCtx（消除隐藏全局态）
+	function statusColor(
+		color: 'success' | 'warning' | 'error',
+		text: string,
+		theme: Theme | undefined,
+	): string {
+		return theme ? theme.fg(color, text) : text;
 	}
 
-	function buildStatusText(): string {
+	function colorizeByUsage(text: string, percent: number, theme: Theme | undefined): string {
+		if (percent >= 0.8) return statusColor('error', text, theme);
+		if (percent >= 0.6) return statusColor('warning', text, theme);
+		return statusColor('success', text, theme);
+	}
+
+	function buildStatusText(theme: Theme | undefined): string {
 		const now = Date.now();
 		let requests: number;
 		let tokens: number;
@@ -214,7 +218,7 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 
 		if (isWaitingForWindow) {
 			const sec = Math.ceil((60000 - (now % 60000)) / 1000);
-			return '|' + C.yellow + `⏳ 限流等待 ${sec}s` + C.reset;
+			return '|' + statusColor('warning', `[等待] 限流等待 ${sec}s`, theme);
 		}
 
 		const modelPrefix = lastModelId ? `[${lastModelId}] ` : '';
@@ -229,12 +233,12 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 		const percentTok = maxTok > 0 ? tokens / maxTok : 0;
 		const usagePercent = Math.max(percentReq, percentTok);
 
-		return `|${prefix}: ` + colorizeByUsage(`${reqStr} · ${tokStr}`, usagePercent);
+		return `|${prefix}: ` + colorizeByUsage(`${reqStr} · ${tokStr}`, usagePercent, theme);
 	}
 
 	function refreshStatus() {
 		if (!activeCtx?.hasUI) return;
-		activeCtx.ui.setStatus(STATUS_KEY, buildStatusText());
+		activeCtx.ui.setStatus(STATUS_KEY, buildStatusText(activeCtx.ui.theme));
 	}
 
 	function startStatusTimer() {
@@ -501,19 +505,18 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 					}, 120_000);
 					const container = new Container();
 
-					// Title + instructions
+					// Title + instructions（ADR-0023：顶边框嵌名，标题用插件英文名）
 					container.addChild(
-						new (class {
-							render(_w: number) {
-								return [
-									theme.fg('accent', theme.bold('Rate Limiter 设置')),
-									theme.fg('dim', '  ↑↓ 移动 · Enter/Space 修改 · Esc/q 关闭'),
-									'',
-								];
-							}
-							invalidate() {}
-						})(),
+						new TitleBar('Rate Limiter', (s) => theme.fg('accent', theme.bold(s))),
 					);
+					container.addChild(
+						new Text(
+							theme.fg('dim', '  ↑↓ 移动 · Enter/Space 修改 · Esc/q 关闭'),
+							1,
+							0,
+						),
+					);
+					container.addChild(new Text('', 1, 0));
 
 					const LABELS: Record<string, string> = {
 						off: '关闭',
@@ -598,7 +601,7 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 							},
 							{
 								id: 'done',
-								label: '✓ 完成 (关闭面板)',
+								label: '[OK] 完成 (关闭面板)',
 								description:
 									'选中此项并按 Enter 或 Space 关闭面板，之后可再次使用 /rate-limit。',
 								currentValue: '',
@@ -853,6 +856,7 @@ export default function rateLimiterExtension(pi: ExtensionAPI) {
 					}
 
 					container.addChild(settingsList);
+					container.addChild(new DynamicBorder((s) => theme.fg('accent', s)));
 
 					return {
 						render(w: number) {

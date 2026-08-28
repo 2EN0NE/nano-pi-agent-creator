@@ -77,6 +77,13 @@ setup_sandbox() {
 			"$test_home/node_modules/@zenone/pi-logger"
 	fi
 
+	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '<root>/src/tui/helpers.js' 的扩展在沙箱内解析
+	#（扩展在 $test_home/.pi/extensions/<name>，相对路径 ../../../src/tui 即 $test_home/src/tui）
+	if [[ -d "$ROOT_DIR/src/tui" ]]; then
+		mkdir -p "$test_home/src"
+		cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
+	fi
+
 	# 初始化 git（某些扩展需要 git 工作目录）
 	if ! git -C "$test_home" rev-parse --git-dir &>/dev/null; then
 		git -C "$test_home" init --initial-branch main &>/dev/null || true

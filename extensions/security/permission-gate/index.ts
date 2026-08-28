@@ -15,6 +15,7 @@
 
 import { Container, SelectList, Text, type SelectItem } from '@earendil-works/pi-tui';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
+import { TitleBar } from '../../../src/tui/helpers.js';
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -397,9 +398,13 @@ async function handleToolCall(
 		}
 
 		// 显示确认对话框 — 展示原始命令 + 拆解后的子命令
-		const subCmdList = results.map((r) => `  ${r.dangerous ? '⚠ ' : '  '}${r.cmd}`).join('\n');
+		const subCmdList = results.map((r) => `  ${r.dangerous ? '! ' : '  '}${r.cmd}`).join('\n');
 		const confirmMessage = `${fullCommand}\n\nSub-commands:\n${subCmdList}`;
-		const allowed = await showConfirmDestructive(ctx, '⚠  Dangerous Command', confirmMessage);
+		const allowed = await showConfirmDestructive(
+			ctx,
+			'[DANGER] Dangerous Command',
+			confirmMessage,
+		);
 
 		if (allowed) {
 			log.info('User allowed: %s', fullCommand.slice(0, 80));
@@ -419,7 +424,7 @@ async function handleToolCall(
 				});
 			}
 
-			event.input.command = `echo "✓ User approved"\n${fullCommand}`;
+			event.input.command = `echo "[OK] User approved"\n${fullCommand}`;
 			updateWidgetStatus(ctx, state);
 			return undefined;
 		}
@@ -469,7 +474,7 @@ async function handleToolCall(
 
 	const dimSummary = [...autoDims].join(',');
 	log.info('Auto-approved (%s): %s', dimSummary || 'graduated', fullCommand.slice(0, 80));
-	event.input.command = `echo "✓ Auto-approved (${dimSummary || 'graduated'})"\n${fullCommand}`;
+	event.input.command = `echo "[OK] Auto-approved (${dimSummary || 'graduated'})"\n${fullCommand}`;
 	updateWidgetStatus(ctx, state);
 	return undefined;
 }
@@ -486,17 +491,17 @@ async function handlePermissionGateCommand(
 	if (!ctx.hasUI) {
 		// Print mode: output config as text
 		const lines = [
-			'Permission Gate Configuration:',
-			`  Enabled: ${state.config.enabled}`,
-			`  Dynamic Policy: ${state.config.dynamicPolicyEnabled}`,
-			`  Scope: ${state.config.dynamicPolicy.scope}`,
-			`  Patterns (${state.config.patterns.length}):`,
+			'权限门配置：',
+			`  已启用: ${state.config.enabled}`,
+			`  动态策略: ${state.config.dynamicPolicyEnabled}`,
+			`  范围: ${state.config.dynamicPolicy.scope}`,
+			`  模式 (${state.config.patterns.length}):`,
 			...state.config.patterns.map((p) => `    - ${p}`),
-			`  Thresholds:`,
-			`    Same Command: ${state.config.dynamicPolicy.thresholds.sameCommand}`,
-			`    Same Tool: ${state.config.dynamicPolicy.thresholds.sameTool}`,
-			`    Same Folder: ${state.config.dynamicPolicy.thresholds.sameFolder}`,
-			`  Approval Counts: ${summarizeApprovalCounts(state)}`,
+			`  阈值:`,
+			`    相同命令: ${state.config.dynamicPolicy.thresholds.sameCommand}`,
+			`    相同工具: ${state.config.dynamicPolicy.thresholds.sameTool}`,
+			`    相同目录: ${state.config.dynamicPolicy.thresholds.sameFolder}`,
+			`  放行计数: ${summarizeApprovalCounts(state)}`,
 		];
 		ctx.ui.notify(lines.join('\n'), 'info');
 		return;
@@ -511,10 +516,10 @@ async function handlePermissionGateCommand(
 function summarizeApprovalCounts(state: PermissionGateState): string {
 	const summary = getStrategySummary(state.counts, state.config.dynamicPolicy.thresholds);
 	const parts: string[] = [];
-	if (summary.cmd.total > 0) parts.push(`Cmd(${summary.cmd.total})`);
-	if (summary.tool.total > 0) parts.push(`Tool(${summary.tool.total})`);
-	if (summary.dir.total > 0) parts.push(`Dir(${summary.dir.total})`);
-	return parts.length > 0 ? parts.join(' - ') : 'No strategies';
+	if (summary.cmd.total > 0) parts.push(`命令(${summary.cmd.total})`);
+	if (summary.tool.total > 0) parts.push(`工具(${summary.tool.total})`);
+	if (summary.dir.total > 0) parts.push(`目录(${summary.dir.total})`);
+	return parts.length > 0 ? parts.join(' - ') : '无策略';
 }
 
 /**
@@ -599,22 +604,22 @@ async function showMainMenu(
 		const items: SelectItem[] = [
 			{
 				value: '__toggle_gate',
-				label: `[${state.config.enabled ? 'X' : ' '}]  Permission Gate`,
+				label: `[${state.config.enabled ? 'X' : ' '}]  权限门`,
 				description: state.config.enabled
-					? 'Enabled — commands are intercepted'
-					: 'Disabled — all commands pass through',
+					? '已启用——命令会被拦截'
+					: '已禁用——所有命令直接放行',
 			},
 			{
 				value: '__edit_patterns',
-				label: '[Patterns]  Intercepted Commands',
-				description: `${state.config.patterns.length} patterns configured`,
+				label: '[模式]  被拦截的命令',
+				description: `已配置 ${state.config.patterns.length} 个模式`,
 			},
 			{
 				value: '__toggle_dynamic',
-				label: `[${state.config.dynamicPolicyEnabled ? 'X' : ' '}]  Dynamic Policy`,
+				label: `[${state.config.dynamicPolicyEnabled ? 'X' : ' '}]  动态策略`,
 				description: state.config.dynamicPolicyEnabled
-					? 'Enabled — auto-approve within thresholds'
-					: 'Disabled — always ask',
+					? '已启用——阈值内自动放行'
+					: '已禁用——始终询问',
 			},
 		];
 
@@ -622,47 +627,47 @@ async function showMainMenu(
 		if (state.config.dynamicPolicyEnabled) {
 			items.push({
 				value: '__edit_scope',
-				label: '[Scope]',
-				description: `Folder: ${state.config.dynamicPolicy.scope}`,
+				label: '[范围]',
+				description: `目录: ${state.config.dynamicPolicy.scope}`,
 			});
 			items.push({
 				value: '__edit_thresholds',
-				label: '[Thresholds]',
-				description: `Cmd:${state.config.dynamicPolicy.thresholds.sameCommand}  Tool:${state.config.dynamicPolicy.thresholds.sameTool}  Folder:${state.config.dynamicPolicy.thresholds.sameFolder}`,
+				label: '[阈值]',
+				description: `命令:${state.config.dynamicPolicy.thresholds.sameCommand}  工具:${state.config.dynamicPolicy.thresholds.sameTool}  目录:${state.config.dynamicPolicy.thresholds.sameFolder}`,
 			});
 		}
 
 		items.push({
 			value: '__view_strategies',
-			label: `[Strategies]  Current Allowed  ${summarizeApprovalCounts(state)}`,
-			description: 'View and manage strategies & history',
+			label: `[策略]  当前放行  ${summarizeApprovalCounts(state)}`,
+			description: '查看和管理策略与历史',
 		});
 
 		// Widget 控制选项
 		items.push({
 			value: '__toggle_widget_show',
-			label: `[Widget]  ${state.config.widget.show ? 'Shown' : 'Hidden'}`,
-			description: 'Toggle widget display in status bar',
+			label: `[组件]  ${state.config.widget.show ? '显示' : '隐藏'}`,
+			description: '切换状态栏中的组件显示',
 		});
 		items.push({
 			value: '__toggle_widget_detail',
-			label: `[Widget Detail]  ${state.config.widget.detailLevel === 'full' ? 'Full' : 'Gate Only'}`,
+			label: `[组件详情]  ${state.config.widget.detailLevel === 'full' ? '完整' : '仅门控'}`,
 			description:
 				state.config.widget.detailLevel === 'full'
-					? 'Show gate + cmd/tool/folder details'
-					: 'Show gate summary only',
+					? '显示门控 + 命令/工具/目录详情'
+					: '仅显示门控摘要',
 		});
 
 		const selected = await makeCustomSelection(
 			ctx,
-			'Permission Gate Control Panel',
+			'权限门控制面板',
 			items,
-			'up/down navigate  enter select  esc close',
+			'up/down 导航  enter 选择  esc 关闭',
 			lastMenuIndex,
 		);
 
 		if (!selected) {
-			ctx.ui.notify('Permission Gate closed', 'info');
+			ctx.ui.notify('Permission Gate 已关闭', 'info');
 			return;
 		}
 
@@ -675,7 +680,7 @@ async function showMainMenu(
 				state.config.enabled = !state.config.enabled;
 				saveConfig(ctx.cwd, state.config, 'project');
 				ctx.ui.notify(
-					`Permission Gate ${state.config.enabled ? 'enabled' : 'disabled'}`,
+					`Permission Gate ${state.config.enabled ? '已启用' : '已禁用'}`,
 					state.config.enabled ? 'info' : 'warning',
 				);
 				updateWidgetStatus(ctx, state);
@@ -691,7 +696,7 @@ async function showMainMenu(
 				state.config.dynamicPolicyEnabled = !state.config.dynamicPolicyEnabled;
 				saveConfig(ctx.cwd, state.config, 'project');
 				ctx.ui.notify(
-					`Dynamic Policy ${state.config.dynamicPolicyEnabled ? 'enabled' : 'disabled'}`,
+					`动态策略 ${state.config.dynamicPolicyEnabled ? '已启用' : '已禁用'}`,
 					'info',
 				);
 				updateWidgetStatus(ctx, state);
@@ -700,19 +705,19 @@ async function showMainMenu(
 
 			case '__edit_scope': {
 				const newScopeVal = await ctx.ui.input(
-					'Scope Folder Path',
+					'范围目录路径',
 					state.config.dynamicPolicy.scope,
 				);
 				if (newScopeVal === undefined || !newScopeVal.trim()) break;
 				const trimmedScope = newScopeVal.trim();
 				const absScopePath = resolve(ctx.cwd, trimmedScope);
 				if (!existsSync(absScopePath)) {
-					ctx.ui.notify(`Path does not exist: ${trimmedScope}`, 'error');
+					ctx.ui.notify(`路径不存在：${trimmedScope}`, 'error');
 					break;
 				}
 				state.config.dynamicPolicy.scope = trimmedScope;
 				saveConfig(ctx.cwd, state.config, 'project');
-				ctx.ui.notify(`Scope set to: ${trimmedScope}`, 'info');
+				ctx.ui.notify(`范围已设置为：${trimmedScope}`, 'info');
 				break;
 			}
 
@@ -741,7 +746,7 @@ async function showMainMenu(
 			case '__toggle_widget_show': {
 				state.config.widget.show = !state.config.widget.show;
 				saveConfig(ctx.cwd, state.config, 'project');
-				ctx.ui.notify(`Widget ${state.config.widget.show ? 'shown' : 'hidden'}`, 'info');
+				ctx.ui.notify(`组件 ${state.config.widget.show ? '已显示' : '已隐藏'}`, 'info');
 				updateWidgetStatus(ctx, state);
 				break;
 			}
@@ -751,7 +756,7 @@ async function showMainMenu(
 					state.config.widget.detailLevel === 'full' ? 'gate' : 'full';
 				saveConfig(ctx.cwd, state.config, 'project');
 				ctx.ui.notify(
-					`Widget detail: ${state.config.widget.detailLevel === 'full' ? 'Full' : 'Gate Only'}`,
+					`组件详情：${state.config.widget.detailLevel === 'full' ? '完整' : '仅门控'}`,
 					'info',
 				);
 				updateWidgetStatus(ctx, state);
@@ -776,8 +781,7 @@ async function makeCustomSelection(
 ): Promise<string | null> {
 	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
-		container.addChild(new Text(theme.fg('accent', theme.bold(title)), 1, 0));
+		container.addChild(new TitleBar(title, (s: string) => theme.fg('accent', theme.bold(s))));
 
 		const selectList = new SelectList(items, Math.min(items.length, 10), {
 			selectedPrefix: (t) => theme.fg('accent', t),
@@ -823,34 +827,34 @@ async function editPatternsMenu(
 		}));
 
 		// 添加操作选项
-		items.push({ value: '__add_pattern', label: '[Add] Add custom pattern' });
-		items.push({ value: '__back', label: '[Back] Back to main menu' });
+		items.push({ value: '__add_pattern', label: '[添加] 添加自定义规则' });
+		items.push({ value: '__back', label: '[返回] 返回主菜单' });
 
 		const selected = await makeCustomSelection(
 			ctx,
-			'Intercepted Commands',
+			'被拦截的命令',
 			items,
-			'up/down navigate  enter to remove  esc back',
+			'up/down 导航  enter 移除  esc 返回',
 		);
 
 		if (!selected || selected === '__back') return;
 
 		if (selected === '__add_pattern') {
-			const newPattern = await ctx.ui.input('Enter regex pattern', '');
+			const newPattern = await ctx.ui.input('输入正则模式', '');
 			if (newPattern && newPattern.trim()) {
 				const trimmed = newPattern.trim();
 				// 检查重复
 				if (state.config.patterns.includes(trimmed)) {
-					ctx.ui.notify(`Pattern already exists: ${trimmed}`, 'error');
+					ctx.ui.notify(`模式已存在：${trimmed}`, 'error');
 					continue;
 				}
 				try {
 					new RegExp(trimmed);
 					state.config.patterns.push(trimmed);
 					saveConfig(ctx.cwd, state.config, 'project');
-					ctx.ui.notify(`Pattern added: ${trimmed}`, 'info');
+					ctx.ui.notify(`已添加模式：${trimmed}`, 'info');
 				} catch {
-					ctx.ui.notify(`Invalid regex: ${trimmed}`, 'error');
+					ctx.ui.notify(`无效的正则表达式：${trimmed}`, 'error');
 				}
 			}
 			continue;
@@ -862,13 +866,13 @@ async function editPatternsMenu(
 		if (pattern) {
 			const confirmed = await showConfirmDestructive(
 				ctx,
-				'Remove Pattern?',
-				`Remove pattern:\n\`${pattern}\``,
+				'移除规则？',
+				`移除模式：\n\`${pattern}\``,
 			);
 			if (confirmed) {
 				state.config.patterns.splice(idx, 1);
 				saveConfig(ctx.cwd, state.config, 'project');
-				ctx.ui.notify('Pattern removed', 'info');
+				ctx.ui.notify('规则已移除', 'info');
 			}
 		}
 	}
@@ -885,31 +889,31 @@ async function editThresholdsMenu(
 		const items: SelectItem[] = [
 			{
 				value: '__threshold_sameCommand',
-				label: `[sameCommand]  Same Command Threshold`,
-				description: `Current: ${state.config.dynamicPolicy.thresholds.sameCommand}`,
+				label: `[同命令]  相同命令阈值`,
+				description: `当前：${state.config.dynamicPolicy.thresholds.sameCommand}`,
 			},
 			{
 				value: '__threshold_sameTool',
-				label: `[sameTool]  Same Tool Threshold`,
-				description: `Current: ${state.config.dynamicPolicy.thresholds.sameTool}`,
+				label: `[同工具]  相同工具阈值`,
+				description: `当前：${state.config.dynamicPolicy.thresholds.sameTool}`,
 			},
 			{
 				value: '__threshold_sameFolder',
-				label: `[sameFolder]  Same Folder Threshold`,
-				description: `Current: ${state.config.dynamicPolicy.thresholds.sameFolder}`,
+				label: `[同目录]  相同目录阈值`,
+				description: `当前：${state.config.dynamicPolicy.thresholds.sameFolder}`,
 			},
 			{
 				value: '__back',
-				label: '[Back] Back',
-				description: 'Return to main menu',
+				label: '[返回] 返回',
+				description: '返回主菜单',
 			},
 		];
 
 		const selected = await makeCustomSelection(
 			ctx,
-			'Threshold Configuration',
+			'阈值配置',
 			items,
-			'up/down navigate  enter select  esc back',
+			'up/down 导航  enter 选择  esc 返回',
 		);
 
 		if (!selected || selected === '__back') return;
@@ -924,15 +928,15 @@ async function editThresholdsMenu(
 		if (!configKey) continue;
 
 		const currentValue = state.config.dynamicPolicy.thresholds[configKey];
-		const input = await ctx.ui.input(`Enter threshold for ${configKey}`, String(currentValue));
+		const input = await ctx.ui.input(`为 ${configKey} 输入阈值`, String(currentValue));
 		if (input !== undefined) {
 			const num = parseInt(input.trim(), 10);
 			if (!Number.isNaN(num) && num >= 0) {
 				(state.config.dynamicPolicy.thresholds as Record<string, number>)[configKey] = num;
 				saveConfig(ctx.cwd, state.config, 'project');
-				ctx.ui.notify(`${configKey} threshold set to ${num}`, 'info');
+				ctx.ui.notify(`${configKey} 阈值已设置为 ${num}`, 'info');
 			} else {
-				ctx.ui.notify('Invalid number, please enter a non-negative integer', 'error');
+				ctx.ui.notify('无效数字，请输入非负整数', 'error');
 			}
 		}
 	}
@@ -948,7 +952,7 @@ export default function permissionGateExtension(pi: ExtensionAPI) {
 
 	// 1. Register CLI flag
 	pi.registerFlag('no-permission-gate', {
-		description: 'Disable permission gate entirely',
+		description: '完全禁用权限门',
 		type: 'boolean',
 		default: false,
 	});
@@ -965,7 +969,7 @@ export default function permissionGateExtension(pi: ExtensionAPI) {
 			});
 			updateWidgetStatus(ctx, state);
 			if (ctx.hasUI) {
-				ctx.ui.notify('Permission Gate disabled via --no-permission-gate', 'warning');
+				ctx.ui.notify('Permission Gate 已通过 --no-permission-gate 禁用', 'warning');
 			}
 			return;
 		}
@@ -991,10 +995,10 @@ export default function permissionGateExtension(pi: ExtensionAPI) {
 
 	// 3. Register /permission-gate command
 	pi.registerCommand('permission-gate', {
-		description: 'Open Permission Gate control panel',
+		description: '打开权限门控制面板',
 		handler: async (args, ctx) => {
 			if (!state) {
-				ctx.ui.notify('Permission Gate not initialized', 'error');
+				ctx.ui.notify('权限门未初始化', 'error');
 				return;
 			}
 			await handlePermissionGateCommand(args, ctx, state);

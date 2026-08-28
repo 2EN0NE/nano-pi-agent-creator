@@ -12,12 +12,14 @@
  *   - Chinese labels present
  */
 import { describe, it, expect } from 'vitest';
-import { assertWithinWidth, stripAnsi } from '../../../src/tui-testing/index.js';
+import { assertWithinWidth, stripAnsi, makeMockTheme } from '../../../src/tui-testing/index.js';
 import {
 	SettingsComponent,
 	type SettingsPanelData,
 	type SettingsUIAction,
 } from '../../../extensions/context/custom-compaction/settings-ui.js';
+
+const mockTheme: any = makeMockTheme();
 
 function makeData(overrides: Partial<SettingsPanelData> = {}): SettingsPanelData {
 	return {
@@ -84,14 +86,20 @@ describe('SettingsComponent render width (TUI 铁律)', () => {
 
 	for (const w of widths) {
 		it(`main mode does not exceed width at ${w}`, () => {
-			const comp = new SettingsComponent(makeData(), () => {});
+			const comp = new SettingsComponent(makeData(), () => {}, mockTheme);
 			const lines = comp.render(w);
 			assertWithinWidth(lines, w);
 			expect(lines.length).toBeGreaterThan(5);
 		});
 
 		it(`fields mode does not exceed width at ${w}`, () => {
-			const comp = new SettingsComponent(makeData(), () => {}, 'fields', 'default');
+			const comp = new SettingsComponent(
+				makeData(),
+				() => {},
+				mockTheme,
+				'fields',
+				'default',
+			);
 			const lines = comp.render(w);
 			assertWithinWidth(lines, w);
 			expect(lines.length).toBeGreaterThan(5);
@@ -103,14 +111,14 @@ describe('SettingsComponent render width (TUI 铁律)', () => {
 			modelLine:
 				'当前模型: openai/gpt-4o-turbo-2024-11-20-preview > Profile: EESV Smart Compact（很长很长的描述）',
 		});
-		const comp = new SettingsComponent(data, () => {});
+		const comp = new SettingsComponent(data, () => {}, mockTheme);
 		const lines = comp.render(60);
 		assertWithinWidth(lines, 60);
 	});
 
 	it('very narrow width (20) does not crash (title line truncated)', () => {
 		// 标题行（╭── custom-compaction ...）在宽度 <24 时曾超出终端宽度
-		const comp = new SettingsComponent(makeData(), () => {});
+		const comp = new SettingsComponent(makeData(), () => {}, mockTheme);
 		for (const w of [20, 22, 24, 28]) {
 			const lines = comp.render(w);
 			assertWithinWidth(lines, w);
@@ -122,7 +130,7 @@ describe('SettingsComponent render width (TUI 铁律)', () => {
 
 describe('SettingsComponent content', () => {
 	it('shows Chinese labels and profile names', () => {
-		const comp = new SettingsComponent(makeData(), () => {});
+		const comp = new SettingsComponent(makeData(), () => {}, mockTheme);
 		const text = stripAnsi(comp.render(80).join('\n'));
 		expect(text).toContain('Custom Compaction 设置');
 		expect(text).toContain('Default');
@@ -132,23 +140,25 @@ describe('SettingsComponent content', () => {
 	});
 
 	it('footer shows add-profile hint', () => {
-		const comp = new SettingsComponent(makeData(), () => {});
+		const comp = new SettingsComponent(makeData(), () => {}, mockTheme);
 		const text = stripAnsi(comp.render(80).join('\n'));
 		expect(text).toContain('n 新增');
 		expect(text).toContain('Esc 关闭');
 	});
 
-	it('top border embeds the plugin name (╭── custom-compaction ─...╮)', () => {
-		const comp = new SettingsComponent(makeData(), () => {});
+	it('top border embeds the plugin name (── custom-compaction ──)', () => {
+		const comp = new SettingsComponent(makeData(), () => {}, mockTheme);
 		const first = stripAnsi(comp.render(80)[0]);
-		expect(first.trimEnd().startsWith('╭── custom-compaction')).toBe(true);
-		expect(first.trimEnd().endsWith('╮')).toBe(true);
+		expect(first.trimEnd().startsWith('── custom-compaction')).toBe(true);
+		// 顶边框是纯横线，无圆角字符（ADR-0023）
+		expect(first).not.toContain('╭');
+		expect(first).not.toContain('╮');
 		// 顶边框总宽不超视口
 		assertWithinWidth(comp.render(80), 80);
 	});
 
 	it('shows experiment status when lab active', () => {
-		const comp = new SettingsComponent(makeData(), () => {});
+		const comp = new SettingsComponent(makeData(), () => {}, mockTheme);
 		const text = stripAnsi(comp.render(80).join('\n'));
 		expect(text).toContain('mechanism-strategy');
 		expect(text).toContain('样本=12');
@@ -156,13 +166,13 @@ describe('SettingsComponent content', () => {
 
 	it('shows lab-inactive hint when pi-lab unavailable', () => {
 		const data = makeData({ lab: { active: false, experiments: [] } });
-		const comp = new SettingsComponent(data, () => {});
+		const comp = new SettingsComponent(data, () => {}, mockTheme);
 		const text = stripAnsi(comp.render(80).join('\n'));
 		expect(text).toContain('pi-lab 未接入');
 	});
 
 	it('fields mode shows field labels and values', () => {
-		const comp = new SettingsComponent(makeData(), () => {}, 'fields', 'default');
+		const comp = new SettingsComponent(makeData(), () => {}, mockTheme, 'fields', 'default');
 		const text = stripAnsi(comp.render(80).join('\n'));
 		expect(text).toContain('触发阈值');
 		expect(text).toContain('20%');
@@ -179,7 +189,13 @@ describe('SettingsComponent keyboard', () => {
 		profileId: string | null = null,
 	) {
 		const actions: SettingsUIAction[] = [];
-		const comp = new SettingsComponent(data, (a) => actions.push(a), mode, profileId);
+		const comp = new SettingsComponent(
+			data,
+			(a) => actions.push(a),
+			mockTheme,
+			mode,
+			profileId,
+		);
 		return { comp, actions };
 	}
 

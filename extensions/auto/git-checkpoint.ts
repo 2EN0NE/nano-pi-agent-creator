@@ -7,6 +7,7 @@
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
+import { selectPanel } from '../../src/tui/select-panel.js';
 
 const log = createLogger('git-checkpoint');
 
@@ -42,14 +43,14 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const choice = await ctx.ui.select('Restore code state?', [
-			'Yes, restore code to that point',
-			'No, keep current code',
+		const choice = await selectPanel(ctx, '恢复代码状态？', [
+			'是，恢复到该时间点',
+			'否，保留当前代码',
 		]);
 
-		if (choice?.startsWith('Yes')) {
+		if (choice?.startsWith('是')) {
 			await pi.exec('git', ['stash', 'apply', ref]);
-			ctx.ui.notify('Code restored to checkpoint', 'info');
+			ctx.ui.notify('代码已恢复到检查点', 'info');
 		}
 	});
 

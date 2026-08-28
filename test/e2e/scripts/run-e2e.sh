@@ -267,6 +267,14 @@ run_pi_and_check() {
 		fi
 	fi
 
+	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '<root>/src/tui/helpers.js' 的扩展在沙箱内解析
+	#（print 路径扩展在 $test_home/.pi/extensions/<name>，相对路径 ../../src/tui 即 $test_home/src/tui；
+	#  与 TUI 路径 tui_setup_sandbox_home 的 $HOME/.pi/src/tui 对应）。
+	if [[ -d "$ROOT_DIR/src/tui" ]]; then
+		mkdir -p "$test_home/src"
+		cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
+	fi
+
 	local padded
 	padded=$(printf '%03d' "$CASE_INDEX")
 	local pi_stdout_file="$CASE_DIR/${padded}-pi-stdout.log"

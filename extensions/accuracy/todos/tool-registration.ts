@@ -32,6 +32,7 @@ import {
 	getTodoTitle,
 	getTodoStatus,
 	renderAssignmentSuffix,
+	todoStatusLabel,
 } from './storage.js';
 
 const log = createLogger('todos:tool');
@@ -41,12 +42,12 @@ export function registerTool(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: 'todo',
-		label: 'Todo',
+		label: '待办',
 		description:
-			`Manage file-based todos in ${todosDirLabel} (list, list-all, get, create, update, append, delete, claim, release). ` +
-			'Title is the short summary; body is long-form markdown notes (update replaces, append adds). ' +
-			'Todo ids are shown as TODO-<hex>; id parameters accept TODO-<hex> or the raw hex filename. ' +
-			'Claim tasks before working on them to avoid conflicts, and close them when complete.',
+			`管理 ${todosDirLabel} 中基于文件的待办（list、list-all、get、create、update、append、delete、claim、release）。` +
+			'标题是简短摘要；正文是长格式 markdown 笔记（update 替换、append 追加）。' +
+			'待办 id 形如 TODO-<hex>；id 参数接受 TODO-<hex> 或原始 hex 文件名。' +
+			'处理前先认领任务以避免冲突，完成后关闭。',
 		parameters: TodoParams,
 
 		async execute(
@@ -99,8 +100,8 @@ export function registerTool(pi: ExtensionAPI): void {
 				case 'get': {
 					if (!params.id) {
 						return {
-							content: [{ type: 'text', text: 'Error: id required' }],
-							details: { action: 'get', error: 'id required' } as any,
+							content: [{ type: 'text', text: '错误: 缺少 id' }],
+							details: { action: 'get', error: '缺少 id' } as any,
 						};
 					}
 					const validated = validateTodoId(params.id);
@@ -117,10 +118,10 @@ export function registerTool(pi: ExtensionAPI): void {
 							content: [
 								{
 									type: 'text',
-									text: `Todo ${formatTodoId(validated.id)} not found`,
+									text: `未找到待办 ${formatTodoId(validated.id)}`,
 								},
 							],
-							details: { action: 'get', error: 'not found' } as any,
+							details: { action: 'get', error: '未找到' } as any,
 						};
 					}
 					return {
@@ -132,8 +133,8 @@ export function registerTool(pi: ExtensionAPI): void {
 				case 'create': {
 					if (!params.title) {
 						return {
-							content: [{ type: 'text', text: 'Error: title required' }],
-							details: { action: 'create', error: 'title required' } as any,
+							content: [{ type: 'text', text: '错误: 缺少标题' }],
+							details: { action: 'create', error: '缺少标题' } as any,
 						};
 					}
 					// Validate status if provided
@@ -181,8 +182,8 @@ export function registerTool(pi: ExtensionAPI): void {
 				case 'update': {
 					if (!params.id) {
 						return {
-							content: [{ type: 'text', text: 'Error: id required' }],
-							details: { action: 'update', error: 'id required' } as any,
+							content: [{ type: 'text', text: '错误: 缺少 id' }],
+							details: { action: 'update', error: '缺少 id' } as any,
 						};
 					}
 					const validated = validateTodoId(params.id);
@@ -198,10 +199,10 @@ export function registerTool(pi: ExtensionAPI): void {
 							content: [
 								{
 									type: 'text',
-									text: `Todo ${formatTodoId(validated.id)} not found`,
+									text: `未找到待办 ${formatTodoId(validated.id)}`,
 								},
 							],
-							details: { action: 'update', error: 'not found' } as any,
+							details: { action: 'update', error: '未找到' } as any,
 						};
 					}
 					// Validate status if provided
@@ -218,7 +219,7 @@ export function registerTool(pi: ExtensionAPI): void {
 						const existing = await ensureTodoExists(filePath, validated.id);
 						if (!existing)
 							return {
-								error: `Todo ${formatTodoId(validated.id)} not found`,
+								error: `未找到待办 ${formatTodoId(validated.id)}`,
 							} as const;
 						if (params.title !== undefined) existing.title = params.title;
 						if (params.status !== undefined) existing.status = params.status;
@@ -250,8 +251,8 @@ export function registerTool(pi: ExtensionAPI): void {
 				case 'append': {
 					if (!params.id) {
 						return {
-							content: [{ type: 'text', text: 'Error: id required' }],
-							details: { action: 'append', error: 'id required' } as any,
+							content: [{ type: 'text', text: '错误: 缺少 id' }],
+							details: { action: 'append', error: '缺少 id' } as any,
 						};
 					}
 					const validated = validateTodoId(params.id);
@@ -267,17 +268,17 @@ export function registerTool(pi: ExtensionAPI): void {
 							content: [
 								{
 									type: 'text',
-									text: `Todo ${formatTodoId(validated.id)} not found`,
+									text: `未找到待办 ${formatTodoId(validated.id)}`,
 								},
 							],
-							details: { action: 'append', error: 'not found' } as any,
+							details: { action: 'append', error: '未找到' } as any,
 						};
 					}
 					const result = await withTodoLock(todosDir, validated.id, ctx, async () => {
 						const existing = await ensureTodoExists(filePath, validated.id);
 						if (!existing)
 							return {
-								error: `Todo ${formatTodoId(validated.id)} not found`,
+								error: `未找到待办 ${formatTodoId(validated.id)}`,
 							} as const;
 						if (!params.body || !params.body.trim()) return existing;
 						return appendTodoBody(filePath, existing, params.body);
@@ -303,8 +304,8 @@ export function registerTool(pi: ExtensionAPI): void {
 				case 'claim': {
 					if (!params.id) {
 						return {
-							content: [{ type: 'text', text: 'Error: id required' }],
-							details: { action: 'claim', error: 'id required' } as any,
+							content: [{ type: 'text', text: '错误: 缺少 id' }],
+							details: { action: 'claim', error: '缺少 id' } as any,
 						};
 					}
 					const result = await claimTodoAssignment(
@@ -330,8 +331,8 @@ export function registerTool(pi: ExtensionAPI): void {
 				case 'release': {
 					if (!params.id) {
 						return {
-							content: [{ type: 'text', text: 'Error: id required' }],
-							details: { action: 'release', error: 'id required' } as any,
+							content: [{ type: 'text', text: '错误: 缺少 id' }],
+							details: { action: 'release', error: '缺少 id' } as any,
 						};
 					}
 					const result = await releaseTodoAssignment(
@@ -360,8 +361,8 @@ export function registerTool(pi: ExtensionAPI): void {
 				case 'delete': {
 					if (!params.id) {
 						return {
-							content: [{ type: 'text', text: 'Error: id required' }],
-							details: { action: 'delete', error: 'id required' } as any,
+							content: [{ type: 'text', text: '错误: 缺少 id' }],
+							details: { action: 'delete', error: '缺少 id' } as any,
 						};
 					}
 					const validated = validateTodoId(params.id);
@@ -409,7 +410,7 @@ export function registerTool(pi: ExtensionAPI): void {
 		renderResult(result: any, { expanded, isPartial }: any, theme: Theme) {
 			const details = result.details as TodoToolDetails | undefined;
 			if (isPartial) {
-				return new Text(theme.fg('warning', 'Processing...'), 0, 0);
+				return new Text(theme.fg('warning', '处理中...'), 0, 0);
 			}
 			if (!details) {
 				const text = result.content[0];
@@ -417,7 +418,7 @@ export function registerTool(pi: ExtensionAPI): void {
 			}
 
 			if (details.error) {
-				return new Text(theme.fg('error', `Error: ${details.error}`), 0, 0);
+				return new Text(theme.fg('error', `错误: ${details.error}`), 0, 0);
 			}
 
 			if (details.action === 'list' || details.action === 'list-all') {
@@ -438,23 +439,23 @@ export function registerTool(pi: ExtensionAPI): void {
 			const todoText = renderTodoDetail(theme, todo, expanded);
 			const actionLabel =
 				details.action === 'create'
-					? 'Created'
+					? '已创建'
 					: details.action === 'update'
-						? 'Updated'
+						? '已更新'
 						: details.action === 'append'
-							? 'Appended to'
+							? '已追加到'
 							: details.action === 'delete'
-								? 'Deleted'
+								? '已删除'
 								: details.action === 'claim'
-									? 'Claimed'
+									? '已认领'
 									: details.action === 'release'
-										? 'Released'
+										? '已释放'
 										: null;
 			let finalText = todoText;
 			if (actionLabel) {
 				const lines = finalText.split('\n');
 				lines[0] =
-					theme.fg('success', '✓ ') + theme.fg('muted', `${actionLabel} `) + lines[0];
+					theme.fg('success', '[OK] ') + theme.fg('muted', `${actionLabel} `) + lines[0];
 				finalText = lines.join('\n');
 			}
 			if (!expanded) {
@@ -473,14 +474,14 @@ function renderTodoList(
 	expanded: boolean,
 	currentSessionId?: string,
 ): string {
-	if (!todos.length) return theme.fg('dim', 'No todos');
+	if (!todos.length) return theme.fg('dim', '无待办');
 
 	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
 	const lines: string[] = [];
 	const pushSection = (label: string, sectionTodos: TodoFrontMatter[]) => {
 		lines.push(theme.fg('muted', `${label} (${sectionTodos.length})`));
 		if (!sectionTodos.length) {
-			lines.push(theme.fg('dim', '  none'));
+			lines.push(theme.fg('dim', '  无'));
 			return;
 		}
 		const maxItems = expanded ? sectionTodos.length : Math.min(sectionTodos.length, 3);
@@ -488,14 +489,14 @@ function renderTodoList(
 			lines.push(`  ${renderTodoHeading(theme, sectionTodos[i], currentSessionId)}`);
 		}
 		if (!expanded && sectionTodos.length > maxItems) {
-			lines.push(theme.fg('dim', `  ... ${sectionTodos.length - maxItems} more`));
+			lines.push(theme.fg('dim', `  ... 还有 ${sectionTodos.length - maxItems} 条`));
 		}
 	};
 
 	const sections: Array<{ label: string; todos: TodoFrontMatter[] }> = [
-		{ label: 'Assigned todos', todos: assignedTodos },
-		{ label: 'Open todos', todos: openTodos },
-		{ label: 'Closed todos', todos: closedTodos },
+		{ label: '已分配的待办', todos: assignedTodos },
+		{ label: '待处理待办', todos: openTodos },
+		{ label: '已关闭的待办', todos: closedTodos },
 	];
 
 	sections.forEach((section, index) => {
@@ -513,14 +514,14 @@ function renderTodoHeading(theme: Theme, todo: TodoFrontMatter, currentSessionId
 	const titleColor = resolved ? 'dim' : 'text';
 	const tagText = todo.tags.length ? theme.fg('dim', ` [${todo.tags.join(', ')}]`) : '';
 	const assignmentText = renderAssignmentSuffix(theme, todo, currentSessionId);
-	const statusLabel = done ? ' (done)' : closed ? ' (closed)' : '';
+	const statusText = done ? '（已完成）' : closed ? '（已关闭）' : '';
 	return (
 		theme.fg('accent', formatTodoId(todo.id)) +
 		' ' +
 		theme.fg(titleColor, getTodoTitle(todo)) +
 		tagText +
 		assignmentText +
-		statusLabel
+		statusText
 	);
 }
 
@@ -528,18 +529,18 @@ function renderTodoDetail(theme: Theme, todo: TodoRecord, expanded: boolean): st
 	const summary = renderTodoHeading(theme, todo);
 	if (!expanded) return summary;
 
-	const tags = todo.tags.length ? todo.tags.join(', ') : 'none';
-	const createdAt = todo.created_at || 'unknown';
-	const bodyText = todo.body?.trim() ? todo.body.trim() : 'No details yet.';
+	const tags = todo.tags.length ? todo.tags.join(', ') : '无';
+	const createdAt = todo.created_at || '未知';
+	const bodyText = todo.body?.trim() ? todo.body.trim() : '暂无详情。';
 	const bodyLines = bodyText.split('\n');
 
 	const lines = [
 		summary,
-		theme.fg('muted', `Status: ${getTodoStatus(todo)}`),
-		theme.fg('muted', `Tags: ${tags}`),
-		theme.fg('muted', `Created: ${createdAt}`),
+		theme.fg('muted', `状态: ${todoStatusLabel(getTodoStatus(todo))}`),
+		theme.fg('muted', `标签: ${tags}`),
+		theme.fg('muted', `创建于: ${createdAt}`),
 		'',
-		theme.fg('muted', 'Body:'),
+		theme.fg('muted', '正文:'),
 		...bodyLines.map((line) => theme.fg('text', `  ${line}`)),
 	];
 
@@ -547,5 +548,5 @@ function renderTodoDetail(theme: Theme, todo: TodoRecord, expanded: boolean): st
 }
 
 function appendExpandHint(theme: Theme, text: string): string {
-	return `${text}\n${theme.fg('dim', `(${keyHint('app.tools.expand', 'to expand')})`)}`;
+	return `${text}\n${theme.fg('dim', `(${keyHint('app.tools.expand', '展开')})`)}`;
 }

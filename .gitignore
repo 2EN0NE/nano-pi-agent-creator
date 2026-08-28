@@ -1,7 +1,8 @@
 node_modules
 .pi/todos
 *.profraw
-.pi/
+# 覆盖 .pi 目录及指向其它 worktree 的 .pi 符号链接（.pi/ 仅匹配目录，不匹配符号链接）
+.pi
 .vscode/
 .DS_Store
 test/results/

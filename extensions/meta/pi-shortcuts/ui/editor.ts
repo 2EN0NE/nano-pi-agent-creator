@@ -101,13 +101,20 @@ export function showEditor(
 		// ── 边框（pi-lab 风格：无左右竖线）──
 
 		function renderTopBorder(title: string): void {
-			const topName = ` ${title} `;
-			const topFill = Math.max(0, width - 2 - 2 - visibleWidth(topName));
+			// 纯横线范式（ADR-0023）：`── ` + 标题 + ` ` + 横线填满，无角
+			const topPrefix = '\u2500\u2500 '; // "── "
+			const safeTitle = truncateToWidth(
+				title,
+				Math.max(0, width - visibleWidth(topPrefix) - 1),
+				'',
+			);
+			const topFill = Math.max(
+				0,
+				width - visibleWidth(topPrefix) - visibleWidth(safeTitle) - 1,
+			);
 			container.addChild(
 				new Text(
-					accent('\u250c\u2500\u2500') +
-						dim(topName) +
-						accent('\u2500'.repeat(topFill) + '\u2510'),
+					accent(topPrefix) + dim(safeTitle) + accent(' ' + '\u2500'.repeat(topFill)),
 					0,
 					0,
 				),
@@ -121,13 +128,7 @@ export function showEditor(
 		}
 
 		function renderBottomBorder(): void {
-			container.addChild(
-				new Text(
-					accent('\u2514' + '\u2500'.repeat(Math.max(0, width - 2)) + '\u2518'),
-					0,
-					0,
-				),
-			);
+			container.addChild(new Text(accent('\u2500'.repeat(width)), 0, 0));
 		}
 
 		// ── Tab 栏（Tab 键切换，当前 bold+accent）──
@@ -321,7 +322,7 @@ export function showEditor(
 		function rebuild(): void {
 			container.clear();
 			if (mode === 'list') {
-				renderTopBorder('快捷键设置');
+				renderTopBorder('Shortcuts');
 				renderTabBar();
 				renderDivider();
 				if (currentTab === 'global') buildGlobal();
@@ -330,7 +331,7 @@ export function showEditor(
 				buildListFooter();
 				renderBottomBorder();
 			} else {
-				renderTopBorder(mode === 'edit-prefix' ? '改前缀键' : '改子键');
+				renderTopBorder(mode === 'edit-prefix' ? '编辑前缀' : '编辑子键');
 				buildEdit();
 				renderBottomBorder();
 			}

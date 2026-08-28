@@ -53,6 +53,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from '@earendil-works/pi-tui';
+import { topBorder } from '../../../src/tui/helpers.js';
 
 // ============================================================
 // 类型定义
@@ -142,12 +143,12 @@ export async function showSelect<T = string>(
 					const available = indentWidth > 0 ? Math.max(10, width - indentWidth) : width;
 					const wrapped = wrapTextWithAnsi(s, available);
 					if (wrapped.length > 1 && contIndent) {
-						lines.push(wrapped[0]);
+						lines.push(truncateToWidth(wrapped[0], width));
 						for (let i = 1; i < wrapped.length; i++) {
-							lines.push(contIndent + wrapped[i]);
+							lines.push(truncateToWidth(contIndent + wrapped[i], width));
 						}
 					} else {
-						lines.push(...wrapped);
+						for (const w of wrapped) lines.push(truncateToWidth(w, width));
 					}
 				} else {
 					lines.push(truncateToWidth(s, width));
@@ -159,11 +160,8 @@ export async function showSelect<T = string>(
 				opts?.mode === 'danger' ? 'error' : opts?.mode === 'warning' ? 'warning' : 'accent';
 			const selectColor = borderColor;
 
-			// ---- 顶部分隔线 ----
-			add(theme.fg(borderColor, '─'.repeat(width)));
-
-			// ---- 标题 ----
-			add(theme.fg('text', theme.bold(` ${title}`)));
+			// ---- 顶边框（标题嵌入，ADR-0023）----
+			add(theme.fg(borderColor, topBorder(`── ${title} `, width)));
 			add('');
 
 			// ---- 详细信息（detail）----
@@ -207,7 +205,7 @@ export async function showSelect<T = string>(
 				const isOther = state.selectedIndex === options.length;
 				const prefix = isOther ? theme.fg(selectColor, ' › ') : '   ';
 				const color = isOther ? selectColor : 'muted';
-				add(prefix + theme.fg(color, '✎ 自定义输入...'));
+				add(prefix + theme.fg(color, '[输入] 自定义输入...'));
 			}
 
 			// ---- 底部：补充输入框 或 导航提示 ----

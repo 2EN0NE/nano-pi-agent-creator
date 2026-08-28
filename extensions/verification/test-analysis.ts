@@ -43,6 +43,8 @@ import { createLogger } from '@zenone/pi-logger';
 
 const log = createLogger('test_analysis');
 import { DynamicBorder, BorderedLoader } from '@earendil-works/pi-coding-agent';
+import { TitleBar } from '../../src/tui/helpers.js';
+import { selectPanel } from '../../src/tui/select-panel.js';
 import {
 	Container,
 	fuzzyFilter,
@@ -1238,8 +1240,11 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 			const result = await ctx.ui.custom<AnalysisPresetValue | null>(
 				(tui, theme, _kb, done) => {
 					const container = new Container();
-					container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-					container.addChild(new Text(theme.fg('accent', theme.bold('选择分析目标'))));
+					container.addChild(
+						new TitleBar('Analysis Target', (str) =>
+							theme.fg('accent', theme.bold(str)),
+						),
+					);
 
 					const selectList = new SelectList(items, Math.min(items.length, 10), {
 						selectedPrefix: (text) => theme.fg('accent', text),
@@ -1385,8 +1390,9 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 		const result = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
 			const container = new Container();
-			container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-			container.addChild(new Text(theme.fg('accent', theme.bold('选择基分支'))));
+			container.addChild(
+				new TitleBar('Base Branch', (str) => theme.fg('accent', theme.bold(str))),
+			);
 
 			const searchInput = new Input();
 			container.addChild(searchInput);
@@ -1489,8 +1495,11 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 		const result = await ctx.ui.custom<{ sha: string; title: string } | null>(
 			(tui, theme, keybindings, done) => {
 				const container = new Container();
-				container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-				container.addChild(new Text(theme.fg('accent', theme.bold('选择要分析的提交'))));
+				container.addChild(
+					new TitleBar('Commits to Analyze', (str) =>
+						theme.fg('accent', theme.bold(str)),
+					),
+				);
 
 				const searchInput = new Input();
 				container.addChild(searchInput);
@@ -2003,10 +2012,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 		analysisLoopInProgress = true;
 		setAnalysisWidget(ctx, Boolean(analysisOriginId));
 		try {
-			ctx.ui.notify(
-				'Loop fixing enabled: cycling analysis until no blocking findings remain.',
-				'info',
-			);
+			ctx.ui.notify('已启用循环修复：将持续分析直到无阻塞问题。', 'info');
 
 			for (let pass = 1; pass <= ANALYSIS_LOOP_MAX_ITERATIONS; pass++) {
 				const analysisBaselineAssistantId = getLastAssistantSnapshot(ctx)?.id;
@@ -2076,7 +2082,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 						'Loop fixing complete: no blocking findings remain after %d passes',
 						pass,
 					);
-					ctx.ui.notify('Loop analysis complete: no blocking findings remain.', 'info');
+					ctx.ui.notify('循环分析完成：无阻塞问题。', 'info');
 					return;
 				}
 
@@ -2148,8 +2154,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 	// Register the /test-analysis command
 	pi.registerCommand('test-analysis', {
-		description:
-			'Analyze test coverage and quality (staged, uncommitted, branch, commit, or folder)',
+		description: '分析测试覆盖与质量（已暂存、未提交、分支、提交或文件夹）',
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify('分析需要交互模式', 'error');
@@ -2236,7 +2241,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 				if (messageCount > 0) {
 					// Existing session - ask user which mode they want
-					const choice = await ctx.ui.select('选择分析模式：', ['新分支', '当前会话']);
+					const choice = await selectPanel(ctx, 'Analysis Mode:', ['新分支', '当前会话']);
 
 					if (choice === undefined) {
 						if (fromSelector) {
@@ -2412,12 +2417,12 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 			try {
 				const result = await ctx.navigateTree(originId, { summarize: false });
 				if (result.cancelled) {
-					ctx.ui.notify('Navigation cancelled. Use /end-analysis to try again.', 'info');
+					ctx.ui.notify('导航已取消。使用 /end-analysis 重试。', 'info');
 					return 'cancelled';
 				}
 			} catch (error) {
 				ctx.ui.notify(
-					`Failed to return: ${error instanceof Error ? error.message : String(error)}`,
+					`返回失败：${error instanceof Error ? error.message : String(error)}`,
 					'error',
 				);
 				return 'error';
@@ -2425,7 +2430,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 			clearAnalysisState(ctx);
 			if (notifySuccess) {
-				ctx.ui.notify('Analysis complete! Returned to original position.', 'info');
+				ctx.ui.notify('分析完成！已返回原位置。', 'info');
 			}
 			return 'ok';
 		}
@@ -2436,17 +2441,17 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 			options.showSummaryLoader ?? false,
 		);
 		if (summaryResult === null) {
-			ctx.ui.notify('Summarization cancelled. Use /end-analysis to try again.', 'info');
+			ctx.ui.notify('摘要已取消。使用 /end-analysis 重试。', 'info');
 			return 'cancelled';
 		}
 
 		if (summaryResult.error) {
-			ctx.ui.notify(`Summarization failed: ${summaryResult.error}`, 'error');
+			ctx.ui.notify(`摘要失败：${summaryResult.error}`, 'error');
 			return 'error';
 		}
 
 		if (summaryResult.cancelled) {
-			ctx.ui.notify('Navigation cancelled. Use /end-analysis to try again.', 'info');
+			ctx.ui.notify('导航已取消。使用 /end-analysis 重试。', 'info');
 			return 'cancelled';
 		}
 
@@ -2493,7 +2498,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 		endAnalysisInProgress = true;
 		try {
-			const choice = await ctx.ui.select('完成分析：', [
+			const choice = await selectPanel(ctx, 'Finish Analysis:', [
 				'仅返回',
 				'返回并修复发现项',
 				'返回并总结',
@@ -2522,7 +2527,7 @@ export default function testAnalysisExtension(pi: ExtensionAPI) {
 
 	// Register the /end-analysis command
 	pi.registerCommand('end-analysis', {
-		description: 'Complete test analysis and return to original position',
+		description: '完成测试分析并返回原位置',
 		handler: async (_args, ctx) => {
 			await runEndAnalysis(ctx);
 		},

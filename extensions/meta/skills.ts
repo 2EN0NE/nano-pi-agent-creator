@@ -15,8 +15,19 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { getSettingsListTheme, formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
-import { Container, type SettingItem, SettingsList, truncateToWidth } from '@earendil-works/pi-tui';
+import {
+	getSettingsListTheme,
+	formatSkillsForPrompt,
+	DynamicBorder,
+} from '@earendil-works/pi-coding-agent';
+import {
+	Container,
+	type SettingItem,
+	SettingsList,
+	Text,
+	truncateToWidth,
+} from '@earendil-works/pi-tui';
+import { TitleBar } from '../../src/tui/helpers.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
@@ -153,8 +164,8 @@ export default function skillsExtension(pi: ExtensionAPI) {
 
 		const header =
 			changedSkills.length > 0
-				? `⚙  Skills: ${enabled}/${total} enabled`
-				: `⚙  Skills: ${enabled}/${total} enabled (no changes)`;
+				? `[Skills] ${enabled}/${total} enabled`
+				: `[Skills] ${enabled}/${total} enabled (no changes)`;
 
 		pi.sendMessage(
 			{
@@ -177,7 +188,7 @@ export default function skillsExtension(pi: ExtensionAPI) {
 	// ── Command ─────────────────────────────────────────────────────
 
 	pi.registerCommand('skills', {
-		description: 'Enable/disable skills',
+		description: '启用/禁用技能',
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== 'tui') {
 				ctx.ui.notify('/skills requires TUI mode', 'error');
@@ -255,17 +266,12 @@ export default function skillsExtension(pi: ExtensionAPI) {
 
 				const container = new Container();
 				container.addChild(
-					new (class {
-						render(_width: number) {
-							return [
-								theme.fg('accent', theme.bold('Skill Configuration')),
-								theme.fg('dim', '  (Enter/Space toggle  ·  Esc/q close)'),
-								'',
-							];
-						}
-						invalidate() {}
-					})(),
+					new TitleBar('技能配置', (s) => theme.fg('accent', theme.bold(s))),
 				);
+				container.addChild(
+					new Text(theme.fg('dim', '  (Enter/Space 开关  ·  Esc/q 关闭)'), 1, 0),
+				);
+				container.addChild(new Text('', 1, 0));
 
 				const settingsList = new SettingsList(
 					items,
@@ -292,7 +298,7 @@ export default function skillsExtension(pi: ExtensionAPI) {
 							const related = findRelatedTools(id);
 							if (related.length > 0) {
 								const toolList = related.slice(0, 5).join(', ');
-								warningText = `⚠  "${id}" 与 tools: ${toolList}${
+								warningText = `[WARN]  "${id}" 与 tools: ${toolList}${
 									related.length > 5 ? '…' : ''
 								} 可能有联动，关闭 skill 不代表禁用这些 tool`;
 							}
@@ -312,6 +318,7 @@ export default function skillsExtension(pi: ExtensionAPI) {
 				);
 
 				container.addChild(settingsList);
+				container.addChild(new DynamicBorder((s) => theme.fg('accent', s)));
 
 				const component = {
 					render(width: number) {

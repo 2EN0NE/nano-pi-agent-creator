@@ -48,6 +48,9 @@ export function updateWidget(ctx: ExtensionContext): void {
 		const col3 = buildPromptLines(ctx);
 
 		ctx.ui.setWidget(WIDGET_KEY, (_tui, _theme) => {
+			// SAFETY: setWidget 回调的 theme 形参在 pi 运行时恒为 Theme 实例
+			//（pi-tui 以 Theme 渲染 widget），此处仅窄化声明类型供 renderCollapsed/
+			// renderExpanded 使用，无运行时转换。
 			const theme = _theme as unknown as Theme;
 			return {
 				render(fullWidth: number) {
@@ -90,7 +93,7 @@ function usageRatio(name: string): number {
 	return total === 0 ? 0 : count / total;
 }
 
-function renderCollapsed(fullWidth: number, theme: Theme): string[] {
+export function renderCollapsed(fullWidth: number, theme: Theme): string[] {
 	const skillCountStr = `${state.xmlSkillCount}/${state.fsSkillCount}`;
 	const promptCount = state.loadedContextFiles?.length ?? 0;
 	const toolActive = state.pi?.getActiveTools().length ?? 0;
@@ -127,7 +130,14 @@ function renderCollapsed(fullWidth: number, theme: Theme): string[] {
 
 	const row2 = `${padTo(toolsActive)}${sep}${padTo(skillsActive)}${sep}${padTo(theme.fg('dim', `${promptCount} file(s)`))}`;
 
-	return [row1, row2, theme.fg('dim', '  Ctrl+Shift+Z toggle \u00B7 /resource-tree settings')];
+	return [
+		row1,
+		row2,
+		truncateToWidth(
+			theme.fg('dim', '  Ctrl+Shift+Z 开关 \u00B7 /resource-tree 设置'),
+			fullWidth,
+		),
+	];
 }
 
 function renderExpanded(

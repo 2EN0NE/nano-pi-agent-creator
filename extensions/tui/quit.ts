@@ -16,6 +16,8 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
 import { getModel } from '@earendil-works/pi-ai/compat';
+import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { bottomBorder, topBorder } from '../../src/tui/helpers.js';
 
 const log = createLogger('quit');
 
@@ -48,7 +50,7 @@ interface BranchLabelInfo {
 	lastLabel: string | undefined;
 }
 
-interface SessionCardData {
+export interface SessionCardData {
 	sessionId: string;
 	sessionFile: string;
 	toolCalls: ToolCallRecord;
@@ -316,28 +318,11 @@ function buildCardData(
  * 如果 theme 不可用，返回回退函数。
  */
 function getColorFn(theme: ExtensionContext['ui']['theme'] | undefined) {
-	const ansiFg = (code: number, text: string) => `\x1b[38;5;${code}m${text}\x1b[0m`;
-	const ansiBold = (text: string) => `\x1b[1m${text}\x1b[0m`;
-
 	if (!theme) {
+		// theme 不可用时降级为纯文本（ADR-0023：禁用硬编码 ANSI）
 		return {
-			fg: (token: string, text: string) => {
-				const fallback: Record<string, number> = {
-					accent: 39,
-					borderMuted: 242,
-					border: 243,
-					dim: 240,
-					success: 76,
-					error: 196,
-					warning: 214,
-					muted: 242,
-					text: 0,
-					toolTitle: 39,
-					thinkingText: 242,
-				};
-				return ansiFg(fallback[token] ?? 0, text);
-			},
-			bold: ansiBold,
+			fg: (_token: string, text: string) => text,
+			bold: (text: string) => text,
 		};
 	}
 
@@ -346,40 +331,6 @@ function getColorFn(theme: ExtensionContext['ui']['theme'] | undefined) {
 		bold: (text: string) => theme.bold(text),
 	};
 }
-
-/** 移除 ANSI 转义码后获取终端显示宽度 */
-function displayWidth(s: string): number {
-	const cleaned = s.replace(/\x1b\[[0-9;]*m/g, '');
-	let width = 0;
-	for (const ch of cleaned) {
-		const code = ch.charCodeAt(0);
-		if (
-			code >= 0x1100 &&
-			(code <= 0x115f ||
-				code === 0x2329 ||
-				code === 0x232a ||
-				(code >= 0x2e80 && code <= 0x303e) ||
-				(code >= 0x3040 && code <= 0x33ff) ||
-				(code >= 0x3400 && code <= 0x4dbf) ||
-				(code >= 0x4e00 && code <= 0x9fff) ||
-				(code >= 0xa000 && code <= 0xa4cf) ||
-				(code >= 0xac00 && code <= 0xd7af) ||
-				(code >= 0xf900 && code <= 0xfaff) ||
-				(code >= 0xfe10 && code <= 0xfe19) ||
-				(code >= 0xfe30 && code <= 0xfe6f) ||
-				(code >= 0xff01 && code <= 0xff60) ||
-				(code >= 0xffe0 && code <= 0xffe6) ||
-				(code >= 0x1f000 && code <= 0x1ffff))
-		) {
-			width += 2;
-		} else {
-			width += 1;
-		}
-	}
-	return width;
-}
-
-const visibleLen = displayWidth;
 
 function termWidth(): number {
 	return process.stdout.columns ?? 80;
@@ -409,7 +360,11 @@ function formatCost(n: number): string {
 	return `$${n.toFixed(2)}`;
 }
 
-function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme']): string[] {
+export function renderCard(
+	data: SessionCardData,
+	theme?: ExtensionContext['ui']['theme'],
+	width?: number,
+): string[] {
 	const c = getColorFn(theme);
 	const { fg, bold } = c;
 	const borderColor = (text: string) => fg('border', text);
@@ -420,156 +375,63 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 	const warningColor = (text: string) => fg('warning', text);
 
 	const lines: string[] = [];
-	const W = 64;
-	const tw = termWidth();
+	const tw = width ?? termWidth();
+	// 卡片宽自适应终端：窄终端（<64 列）收窄避免溢出；W 恒 ≤ tw，任何宽度下不超视口。
+	const W = Math.min(64, tw);
 	const indent = ' '.repeat(Math.max(0, Math.floor((tw - W) / 2)));
+	const sepLine = indent + ' ' + borderColor(bottomBorder(W - 2)) + ' ';
 
-	// 顶部边框
-	lines.push(indent + borderColor(`┌${'─'.repeat(W - 2)}┐`));
-	// 标题（居中）
-	const titleStr = 'Session Summary  会话总结卡片';
-	const titlePadding = Math.max(0, W - 2 - visibleLen(titleStr));
-	const titleLeft = Math.floor(titlePadding / 2);
-	const titleRight = titlePadding - titleLeft;
-	lines.push(
-		indent +
-			borderColor('│') +
-			' '.repeat(titleLeft) +
-			accentColor(bold(titleStr)) +
-			' '.repeat(titleRight) +
-			borderColor('│'),
-	);
+	// 内容行：缩进 + truncate 兜底（ADR-0023 纯横线：无竖线无 rightPad）
+	const row = (content: string): string => indent + truncateToWidth(content, W);
 
-	// 分隔线
-	lines.push(indent + borderColor(`├${'─'.repeat(W - 2)}┤`));
+	// 顶边框（纯横线 + 插件名）：truncate 兜底，避免极窄终端（<8 列）下插件名行溢出
+	lines.push(truncateToWidth(indent + borderColor(topBorder('── quit ', W)), tw));
+	lines.push(row('  ' + accentColor(bold('Session Summary  会话总结卡片'))));
+	lines.push(sepLine);
 
 	// 交互摘要
-	const sectionLabel = '交互摘要 Interaction';
-	lines.push(
-		indent +
-			borderColor('│') +
-			'  ' +
-			accentColor(bold(sectionLabel)) +
-			' '.repeat(Math.max(0, W - 4 - visibleLen(sectionLabel))) +
-			borderColor('│'),
-	);
-
+	lines.push(row('  ' + accentColor(bold('交互摘要 Interaction'))));
 	const sid =
-		data.sessionId.length > W - 12 ? data.sessionId.slice(0, W - 15) + '…' : data.sessionId;
-	lines.push(
-		indent +
-			borderColor('│') +
-			`    ${mutedColor('会话 ID')}: ${fg('text', sid)}` +
-			' '.repeat(Math.max(0, W - 2 - displayWidth('    会话 ID: ') - sid.length)) +
-			borderColor('│'),
-	);
+		visibleWidth(data.sessionId) > W - 12
+			? data.sessionId.slice(0, W - 15) + '…'
+			: data.sessionId;
+	lines.push(row(`    ${mutedColor('会话 ID')}: ${fg('text', sid)}`));
 
 	const { total, success, failed } = data.toolCalls;
 	const successRate = total > 0 ? Math.round((success / total) * 100) : 0;
 	const rateFn = successRate >= 80 ? successColor : warningColor;
 	const toolLine = `    ${mutedColor('工具调用')}: ${fg('text', String(total))} ${mutedColor('次 ·')} ${successColor(String(success))} ${mutedColor('成功 ·')} ${errorColor(String(failed))} ${mutedColor('失败 · 成功率')} ${rateFn(`(${successRate}%)`)}`;
-	lines.push(
-		indent +
-			borderColor('│') +
-			toolLine +
-			' '.repeat(Math.max(0, W - 2 - displayWidth(toolLine))) +
-			borderColor('│'),
-	);
+	lines.push(row(toolLine));
 
 	const { branchCount, labelCount, lastLabel } = data.branchLabels;
 	const treeLine = `    ${mutedColor('/tree')}: ${fg('text', String(branchCount))} ${mutedColor('个分支 ·')} ${fg('text', String(labelCount))} ${mutedColor('个标签')}`;
-	lines.push(
-		indent +
-			borderColor('│') +
-			treeLine +
-			' '.repeat(Math.max(0, W - 2 - displayWidth(treeLine))) +
-			borderColor('│'),
-	);
+	lines.push(row(treeLine));
 
 	if (lastLabel) {
-		const labelLine = `    ${mutedColor('最后标签')}: ${fg('accent', lastLabel)}`;
-		lines.push(
-			indent +
-				borderColor('│') +
-				labelLine +
-				' '.repeat(Math.max(0, W - 2 - displayWidth(labelLine))) +
-				borderColor('│'),
-		);
+		lines.push(row(`    ${mutedColor('最后标签')}: ${fg('accent', lastLabel)}`));
 	}
 
-	// 分隔线
-	lines.push(indent + borderColor(`├${'─'.repeat(W - 2)}┤`));
+	lines.push(sepLine);
 
 	// 性能
-	const perfLabel = '性能 Performance';
+	lines.push(row('  ' + accentColor(bold('性能 Performance'))));
 	lines.push(
-		indent +
-			borderColor('│') +
-			'  ' +
-			accentColor(bold(perfLabel)) +
-			' '.repeat(Math.max(0, W - 4 - visibleLen(perfLabel))) +
-			borderColor('│'),
+		row(`    ${mutedColor('总耗时')}: ${fg('text', formatDuration(data.totalDurationMs))}`),
+	);
+	lines.push(
+		row(`    ${mutedColor('智能体活跃')}: ${fg('text', formatDuration(data.agentActiveMs))}`),
+	);
+	lines.push(row(`    ${mutedColor('API 调用')}: ${fg('text', formatDuration(data.apiCallMs))}`));
+	lines.push(
+		row(`    ${mutedColor('工具执行')}: ${fg('text', formatDuration(data.toolExecMs))}`),
 	);
 
-	const dur = formatDuration(data.totalDurationMs);
-	lines.push(
-		indent +
-			borderColor('│') +
-			`    ${mutedColor('总耗时')}: ${fg('text', dur)}` +
-			' '.repeat(Math.max(0, W - 2 - displayWidth('    总耗时: ') - dur.length)) +
-			borderColor('│'),
-	);
-
-	const agent = formatDuration(data.agentActiveMs);
-	lines.push(
-		indent +
-			borderColor('│') +
-			`    ${mutedColor('智能体活跃')}: ${fg('text', agent)}` +
-			' '.repeat(Math.max(0, W - 2 - displayWidth('    智能体活跃: ') - agent.length)) +
-			borderColor('│'),
-	);
-
-	const api = formatDuration(data.apiCallMs);
-	lines.push(
-		indent +
-			borderColor('│') +
-			`    ${mutedColor('API 调用')}: ${fg('text', api)}` +
-			' '.repeat(Math.max(0, W - 2 - displayWidth('    API 调用: ') - api.length)) +
-			borderColor('│'),
-	);
-
-	const toolExec = formatDuration(data.toolExecMs);
-	lines.push(
-		indent +
-			borderColor('│') +
-			`    ${mutedColor('工具执行')}: ${fg('text', toolExec)}` +
-			' '.repeat(Math.max(0, W - 2 - displayWidth('    工具执行: ') - toolExec.length)) +
-			borderColor('│'),
-	);
-
-	// 分隔线
-	lines.push(indent + borderColor(`├${'─'.repeat(W - 2)}┤`));
+	lines.push(sepLine);
 
 	// 模型使用
-	const modelLabel = '模型使用 Model Usage';
-	lines.push(
-		indent +
-			borderColor('│') +
-			'  ' +
-			accentColor(bold(modelLabel)) +
-			' '.repeat(Math.max(0, W - 4 - visibleLen(modelLabel))) +
-			borderColor('│'),
-	);
-
+	lines.push(row('  ' + accentColor(bold('模型使用 Model Usage'))));
 	if (data.modelUsage.length === 0) {
-		const emptyLabel = '(无模型调用数据)';
-		lines.push(
-			indent +
-				borderColor('│') +
-				`    ${mutedColor(emptyLabel)}` +
-				' '.repeat(Math.max(0, W - 2 - 4 - displayWidth(emptyLabel))) +
-				borderColor('│'),
-		);
+		lines.push(row('    ' + mutedColor('(无模型调用数据)')));
 	} else {
 		const hModel = mutedColor('模型');
 		const hReq = mutedColor('请求');
@@ -577,37 +439,26 @@ function renderCard(data: SessionCardData, theme?: ExtensionContext['ui']['theme
 		const hOut = mutedColor('输出');
 		const hCost = mutedColor('费用');
 		const headerLine = `    ${hModel}${' '.repeat(Math.max(1, 24 - 4))}${hReq}  ${hIn}  ${hOut}  ${hCost}`;
-		lines.push(
-			indent +
-				borderColor('│') +
-				headerLine +
-				' '.repeat(Math.max(0, W - 2 - displayWidth(headerLine))) +
-				borderColor('│'),
-		);
+		lines.push(row(headerLine));
 
 		for (const mu of data.modelUsage) {
 			const name = `${mu.provider}/${mu.model}`;
-			const displayName = name.length > 24 ? '…' + name.slice(-23) : name;
+			const displayName = visibleWidth(name) > 24 ? '…' + name.slice(-23) : name;
 			const reqStr = String(mu.requests);
 			const inStr = formatTokens(mu.inputTokens);
 			const outStr = formatTokens(mu.outputTokens);
 			const costStr = formatCost(mu.totalCost);
-			const row = `    ${fg('text', displayName)}${' '.repeat(Math.max(1, 26 - displayName.length))}${fg('text', reqStr)}  ${fg('text', inStr)}  ${fg('text', outStr)}  ${fg('text', costStr)}`;
-			const padding = Math.max(0, W - 2 - displayWidth(row));
-			lines.push(indent + borderColor('│') + row + ' '.repeat(padding) + borderColor('│'));
+			const rowStr = `    ${fg('text', displayName)}${' '.repeat(Math.max(1, 26 - visibleWidth(displayName)))}${fg('text', reqStr)}  ${fg('text', inStr)}  ${fg('text', outStr)}  ${fg('text', costStr)}`;
+			lines.push(row(rowStr));
 		}
 
-		const totalCostLabel = mutedColor('总计费用');
-		const totalCostStr = successColor(formatCost(data.totalCost));
-		const totalLine = `    ${totalCostLabel}:  ${totalCostStr}`;
-		const totalPadding = Math.max(0, W - 2 - displayWidth(totalLine));
 		lines.push(
-			indent + borderColor('│') + totalLine + ' '.repeat(totalPadding) + borderColor('│'),
+			row(`    ${mutedColor('总计费用')}:  ${successColor(formatCost(data.totalCost))}`),
 		);
 	}
 
-	// 底部边框
-	lines.push(indent + borderColor(`└${'─'.repeat(W - 2)}┘`));
+	// 底边框（纯横线）
+	lines.push(indent + borderColor(bottomBorder(W)));
 
 	return lines;
 }
@@ -631,6 +482,8 @@ export default function (pi: ExtensionAPI): void {
 	let sessionStarted = false;
 
 	function syncIncremental(ctx: ExtensionContext): void {
+		// SAFETY: sessionManager.getBranch() 返回 session tree 的 branch 节点数组，
+		// 每个节点是 JSON-like entry（Record<string, unknown>），此处仅用于增量累加器遍历。
 		const branch = ctx.sessionManager.getBranch() as unknown as Array<Record<string, unknown>>;
 		accumulator.processNewEntries(branch);
 	}

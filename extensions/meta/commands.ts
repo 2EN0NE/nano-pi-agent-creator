@@ -12,13 +12,14 @@
 
 import type { ExtensionAPI, SlashCommandInfo } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
+import { selectPanel } from '../../src/tui/select-panel.js';
 
 const log = createLogger('commands');
 
 export default function commandsExtension(pi: ExtensionAPI) {
 	log.debug('Registering /commands command');
 	pi.registerCommand('commands', {
-		description: 'List available slash commands',
+		description: '列出可用的斜杠命令',
 		getArgumentCompletions: (prefix) => {
 			const sources = ['extension', 'prompt', 'skill'];
 			const filtered = sources.filter((s) => s.startsWith(prefix));
@@ -56,9 +57,9 @@ export default function commandsExtension(pi: ExtensionAPI) {
 				key: 'extension' | 'prompt' | 'skill';
 				label: string;
 			}> = [
-				{ key: 'extension', label: 'Extensions' },
-				{ key: 'prompt', label: 'Prompts' },
-				{ key: 'skill', label: 'Skills' },
+				{ key: 'extension', label: '扩展' },
+				{ key: 'prompt', label: '提示词' },
+				{ key: 'skill', label: '技能' },
 			];
 
 			for (const { key, label } of sources) {
@@ -69,7 +70,7 @@ export default function commandsExtension(pi: ExtensionAPI) {
 				}
 			}
 
-			const selected = await ctx.ui.select('Available Commands', items);
+			const selected = await selectPanel(ctx, 'Available Commands', items);
 
 			if (selected && !selected.startsWith('---')) {
 				const cmdName = selected.split(' - ')[0].slice(1);

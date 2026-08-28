@@ -1,7 +1,7 @@
 /**
  * Settings panel UI component (answer-style bordered box).
  *
- * 纯渲染 + 键盘导航组件，无 Pi 依赖（可 headless 测试）。
+ * 纯渲染 + 键盘导航组件，无 Pi 运行时依赖（仅 type 引用 Theme，可 headless 测试）。
  * 交互契约：
  *  - 主面板（main）：profile 列表 + 实验状态区。↑↓ 选择 profile，Enter 进入字段编辑，Esc 关闭。
  *  - 字段面板（fields）：选中 profile 的字段列表。↑↓ 选择字段，Enter 返回「编辑该字段」动作，
@@ -21,6 +21,8 @@ import {
 	visibleWidth,
 	type Component,
 } from '@earendil-works/pi-tui';
+import { bottomBorder, makeThemeColors, topBorder } from '../../../src/tui/helpers.js';
+import type { Theme } from '@earendil-works/pi-coding-agent';
 
 /** 配置层（纯字面量联合，保持渲染组件无 config 依赖） */
 type ScopeLabel = 'user' | 'session' | 'project';
@@ -65,14 +67,6 @@ export type SettingsUIAction =
 
 // ── ANSI 颜色辅助（answer 同款） ───────────────────────────────
 
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
-const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
-const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
-const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
-const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
-const gray = (s: string) => `\x1b[90m${s}\x1b[0m`;
-
 // ── 组件 ────────────────────────────────────────────────────────
 
 export class SettingsComponent implements Component {
@@ -82,6 +76,15 @@ export class SettingsComponent implements Component {
 	private selectedIndex: number = 0;
 	private onDone: (action: SettingsUIAction) => void;
 
+	// 颜色（由 theme 注入，禁用硬编码 ANSI，见 ADR-0023）
+	private dim!: (s: string) => string;
+	private bold!: (s: string) => string;
+	private cyan!: (s: string) => string;
+	private green!: (s: string) => string;
+	private yellow!: (s: string) => string;
+	private red!: (s: string) => string;
+	private gray!: (s: string) => string;
+
 	// 渲染缓存
 	private cachedWidth?: number;
 	private cachedLines?: string[];
@@ -89,6 +92,7 @@ export class SettingsComponent implements Component {
 	constructor(
 		data: SettingsPanelData,
 		onDone: (action: SettingsUIAction) => void,
+		theme: Theme,
 		mode: 'main' | 'fields' = 'main',
 		profileId: string | null = null,
 	) {
@@ -96,6 +100,8 @@ export class SettingsComponent implements Component {
 		this.onDone = onDone;
 		this.mode = mode;
 		this.profileId = profileId;
+
+		Object.assign(this, makeThemeColors(theme));
 	}
 
 	invalidate(): void {
@@ -159,48 +165,32 @@ export class SettingsComponent implements Component {
 		const boxWidth = Math.min(width - 4, 100);
 		const contentWidth = boxWidth - 4;
 
-		const horizontalLine = (count: number) => '─'.repeat(Math.max(0, count));
 		const boxLine = (content: string): string => {
-			// 内部兜底截断：调用方遗漏时也不会超出 box 宽度（TUI 铁律）
-			const safe = truncateToWidth(content, Math.max(0, contentWidth));
-			const len = visibleWidth(safe);
-			const rightPad = Math.max(0, boxWidth - len - 2);
-			return dim('│') + safe + ' '.repeat(rightPad) + dim('│');
+			// 纯横线范式（ADR-0023）：无竖线，truncate 兜底
+			return truncateToWidth(content, Math.max(0, boxWidth));
 		};
-		const emptyBoxLine = (): string =>
-			dim('│') + ' '.repeat(Math.max(0, boxWidth - 2)) + dim('│');
+		const emptyBoxLine = (): string => '';
 		const padToWidth = (line: string): string => {
 			const len = visibleWidth(line);
 			return line + ' '.repeat(Math.max(0, width - len));
 		};
 
-		// ── 标题（固定文案，第 0 行） ──
-		// 顶边框嵌入插件名：╭── custom-compaction ───...╮
-		const boxTitle = 'custom-compaction';
-		const titleInner = `── ${boxTitle} `;
-		// 窄终端下截断标题，保证标题行总宽 ≤ boxWidth（含 ╭╮ 边框 2 字符），
-		// 避免固定长度标题在窄视口溢出（TUI 铁律：每行 truncateToWidth 兜底）
-		const maxTitleInner = Math.max(0, boxWidth - 2);
-		const safeTitleInner =
-			titleInner.length > maxTitleInner
-				? titleInner.slice(0, Math.max(2, maxTitleInner))
-				: titleInner;
+		// ── 顶边框（固定文案，第 0 行）：纯横线 + 插件名（ADR-0023）──
 		lines.push(
 			padToWidth(
-				truncateToWidth(
-					dim('╭' + safeTitleInner) +
-						dim(horizontalLine(Math.max(0, boxWidth - 2 - safeTitleInner.length))) +
-						dim('╮'),
-					width,
+				truncateToWidth(this.dim(topBorder('── custom-compaction ', boxWidth)), width),
+			),
+		);
+		lines.push(
+			padToWidth(
+				boxLine(
+					this.bold(
+						this.cyan(this.mode === 'main' ? ' Custom Compaction 设置' : ' 字段编辑'),
+					),
 				),
 			),
 		);
-		lines.push(
-			padToWidth(
-				boxLine(bold(cyan(this.mode === 'main' ? ' Custom Compaction 设置' : ' 字段编辑'))),
-			),
-		);
-		lines.push(padToWidth(dim('├' + horizontalLine(boxWidth - 2) + '┤')));
+		lines.push(padToWidth(this.dim(' ' + bottomBorder(boxWidth - 2) + ' ')));
 
 		if (this.mode === 'main') {
 			this.renderMain(lines, boxLine, emptyBoxLine, contentWidth);
@@ -208,7 +198,7 @@ export class SettingsComponent implements Component {
 			this.renderFields(lines, boxLine, emptyBoxLine, contentWidth);
 		}
 
-		lines.push(padToWidth(dim('╰' + horizontalLine(boxWidth - 2) + '╯')));
+		lines.push(padToWidth(this.dim(bottomBorder(boxWidth))));
 		this.cachedLines = lines;
 		this.cachedWidth = width;
 		return lines;
@@ -231,7 +221,7 @@ export class SettingsComponent implements Component {
 		lines.push(emptyBoxLine());
 
 		// Profile 列表
-		const header = gray(' [Profile 列表]');
+		const header = this.gray(' [Profile 列表]');
 		lines.push(boxLine(truncateToWidth(header, contentWidth)));
 
 		const MAX_PROFILES = 6;
@@ -239,27 +229,28 @@ export class SettingsComponent implements Component {
 		for (let i = 0; i < shown.length; i++) {
 			const p = shown[i];
 			const isSel = i === this.selectedIndex;
-			const marker = isSel ? cyan('>') : ' ';
-			const activeMark = p.active ? green('*') : ' ';
-			const name = isSel ? bold(p.name) : p.name;
-			const desc = p.description ? dim(`  ${p.description}`) : '';
+			const marker = isSel ? this.cyan('>') : ' ';
+			const activeMark = p.active ? this.green('*') : ' ';
+			const name = isSel ? this.bold(p.name) : p.name;
+			const desc = p.description ? this.dim(`  ${p.description}`) : '';
 			const row = `${marker} ${activeMark} ${name}${desc}`;
 			lines.push(boxLine(truncateToWidth(row, contentWidth)));
 		}
 		if (data.profiles.length > MAX_PROFILES) {
-			lines.push(boxLine(dim(`  ... 共 ${data.profiles.length} 个 profile`)));
+			lines.push(boxLine(this.dim(`  ... 共 ${data.profiles.length} 个 profile`)));
 		}
 		lines.push(emptyBoxLine());
 
 		// 实验状态区
-		lines.push(boxLine(truncateToWidth(gray(' [实验状态]'), contentWidth)));
+		lines.push(boxLine(truncateToWidth(this.gray(' [实验状态]'), contentWidth)));
 		if (!data.lab.active) {
-			lines.push(boxLine(dim('   pi-lab 未接入（实验不可用）')));
+			lines.push(boxLine(this.dim('   pi-lab 未接入（实验不可用）')));
 		} else if (data.lab.experiments.length === 0) {
-			lines.push(boxLine(dim('   实验未注册')));
+			lines.push(boxLine(this.dim('   实验未注册')));
 		} else {
 			for (const exp of data.lab.experiments) {
-				const arm = exp.currentArm === '(未压缩)' ? yellow(exp.currentArm) : exp.currentArm;
+				const arm =
+					exp.currentArm === '(未压缩)' ? this.yellow(exp.currentArm) : exp.currentArm;
 				lines.push(
 					boxLine(
 						truncateToWidth(
@@ -273,7 +264,7 @@ export class SettingsComponent implements Component {
 		lines.push(emptyBoxLine());
 
 		// 操作提示
-		lines.push(boxLine(dim('   ↑↓ 选择  Enter 编辑  n 新增  Esc 关闭')));
+		lines.push(boxLine(this.dim('   ↑↓ 选择  Enter 编辑  n 新增  Esc 关闭')));
 	}
 
 	// ── 字段面板 ──────────────────────────────────────────────
@@ -286,13 +277,15 @@ export class SettingsComponent implements Component {
 	): void {
 		const p = this.data.profiles.find((x) => x.id === this.profileId);
 		if (!p) {
-			lines.push(boxLine(red('   未找到 profile')));
-			lines.push(boxLine(dim('   Esc 返回')));
+			lines.push(boxLine(this.red('   未找到 profile')));
+			lines.push(boxLine(this.dim('   Esc 返回')));
 			return;
 		}
 
 		lines.push(
-			boxLine(truncateToWidth(`  ${bold(p.name)} ${dim(p.description)}`, contentWidth)),
+			boxLine(
+				truncateToWidth(`  ${this.bold(p.name)} ${this.dim(p.description)}`, contentWidth),
+			),
 		);
 		lines.push(emptyBoxLine());
 
@@ -302,16 +295,16 @@ export class SettingsComponent implements Component {
 		for (let i = 0; i < shown.length; i++) {
 			const f = shown[i];
 			const isSel = i === this.selectedIndex;
-			const marker = isSel ? cyan('>') : ' ';
+			const marker = isSel ? this.cyan('>') : ' ';
 			const label = f.label.padEnd(18);
-			const value = f.value ? dim(f.value) : '';
+			const value = f.value ? this.dim(f.value) : '';
 			const row = `${marker} ${label} ${value}`;
 			lines.push(boxLine(truncateToWidth(row, contentWidth)));
 		}
 		if (fields.length > MAX_FIELDS) {
-			lines.push(boxLine(dim(`  ... 共 ${fields.length} 个字段`)));
+			lines.push(boxLine(this.dim(`  ... 共 ${fields.length} 个字段`)));
 		}
 		lines.push(emptyBoxLine());
-		lines.push(boxLine(dim('   ↑↓ 选择字段  Enter 编辑  Esc 返回')));
+		lines.push(boxLine(this.dim('   ↑↓ 选择字段  Enter 编辑  Esc 返回')));
 	}
 }

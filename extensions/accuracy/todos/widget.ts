@@ -1,7 +1,7 @@
 import type { Theme } from '@earendil-works/pi-coding-agent';
 import { getConfig } from './config.js';
 import type { TodoFrontMatter, TodoPluginConfig } from './types.js';
-import { isTodoDone, isTodoClosed } from './storage.js';
+import { isTodoDone, isTodoClosed, todoStatusLabel } from './storage.js';
 
 /**
  * Build widget content lines for a set of todos.
@@ -35,7 +35,7 @@ export function buildWidgetContent(
 	scoped = scoped.filter((t) => !isTodoClosed(t.status));
 
 	if (scoped.length === 0) {
-		return [theme.fg('text', '|Todos: none')];
+		return [theme.fg('text', '|Todos: 无')];
 	}
 
 	if (cfg.widgetDisplay === 'details') {
@@ -54,9 +54,9 @@ function buildSummaryLines(todos: TodoFrontMatter[], theme: Theme): string[] {
 
 	const title = theme.fg('accent', theme.bold('Todos'));
 	const counts = [
-		assigned.length ? theme.fg('success', `${assigned.length} in progress`) : '',
-		pending.length ? theme.fg('text', `${pending.length} pending`) : '',
-		done.length ? theme.fg('dim', `${done.length} done`) : '',
+		assigned.length ? theme.fg('success', `${assigned.length} 进行中`) : '',
+		pending.length ? theme.fg('text', `${pending.length} 待处理`) : '',
+		done.length ? theme.fg('dim', `${done.length} 已完成`) : '',
 	]
 		.filter(Boolean)
 		.join(theme.fg('dim', ' | '));
@@ -68,21 +68,21 @@ function buildSummaryLines(todos: TodoFrontMatter[], theme: Theme): string[] {
 	for (const t of showItems) {
 		const isDone = isTodoDone(t.status);
 		const checkbox = isDone ? '[x]' : '[ ]';
-		const suffix = t.assigned_to_session ? ' (in progress)' : '';
+		const suffix = t.assigned_to_session ? '（进行中）' : '';
 		lines.push(
 			theme.fg(
 				isDone ? 'dim' : 'accent',
-				`${checkbox} ${t.id} ${t.status || 'open'} ${t.title || '(untitled)'}${suffix}`,
+				`${checkbox} ${t.id} ${todoStatusLabel(t.status)} ${t.title || '(无标题)'}${suffix}`,
 			),
 		);
 	}
 
 	const remaining = open.length + done.length - 3;
 	if (remaining > 0) {
-		lines.push(theme.fg('dim', `  ... ${remaining} more`));
+		lines.push(theme.fg('dim', `  ... 还有 ${remaining} 条`));
 	}
 
-	lines.push(theme.fg('dim', '  For details, run /todos'));
+	lines.push(theme.fg('dim', '  详情请运行 /todos'));
 
 	return lines;
 }
@@ -98,16 +98,16 @@ function buildDetailLines(todos: TodoFrontMatter[], theme: Theme): string[] {
 	for (const t of shown) {
 		const done = isTodoDone(t.status);
 		const checkbox = done ? '[x]' : '[ ]';
-		const suffix = done ? ' (done)' : t.assigned_to_session ? ' (in progress)' : '';
-		const text = `${checkbox} ${t.id} ${t.status || 'open'} ${t.title || '(untitled)'}${suffix}`;
+		const suffix = done ? '（已完成）' : t.assigned_to_session ? '（进行中）' : '';
+		const text = `${checkbox} ${t.id} ${todoStatusLabel(t.status)} ${t.title || '(无标题)'}${suffix}`;
 		lines.push(theme.fg(done ? 'dim' : 'accent', text));
 	}
 
 	if (todos.length > maxItems) {
-		lines.push(theme.fg('dim', `  ... ${todos.length - maxItems} more`));
+		lines.push(theme.fg('dim', `  ... 还有 ${todos.length - maxItems} 条`));
 	}
 
-	lines.push(theme.fg('dim', '  For details, run /todos'));
+	lines.push(theme.fg('dim', '  详情请运行 /todos'));
 
 	return lines;
 }

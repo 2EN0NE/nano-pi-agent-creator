@@ -73,8 +73,8 @@ export class TabBar implements Component {
 		const barLine = tabParts.join(separator);
 
 		// Divider line — accent color for visual separation
-		const divider = theme.fg('accent', '─'.repeat(Math.min(width, 80)));
-		const hint = theme.fg('dim', 'Left/Right: switch  Enter: select  Esc: close');
+		const divider = theme.fg('accent', '─'.repeat(Math.max(0, width)));
+		const hint = theme.fg('dim', '左右: 切换  回车: 选中  退出: 关闭');
 
 		lines.push(truncateToWidth(barLine, width));
 		lines.push(truncateToWidth(divider, width));

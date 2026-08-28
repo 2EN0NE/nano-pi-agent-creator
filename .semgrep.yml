@@ -222,7 +222,8 @@ rules:
           - pattern: console.error(...)
           - pattern: console.warn(...)
       message: >-
-          使用裸 console.log/error/warn。所有扩展必须通过 @zenone/pi-logger 的 createLogger() 提供日志。
+          使用裸 console.log/error/warn。所有扩展必须通过
+          @zenone/pi-logger 的 createLogger() 提供日志。
       languages: [javascript, typescript]
       severity: ERROR
       metadata:
@@ -243,7 +244,12 @@ rules:
     - id: pi.logger-imported-but-unused
       patterns:
           - pattern: import { createLogger } from "@zenone/pi-logger"
-          - pattern-not: const $LOG = createLogger(...)
+          # pattern-not 是同位置排除（import 位置 ≠ const 位置，永远误报），
+          # 改为 pattern-not-inside：import 后有 const $LOG = createLogger(...) 即实例化。
+          - pattern-not-inside: |
+                import { createLogger } from "@zenone/pi-logger"
+                ...
+                const $LOG = createLogger(...)
       message: >-
           导入了 createLogger 但未检测到 const log = createLogger(...) 实例化。
           请创建日志器并通过 log.info/warn/error/debug 记录所有日志。

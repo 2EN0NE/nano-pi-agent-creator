@@ -27,7 +27,8 @@ import type {
 	ExtensionContext,
 	BuildSystemPromptOptions,
 } from '@earendil-works/pi-coding-agent';
-import { truncateToWidth } from '@earendil-works/pi-tui';
+import { parseKey, truncateToWidth } from '@earendil-works/pi-tui';
+import { bottomBorder, topBorder } from '../../src/tui/helpers.js';
 import { createLogger } from '@zenone/pi-logger';
 
 const log = createLogger('prompt-editor');
@@ -93,9 +94,9 @@ function discoverComponents(options: BuildSystemPromptOptions, cwd: string): Pro
 	const systemPromptSource = detectSystemPromptSource(cwd);
 	components.push({
 		type: 'system_prompt',
-		label: 'System Prompt',
+		label: '系统提示词',
 		source: systemPromptSource,
-		content: options.customPrompt ?? '(built-in default)',
+		content: options.customPrompt ?? '(内置默认)',
 		toggleable: true,
 		editable: true,
 		order: 1,
@@ -106,7 +107,7 @@ function discoverComponents(options: BuildSystemPromptOptions, cwd: string): Pro
 		const appendSource = detectAppendPromptSource(cwd);
 		components.push({
 			type: 'append_prompt',
-			label: 'Append Prompt',
+			label: '追加提示词',
 			source: appendSource,
 			content: options.appendSystemPrompt,
 			toggleable: true,
@@ -120,7 +121,7 @@ function discoverComponents(options: BuildSystemPromptOptions, cwd: string): Pro
 		for (const cf of options.contextFiles) {
 			components.push({
 				type: 'context_file',
-				label: `Context: ${shortPath(cf.path)}`,
+				label: `上下文: ${shortPath(cf.path)}`,
 				source: cf.path,
 				content: cf.content,
 				toggleable: true,
@@ -138,9 +139,9 @@ function discoverComponents(options: BuildSystemPromptOptions, cwd: string): Pro
 		if (snippetText) {
 			components.push({
 				type: 'tool_snippet',
-				label: 'Tool Snippets',
-				source: '(active tools)',
-				content: `Available tools:\n${snippetText}`,
+				label: '工具片段',
+				source: '(当前工具)',
+				content: `可用工具:\n${snippetText}`,
 				toggleable: true,
 				editable: true,
 				order: 4,
@@ -151,8 +152,8 @@ function discoverComponents(options: BuildSystemPromptOptions, cwd: string): Pro
 	if (options.promptGuidelines && options.promptGuidelines.length > 0) {
 		components.push({
 			type: 'tool_guideline',
-			label: 'Tool Guidelines',
-			source: '(active tools)',
+			label: '工具指南',
+			source: '(当前工具)',
 			content: options.promptGuidelines.join('\n'),
 			toggleable: true,
 			editable: true,
@@ -165,7 +166,7 @@ function discoverComponents(options: BuildSystemPromptOptions, cwd: string): Pro
 		for (const skill of options.skills) {
 			components.push({
 				type: 'skill',
-				label: `Skill: ${skill.name ?? 'unnamed'}`,
+				label: `技能: ${skill.name ?? '未命名'}`,
 				source: skill.name ?? 'unknown',
 				content: skill.description ?? '',
 				toggleable: true,
@@ -180,9 +181,9 @@ function discoverComponents(options: BuildSystemPromptOptions, cwd: string): Pro
 	const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 	components.push({
 		type: 'footer',
-		label: 'Date & CWD',
-		source: '(auto)',
-		content: `Current date: ${date}\nCurrent working directory: ${cwd}`,
+		label: '日期与工作目录',
+		source: '(自动)',
+		content: `当前日期: ${date}\n当前工作目录: ${cwd}`,
 		toggleable: false, // always present
 		editable: false,
 		order: 99,
@@ -272,17 +273,14 @@ interface PanelState {
 	needsRedraw: boolean;
 }
 
-async function showPromptPanel(
-	pi: ExtensionAPI,
-	ctx: ExtensionContext,
-	options: BuildSystemPromptOptions,
-) {
+export async function showPromptPanel(ctx: ExtensionContext, options: BuildSystemPromptOptions) {
 	if (!ctx.hasUI) return;
 
 	const components = discoverComponents(options, ctx.cwd);
 	log.debug('Opening prompt panel', { componentCount: components.length });
 	const MAX_VISIBLE = 8;
 
+	// 跨面板重开持久的状态：编辑后重开时保留选中项 / 滚动位置 / 预览状态
 	const state: PanelState = {
 		components,
 		cursorIndex: 0,
@@ -292,173 +290,269 @@ async function showPromptPanel(
 		needsRedraw: true,
 	};
 
-	await ctx.ui.custom<any>((tui, theme, _keybindings, done) => {
-		const dim = (text: string) => theme.fg('dim', text);
-		const accent = (text: string) => theme.fg('accent', text);
+	// 非悬浮设计（不使用 overlay）：面板放 editorContainer（内嵌，与普通 custom 组件一致）。
+	// 编辑流程 = 关面板（done）→ 顺序调用 ctx.ui.editor（不嵌套）→ 重开面板。
+	// 与 review.ts / custom-compaction 的编辑模式一致，editorContainer 无嵌套冲突。
+	while (true) {
+		const result = await ctx.ui.custom<{ action: 'edit'; index: number } | undefined>(
+			(tui, theme, _keybindings, done) => {
+				const dim = (text: string) => theme.fg('dim', text);
+				const accent = (text: string) => theme.fg('accent', text);
 
-		const typeIcons: Record<string, string> = {
-			system_prompt: '📋',
-			append_prompt: '📎',
-			context_file: '📄',
-			tool_snippet: '🔧',
-			tool_guideline: '📏',
-			skill: '🎯',
-			footer: '📅',
-		};
+				const typeIcons: Record<string, string> = {
+					system_prompt: 'SYS',
+					append_prompt: 'APP',
+					context_file: 'FIL',
+					tool_snippet: 'SNP',
+					tool_guideline: 'GDL',
+					skill: 'SKL',
+					footer: 'FTR',
+				};
 
-		function getComponentLines(): string[] {
-			const lines: string[] = [];
-			lines.push(theme.bold('Prompt Assembly — /prompt'));
-			lines.push(dim('─────────────────────────────────────────────'));
-			lines.push('');
+				function getComponentLines(width: number): string[] {
+					const lines: string[] = [];
+					lines.push(theme.bold(topBorder('── Prompt Assembly ', width)));
+					lines.push('');
 
-			const totalItems = state.components.length;
-			const start = state.scrollOffset;
-			const end = Math.min(totalItems, start + state.maxVisible);
+					const totalItems = state.components.length;
+					const start = state.scrollOffset;
+					const end = Math.min(totalItems, start + state.maxVisible);
 
-			// Scroll indicator: more above
-			if (start > 0) {
-				const hidden = start;
-				lines.push(
-					dim('  ↑ ' + hidden + ' more component' + (hidden > 1 ? 's' : '') + ' above'),
-				);
-			}
+					// Scroll indicator: more above
+					if (start > 0) {
+						const hidden = start;
+						lines.push(dim('  ↑ 上方还有 ' + hidden + ' 个组件'));
+					}
 
-			// Render visible components
-			for (let i = start; i < end; i++) {
-				const comp = state.components[i]!;
-				const key = overrideKey(comp.type, comp.source);
-				const ov = overrides.components.get(key);
-				const isEnabled = ov ? ov.enabled : true;
-				const isEdited = ov?.content !== undefined;
-				const isSelected = i === state.cursorIndex;
+					// Render visible components
+					for (let i = start; i < end; i++) {
+						const comp = state.components[i]!;
+						const key = overrideKey(comp.type, comp.source);
+						const ov = overrides.components.get(key);
+						const isEnabled = ov ? ov.enabled : true;
+						const isEdited = ov?.content !== undefined;
+						const isSelected = i === state.cursorIndex;
 
-				const icon = typeIcons[comp.type] ?? '  ';
-				const statusIcon = isEnabled ? '✓' : '✗';
-				const editMark = isEdited ? ' *' : '';
-				const cursor = isSelected ? '▶' : ' ';
-				const indexLabel = dim((i + 1).toString().padStart(2) + ' ');
+						const icon = typeIcons[comp.type] ?? '   ';
+						const statusIcon = isEnabled ? '[x]' : '[ ]';
+						const editMark = isEdited ? ' *' : '';
+						const cursor = isSelected ? '>' : ' ';
+						const indexLabel = dim((i + 1).toString().padStart(2) + ' ');
 
-				const line =
-					indexLabel +
-					cursor +
-					' ' +
-					icon +
-					' ' +
-					statusIcon +
-					' ' +
-					comp.label +
-					editMark;
-				lines.push(isSelected ? accent(theme.bold(line)) : line);
-			}
+						const line =
+							indexLabel +
+							cursor +
+							' ' +
+							icon +
+							' ' +
+							statusIcon +
+							' ' +
+							comp.label +
+							editMark;
+						lines.push(isSelected ? accent(theme.bold(line)) : line);
+					}
 
-			// Scroll indicator: more below
-			if (end < totalItems) {
-				const hidden = totalItems - end;
-				lines.push(
-					dim('  ↓ ' + hidden + ' more component' + (hidden > 1 ? 's' : '') + ' below'),
-				);
-			}
+					// Scroll indicator: more below
+					if (end < totalItems) {
+						const hidden = totalItems - end;
+						lines.push(dim('  ↓ 下方还有 ' + hidden + ' 个组件'));
+					}
 
-			lines.push('');
+					lines.push('');
 
-			// Selected item details (fixed position below list)
-			if (state.cursorIndex >= 0 && state.cursorIndex < totalItems) {
-				const sel = state.components[state.cursorIndex]!;
-				lines.push(dim('─── Details ───'));
-				lines.push(dim('  Source: ' + shortPath(sel.source)));
-				const preview = sel.content.slice(0, 100).replace(/\n/g, ' \\n ');
-				lines.push(dim('  ' + preview + (sel.content.length > 100 ? '…' : '')));
-				lines.push('');
-			}
+					// Selected item details (fixed position below list)
+					if (state.cursorIndex >= 0 && state.cursorIndex < totalItems) {
+						const sel = state.components[state.cursorIndex]!;
+						lines.push(dim(topBorder('── 详情 ', width)));
+						lines.push(dim('  来源: ' + shortPath(sel.source)));
+						const preview = sel.content.slice(0, 100).replace(/\n/g, ' \\n ');
+						lines.push(dim('  ' + preview + (sel.content.length > 100 ? '…' : '')));
+						lines.push('');
+					}
 
-			if (state.showPreview) {
-				lines.push(dim('─── Preview (press P to toggle) ───'));
-				const enabledCount = state.components.filter((c) => {
-					const k = overrideKey(c.type, c.source);
-					const ov = overrides.components.get(k);
-					return ov ? ov.enabled : true;
-				}).length;
-				lines.push(
-					dim('  ' + totalItems + ' components total, ' + enabledCount + ' enabled'),
-				);
-			} else {
-				lines.push(dim('─────────────────────────────────────────────'));
-				lines.push(dim(' ↑↓ move  Space toggle  e edit  p preview  q quit'));
-				const enabledCount = state.components.filter((c) => {
-					const k = overrideKey(c.type, c.source);
-					const ov = overrides.components.get(k);
-					return ov ? ov.enabled : true;
-				}).length;
-				lines.push(
-					dim(
-						' ' +
-							enabledCount +
-							'/' +
-							totalItems +
-							' enabled (scroll ' +
-							(start + 1) +
-							'-' +
-							end +
-							')',
-					),
-				);
-			}
+					if (state.showPreview) {
+						lines.push(dim(topBorder('── 预览 ', width)));
+						const enabledCount = state.components.filter((c) => {
+							const k = overrideKey(c.type, c.source);
+							const ov = overrides.components.get(k);
+							return ov ? ov.enabled : true;
+						}).length;
+						lines.push(
+							dim('  共 ' + totalItems + ' 个组件，启用 ' + enabledCount + ' 个'),
+						);
+					} else {
+						lines.push(dim(bottomBorder(width)));
+						lines.push(dim(' ↑↓ 移动  Space 开关  e 编辑  p 预览  q 退出'));
+						const enabledCount = state.components.filter((c) => {
+							const k = overrideKey(c.type, c.source);
+							const ov = overrides.components.get(k);
+							return ov ? ov.enabled : true;
+						}).length;
+						lines.push(
+							dim(
+								' 已启用 ' +
+									enabledCount +
+									'/' +
+									totalItems +
+									'（显示 ' +
+									(start + 1) +
+									'-' +
+									end +
+									'）',
+							),
+						);
+					}
 
-			return lines;
-		}
+					return lines;
+				}
 
-		function updatePromptEffect() {
-			// Overrides are applied on next before_agent_start via the event handler.
-			log.debug('Prompt overrides updated', {
-				overrideCount: overrides.components.size,
-				enabledCount: state.components.filter((c) => {
-					const k = overrideKey(c.type, c.source);
-					const ov = overrides.components.get(k);
-					return ov ? ov.enabled : true;
-				}).length,
-			});
-		}
+				function updatePromptEffect() {
+					// Overrides are applied on next before_agent_start via the event handler.
+					log.debug('Prompt overrides updated', {
+						overrideCount: overrides.components.size,
+						enabledCount: state.components.filter((c) => {
+							const k = overrideKey(c.type, c.source);
+							const ov = overrides.components.get(k);
+							return ov ? ov.enabled : true;
+						}).length,
+					});
+				}
 
-		async function toggleComponent(index: number) {
-			const comp = state.components[index];
-			if (!comp || !comp.toggleable) return;
-			const key = overrideKey(comp.type, comp.source);
-			const existing = overrides.components.get(key);
+				async function toggleComponent(index: number) {
+					const comp = state.components[index];
+					if (!comp || !comp.toggleable) return;
+					const key = overrideKey(comp.type, comp.source);
+					const existing = overrides.components.get(key);
 
-			if (existing) {
-				existing.enabled = !existing.enabled;
-				log.info('Toggled component', {
-					type: comp.type,
-					source: comp.source,
-					enabled: existing.enabled,
-				});
-			} else {
-				overrides.components.set(key, { enabled: false });
-				log.info('Disabled component', { type: comp.type, source: comp.source });
-			}
-			updatePromptEffect();
-		}
+					if (existing) {
+						existing.enabled = !existing.enabled;
+						log.info('Toggled component', {
+							type: comp.type,
+							source: comp.source,
+							enabled: existing.enabled,
+						});
+					} else {
+						overrides.components.set(key, { enabled: false });
+						log.info('Disabled component', { type: comp.type, source: comp.source });
+					}
+					updatePromptEffect();
+				}
 
-		async function editComponent(index: number, _pi: ExtensionAPI, ctx: ExtensionContext) {
-			const comp = state.components[index];
-			if (!comp || !comp.editable) return;
+				const component = {
+					name: 'prompt-editor-panel',
+					// Focusable：显式声明可聚焦，确保 TUI 的 setFocus(component) 稳定生效
+					focused: false,
+					focus() {
+						this.focused = true;
+					},
+					unfocus() {
+						this.focused = false;
+					},
+					render(width: number): string[] {
+						return getComponentLines(width).map((line) => truncateToWidth(line, width));
+					},
+					invalidate() {
+						state.needsRedraw = true;
+					},
+					handleInput(data: string): void {
+						if (state.needsRedraw) {
+							state.needsRedraw = false;
+							tui.requestRender();
+						}
 
-			const key = overrideKey(comp.type, comp.source);
-			const existing = overrides.components.get(key);
-			const currentContent = existing?.content ?? comp.content;
+						// 统一按键解析：兼容各终端的序列差异（普通模式 \x1b[B、应用模式
+						// \x1bOB / \x1bOA 等全部归一到 "down"/"up"），与 SelectList 等
+						// pi-tui 组件一致（其他 custom 面板方向键正常的原因）。
+						const key = parseKey(data) ?? data;
 
-			log.debug('Opening editor for component', {
-				type: comp.type,
-				source: comp.source,
-				contentLength: currentContent.length,
-			});
-			const newContent = await ctx.ui.editor(`Edit: ${comp.label}`, currentContent);
-			if (newContent === undefined) {
-				log.debug('Component edit cancelled', { type: comp.type, source: comp.source });
-				return;
-			}
+						switch (key) {
+							case 'q':
+							case 'escape':
+							case '\x1b':
+								log.debug('Closing prompt panel');
+								done(undefined);
+								return;
 
+							case 'j':
+							case 'down':
+							case 'ArrowDown':
+							case '\x1b[B':
+								if (state.cursorIndex < state.components.length - 1) {
+									state.cursorIndex++;
+									// Auto-scroll: keep cursor visible
+									if (
+										state.cursorIndex >=
+										state.scrollOffset + state.maxVisible
+									) {
+										state.scrollOffset =
+											state.cursorIndex - state.maxVisible + 1;
+									}
+									tui.requestRender();
+								}
+								return;
+
+							case 'k':
+							case 'up':
+							case 'ArrowUp':
+							case '\x1b[A':
+								if (state.cursorIndex > 0) {
+									state.cursorIndex--;
+									// Auto-scroll: keep cursor visible
+									if (state.cursorIndex < state.scrollOffset) {
+										state.scrollOffset = state.cursorIndex;
+									}
+									tui.requestRender();
+								}
+								return;
+
+							case ' ':
+							case 'space':
+								toggleComponent(state.cursorIndex);
+								tui.requestRender();
+								return;
+
+							case 'e':
+								// 非悬浮：编辑时先关闭面板（done），外层顺序调用编辑器后重开面板
+								if (state.components[state.cursorIndex]?.editable) {
+									done({ action: 'edit', index: state.cursorIndex });
+								}
+								return;
+
+							case 'p':
+								state.showPreview = !state.showPreview;
+								tui.requestRender();
+								return;
+
+							default:
+								// Unrecognized keys are ignored
+								return;
+						}
+					},
+				};
+
+				return component;
+			},
+		);
+
+		if (!result) break; // q / escape → 退出
+
+		// 编辑组件（此时面板已关闭，editorContainer 可安全使用，无嵌套）
+		const comp = state.components[result.index];
+		if (!comp || !comp.editable) continue;
+
+		const key = overrideKey(comp.type, comp.source);
+		const existing = overrides.components.get(key);
+		const currentContent = existing?.content ?? comp.content;
+
+		log.debug('Opening editor for component', {
+			type: comp.type,
+			source: comp.source,
+			contentLength: currentContent.length,
+		});
+		const newContent = await ctx.ui.editor(`编辑: ${comp.label}`, currentContent);
+		if (newContent === undefined) {
+			log.debug('Component edit cancelled', { type: comp.type, source: comp.source });
+		} else {
 			if (existing) {
 				existing.content = newContent;
 			} else {
@@ -469,81 +563,9 @@ async function showPromptPanel(
 				source: comp.source,
 				newLength: newContent.length,
 			});
-			updatePromptEffect();
-			tui.requestRender();
 		}
-
-		const component = {
-			name: 'prompt-editor-panel',
-			render(width: number): string[] {
-				return getComponentLines().map((line) => truncateToWidth(line, width));
-			},
-			invalidate() {
-				state.needsRedraw = true;
-			},
-			handleInput(data: string): void {
-				if (state.needsRedraw) {
-					state.needsRedraw = false;
-					tui.requestRender();
-				}
-
-				switch (data) {
-					case 'q':
-					case 'escape':
-					case '\x1b':
-						log.debug('Closing prompt panel');
-						done(undefined);
-						return;
-
-					case 'j':
-					case 'ArrowDown':
-					case '\x1b[B':
-						if (state.cursorIndex < state.components.length - 1) {
-							state.cursorIndex++;
-							// Auto-scroll: keep cursor visible
-							if (state.cursorIndex >= state.scrollOffset + state.maxVisible) {
-								state.scrollOffset = state.cursorIndex - state.maxVisible + 1;
-							}
-							tui.requestRender();
-						}
-						return;
-
-					case 'k':
-					case 'ArrowUp':
-					case '\x1b[A':
-						if (state.cursorIndex > 0) {
-							state.cursorIndex--;
-							// Auto-scroll: keep cursor visible
-							if (state.cursorIndex < state.scrollOffset) {
-								state.scrollOffset = state.cursorIndex;
-							}
-							tui.requestRender();
-						}
-						return;
-
-					case ' ':
-						toggleComponent(state.cursorIndex);
-						tui.requestRender();
-						return;
-
-					case 'e':
-						editComponent(state.cursorIndex, pi, ctx);
-						return;
-
-					case 'p':
-						state.showPreview = !state.showPreview;
-						tui.requestRender();
-						return;
-
-					default:
-						// Unrecognized keys are ignored
-						return;
-				}
-			},
-		};
-
-		return component;
-	});
+		// 循环继续 → 重新打开面板（cursorIndex / scrollOffset 保留）
+	}
 }
 
 // =============================================================================
@@ -554,7 +576,7 @@ export default function (pi: ExtensionAPI) {
 	log.info('Extension loaded');
 
 	pi.registerCommand('prompt', {
-		description: 'Inspect and control prompt assembly',
+		description: '检查和控制 prompt 组装',
 		handler: async (_args, ctx) => {
 			const options = ctx.getSystemPromptOptions?.();
 			if (!options) {
@@ -563,7 +585,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				return;
 			}
-			await showPromptPanel(pi, ctx, options);
+			await showPromptPanel(ctx, options);
 		},
 	});
 
@@ -576,7 +598,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			return;
 		}
-		await showPromptPanel(pi, cmdCtx, options);
+		await showPromptPanel(cmdCtx, options);
 	}
 	// session_start 时注册（消除加载顺序竞险：hub 在所有扩展工厂函数执行后才挂载）
 	pi.on('session_start', () => {

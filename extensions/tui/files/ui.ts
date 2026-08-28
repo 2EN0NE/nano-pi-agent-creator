@@ -6,6 +6,7 @@
 
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
+import { TitleBar } from '../../../src/tui/helpers.js';
 import {
 	Container,
 	fuzzyFilter,
@@ -30,7 +31,7 @@ export const toggleTuiOffline = { set: (_v: boolean) => {} };
 
 export const buildSelectItems = (files: FileEntry[], selectedPaths: Set<string>): SelectItem[] =>
 	files.map((file) => {
-		const checkbox = selectedPaths.has(file.canonicalPath) ? '☑ ' : '☐ ';
+		const checkbox = selectedPaths.has(file.canonicalPath) ? '[x] ' : '[ ] ';
 		const directoryLabel = file.isDirectory ? ' [directory]' : '';
 		const statusSuffix = file.status ? ` [${file.status}]` : '';
 		return {
@@ -70,8 +71,9 @@ export const showActionSelector = async (
 		'reveal' | 'quicklook' | 'open' | 'edit' | 'addToPrompt' | 'viewChanges' | 'fileDiff' | null
 	>((tui, theme, _kb, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-		container.addChild(new Text(theme.fg('accent', theme.bold('Choose action'))));
+		container.addChild(
+			new TitleBar('Choose action', (str: string) => theme.fg('accent', theme.bold(str))),
+		);
 
 		const selectList = new SelectList(actions, actions.length, {
 			selectedPrefix: (text) => theme.fg('accent', text),
@@ -85,7 +87,7 @@ export const showActionSelector = async (
 		selectList.onCancel = () => done(null);
 
 		container.addChild(selectList);
-		container.addChild(new Text(theme.fg('dim', 'Press enter to confirm or esc to cancel')));
+		container.addChild(new Text(theme.fg('dim', '按 Enter 确认或 Esc 取消')));
 		container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
 
 		return {
@@ -120,8 +122,9 @@ export const showFileSelector = async (
 	const selectionResult = await ctx.ui.custom<string[] | null>(
 		(tui, theme, keybindings, done) => {
 			const container = new Container();
-			container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-			container.addChild(new Text(theme.fg('accent', theme.bold(' Select file(s)')), 0, 0));
+			container.addChild(
+				new TitleBar('选择文件', (str: string) => theme.fg('accent', theme.bold(str))),
+			);
 
 			const searchInput = new Input();
 			container.addChild(searchInput);
@@ -133,7 +136,7 @@ export const showFileSelector = async (
 				new Text(
 					theme.fg(
 						'dim',
-						'Type to filter \u2022 space toggle \u2022 enter confirm \u2022 ctrl+shift+d diff \u2022 esc cancel',
+						'输入过滤 \u2022 空格开关 \u2022 enter 确认 \u2022 ctrl+shift+d 差异 \u2022 esc 取消',
 					),
 					0,
 					0,
@@ -311,8 +314,9 @@ export const promptDiffDisplayMode = async (
 
 	return ctx.ui.custom<'panel' | 'tmux' | null>((tui, theme, _kb, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-		container.addChild(new Text(theme.fg('accent', theme.bold(' 选择 diff 展示方式')), 0, 0));
+		container.addChild(
+			new TitleBar('Diff View', (str: string) => theme.fg('accent', theme.bold(str))),
+		);
 
 		const list = new SelectList(options, options.length, {
 			selectedPrefix: (text) => theme.fg('accent', text),
@@ -352,8 +356,9 @@ export const showDiffInPiPanel = async (
 ): Promise<void> => {
 	return ctx.ui.custom<void>((_tui, theme, _kb, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-		container.addChild(new Text(theme.fg('accent', theme.bold(` ${title}`)), 0, 0));
+		container.addChild(
+			new TitleBar(title, (str: string) => theme.fg('accent', theme.bold(str))),
+		);
 		container.addChild(new Spacer(1));
 
 		const lines = diffContent.split('\n');
@@ -405,9 +410,10 @@ export const showChangesUI = async (
 ): Promise<void> => {
 	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
 		container.addChild(
-			new Text(theme.fg('accent', theme.bold(` 变更文件 (${changes.length})`)), 0, 0),
+			new TitleBar(`变更文件 (${changes.length})`, (str: string) =>
+				theme.fg('accent', theme.bold(str)),
+			),
 		);
 
 		const searchInput = new Input();

@@ -338,7 +338,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Register /custom-compaction-setting command ───────────
 	pi.registerCommand('custom-compaction-setting', {
-		description: 'Open custom compaction settings panel',
+		description: '打开自定义压缩设置面板',
 		handler: async (_args, ctx) => {
 			reloadConfig();
 			await openSettingsPanel(ctx);
@@ -354,7 +354,7 @@ export default function (pi: ExtensionAPI) {
 		const config = loadConfig();
 		const entries = Object.entries(config.profiles);
 		if (entries.length === 0) {
-			if (ctx.hasUI) ctx.ui.notify('No compaction profiles available', 'error');
+			if (ctx.hasUI) ctx.ui.notify('没有可用的压缩配置', 'error');
 			return;
 		}
 
@@ -372,7 +372,7 @@ export default function (pi: ExtensionAPI) {
 			if (match) {
 				chosenProfile = match[1];
 			} else if (ctx.hasUI) {
-				ctx.ui.notify(`Profile "${trimmedName}" not found`, 'warning');
+				ctx.ui.notify(`未找到配置 "${trimmedName}"`, 'warning');
 			}
 		}
 
@@ -410,8 +410,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand('custom-compact', {
 		description:
-			'Trigger compaction manually. Usage: /custom-compact [profile-name]. ' +
-			'Without a profile name, pick one via selector (Tab for supplementary instructions).',
+			'手动触发压缩。用法：/custom-compact [配置名]。 ' +
+			'不带配置名时，通过选择器挑选（Tab 可补充说明）。',
 		handler: triggerHandler,
 	});
 

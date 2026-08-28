@@ -210,3 +210,57 @@ pi-worktree 是**本地 git 工作区生命周期管理**工具。**不做远端
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Embedded Skill / 内嵌技能** | 放置在扩展目录 `skills/` 子目录下、由扩展根 `package.json` 的 `pi.skills` 字段声明、随扩展一起同步分发的 agent 技能（区别于独立存放在 `skills/` 顶层的技能）。 |
 | **pi manifest**               | 扩展根 `package.json` 中的 `pi` 字段，声明扩展入口（`pi.extensions`）与内嵌技能（`pi.skills`），为将来 npm 包化分发做准备。                                    |
+
+## todos 待办插件
+
+### 核心术语
+
+| 术语                            | 中文         | 定义                                                                                                                         |
+| ------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| **Todo / 待办**                 | 待办         | 基于文件的轻量任务：front matter（标题/标签/状态/分配）+ markdown 正文，存储在 `.pi/todos/`（项目）或 `~/.pi/todos/`（全局） |
+| **Status / 状态**               | 状态         | 三种：`open` 待办（未完成、进行中）、`done` 已完成、`close` 已关闭（软删除，从列表隐藏）                                     |
+| **Scope / 作用域**              | 作用域       | 待办的归属目录：`session` 会话（当前会话分配的）、`project` 项目、`global` 全局                                              |
+| **Assignment / 分配**           | 分配         | 待办是否已分配给某会话（`assigned_to_session` 字段）。认领（claim）后待办绑定当前会话，释放（release）后解除绑定             |
+| **Claim / 认领**                | 认领         | 把待办分配给当前会话，处理前先认领以避免冲突                                                                                 |
+| **Release / 释放**              | 释放         | 解除待办的会话分配，恢复为未分配状态                                                                                         |
+| **Sort Field / 排序字段**       | 排序字段     | `created-at` 创建时间、`title` 标题——待办列表的排序维度                                                                      |
+| **Sort Direction / 排序方向**   | 排序方向     | `asc` 升序、`desc` 降序                                                                                                      |
+| **Compact View / 紧凑列表视图** | 紧凑列表视图 | 面板显示模式：`是`（紧凑/摘要）vs `否`（详情）。对应 `widgetDisplay` 的 summary/details                                      |
+| **Widget Display / 组件显示**   | 组件显示     | 状态栏组件（widget）的展示样式：`summary` 摘要、`details` 详情                                                               |
+
+### 术语中文化映射（所有插件统一）
+
+代码中存储/比较始终用**英文值**（schema、配置、文件内容），仅在**展示层**通过 `storage.ts` 的映射函数转为中文。其他插件涉及同义概念时应复用同一中文词，不得另译。
+
+| 英文               | 中文            | 说明                                        |
+| ------------------ | --------------- | ------------------------------------------- |
+| Cancel / Cancelled | 取消 / 已取消   | 所有交互的取消动作                          |
+| Session            | 会话            | pi 会话                                     |
+| Resume             | 恢复            | 恢复会话/线程/目标                          |
+| Enabled / Disabled | 已启用 / 已禁用 | 开关状态                                    |
+| Ready              | 就绪            | 待命状态                                    |
+| Save / Saved       | 保存 / 已保存   | 持久化                                      |
+| Delete             | 删除            | 删除动作                                    |
+| Confirm            | 确认            | 确认对话框                                  |
+| Submit             | 提交            | 提交答案/表单                               |
+| Widget             | 组件            | 状态栏小组件（widget）                      |
+| Profile            | 配置 / 预设     | smart-context 用「配置」，preset 用「预设」 |
+| Strategy           | 策略            | 合并/同步策略                               |
+| Notifications      | 通知            | 通知开关                                    |
+| Compaction         | 压缩            | 上下文压缩（custom-compaction）             |
+| Goal               | 目标            | 长期任务目标                                |
+| Loop               | 循环            | 循环执行                                    |
+| Fork               | 分叉            | 会话分叉（split-fork / worktree fork）      |
+| Recap              | 回顾            | 会话进度总结                                |
+| Search             | 搜索            | 过滤/查找                                   |
+| Next / Prev        | 下一个 / 上一个 | 导航                                        |
+| Run / Running      | 运行 / 运行中   | 执行状态                                    |
+
+**保留英文（不翻译）的技术标识**：
+
+- 命令名（`/goal` `/review` `/fox` 等）与工具名（`get_goal` `edit` `rg` 等）——API 标识符
+- 参数名（`multi` `patch` `oldText` `token_budget` 等）——schema 键
+- git 术语（`worktree` `rebase` `squash` `merge commit` `stash` `caffeinate` 等）
+- 插件名（`smart-context` `pi-logger` `cloud-sessions` 等）
+- 状态/枚举值（`open/done/close`、`trace/debug/info/warn/error/off`、`pass/fail` 等）
+- 日志输出（`log.info/error` 写文件，开发者排查用，保留英文）

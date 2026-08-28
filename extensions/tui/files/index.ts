@@ -48,7 +48,7 @@ const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		git仓库数: gitRoots.length,
 	});
 	if (files.length === 0) {
-		ctx.ui.notify('No files found', 'info');
+		ctx.ui.notify('未找到文件', 'info');
 		return;
 	}
 
@@ -117,7 +117,7 @@ const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 							文件: file.displayPath,
 							原因: ec.reason,
 						});
-						ctx.ui.notify(ec.reason ?? 'File cannot be edited', 'warning');
+						ctx.ui.notify(ec.reason ?? '文件无法编辑', 'warning');
 						break;
 					}
 					log.info('操作: edit', { 文件: file.displayPath });
@@ -155,7 +155,7 @@ const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 const runDiffBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> => {
 	if (!ctx.hasUI) {
 		log.warn('/diff 被调用但当前不是交互模式');
-		ctx.ui.notify('Diff requires interactive mode', 'error');
+		ctx.ui.notify('diff 需要交互模式', 'error');
 		return;
 	}
 
@@ -167,7 +167,7 @@ const runDiffBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	});
 
 	if (files.length === 0) {
-		ctx.ui.notify('No files found', 'info');
+		ctx.ui.notify('未找到文件', 'info');
 		return;
 	}
 
@@ -176,7 +176,7 @@ const runDiffBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		const { selected } = await showFileSelector(ctx, files, lastSelectedPath, gitRoots);
 		if (selected.length === 0) {
 			log.info('/diff 用户取消选择');
-			ctx.ui.notify('Diff cancelled', 'info');
+			ctx.ui.notify('diff 已取消', 'info');
 			return;
 		}
 
@@ -244,7 +244,7 @@ const runDiffBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 								文件: file.displayPath,
 								原因: ec.reason,
 							});
-							ctx.ui.notify(ec.reason ?? 'File cannot be edited', 'warning');
+							ctx.ui.notify(ec.reason ?? '文件无法编辑', 'warning');
 							break;
 						}
 						log.info('/diff 回退操作: edit', {

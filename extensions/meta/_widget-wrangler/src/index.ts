@@ -6,11 +6,38 @@ import type {
 	WidgetPlacement,
 } from '@earendil-works/pi-coding-agent';
 import { getSettingsListTheme } from '@earendil-works/pi-coding-agent';
-import { Container, type SettingItem, SettingsList, Text } from '@earendil-works/pi-tui';
+import {
+	Container,
+	type SettingItem,
+	SettingsList,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+	type Component,
+} from '@earendil-works/pi-tui';
 import { createLogger } from '@zenone/pi-logger';
 import { resolveConfigPaths, readJsonFile, writeJsonAtomic } from '@zenone/pi-config';
 
 const log = createLogger('widget-wrangler');
+
+// 标题边框（ADR-0023）：把标题嵌入顶边框（`── 标题 ──...`），
+// 替代「独立标题 Text」的旧范式（本扩展有独立 tsconfig，内联而非 import src/tui）。
+function titleBar(title: string, color: (s: string) => string): Component {
+	return {
+		render(width: number) {
+			const inner = `── ${title.trim()} `;
+			return [
+				color(
+					truncateToWidth(
+						inner + '─'.repeat(Math.max(0, width - visibleWidth(inner))),
+						width,
+					),
+				),
+			];
+		},
+		invalidate() {},
+	};
+}
 
 const CUSTOM_TYPE = 'widget-wrangler-config';
 const OWN_WIDGET_KEY = 'widget-wrangler';
@@ -24,6 +51,8 @@ function loadGlobalConfig(): string[] | null {
 	try {
 		const raw = readJsonFile(configPath());
 		if (raw === null) return null;
+		// SAFETY: readJsonFile 返回 unknown，此处窄化为 WranglerState 后仅读取其可选
+		// disabled 数组字段；若非数组（配置损坏/结构不符）Array.isArray 检查会返回 null，无运行时风险。
 		const data = raw as unknown as WranglerState;
 		return Array.isArray(data?.disabled) ? data.disabled : null;
 	} catch {
@@ -264,13 +293,8 @@ export default function widgetWranglerExtension(pi: ExtensionAPI) {
 
 		await ctx.ui.custom<void>((tui, theme, _kb, done) => {
 			const container = new Container();
-			container.addChild(
-				new Text(
-					`${theme.fg('accent', theme.bold('小组件管理'))}  ${theme.fg('muted', '空格/回车切换 · Esc 关闭')}`,
-					1,
-					1,
-				),
-			);
+			container.addChild(titleBar('小组件管理', (s) => theme.fg('accent', theme.bold(s))));
+			container.addChild(new Text(theme.fg('muted', '空格/回车切换 · Esc 关闭'), 1, 0));
 
 			const settingsList = new SettingsList(
 				items,

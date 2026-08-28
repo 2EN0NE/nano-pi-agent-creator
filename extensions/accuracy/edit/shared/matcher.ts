@@ -77,7 +77,7 @@ export function deriveUpdatedContent(
 		if (chunk.changeContext !== undefined) {
 			const ctxIndex = seekSequence(originalLines, [chunk.changeContext], lineIndex, false);
 			if (ctxIndex === undefined) {
-				throw new Error(`Failed to find context '${chunk.changeContext}' in ${filePath}`);
+				throw new Error(`在 ${filePath} 中找不到上下文 '${chunk.changeContext}'`);
 			}
 			lineIndex = ctxIndex + 1;
 		}
@@ -100,9 +100,7 @@ export function deriveUpdatedContent(
 		}
 
 		if (found === undefined) {
-			throw new Error(
-				`Failed to find expected lines in ${filePath}:\n${chunk.oldLines.join('\n')}`,
-			);
+			throw new Error(`在 ${filePath} 中找不到预期行：\n${chunk.oldLines.join('\n')}`);
 		}
 
 		replacements.push([found, pattern.length, [...newSlice]]);
@@ -300,8 +298,8 @@ export function applyEditsToNormalizedContent(
 		if (edits[i].oldText.length === 0) {
 			throw new Error(
 				edits.length === 1
-					? `oldText must not be empty in ${path}.`
-					: `edits[${i}].oldText must not be empty in ${path}.`,
+					? `${path} 中的 oldText 不能为空。`
+					: `${path} 中的 edits[${i}].oldText 不能为空。`,
 			);
 		}
 	}
@@ -329,14 +327,14 @@ export function applyEditsToNormalizedContent(
 		const matchResult = fuzzyFindText(positionBase, edit.oldText, wholeLines);
 		if (!matchResult.found) {
 			throw new Error(
-				`Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`,
+				`在 ${path} 中找不到精确文本。oldText 必须完全匹配（包括所有空白和换行符）。`,
 			);
 		}
 
 		const occurrences = countOccurrences(positionBase, edit.oldText, wholeLines);
 		if (occurrences > 1) {
 			throw new Error(
-				`Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context.`,
+				`在 ${path} 中找到 ${occurrences} 处相同文本。文本必须唯一。请提供更多上下文。`,
 			);
 		}
 
@@ -360,7 +358,7 @@ export function applyEditsToNormalizedContent(
 		const cur = matchedEdits[i];
 		if (prev.matchIndex + prev.matchLength > cur.matchIndex) {
 			throw new Error(
-				`edits[${prev.editIndex}] and edits[${cur.editIndex}] overlap in ${path}. Merge them into one edit.`,
+				`${path} 中的 edits[${prev.editIndex}] 和 edits[${cur.editIndex}] 重叠。请合并为一次编辑。`,
 			);
 		}
 	}
@@ -370,7 +368,7 @@ export function applyEditsToNormalizedContent(
 	const newContent = applyTextReplacements(normalizedContent, matchedEdits);
 
 	if (baseContent === newContent) {
-		throw new Error(`No changes made to ${path}. The replacement produced identical content.`);
+		throw new Error(`${path} 没有发生变更。替换产生了相同的内容。`);
 	}
 
 	return { baseContent, newContent };

@@ -8,6 +8,7 @@ import {
 } from '@earendil-works/pi-tui';
 import { getConfig, saveConfig, reloadConfig } from '../config.js';
 import type { TodoPluginConfig } from '../types.js';
+import { scopeLabel, widgetDisplayLabel } from '../storage.js';
 
 export interface SettingsHandlers {
 	onClose: () => void;
@@ -56,19 +57,11 @@ export class SettingsPanel implements Component {
 
 		if (this.mode === 'main') {
 			if (!this.mainSettings) this.buildMainSettings();
-			lines.push(
-				truncateToWidth(this.theme.fg('accent', this.theme.bold('Todo Settings')), width),
-				'',
-			);
 			const rendered = this.mainSettings?.render(width) ?? [];
 			lines.push(...rendered);
 		} else {
 			if (!this.widgetSettings) this.buildWidgetSubmenu();
-			lines.push(
-				truncateToWidth(this.theme.fg('accent', this.theme.bold('Widget Settings')), width),
-				truncateToWidth(this.theme.fg('dim', 'Esc to go back'), width),
-				'',
-			);
+			lines.push(truncateToWidth(this.theme.fg('dim', 'Esc 返回'), width));
 			const rendered = this.widgetSettings?.render(width) ?? [];
 			lines.push(...rendered);
 		}
@@ -87,25 +80,25 @@ export class SettingsPanel implements Component {
 		const items: SettingItem[] = [
 			{
 				id: 'sortField',
-				label: 'Sort by',
-				currentValue: cfg.sortField === 'created-at' ? 'Created time' : 'Title',
-				values: ['Created time', 'Title'],
+				label: '排序字段',
+				currentValue: cfg.sortField === 'created-at' ? '创建时间' : '标题',
+				values: ['创建时间', '标题'],
 			},
 			{
 				id: 'sortDirection',
-				label: 'Sort direction',
-				currentValue: cfg.sortDirection === 'desc' ? 'Descending' : 'Ascending',
-				values: ['Descending', 'Ascending'],
+				label: '排序方向',
+				currentValue: cfg.sortDirection === 'desc' ? '降序' : '升序',
+				values: ['降序', '升序'],
 			},
 			{
 				id: 'compactView',
-				label: 'Compact list view',
-				currentValue: cfg.compactView ? 'Yes' : 'No',
-				values: ['Yes', 'No'],
+				label: '紧凑列表视图',
+				currentValue: cfg.compactView ? '是' : '否',
+				values: ['是', '否'],
 			},
 			{
 				id: 'widget',
-				label: 'Widget settings',
+				label: '组件设置',
 				currentValue: '>',
 				submenu: (_value: string, _done: (v?: string) => void) => {
 					this.mode = 'widget-sub';
@@ -115,10 +108,29 @@ export class SettingsPanel implements Component {
 			},
 		];
 
+		// pi-tui 的 SettingsList 内置 hint（"Enter/Space to change · Esc to cancel"）为英文，
+		// 通过覆盖 theme.hint 翻译为中文（不改 pi-tui 源码）。
+		const listTheme = getSettingsListTheme();
+		const localizedTheme = {
+			...listTheme,
+			hint: (text: string) =>
+				listTheme.hint(
+					text
+						.replace(
+							'Type to search · Enter/Space to change · Esc to cancel',
+							'输入搜索 · 回车/空格 修改 · Esc 取消',
+						)
+						.replace(
+							'Enter/Space to change · Esc to cancel',
+							'回车/空格 修改 · Esc 取消',
+						),
+				),
+		};
+
 		this.mainSettings = new SettingsList(
 			items,
 			10,
-			getSettingsListTheme(),
+			localizedTheme,
 			(id, newValue) => {
 				this.handleMainChange(id, newValue);
 			},
@@ -131,13 +143,13 @@ export class SettingsPanel implements Component {
 		const updates: Partial<TodoPluginConfig> = {};
 		switch (id) {
 			case 'sortField':
-				updates.sortField = newValue === 'Created time' ? 'created-at' : 'title';
+				updates.sortField = newValue === '创建时间' ? 'created-at' : 'title';
 				break;
 			case 'sortDirection':
-				updates.sortDirection = newValue === 'Descending' ? 'desc' : 'asc';
+				updates.sortDirection = newValue === '降序' ? 'desc' : 'asc';
 				break;
 			case 'compactView':
-				updates.compactView = newValue === 'Yes';
+				updates.compactView = newValue === '是';
 				break;
 		}
 		if (Object.keys(updates).length > 0) {
@@ -156,18 +168,18 @@ export class SettingsPanel implements Component {
 		}> = [
 			{
 				value: 'widgetShow',
-				label: cfg.widgetShow ? 'Show widget' : 'Hide widget',
-				description: 'Toggle widget visibility',
+				label: cfg.widgetShow ? '显示组件' : '隐藏组件',
+				description: '切换组件可见性',
 			},
 			{
 				value: 'widgetScope',
-				label: `Scope: ${cfg.widgetScope}`,
-				description: 'Session | Project | Global',
+				label: `范围: ${scopeLabel(cfg.widgetScope)}`,
+				description: '会话 | 项目 | 全局',
 			},
 			{
 				value: 'widgetDisplay',
-				label: `Display: ${cfg.widgetDisplay}`,
-				description: 'Summary | Details',
+				label: `显示: ${widgetDisplayLabel(cfg.widgetDisplay)}`,
+				description: '摘要 | 详情',
 			},
 		];
 
@@ -178,9 +190,9 @@ export class SettingsPanel implements Component {
 		};
 
 		const displayLabels: Record<string, (val: string) => string> = {
-			widgetShow: (v: string) => (v === 'true' ? 'Show widget' : 'Hide widget'),
-			widgetScope: (v: string) => `Scope: ${v}`,
-			widgetDisplay: (v: string) => `Display: ${v}`,
+			widgetShow: (v: string) => (v === 'true' ? '显示组件' : '隐藏组件'),
+			widgetScope: (v: string) => `范围: ${scopeLabel(v)}`,
+			widgetDisplay: (v: string) => `显示: ${widgetDisplayLabel(v)}`,
 		};
 
 		const updateWidgetConfig = (key: string, newValue: string) => {
@@ -212,6 +224,8 @@ export class SettingsPanel implements Component {
 			if (!values) return;
 			// Read FRESH values each time — not from captured cfg
 			const cur = getConfig();
+			// SAFETY: getConfig() 返回 TodoPluginConfig，此处按 key 动态读取可选字段；
+			// 窄化为 Record 后 String() 包装，缺失字段得 "undefined"，不影响 cycleValues 查找。
 			const currentValue = String((cur as unknown as Record<string, unknown>)[key]);
 			const idx = values.indexOf(currentValue);
 			const nextValue = values[(idx + 1) % values.length];

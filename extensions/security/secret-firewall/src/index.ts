@@ -185,35 +185,32 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand('secret-firewall', {
-		description: 'Show secret-firewall status (protected secrets, redaction count)',
+		description: '显示 secret-firewall 状态（受保护的密钥、脱敏次数）',
 		handler: async (_args, ctx) => {
 			rescan(ctx.cwd);
-			const names = entries.map((e) => e.placeholder).join(', ') || '(none)';
-			const captured = redactor.knownPlaceholders().join(', ') || '(none)';
+			const names = entries.map((e) => e.placeholder).join(', ') || '（无）';
+			const captured = redactor.knownPlaceholders().join(', ') || '（无）';
 			ctx.ui.notify(
-				`secret-firewall [${enabled ? 'on' : 'off'}] | protecting ${entries.length} secret(s) | ` +
-					`redacted ${stats.redactedHits} value(s) so far\nReferenceable as shell env: ${names}\nCaptured from context (auto-exported): ${captured}`,
+				`secret-firewall [${enabled ? 'on' : 'off'}] | 保护 ${entries.length} 个密钥 | ` +
+					`已脱敏 ${stats.redactedHits} 个值\n可作为 shell 环境变量引用：${names}\n从上下文捕获（自动导出）：${captured}`,
 				'info',
 			);
 		},
 	});
 
 	pi.registerCommand('secret-firewall-toggle', {
-		description: 'Enable or disable secret-firewall redaction',
+		description: '启用或禁用 secret-firewall 脱敏',
 		handler: async (_args, ctx) => {
 			enabled = !enabled;
-			ctx.ui.notify(`secret-firewall ${enabled ? 'enabled' : 'disabled'}`, 'info');
+			ctx.ui.notify(`secret-firewall ${enabled ? '已启用' : '已禁用'}`, 'info');
 		},
 	});
 
 	pi.registerCommand('secret-firewall-rescan', {
-		description: 'Re-scan environment and .env files for secrets',
+		description: '重新扫描环境变量和 .env 文件中的密钥',
 		handler: async (_args, ctx) => {
 			rescan(ctx.cwd);
-			ctx.ui.notify(
-				`secret-firewall re-scanned: ${entries.length} secret(s) protected`,
-				'info',
-			);
+			ctx.ui.notify(`secret-firewall 已重新扫描：${entries.length} 个密钥受保护`, 'info');
 		},
 	});
 }

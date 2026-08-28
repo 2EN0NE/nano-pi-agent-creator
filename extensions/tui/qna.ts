@@ -35,15 +35,15 @@ Keep questions in the order they appeared. Be concise.`;
 export default function (pi: ExtensionAPI) {
 	log.debug('registerCommand: qna');
 	pi.registerCommand('qna', {
-		description: 'Extract questions from last assistant message into editor',
+		description: '从最后一条 assistant 消息提取问题到编辑器',
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== 'tui') {
-				ctx.ui.notify('qna requires interactive mode', 'error');
+				ctx.ui.notify('qna 需要交互模式', 'error');
 				return;
 			}
 
 			if (!ctx.model) {
-				ctx.ui.notify('No model selected', 'error');
+				ctx.ui.notify('未选择模型', 'error');
 				return;
 			}
 
@@ -57,10 +57,7 @@ export default function (pi: ExtensionAPI) {
 					const msg = entry.message;
 					if ('role' in msg && msg.role === 'assistant') {
 						if (msg.stopReason !== 'stop') {
-							ctx.ui.notify(
-								`Last assistant message incomplete (${msg.stopReason})`,
-								'error',
-							);
+							ctx.ui.notify(`上一条助手消息不完整 (${msg.stopReason})`, 'error');
 							return;
 						}
 						const textParts = msg.content
@@ -75,7 +72,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (!lastAssistantText) {
-				ctx.ui.notify('No assistant messages found', 'error');
+				ctx.ui.notify('未找到助手消息', 'error');
 				return;
 			}
 
@@ -84,7 +81,7 @@ export default function (pi: ExtensionAPI) {
 				const loader = new BorderedLoader(
 					tui,
 					theme,
-					`Extracting questions using ${ctx.model!.id}...`,
+					`正在使用 ${ctx.model!.id} 提取问题...`,
 				);
 				loader.onAbort = () => done(null);
 
@@ -126,12 +123,12 @@ export default function (pi: ExtensionAPI) {
 			});
 
 			if (result === null) {
-				ctx.ui.notify('Cancelled', 'info');
+				ctx.ui.notify('已取消', 'info');
 				return;
 			}
 
 			ctx.ui.setEditorText(result);
-			ctx.ui.notify('Questions loaded. Edit and submit when ready.', 'info');
+			ctx.ui.notify('问题已加载，编辑后提交即可。', 'info');
 		},
 	});
 }

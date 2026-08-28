@@ -69,7 +69,7 @@ export default function (pi: ExtensionAPI) {
 			const decision = await router.pick(event.prompt, ctx);
 			if (!decision) {
 				log.info('No route — keeping current model');
-				if (debug) ctx.ui.notify('smart-context: no route (keeping current model)', 'info');
+				if (debug) ctx.ui.notify('smart-context: 无路由（保持当前模型）', 'info');
 				return;
 			}
 			const { model } = decision;
@@ -113,14 +113,14 @@ export default function (pi: ExtensionAPI) {
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			log.error('Routing error', { error: msg, diagnostics: getDiagnostics() });
-			ctx.ui.notify(`smart-context routing error: ${msg} [${getDiagnostics()}]`, 'warning');
+			ctx.ui.notify(`smart-context 路由错误：${msg} [${getDiagnostics()}]`, 'warning');
 		} finally {
 			ctx.ui.setWorkingMessage();
 		}
 	});
 
 	pi.on('context', async (event, ctx) => {
-		ctx.ui.setWorkingMessage('Compressing...');
+		ctx.ui.setWorkingMessage('压缩中...');
 		const before = JSON.stringify(event.messages).length;
 		try {
 			const messages = await compressor.compress(event.messages as any[], ctx);
@@ -156,16 +156,16 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: 'recover_context',
-		label: 'Recover Context',
+		label: '恢复上下文',
 		description:
-			'Recover the full original content of a message that was compressed/summarized in the conversation context. Pass the id shown in a recover_context("id") hint.',
-		promptSnippet: 'Recover full original text of a compressed message by its id',
+			'恢复会话上下文中被压缩/摘要的消息的完整原始内容。传入 recover_context("id") 提示中显示的 id。',
+		promptSnippet: '按 id 恢复被压缩消息的完整原始文本',
 		promptGuidelines: [
-			'Use recover_context when a compressed or summarized message lacks detail you need and shows a recover_context("id") hint.',
+			'当被压缩或摘要的消息缺少你需要的细节并显示 recover_context("id") 提示时，使用 recover_context。',
 		],
 		parameters: Type.Object({
 			id: Type.String({
-				description: 'The content id from a recover_context("id") hint',
+				description: '来自 recover_context("id") 提示的内容 id',
 			}),
 		}),
 		async execute(
@@ -178,7 +178,7 @@ export default function (pi: ExtensionAPI) {
 			const stored = store.get(params.id);
 			if (!stored) {
 				return {
-					content: [{ type: 'text', text: `No stored content for id "${params.id}".` }],
+					content: [{ type: 'text', text: `没有 id 为 "${params.id}" 的存储内容。` }],
 					details: {},
 				};
 			}
@@ -190,22 +190,22 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand('smart-context-toggle', {
-		description: 'Enable or disable smart-context model routing',
+		description: '启用或禁用 smart-context 模型路由',
 		handler: async (_args, ctx) => {
 			enabled = !enabled;
-			ctx.ui.notify(`smart-context routing ${enabled ? 'enabled' : 'disabled'}`, 'info');
+			ctx.ui.notify(`smart-context routing ${enabled ? '已启用' : '已禁用'}`, 'info');
 		},
 	});
 
 	pi.registerCommand('smart-context', {
-		description: 'Show smart-context compression stats and current profile',
+		description: '显示 smart-context 压缩统计与当前配置',
 		handler: async (_args, ctx) => {
 			const s = compressor.getStats();
 			const profile = resolveProfile(ctx.cwd);
 			ctx.ui.notify(
-				`[${enabled ? 'on' : 'off'}] profile=${_activeProfileName(profile)} ` +
-					`Saved ${s.totalSaved} chars (${s.ratio}% avg) | turns ${s.turnsProcessed} | ` +
-					`classifier ${s.haikuCalls} calls / ${s.haikuCacheHits} cached | recoverable ${s.storedItems}`,
+				`[${enabled ? 'on' : 'off'}] 配置=${_activeProfileName(profile)} ` +
+					`已节省 ${s.totalSaved} 字符（${s.ratio}% 平均）| 轮次 ${s.turnsProcessed} | ` +
+					`分类器 ${s.haikuCalls} 次调用 / ${s.haikuCacheHits} 次缓存 | 可恢复 ${s.storedItems}`,
 				'info',
 			);
 		},
@@ -213,9 +213,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand('smart-context-profile', {
 		description:
-			'List or switch smart-context profiles (balanced, fast, quality, or custom). ' +
-			'Usage: /smart-context-profile          → list profiles\n' +
-			"       /smart-context-profile balanced → switch to 'balanced'",
+			'列出或切换 smart-context 配置（balanced、fast、quality 或 custom）。 ' +
+			'用法：/smart-context-profile          → 列出配置\n' +
+			"       /smart-context-profile balanced → 切换到 'balanced'",
 		handler: async (args, ctx) => {
 			const profiles = builtinProfiles();
 
@@ -227,10 +227,10 @@ export default function (pi: ExtensionAPI) {
 				const names = Object.keys(profiles);
 				const cfgPath = configFilePath(ctx.cwd);
 				ctx.ui.notify(
-					`Available profiles: ${names.join(', ')}\n` +
-						`Current: ${_activeProfileName(current)}\n` +
-						`Config: ${cfgPath}\n` +
-						`To switch: /smart-context-profile {profileName}`,
+					`可用配置：${names.join(', ')}\n` +
+						`当前：${_activeProfileName(current)}\n` +
+						`配置文件：${cfgPath}\n` +
+						`切换方式：/smart-context-profile {profileName}`,
 					'info',
 				);
 				return;
@@ -238,7 +238,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (!profiles[profileArg]) {
 				ctx.ui.notify(
-					`Unknown profile "${profileArg}". Available: ${Object.keys(profiles).join(', ')}`,
+					`未知配置 "${profileArg}". Available: ${Object.keys(profiles).join(', ')}`,
 					'warning',
 				);
 				return;
@@ -248,10 +248,7 @@ export default function (pi: ExtensionAPI) {
 			const fs = await import('node:fs');
 			const cfgPath = configFilePath(ctx.cwd);
 			if (!cfgPath) {
-				ctx.ui.notify(
-					'Config path unavailable; cannot persist profile selection.',
-					'warning',
-				);
+				ctx.ui.notify('配置路径不可用；无法持久化配置选择。', 'warning');
 				return;
 			}
 
@@ -273,7 +270,7 @@ export default function (pi: ExtensionAPI) {
 
 			const p = resolveProfile(ctx.cwd);
 			ctx.ui.notify(
-				`Switched to profile "${profileArg}"\n` +
+				`已切换到配置 "${profileArg}"\n` +
 					`classifier: ${p.classifier.provider}/${p.classifier.model}\n` +
 					`trivial → ${p.routing.trivial.provider}/${p.routing.trivial.model}\n` +
 					`simple  → ${p.routing.simple.provider}/${p.routing.simple.model}\n` +

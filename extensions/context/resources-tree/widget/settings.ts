@@ -1,6 +1,7 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { getSettingsListTheme } from '@earendil-works/pi-coding-agent';
+import { getSettingsListTheme, DynamicBorder } from '@earendil-works/pi-coding-agent';
 import { Container, type SettingItem, SettingsList } from '@earendil-works/pi-tui';
+import { topBorder } from '../../../../src/tui/helpers.js';
 import { state } from '../state.js';
 import { showWidget, hideWidget, updateWidget } from './core.js';
 
@@ -11,13 +12,13 @@ export function openSettings(ctx: ExtensionContext): void {
 		const items: SettingItem[] = [
 			{
 				id: 'visible',
-				label: 'Always-on panel',
+				label: '常驻面板',
 				currentValue: state.widgetVisible ? 'ON' : 'OFF',
 				values: ['ON', 'OFF'],
 			},
 			{
 				id: 'collapsed',
-				label: 'Panel mode',
+				label: '面板模式',
 				currentValue: state.widgetCollapsed ? 'COLLAPSED' : 'EXPANDED',
 				values: ['EXPANDED', 'COLLAPSED'],
 			},
@@ -25,10 +26,13 @@ export function openSettings(ctx: ExtensionContext): void {
 		const container = new Container();
 		container.addChild(
 			new (class {
-				render() {
+				render(width: number) {
 					return [
-						theme.fg('accent', theme.bold('Resource Tree Settings')),
-						theme.fg('dim', 'Enter/Space to change \u00B7 Esc to cancel'),
+						theme.fg(
+							'accent',
+							theme.bold(topBorder('── Resource Tree Settings ', width)),
+						),
+						theme.fg('dim', 'Enter/Space 更改 \u00B7 Esc 取消'),
 						'',
 					];
 				}
@@ -50,6 +54,7 @@ export function openSettings(ctx: ExtensionContext): void {
 			() => done(undefined),
 		);
 		container.addChild(sl);
+		container.addChild(new DynamicBorder((s) => theme.fg('accent', s)));
 		return {
 			render(w: number) {
 				return container.render(w);

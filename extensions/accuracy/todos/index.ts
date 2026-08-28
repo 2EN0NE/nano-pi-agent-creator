@@ -126,6 +126,8 @@ export default function todosExtension(pi: ExtensionAPI) {
 			return;
 		}
 
+		// SAFETY: agent_end 事件的 payload 含 messages 数组（内部事件结构，未在公开类型中暴露）；
+		// 此处仅读取 messages 用于提取最后一条 assistant 文本，缺失时回退空数组。
 		const response = extractLastAssistantText(
 			(event as unknown as { messages?: Array<{ role?: string; content?: unknown }> })
 				.messages ?? [],
@@ -159,7 +161,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 	// ── /todos command ────────────────────────────────
 
 	pi.registerCommand('todos', {
-		description: 'Manage todos - interactive panel with Session/Project/Global/Settings tabs',
+		description: '管理待办 - 带会话/项目/全局/设置标签的交互式面板',
 		handler: async (args, ctx) => {
 			const cwd = ctx.cwd;
 			const allTodos = await listAllTodos(cwd);
@@ -188,7 +190,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					tui,
 					{
 						onWorkOnTodo: (todoId, title) => {
-							nextPrompt = `work on todo TODO-${todoId} "${title}"`;
+							nextPrompt = `处理待办 TODO-${todoId} "${title}"`;
 							done();
 						},
 						onRefineTodo: async (todoId, title) => {
@@ -202,6 +204,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					},
 					filteredTodos,
 					currentSessionId,
+					true,
 				);
 			});
 

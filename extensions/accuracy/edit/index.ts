@@ -24,28 +24,22 @@ const log = createLogger('edit');
 const editItemSchema = Type.Object({
 	path: Type.Optional(
 		Type.String({
-			description: 'Path to the file to edit. Inherits from top-level path if omitted.',
+			description: '要编辑的文件路径。省略时继承顶层的 path。',
 		}),
 	),
-	oldText: Type.String({ description: 'Exact text to find and replace (must match exactly)' }),
-	newText: Type.String({ description: 'New text to replace the old text with' }),
+	oldText: Type.String({ description: '要查找并替换的精确文本（必须完全匹配）' }),
+	newText: Type.String({ description: '替换旧文本的新文本' }),
 });
 
 const editSchema = Type.Object({
-	path: Type.Optional(
-		Type.String({ description: 'Path to the file to edit (relative or absolute)' }),
-	),
-	oldText: Type.Optional(
-		Type.String({ description: 'Exact text to find and replace (must match exactly)' }),
-	),
-	newText: Type.Optional(Type.String({ description: 'New text to replace the old text with' })),
-	multi: Type.Optional(
-		Type.Array(editItemSchema, { description: 'Multiple edits to apply in sequence.' }),
-	),
+	path: Type.Optional(Type.String({ description: '要编辑的文件路径（相对或绝对）' })),
+	oldText: Type.Optional(Type.String({ description: '要查找并替换的精确文本（必须完全匹配）' })),
+	newText: Type.Optional(Type.String({ description: '替换旧文本的新文本' })),
+	multi: Type.Optional(Type.Array(editItemSchema, { description: '按顺序应用的多个编辑。' })),
 	patch: Type.Optional(
 		Type.String({
 			description:
-				'Codex-style apply_patch payload (*** Begin Patch ... *** End Patch). Mutually exclusive with path/oldText/newText/multi.',
+				'Codex 风格的 apply_patch 载荷（*** Begin Patch ... *** End Patch）。与 path/oldText/newText/multi 互斥。',
 		}),
 	),
 });
@@ -127,13 +121,13 @@ export default function editExtension(pi: ExtensionAPI) {
 		name: 'edit',
 		label: 'edit',
 		description:
-			'Edit a file by replacing exact text. The oldText must match exactly (including whitespace). Use this for precise, surgical edits. Supports a `multi` parameter for batch edits across one or more files, and a `patch` parameter for Codex-style patches.',
+			'通过替换精确文本来编辑文件。oldText 必须完全匹配（包括空白字符）。用于精准、外科手术式的编辑。支持 `multi` 参数跨一个或多个文件批量编辑，以及 `patch` 参数进行 Codex 风格的补丁。',
 		promptSnippet:
-			'Edit a file by replacing exact text. The oldText must match exactly (including whitespace). Use this for precise, surgical edits.',
+			'通过替换精确文本来编辑文件。oldText 必须完全匹配（包括空白字符）。用于精准、外科手术式的编辑。',
 		promptGuidelines: [
-			'Use edit for precise changes (old text must match exactly)',
-			'Use the `multi` parameter to apply multiple edits in a single tool call',
-			'Use the `patch` parameter for Codex-style multi-file / hunk-based edits',
+			'使用 edit 进行精确修改（oldText 必须完全匹配）',
+			'使用 `multi` 参数在一次工具调用中应用多个编辑',
+			'使用 `patch` 参数进行 Codex 风格的多文件 / 基于补丁块的编辑',
 		],
 		parameters: editSchema,
 
@@ -147,9 +141,7 @@ export default function editExtension(pi: ExtensionAPI) {
 				multi !== undefined;
 
 			if (hasPatch && hasClassic) {
-				throw new Error(
-					'The `patch` parameter is mutually exclusive with path/oldText/newText/multi.',
-				);
+				throw new Error('`patch` 参数与 path/oldText/newText/multi 互斥。');
 			}
 
 			const startTime = Date.now();
@@ -171,7 +163,7 @@ export default function editExtension(pi: ExtensionAPI) {
 						content: [
 							{
 								type: 'text',
-								text: `Applied patch with ${r.results.length} operation(s).\n${summary}`,
+								text: `已应用补丁，共 ${r.results.length} 个操作。\n${summary}`,
 							},
 						],
 						details: { diff: r.combinedDiff, firstChangedLine: r.firstChangedLine },
@@ -202,7 +194,7 @@ export default function editExtension(pi: ExtensionAPI) {
 								content: [
 									{
 										type: 'text',
-										text: `Applied ${fr.results.length} edit(s) (with fallback).\n${summary}`,
+										text: `已应用 ${fr.results.length} 处编辑（含回退）。\n${summary}`,
 									},
 								],
 								details: {
@@ -228,7 +220,7 @@ export default function editExtension(pi: ExtensionAPI) {
 									content: [
 										{
 											type: 'text',
-											text: `Applied ${r.results.length} edit(s) successfully.\n${summary}`,
+											text: `已成功应用 ${r.results.length} 处编辑。\n${summary}`,
 										},
 									],
 									details: {
@@ -250,7 +242,7 @@ export default function editExtension(pi: ExtensionAPI) {
 							content: [
 								{
 									type: 'text',
-									text: `Applied ${r.results.length} edit(s).\n${summary}`,
+									text: `已应用 ${r.results.length} 处编辑。\n${summary}`,
 								},
 							],
 							details: { diff: r.combinedDiff, firstChangedLine: r.firstChangedLine },
@@ -296,10 +288,10 @@ function buildEditList(
 		}
 	}
 	if (edits.length === 0) {
-		throw new Error('No edits provided. Supply path/oldText/newText or a multi array.');
+		throw new Error('未提供编辑。请提供 path/oldText/newText 或一个 multi 数组。');
 	}
 	for (let i = 0; i < edits.length; i++) {
-		if (!edits[i].path) throw new Error(`Edit ${i + 1} is missing a path.`);
+		if (!edits[i].path) throw new Error(`第 ${i + 1} 个编辑缺少 path。`);
 	}
 	return edits;
 }

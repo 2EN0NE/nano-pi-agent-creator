@@ -24,7 +24,7 @@ const STRATEGY_LABELS: Record<NodeModulesStrategy, string> = {
 	symlink: 'Symlink (fastest)',
 	copy: 'Hardlink copy (cp -al)',
 	install: 'Auto install (npm/pnpm/yarn)',
-	none: 'None',
+	none: '无',
 };
 
 // ═══════════════════════════════════════════
@@ -346,7 +346,7 @@ class ListSelector {
 		this.title_ = opts.title;
 		this.options_ = opts.options;
 		this.cursor_ = opts.cursor ?? 0;
-		this.footer_ = opts.footer ?? 'up/down navigate  Enter confirm  Esc cancel';
+		this.footer_ = opts.footer ?? 'up/down 导航  Enter 确认  Esc 取消';
 	}
 
 	handleInput(data: string): void {
@@ -378,8 +378,20 @@ class ListSelector {
 		const th = this.theme_;
 		const lines: string[] = [];
 
-		lines.push(truncateToWidth(th.fg('accent', th.bold(this.title_)), width));
-		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
+		const titleText = th.fg('accent', th.bold(this.title_));
+		const titlePrefix = th.fg('dim', '── ');
+		const titleSuffix = ' ';
+		const titleVisible = visibleWidth(titleText);
+		const titleFill = Math.max(
+			0,
+			width - visibleWidth(titlePrefix) - titleVisible - visibleWidth(titleSuffix),
+		);
+		lines.push(
+			truncateToWidth(
+				titlePrefix + titleText + titleSuffix + th.fg('dim', '─'.repeat(titleFill)),
+				width,
+			),
+		);
 
 		for (let i = 0; i < this.options_.length; i++) {
 			const opt = this.options_[i];
@@ -409,10 +421,10 @@ export async function askDeleteLeaveChoice(
 
 	const options: Array<{ value: 'resume' | 'new' | 'cancel'; label: string }> = [];
 	if (hasHistory) {
-		options.push({ value: 'resume', label: 'Resume main history' });
+		options.push({ value: 'resume', label: '恢复主历史' });
 	}
-	options.push({ value: 'new', label: 'New session in main' });
-	options.push({ value: 'cancel', label: 'Cancel deletion' });
+	options.push({ value: 'new', label: '在主会话中新建' });
+	options.push({ value: 'cancel', label: '取消删除' });
 
 	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<
 		'resume' | 'new' | 'cancel'
@@ -421,9 +433,9 @@ export async function askDeleteLeaveChoice(
 			tui,
 			theme,
 			done,
-			title: 'Delete current worktree: where to go?',
+			title: '删除当前工作树：接下来去哪里？',
 			options,
-			footer: 'up/down navigate  Enter confirm  Esc cancel',
+			footer: 'up/down 导航  Enter 确认  Esc 取消',
 		});
 		return {
 			render: (w: number) => selector.render(w),
@@ -451,30 +463,30 @@ export async function askSessionStrategy(
 	if (isOriginalProject) {
 		options.push({
 			value: 'checkout',
-			label: 'Checkout branch in current directory (no session switch)',
+			label: '在当前目录检出分支（不切换会话）',
 		});
 		if (hasHistory) {
-			options.push({ value: 'resume', label: 'Resume existing session' });
+			options.push({ value: 'resume', label: '恢复已有会话' });
 		}
 		// 始终允许带 session 切换回 main
-		options.push({ value: 'new', label: 'Switch to main (new session)' });
+		options.push({ value: 'new', label: '切换到主会话（新建）' });
 	} else {
 		// worktree 目标：clone 始终可用（有 history 时覆盖，无 history 时首次建立）
 		if (hasHistory) {
-			options.push({ value: 'resume', label: 'Resume existing session' });
+			options.push({ value: 'resume', label: '恢复已有会话' });
 			options.push({
 				value: 'clone',
-				label: 'Clone current session history (overwrite existing)',
+				label: '克隆当前会话历史（覆盖现有）',
 			});
 		} else {
 			options.push({
 				value: 'clone',
-				label: 'Clone current session history to worktree',
+				label: '克隆当前会话历史到 worktree',
 			});
 		}
-		options.push({ value: 'new', label: 'New session (no history)' });
+		options.push({ value: 'new', label: '新会话（无历史）' });
 	}
-	options.push({ value: 'cancel', label: 'Cancel' });
+	options.push({ value: 'cancel', label: '取消' });
 
 	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<
 		'checkout' | 'resume' | 'new' | 'clone' | 'cancel'
@@ -483,9 +495,9 @@ export async function askSessionStrategy(
 			tui,
 			theme,
 			done,
-			title: `Switch to ${label}`,
+			title: `切换到 ${label}`,
 			options,
-			footer: 'up/down navigate  Enter confirm  Esc cancel',
+			footer: 'up/down 导航  Enter 确认  Esc 取消',
 		});
 		return {
 			render: (w: number) => selector.render(w),
@@ -530,7 +542,7 @@ class MultiSelectPanel {
 		this.title_ = opts.title;
 		this.items_ = opts.items;
 		this.cursor_ = opts.cursor ?? 0;
-		this.footer_ = opts.footer ?? 'up/down navigate  Space toggle  Enter confirm  Esc cancel';
+		this.footer_ = opts.footer ?? 'up/down 导航  Space 开关  Enter 确认  Esc 取消';
 	}
 
 	handleInput(data: string): void {
@@ -569,8 +581,20 @@ class MultiSelectPanel {
 		const th = this.theme_;
 		const lines: string[] = [];
 
-		lines.push(truncateToWidth(th.fg('accent', th.bold(this.title_)), width));
-		lines.push(truncateToWidth(th.fg('dim', '\u2500'.repeat(width)), width));
+		const titleText = th.fg('accent', th.bold(this.title_));
+		const titlePrefix = th.fg('dim', '── ');
+		const titleSuffix = ' ';
+		const titleVisible = visibleWidth(titleText);
+		const titleFill = Math.max(
+			0,
+			width - visibleWidth(titlePrefix) - titleVisible - visibleWidth(titleSuffix),
+		);
+		lines.push(
+			truncateToWidth(
+				titlePrefix + titleText + titleSuffix + th.fg('dim', '─'.repeat(titleFill)),
+				width,
+			),
+		);
 
 		for (let i = 0; i < this.items_.length; i++) {
 			const item = this.items_[i];
@@ -634,23 +658,30 @@ class CustomPathsInput {
 		const th = this.theme_;
 		const lines: string[] = [];
 
-		lines.push(truncateToWidth(th.fg('accent', th.bold('Custom symlink paths')), width));
-		lines.push(truncateToWidth(th.fg('dim', '\u2500'.repeat(width)), width));
+		const titleText = th.fg('accent', th.bold('自定义符号链接路径'));
+		const titlePrefix = th.fg('dim', '── ');
+		const titleSuffix = ' ';
+		const titleVisible = visibleWidth(titleText);
+		const titleFill = Math.max(
+			0,
+			width - visibleWidth(titlePrefix) - titleVisible - visibleWidth(titleSuffix),
+		);
 		lines.push(
 			truncateToWidth(
-				th.fg('dim', 'Enter paths relative to repo root. Separate multiple with ;'),
+				titlePrefix + titleText + titleSuffix + th.fg('dim', '─'.repeat(titleFill)),
 				width,
 			),
 		);
+		lines.push(truncateToWidth(th.fg('dim', '输入相对仓库根目录的路径，多个用 ; 分隔'), width));
 		lines.push(truncateToWidth(th.fg('dim', ''), width));
-		lines.push(truncateToWidth(th.fg('dim', 'Examples:'), width));
+		lines.push(truncateToWidth(th.fg('dim', '示例：'), width));
 		lines.push(truncateToWidth(th.fg('dim', '  .venv;public/assets'), width));
 		lines.push(truncateToWidth(th.fg('dim', '  .mypy_cache;.pytest_cache'), width));
 		lines.push(truncateToWidth(th.fg('dim', '  storage/cache;uploads'), width));
 		lines.push(truncateToWidth(th.fg('dim', '\u2500'.repeat(width)), width));
 		lines.push(truncateToWidth(` ${th.fg('accent', '>')} ${this.input_}`, width));
 		lines.push(truncateToWidth(th.fg('dim', '\u2500'.repeat(width)), width));
-		lines.push(truncateToWidth(th.fg('dim', '[Enter] confirm  [Esc] skip / cancel'), width));
+		lines.push(truncateToWidth(th.fg('dim', '[Enter] 确认  [Esc] 跳过 / 取消'), width));
 
 		return lines;
 	}
@@ -668,9 +699,9 @@ class CustomPathsInput {
 
 export async function askMergeStrategy(ctx: any): Promise<'merge' | 'squash' | 'rebase-ff' | null> {
 	const options: Array<{ value: 'merge' | 'squash' | 'rebase-ff'; label: string }> = [
-		{ value: 'merge', label: 'Merge -- preserve branch history (merge commit)' },
-		{ value: 'squash', label: 'Squash -- single commit, linear history' },
-		{ value: 'rebase-ff', label: 'Rebase + ff -- linear, no merge commit' },
+		{ value: 'merge', label: 'Merge — 保留分支历史（合并提交）' },
+		{ value: 'squash', label: 'Squash — 单提交、线性历史' },
+		{ value: 'rebase-ff', label: 'Rebase + ff — 线性、无合并提交' },
 	];
 
 	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<
@@ -680,9 +711,9 @@ export async function askMergeStrategy(ctx: any): Promise<'merge' | 'squash' | '
 			tui,
 			theme,
 			done,
-			title: 'Merge strategy',
+			title: '合并策略',
 			options,
-			footer: 'up/down navigate  Enter confirm  Esc cancel',
+			footer: 'up/down 导航  Enter 确认  Esc 取消',
 		});
 		return {
 			render: (w: number) => selector.render(w),
@@ -765,8 +796,8 @@ export async function askSymlinkTargetsPanel(ctx: any): Promise<SymlinkSelection
 		})),
 		{
 			id: '__other__',
-			label: 'Other...',
-			hint: 'Custom paths',
+			label: '其他...',
+			hint: '自定义路径',
 			selected: lastIds.includes('__other__'),
 		},
 	];
@@ -884,7 +915,7 @@ export async function confirmRebaseFF(
 				);
 				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
 				lines.push(truncateToWidth(` ${theme.fg('accent', '[y]')} Proceed with rebase`, w));
-				lines.push(truncateToWidth(` ${theme.fg('dim', '[n/esc]')} Cancel`, w));
+				lines.push(truncateToWidth(` ${theme.fg('dim', '[n/esc]')} 取消`, w));
 				return lines;
 			},
 			handleInput(data: string): void {
@@ -919,15 +950,10 @@ export async function confirmDelete(ctx: any, name: string): Promise<boolean> {
 					),
 				);
 				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
-				lines.push(truncateToWidth(` ${theme.fg('accent', '[y]')} Yes, delete it`, w));
-				lines.push(truncateToWidth(` ${theme.fg('dim', '[n/esc]')} Cancel`, w));
+				lines.push(truncateToWidth(` ${theme.fg('accent', '[y]')} 是，删除它`, w));
+				lines.push(truncateToWidth(` ${theme.fg('dim', '[n/esc]')} 取消`, w));
 				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
-				lines.push(
-					truncateToWidth(
-						theme.fg('dim', 'Removes the worktree directory and deletes branch.'),
-						w,
-					),
-				);
+				lines.push(truncateToWidth(theme.fg('dim', '删除工作树目录并移除分支。'), w));
 				lines.push(
 					truncateToWidth(
 						theme.fg('warning', 'Session history (if any) is NOT deleted.'),
@@ -995,7 +1021,7 @@ export async function confirmForceDelete(
 						w,
 					),
 				);
-				lines.push(truncateToWidth(` ${theme.fg('dim', '[n/esc]')} Cancel`, w));
+				lines.push(truncateToWidth(` ${theme.fg('dim', '[n/esc]')} 取消`, w));
 				lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
 				lines.push(
 					truncateToWidth(
@@ -1033,9 +1059,9 @@ export async function askBranchDelete(
 	if (!unmerged) return 'delete';
 
 	const options = [
-		{ value: 'delete', label: 'Force delete branch (commits may be lost)' },
-		{ value: 'keep', label: 'Keep branch (safe)' },
-		{ value: 'cancel', label: 'Cancel' },
+		{ value: 'delete', label: '强制删除分支（提交可能丢失）' },
+		{ value: 'keep', label: '保留分支（安全）' },
+		{ value: 'cancel', label: '取消' },
 	];
 
 	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<
@@ -1075,10 +1101,7 @@ export async function promptWorktreeName(ctx: any): Promise<string | null> {
 					lines.push(truncateToWidth(theme.fg('dim', '─'.repeat(w)), w));
 					lines.push(
 						truncateToWidth(
-							theme.fg(
-								'dim',
-								'Leave empty for auto-name.  [Enter] confirm  [Esc] cancel',
-							),
+							theme.fg('dim', '留空自动命名。  [Enter] 确认  [Esc] 取消'),
 							w,
 						),
 					);
@@ -1141,13 +1164,13 @@ class OperationSubmenu {
 		this.worktreeName_ = opts.worktreeName;
 
 		this.options_ = [
-			{ value: 'switch', label: 'Switch to worktree', key: 'S' },
-			{ value: 'fork', label: 'Fork context to worktree', key: 'F' },
-			{ value: 'merge', label: 'Merge into main', key: 'M' },
-			{ value: 'rebase', label: 'Sync onto main (rebase)', key: 'R' },
-			{ value: 'delete', label: 'Delete worktree', key: 'D' },
-			{ value: 'shell', label: 'Open shell in worktree', key: 'H' },
-			{ value: 'cancel', label: 'Cancel', key: '' },
+			{ value: 'switch', label: '切换到工作树', key: 'S' },
+			{ value: 'fork', label: '分叉上下文到 worktree', key: 'F' },
+			{ value: 'merge', label: '合并到 main', key: 'M' },
+			{ value: 'rebase', label: '同步到 main（rebase）', key: 'R' },
+			{ value: 'delete', label: '删除 worktree', key: 'D' },
+			{ value: 'shell', label: '在 worktree 中打开 shell', key: 'H' },
+			{ value: 'cancel', label: '取消', key: '' },
 		];
 		this.cursor_ = 0;
 	}
@@ -1190,10 +1213,20 @@ class OperationSubmenu {
 		const th = this.theme_;
 		const lines: string[] = [];
 
-		lines.push(
-			truncateToWidth(th.fg('accent', th.bold(` Worktree: ${this.worktreeName_}`)), width),
+		const titleText = th.fg('accent', th.bold(`Worktree: ${this.worktreeName_}`));
+		const titlePrefix = th.fg('dim', '── ');
+		const titleSuffix = ' ';
+		const titleVisible = visibleWidth(titleText);
+		const titleFill = Math.max(
+			0,
+			width - visibleWidth(titlePrefix) - titleVisible - visibleWidth(titleSuffix),
 		);
-		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
+		lines.push(
+			truncateToWidth(
+				titlePrefix + titleText + titleSuffix + th.fg('dim', '─'.repeat(titleFill)),
+				width,
+			),
+		);
 
 		for (let i = 0; i < this.options_.length; i++) {
 			const opt = this.options_[i];
@@ -1206,10 +1239,7 @@ class OperationSubmenu {
 
 		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
 		lines.push(
-			truncateToWidth(
-				th.fg('dim', ' up/down navigate  Enter confirm  key shortcut  Esc back'),
-				width,
-			),
+			truncateToWidth(th.fg('dim', ' up/down 导航  Enter 确认  按键快捷  Esc 返回'), width),
 		);
 
 		return lines;

@@ -12,6 +12,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { compact } from '@earendil-works/pi-coding-agent';
 import { Container, type SelectItem, SelectList, Text } from '@earendil-works/pi-tui';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
+import { TitleBar } from '../../src/tui/helpers.js';
 import { createLogger } from '@zenone/pi-logger';
 
 const log = createLogger('loop');
@@ -30,9 +31,9 @@ type LoopStateData = {
 };
 
 const LOOP_PRESETS = [
-	{ value: 'tests', label: 'Until tests pass', description: '' },
-	{ value: 'custom', label: 'Until custom condition', description: '' },
-	{ value: 'self', label: 'Self driven (agent decides)', description: '' },
+	{ value: 'tests', label: '直到测试通过', description: '' },
+	{ value: 'custom', label: '直到满足自定义条件', description: '' },
+	{ value: 'self', label: '自主驱动（由 agent 决定）', description: '' },
 ] as const;
 
 const LOOP_STATE_ENTRY = 'loop-state';
@@ -179,9 +180,9 @@ function updateStatus(ctx: ExtensionContext, state: LoopStateData): void {
 		return;
 	}
 	const loopCount = state.loopCount ?? 0;
-	const turnText = `(turn ${loopCount})`;
+	const turnText = `（第 ${loopCount} 轮）`;
 	const summary = state.summary?.trim();
-	const text = summary ? `Loop active: ${summary} ${turnText}` : `Loop active ${turnText}`;
+	const text = summary ? `循环运行中：${summary} ${turnText}` : `循环运行中 ${turnText}`;
 	ctx.ui.setWidget('loop', [ctx.ui.theme.fg('accent', text)]);
 }
 
@@ -218,7 +219,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
 	function breakLoop(ctx: ExtensionContext): void {
 		clearLoopState(ctx);
-		ctx.ui.notify('Loop ended', 'info');
+		ctx.ui.notify('循环已结束', 'info');
 	}
 
 	function wasLastAssistantAborted(
@@ -264,8 +265,9 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
 		const selection = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 			const container = new Container();
-			container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
-			container.addChild(new Text(theme.fg('accent', theme.bold('Select a loop preset'))));
+			container.addChild(
+				new TitleBar('选择循环预设', (str) => theme.fg('accent', theme.bold(str))),
+			);
 
 			const selectList = new SelectList(items, Math.min(items.length, 10), {
 				selectedPrefix: (text) => theme.fg('accent', text),
@@ -279,9 +281,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 			selectList.onCancel = () => done(null);
 
 			container.addChild(selectList);
-			container.addChild(
-				new Text(theme.fg('dim', 'Press enter to confirm or esc to cancel')),
-			);
+			container.addChild(new Text(theme.fg('dim', '按 Enter 确认或 Esc 取消')));
 			container.addChild(new DynamicBorder((str) => theme.fg('accent', str)));
 
 			return {
@@ -347,14 +347,14 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: 'signal_loop_success',
-		label: 'Signal Loop Success',
+		label: '标记循环成功',
 		description:
-			'Stop the active loop when the breakout condition is satisfied. Only call this tool when explicitly instructed to do so by the user, tool or system prompt.',
+			'当跳出条件满足时停止活动循环。仅当用户、工具或系统提示明确指示时，才调用此工具。',
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			if (!loopState.active) {
 				return {
-					content: [{ type: 'text', text: 'No active loop is running.' }],
+					content: [{ type: 'text', text: '没有正在运行的循环。' }],
 					details: { active: false },
 				};
 			}
@@ -362,7 +362,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 			clearLoopState(ctx);
 
 			return {
-				content: [{ type: 'text', text: 'Loop ended.' }],
+				content: [{ type: 'text', text: '循环已结束。' }],
 				details: { active: false },
 			};
 		},
@@ -370,13 +370,13 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
 	log.debug('registerCommand: loop');
 	pi.registerCommand('loop', {
-		description: 'Start a follow-up loop until a breakout condition is met',
+		description: '启动一个后续循环，直到满足跳出条件',
 		handler: async (args, ctx) => {
 			let nextState = parseArgs(args);
 			if (!nextState) {
 				if (!ctx.hasUI) {
 					ctx.ui.notify(
-						'Usage: /loop tests | /loop custom <condition> | /loop self',
+						'用法：/loop tests | /loop custom <条件> | /loop self',
 						'warning',
 					);
 					return;
@@ -385,19 +385,16 @@ export default function loopExtension(pi: ExtensionAPI): void {
 			}
 
 			if (!nextState) {
-				ctx.ui.notify('Loop cancelled', 'info');
+				ctx.ui.notify('循环已取消', 'info');
 				return;
 			}
 
 			if (loopState.active) {
 				const confirm = ctx.hasUI
-					? await ctx.ui.confirm(
-							'Replace active loop?',
-							'A loop is already active. Replace it?',
-						)
+					? await ctx.ui.confirm('替换活动循环？', '已有一个活动循环。是否替换？')
 					: true;
 				if (!confirm) {
-					ctx.ui.notify('Loop unchanged', 'info');
+					ctx.ui.notify('循环未变更', 'info');
 					return;
 				}
 			}
@@ -408,7 +405,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 				loopCount: 0,
 			};
 			setLoopState(summarizedState, ctx);
-			ctx.ui.notify('Loop active', 'info');
+			ctx.ui.notify('循环运行中', 'info');
 			triggerLoopPrompt(ctx);
 
 			const mode = nextState.mode!;

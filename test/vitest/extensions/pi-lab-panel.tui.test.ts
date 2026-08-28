@@ -264,7 +264,7 @@ describe('pi-lab panel — headless snapshot', () => {
 		expect(renderText(panel)).toContain('尚未采集到数据');
 	});
 
-	it('面板有上下边框 ┌─┐└┘ 且不超宽', async () => {
+	it('面板有纯横线上下边框且不超宽', async () => {
 		manager.registerExperiment({
 			owner: 'test',
 			name: 'border-test',
@@ -277,12 +277,15 @@ describe('pi-lab panel — headless snapshot', () => {
 		const lines = panel.render(80).map(stripAnsi);
 		assertWithinWidth(lines, 80);
 
-		expect(lines[0].startsWith('┌')).toBe(true);
-		expect(lines[0].endsWith('┐')).toBe(true);
+		expect(lines[0].startsWith('──')).toBe(true);
+		expect(lines[0]).not.toContain('┌');
+		expect(lines[0]).not.toContain('┐');
 		// 尾部可能是 MIN_TOTAL_LINES 高度填充的空行，取最后一个非空行验证底边框
 		const lastContent = [...lines].reverse().find((l) => l.trim().length > 0) ?? '';
-		expect(lastContent.startsWith('└')).toBe(true);
-		expect(lastContent.endsWith('┘')).toBe(true);
+		expect(lastContent).not.toContain('└');
+		expect(lastContent).not.toContain('┘');
+		// 底边框为纯横线
+		expect(lastContent.trim().replace(/─/g, '')).toBe('');
 	});
 
 	it('视图切换时渲染高度不小于最小高度（防抖动）', async () => {

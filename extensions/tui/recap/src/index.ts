@@ -71,7 +71,7 @@ export default function recapExtension(pi: ExtensionAPI): void {
 			try {
 				const recap = await generateRecap(ctx);
 				if (recap) {
-					ctx.ui.notify(`Recap: ${recap}`, 'info');
+					ctx.ui.notify(`回顾：${recap}`, 'info');
 					log.info('Auto recap result', { text: recap });
 				}
 			} catch {
@@ -82,7 +82,7 @@ export default function recapExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand('recap', {
-		description: 'Summarize where you left off in this session',
+		description: '总结你本次会话进行到哪了',
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
 				log.debug('No UI available for /recap command');
@@ -91,20 +91,20 @@ export default function recapExtension(pi: ExtensionAPI): void {
 			await ctx.waitForIdle();
 
 			log.info('User triggered /recap');
-			ctx.ui.setWorkingMessage('Drafting recap...');
+			ctx.ui.setWorkingMessage('正在生成回顾...');
 			try {
 				const recap = await generateRecap(ctx);
 				showedRecapSinceActivity = true;
 				if (recap) {
-					ctx.ui.notify(`Recap: ${recap}`, 'info');
+					ctx.ui.notify(`回顾：${recap}`, 'info');
 					log.info('Manual recap result', { text: recap });
 				} else {
-					ctx.ui.notify('Not enough conversation to recap yet.', 'warning');
+					ctx.ui.notify('会话内容还不够生成回顾。', 'warning');
 					log.debug('Manual recap: not enough conversation');
 				}
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
-				ctx.ui.notify(`Recap failed: ${msg}`, 'error');
+				ctx.ui.notify(`回顾失败：${msg}`, 'error');
 				log.error('Manual recap failed', { error: msg });
 			} finally {
 				ctx.ui.setWorkingMessage();

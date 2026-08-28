@@ -5,10 +5,38 @@ import { execSync } from 'node:child_process';
 import { createLogger } from '@zenone/pi-logger';
 import { createConfigStore } from '@zenone/pi-config';
 import type { ConfigStore } from '@zenone/pi-config';
-import { Container, SelectList, Text, matchesKey, Key } from '@earendil-works/pi-tui';
+import {
+	Container,
+	SelectList,
+	Text,
+	matchesKey,
+	Key,
+	truncateToWidth,
+	visibleWidth,
+	type Component,
+} from '@earendil-works/pi-tui';
 import type { SelectItem } from '@earendil-works/pi-tui';
 
 const log = createLogger('ci-watch');
+
+// 标题边框（ADR-0023）：把标题嵌入顶边框（`── 标题 ──...`），
+// 替代 DynamicBorder(纯横线) + Text(独立标题) 的旧范式。
+function titleBar(title: string, color: (s: string) => string): Component {
+	return {
+		render(width: number) {
+			const inner = `── ${title.trim()} `;
+			return [
+				color(
+					truncateToWidth(
+						inner + '─'.repeat(Math.max(0, width - visibleWidth(inner))),
+						width,
+					),
+				),
+			];
+		},
+		invalidate() {},
+	};
+}
 
 const MAX_ATTEMPTS = 3;
 const DEFAULT_POLL_MIN_MS = 30_000;
@@ -364,8 +392,7 @@ function makeCiWatchPanel(
 
 	ctx.ui.custom<void>((tui, theme, _kb, done) => {
 		const container = new Container();
-		container.addChild(new DynamicBorder((s: string) => theme.fg('accent', s)));
-		container.addChild(new Text(theme.fg('accent', theme.bold('CI 监控')), 1, 0));
+		container.addChild(titleBar('CI 监控', (s: string) => theme.fg('accent', theme.bold(s))));
 
 		const selectList = new SelectList(items, Math.min(items.length + 1, 12), {
 			selectedPrefix: (t) => theme.fg('accent', t),
@@ -766,7 +793,7 @@ export default function (pi: ExtensionAPI) {
 	// ====================================================================
 	pi.registerTool({
 		name: 'ci_watch',
-		label: 'CI Monitor',
+		label: 'CI 监控',
 		description:
 			'监控 GitHub PR 或分支的 CI 状态，等待完成并报告结果。如果 CI 失败，返回失败日志供修复。支持 PR 编号（如 12）或分支名（如 main）。',
 		promptSnippet: '监控 PR 或分支的 CI 状态，等待完成，如有失败则返回失败日志',
@@ -776,10 +803,10 @@ export default function (pi: ExtensionAPI) {
 			'不要主动调用 ci_watch——只有用户明确要求监控 CI 时才调用。',
 		],
 		parameters: Type.Object({
-			pr: Type.String({ description: 'PR number or branch name to monitor' }),
+			pr: Type.String({ description: '要监控的 PR 编号或分支名' }),
 			attempt: Type.Optional(
 				Type.Number({
-					description: 'Current fix attempt count (1-3). Omit for first check.',
+					description: '当前修复尝试次数（1-3）。首次检查省略。',
 				}),
 			),
 		}),
