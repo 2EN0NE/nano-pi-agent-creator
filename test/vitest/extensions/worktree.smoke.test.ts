@@ -1198,7 +1198,7 @@ describe('worktree extension — delete leave choice', () => {
 			encoding: 'utf-8',
 		});
 		expect(list).toContain('delete-wt');
-		expect(notifyMsgs.some((m) => m.includes('Deletion cancelled'))).toBe(true);
+		expect(notifyMsgs.some((m) => m.includes('已取消删除'))).toBe(true);
 	});
 
 	it('2. 非 TUI 模式：有历史 resume、无历史 new', async () => {
@@ -1269,7 +1269,7 @@ describe('worktree extension — prune', () => {
 		await handleWorktreeCommand('prune --dry-run', pruneCtx(notifyMsgs));
 
 		expect(notifyMsgs.some((m) => m.includes('Orphaned session directories'))).toBe(true);
-		expect(notifyMsgs.some((m) => m.includes('dry run'))).toBe(true);
+		expect(notifyMsgs.some((m) => m.includes('预演'))).toBe(true);
 
 		// dry-run 不执行：git 记录仍存在
 		const list = execSync('git worktree list --porcelain', {
@@ -1287,7 +1287,7 @@ describe('worktree extension — prune', () => {
 		const notifyMsgs: string[] = [];
 		await handleWorktreeCommand('prune', pruneCtx(notifyMsgs));
 
-		expect(notifyMsgs.some((m) => m.includes('Pruned git worktree metadata'))).toBe(true);
+		expect(notifyMsgs.some((m) => m.includes('已修剪 git worktree 元数据'))).toBe(true);
 		const list = execSync('git worktree list --porcelain', {
 			cwd: repoDir,
 			encoding: 'utf-8',
