@@ -53,7 +53,7 @@ All notable changes to mitsupi are documented here.
 ### 工程体系
 
 - **双层测试**：`test/vitest/` 单元 + 组件测试（mock 全部 Pi API，<30s）；`test/e2e/` 集成测试（真实 Pi 进程，仅 mock LLM）。当前覆盖 64 文件 / 1155 用例。
-- **CI 与 Git Hooks**：CI 为绝对标准（Prettier / TypeScript / ESLint / Vitest / E2E / Semgrep / TUI / Config 全阻塞），本地 husky 分层对齐。
+- **CI 与 Git Hooks**：CI 为绝对标准（Prettier / TypeScript / ESLint / Vitest / E2E / Semgrep / TUI 全阻塞），Config 合规门禁暂为 WARN（列出违规但不阻塞，待基础组件与插件解耦后收紧）；本地 husky 分层对齐。
 - **Sync 工具**：双 Profile 架构（`user-install` 全局 vs `project` 项目级），支持内联测试目标、本地依赖解析、内嵌技能打包。
 
 ### 新增与重构的扩展
