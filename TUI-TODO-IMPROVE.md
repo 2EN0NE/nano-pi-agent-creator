@@ -75,7 +75,7 @@
 
 > 非强制：notify() 消息、工具描述、日志中的 ⚠✓✗ 建议也改为纯文本，避免跨环境字体缺字显示方块。
 
-- [ ] `auto/cloud-sessions/src/project-match.ts`（⚠）、`auto/extension-dev-final-sync.ts`（⚠❌）、`context/custom-compaction/`（⚠×3）、`security/permission-gate/records.ts`（⚠）、`meta/pi-lab/core/definition-diff.ts`（✅）、`meta/pi-lab/core/manager.ts`（✓）
+- [ ] `auto/cloud-sessions/src/project-match.ts`（⚠）、`context/custom-compaction/`（⚠×3）、`security/permission-gate/records.ts`（⚠）、`meta/pi-lab/core/definition-diff.ts`（✅）、`meta/pi-lab/core/manager.ts`（✓）
 
 ---
 

@@ -24,7 +24,7 @@ if [ -z "$CHANGED_FILES" ]; then
   exit 0
 fi
 
-# ── 类型检查（当有 .ts/.tsx 变更时）──
+# ── 类型检查 + 合规门禁（当有 .ts/.tsx 变更时）──
 if echo "$CHANGED_FILES" | grep -q '\.tsx\?$'; then
 	echo "🔍 pre-push: typecheck..."
   npm run typecheck
@@ -32,6 +32,17 @@ if echo "$CHANGED_FILES" | grep -q '\.tsx\?$'; then
     echo "❌ TypeScript errors found. Fix before pushing."
     exit 1
   fi
+
+	echo "🔍 pre-push: TUI 合规门禁..."
+  npm run lint:tui
+  if [ $? -ne 0 ]; then
+    echo "❌ TUI 合规违规（双宽 emoji / 硬编码颜色 / 方角边框等）。Fix before pushing."
+    exit 1
+  fi
+
+	echo "🔍 pre-push: config 合规门禁（WARN，不阻塞）..."
+  npm run lint:config
+  echo "⚠️  config 合规违规已列出（当前为 WARN，不阻塞推送）。请尽快将基础组件与独立插件解耦。"
 fi
 
 # ── 单元测试（对齐 CI unit-tests job）──
