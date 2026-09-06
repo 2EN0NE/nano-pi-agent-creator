@@ -78,7 +78,7 @@ export const DEFAULT_PATTERN_NOTES: Record<string, string> = Object.fromEntries(
 export const FALLBACK_EXPLAIN: Record<ReasonKey, string> = {
 	destructive: '破坏性命令，可能抹除或覆写数据',
 	'permission-related': '权限相关操作，可能改变访问控制或提权',
-	credential: '触及敏感凭证/密钥文件',
+	credential: '触及敏感凭证/密钥文件', // nosemgrep: security.no-hardcoded-secrets
 	'system-dir-write': '写入系统关键目录',
 	'system-dir-read': '读取系统关键目录',
 	pattern: '匹配拦截模式（未写备注）',
