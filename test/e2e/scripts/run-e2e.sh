@@ -50,6 +50,8 @@ TARGET_EXT=""
 TARGET_SKILL=""
 TUI_ONLY=false
 TARGET_CASE=""
+SHARD_INDEX=""
+SHARD_TOTAL=""
 
 usage() {
 	cat <<'EOF'
@@ -63,6 +65,9 @@ Options:
                        (case-insensitive). Requires --ext or --skill. Speeds up
                        iterating on a single case instead of the whole file.
   --pool <N>          Parallel worker count (default: CPU×2, auto-detected)
+  --shard <N/M>       Run only the N-th shard (0-based) of M total shards.
+                       Deterministically partitions the full module set so CI
+                       can split the long full e2e run into parallel jobs.
   -h, --help          Show this help
 
 Without options, runs all test modules (smoke.test.sh only).
@@ -115,6 +120,21 @@ while [[ $# -gt 0 ]]; do
 		POOL_SIZE="$2"
 		shift 2
 		;;
+	--shard)
+		SHARD_SPEC="$2"
+		if [[ "$SHARD_SPEC" =~ ^([0-9]+)/([0-9]+)$ ]]; then
+			SHARD_INDEX="${BASH_REMATCH[1]}"
+			SHARD_TOTAL="${BASH_REMATCH[2]}"
+			if [[ $SHARD_INDEX -ge $SHARD_TOTAL ]]; then
+				echo "Invalid --shard: index must be < total" >&2
+				exit 2
+			fi
+		else
+			echo "Invalid --shard: expected N/M format (e.g., 0/4)" >&2
+			exit 2
+		fi
+		shift 2
+		;;
 	-h | --help) usage ;;
 	*)
 		echo "Unknown option: $1" >&2
@@ -122,6 +142,29 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+# ── shard 分区（--shard N/M）──
+# 全量枚举模块时，用模块名的确定性 hash 分配到各 shard，保证同一模块的
+# smoke/tui/exp 任务落在同一 shard，且跨 run 确定性一致。
+# 刻意不用关联数组（declare -A）——macOS 自带 bash 3.2 不支持，需兼容。
+if [[ -n "$SHARD_INDEX" ]]; then
+	# 确定性 hash 分桶：h = (h XOR code) * 33，中间用大质数 1000003 取模保持
+	# 64 位内，最终 % SHARD_TOTAL。对 59 个扩展名的实测分布接近均匀（差 ≤2）。
+	# 刻意不用关联数组（declare -A）——macOS 自带 bash 3.2 不支持，需兼容。
+	_shard_match() {
+		local name="$1"
+		local h=0 i c code
+		local len=${#name}
+		for ((i = 0; i < len; i++)); do
+			c="${name:$i:1}"
+			code=$(LC_ALL=C printf '%d' "'$c")
+			h=$(((h ^ code) * 33 % 1000003))
+		done
+		[[ $((h % SHARD_TOTAL)) -eq "$SHARD_INDEX" ]]
+	}
+else
+	_shard_match() { return 0; }
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 测试框架 API（在 source 测试文件前定义）
@@ -910,6 +953,7 @@ run_target() {
 		for d in "$TEST_DIR/$type_dir"/*/; do
 			local bn
 			bn=$(basename "$d")
+			if ! _shard_match "$bn"; then continue; fi
 			local tf="$d/smoke.test.sh"
 			if [[ -f "$tf" ]]; then
 				add_task "$type_dir" "$bn" "$tf"
@@ -922,6 +966,7 @@ run_target() {
 			for d in "$TEST_DIR/$type_dir"/*/; do
 				local bn
 				bn=$(basename "$d")
+				if ! _shard_match "$bn"; then continue; fi
 				local tf="$d/tui-expect.smoke.test.sh"
 				if [[ -f "$tf" ]]; then
 					add_task "$type_dir" "$bn" "$tf"
@@ -934,6 +979,7 @@ run_target() {
 		for d in "$TEST_DIR/$type_dir"/*/; do
 			local bn
 			bn=$(basename "$d")
+			if ! _shard_match "$bn"; then continue; fi
 			local tf="$d/tui-integration.test.exp"
 			if [[ -f "$tf" ]]; then
 				add_task "$type_dir" "$bn" "$tf"

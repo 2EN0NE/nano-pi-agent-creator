@@ -183,10 +183,16 @@ jobs:
               run: bash bench/smoke-test.sh --task scc-bounded-memory-spilling
 
     # ── E2E Tests（bash 集成测试，阻塞）──
+    # 全量 e2e 模块多、耗时长（单 job 曾超 70 分钟并触发 runner 异常），
+    # 拆成 4 个并行 shard：每个 shard 跑约 1/4 模块，单 job 控制在 40 分钟内。
     e2e:
         name: E2E Tests
         runs-on: ubuntu-latest
-        timeout-minutes: 90
+        timeout-minutes: 40
+        strategy:
+            fail-fast: false
+            matrix:
+                shard: [0, 1, 2, 3]
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
@@ -197,15 +203,17 @@ jobs:
               run: npm ci
             - name: Setup CI environment
               run: bash scripts/setup-ci.sh
-            - name: Run bash e2e tests (auto-pool)
+            - name: Run bash e2e tests (shard ${{ matrix.shard }}/4)
               env:
                   E2E_POOL_SIZE: 4
-              run: bash test/e2e/scripts/run-e2e.sh
+              run: |
+                  bash test/e2e/scripts/run-e2e.sh \
+                    --shard "${{ matrix.shard }}/4"
             - name: Upload test results
               if: always()
               uses: actions/upload-artifact@v4
               with:
-                  name: e2e-test-results
+                  name: e2e-test-results-${{ matrix.shard }}
                   path: test/results/
             - name: Show summary
               if: always()
