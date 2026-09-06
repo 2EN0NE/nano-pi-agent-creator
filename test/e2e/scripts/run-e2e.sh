@@ -314,8 +314,13 @@ run_pi_and_check() {
 	#（print 路径扩展在 $test_home/.pi/extensions/<name>，相对路径 ../../src/tui 即 $test_home/src/tui；
 	#  与 TUI 路径 tui_setup_sandbox_home 的 $HOME/.pi/src/tui 对应）。
 	if [[ -d "$ROOT_DIR/src/tui" ]]; then
+		# 2 层 import（extensions/tui/*.ts → ../../src/tui）解析到 $test_home/src/tui
 		mkdir -p "$test_home/src"
 		cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
+		# 3 层 import（extensions/*/*/*.ts → ../../../src/tui）扁平化后解析到
+		# $test_home/../src/tui（= $ROOT_DIR/.pi/tmp/src/tui，所有 print 沙箱共享）
+		mkdir -p "$test_home/../src"
+		cp -r "$ROOT_DIR/src/tui" "$test_home/../src/tui" 2>/dev/null || true
 	fi
 
 	local padded

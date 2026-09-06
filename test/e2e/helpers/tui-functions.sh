@@ -184,11 +184,16 @@ tui_setup_sandbox_home() {
 	export HOME="$test_home/home"
 	[[ -f "$test_home/.pi/pi-logger.json" ]] && cp "$test_home/.pi/pi-logger.json" "$HOME/.pi/agent/"
 
-	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '<root>/src/tui/helpers.js' 的扩展在沙箱内解析
-	#（扩展在 $HOME/.pi/agent/extensions/<name>，相对路径 ../../../src/tui 即 $HOME/.pi/src/tui）。
+	# 拷贝共享 TUI 辅助模块（src/tui/），供 import '<root>/src/tui/helpers.js' 的扩展在沙箱内解析。
+	# sync 会把目录扩展扁平化到 $HOME/.pi/agent/extensions/<name>，相对 import 的解析基准随
+	# 源文件深度变化，需在两个位置各放一份：
+	#   - extensions/tui/*.ts        → ../../src/tui    = $HOME/.pi/src/tui
+	#   - extensions/*/*/*.ts        → ../../../src/tui = $HOME/src/tui
 	if [[ -d "$ROOT_DIR/src/tui" ]]; then
 		mkdir -p "$HOME/.pi/src"
 		cp -r "$ROOT_DIR/src/tui" "$HOME/.pi/src/tui"
+		mkdir -p "$HOME/src"
+		cp -r "$ROOT_DIR/src/tui" "$HOME/src/tui"
 	fi
 
 	# 关键：扩展复制到用户级目录 + node_modules 链接。
