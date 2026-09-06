@@ -1008,18 +1008,27 @@ run_pool() {
 	echo "─── Parallel pool (${POOL_SIZE} workers, ${task_count} tasks) ───"
 
 	declare -a worker_pids=()
+	declare -a worker_times=()
+	declare -a worker_names=()
 	local next_task=0
 
 	while ((next_task < task_count)); do
 		# 清理已完成 worker（bash 3.2 兼容：空数组用 + 展开）
 		declare -a active_pids=()
-		local pid
-		for pid in "${worker_pids[@]+"${worker_pids[@]}"}"; do
-			if kill -0 "$pid" 2>/dev/null; then
+		declare -a active_times=()
+		declare -a active_names=()
+		local idx
+		for ((idx = 0; idx < ${#worker_pids[@]}; idx++)); do
+			local pid="${worker_pids[$idx]}"
+			if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
 				active_pids+=("$pid")
+				active_times+=("${worker_times[$idx]}")
+				active_names+=("${worker_names[$idx]}")
 			fi
 		done
 		worker_pids=("${active_pids[@]+"${active_pids[@]}"}")
+		worker_times=("${active_times[@]+"${active_times[@]}"}")
+		worker_names=("${active_names[@]+"${active_names[@]}"}")
 
 		# 填充空闲 slot
 		while ((${#worker_pids[@]} < POOL_SIZE && next_task < task_count)); do
@@ -1036,20 +1045,47 @@ run_pool() {
 					run_test_file "$task_file" "$task_type" "$task_name"
 				fi
 			) >"$worker_log" 2>&1 &
-			worker_pids+=($!)
+			local wp=$!
+			worker_pids+=("$wp")
+			worker_times+=("$(date +%s)")
+			worker_names+=("$task_type/$task_name")
 			next_task=$((next_task + 1))
-			echo "  [${next_task}/${task_count}] Started: $task_type/$task_name (pid=$!)"
+			echo "  [${next_task}/${task_count}] Started: $task_type/$task_name (pid=$wp)"
 		done
 
 		sleep 1
 	done
 
-	# 等待所有 worker 完成
+	# 等待所有 worker 完成，带 per-worker 超时保护：
+	# 单个测试挂起不再拖垮整个 job（CI 上 40min timeout 的根因），
+	# 超时 worker 被 kill 并留名，worker 日志保留挂起前的输出便于定位。
+	local worker_timeout="${E2E_WORKER_TIMEOUT:-900}"
 	local remaining=${#worker_pids[@]}
-	for pid in "${worker_pids[@]+"${worker_pids[@]}"}"; do
-		wait "$pid" 2>/dev/null || true
-		remaining=$((remaining - 1))
-		echo "  Worker pid=$pid finished (${remaining} remaining)"
+	while ((remaining > 0)); do
+		local now
+		now=$(date +%s)
+		local i
+		for ((i = 0; i < ${#worker_pids[@]}; i++)); do
+			local wpid="${worker_pids[$i]}"
+			[[ -z "$wpid" ]] && continue
+			if kill -0 "$wpid" 2>/dev/null; then
+				local elapsed=$((now - worker_times[$i]))
+				if ((elapsed > worker_timeout)); then
+					echo "  [TIMEOUT] worker pid=$wpid (${worker_names[$i]}) 超过 ${worker_timeout}s，强制终止"
+					# 先杀进程组（覆盖 pi/expect 子进程），失败则杀单进程
+					kill -TERM -- -"$wpid" 2>/dev/null || kill -TERM "$wpid" 2>/dev/null || true
+					sleep 2
+					kill -KILL -- -"$wpid" 2>/dev/null || kill -KILL "$wpid" 2>/dev/null || true
+					worker_pids[$i]=""
+					remaining=$((remaining - 1))
+				fi
+			else
+				worker_pids[$i]=""
+				remaining=$((remaining - 1))
+			fi
+		done
+		((remaining <= 0)) && break
+		sleep 3
 	done
 
 	# ── 汇总结果：从每个模块的 summary.json 读取 ──
