@@ -184,7 +184,7 @@ jobs:
 
     # ── E2E Tests（bash 集成测试，阻塞）──
     # 全量 e2e 模块多、耗时长（单 job 曾超 70 分钟并触发 runner 异常），
-    # 拆成 4 个并行 shard：每个 shard 跑约 1/4 模块，单 job 控制在 40 分钟内。
+    # 拆成 8 个并行 shard：每个 shard 跑约 1/8 模块，降低单 job 资源压力与挂起风险。
     e2e:
         name: E2E Tests
         runs-on: ubuntu-latest
@@ -192,7 +192,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                shard: [0, 1, 2, 3]
+                shard: [0, 1, 2, 3, 4, 5, 6, 7]
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
@@ -203,12 +203,12 @@ jobs:
               run: npm ci
             - name: Setup CI environment
               run: bash scripts/setup-ci.sh
-            - name: Run bash e2e tests (shard ${{ matrix.shard }}/4)
+            - name: Run bash e2e tests (shard ${{ matrix.shard }}/8)
               env:
                   E2E_POOL_SIZE: 4
               run: |
                   bash test/e2e/scripts/run-e2e.sh \
-                    --shard "${{ matrix.shard }}/4"
+                    --shard "${{ matrix.shard }}/8"
             - name: Upload test results
               if: always()
               uses: actions/upload-artifact@v4
