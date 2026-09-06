@@ -54,9 +54,9 @@ TEST
 # ── 用例 4：内联模式同步文件扩展（.ts 文件） ──
 test_it "inline mode syncs single-file extension" <<'TEST'
   clean_test_dir
-  npx tsx "$SYNC_SCRIPT" --ext review --target ./.pi/test 2>&1
-  [[ -f "$ROOT_DIR/.pi/test/extensions/review.ts" ]] || { echo "review.ts not found"; exit 1; }
-  echo "Verified: review.ts synced correctly"
+  npx tsx "$SYNC_SCRIPT" --ext quit --target ./.pi/test 2>&1
+  [[ -f "$ROOT_DIR/.pi/test/extensions/quit.ts" ]] || { echo "quit.ts not found"; exit 1; }
+  echo "Verified: quit.ts synced correctly"
   clean_test_dir
 TEST
 
@@ -80,9 +80,9 @@ TEST
 # ── 用例 7：内联模式多资源同步 ──
 test_it "inline mode syncs multiple extensions" <<'TEST'
   clean_test_dir
-  npx tsx "$SYNC_SCRIPT" --ext pi-logger --ext review --theme nightowl --target ./.pi/test 2>&1
+  npx tsx "$SYNC_SCRIPT" --ext pi-logger --ext quit --theme nightowl --target ./.pi/test 2>&1
   [[ -d "$ROOT_DIR/.pi/test/extensions/pi-logger" ]] || { echo "pi-logger missing"; exit 1; }
-  [[ -f "$ROOT_DIR/.pi/test/extensions/review.ts" ]] || { echo "review.ts missing"; exit 1; }
+  [[ -f "$ROOT_DIR/.pi/test/extensions/quit.ts" ]] || { echo "quit.ts missing"; exit 1; }
   [[ -f "$ROOT_DIR/.pi/test/themes/nightowl.json" ]] || { echo "nightowl.json missing"; exit 1; }
   echo "Verified: all 3 resources synced"
   clean_test_dir
