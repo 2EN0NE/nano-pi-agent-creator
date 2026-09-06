@@ -81,9 +81,13 @@ test_it "expect: 多选勾选后改用「输入其他」，自定义文本成为
       timeout { exit 1 }
     }
     sleep 1
-    # ← 返回问题页：勾选集合应已被清空，不再显示 [x] 残留
+    # ← 返回问题页：勾选集合应已被清空，选项 A 应显示 [ ] 而非 [x]
     send "\x1b\[D"
     sleep 1
+    expect {
+      -re {\[ \] 1\. 选项 A} { }
+      timeout { exit 1 }
+    }
     # 再前进到提交页并提交
     send "\x1b\[C"
     sleep 1
@@ -93,8 +97,8 @@ test_it "expect: 多选勾选后改用「输入其他」，自定义文本成为
 
   # 自定义文本是该问题的唯一答案（wasCustom 路径），而非勾选项
   tui_assert_contains "[OK] q1: (wrote) custom-text-answer" "自定义文本成为唯一答案"
-  # 若提交自定义后勾选集合未清空，回访问题页会残留 [x] → 断言其不存在
-  tui_assert_not_contains "[x]" "自定义提交后回访不应残留已勾选复选框"
+  # 回访问题页的复选框清空已在 expect 脚本内做屏幕级断言（匹配 [ ] 1. 选项 A）。
+  # 不能在此用 tui_assert_not_contains "[x]" 检查全量输出——勾选阶段本就产生过 [x]。
   # 答案不应以选项格式（1. 选项 A…）回显
   tui_assert_not_contains "[OK] q1: 1. 选项 A" "自定义答案不应包含勾选项"
   tui_cleanup
