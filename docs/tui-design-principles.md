@@ -294,12 +294,22 @@ Pi TUI 内置 `SelectList` 组件（pi-tui 包），支持：
 | 按键           | 功能                                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------- |
 | `↑` / `↓`      | 上下导航选项                                                                                      |
-| `Enter`        | 确认/选中/进入编辑                                                                                |
+| `Enter`        | 确认/选中/进入详情                                                                                |
 | `Esc`          | 取消/关闭/返回                                                                                    |
-| `Tab`          | 切换标签页（面板中）                                                                              |
+| `Tab`          | 两级 Tab 结构中切换**一级**标签页；单级面板亦用它切标签                                           |
+| `←` / `→`      | 两级 Tab 结构中切换**二级**标签页（维度/子分类）；单级面板可复用为切标签                          |
 | `/`            | 进入过滤模式                                                                                      |
 | `Ctrl+Shift+O` | **通用：折叠/展开长文本内容。** 所有 TUI 面板中的长文字、详细信息，统一使用此快捷键控制展开与收起 |
 | `Backspace`    | 过滤时删除字符 / 编辑时退格                                                                       |
+
+**两级 Tab 结构按键规范（强制）**：当面板存在一级 tab（主分类）与二级 tab（子分类）两级结构时——
+
+- `Tab` 切换**一级** tab；
+- `←` / `→` 切换**二级** tab；
+- `Enter` 打开当前选中条目的**详情**（master-detail 二级），`Esc` 逐级返回/关闭；
+- 二级 tab 的内容随一级 tab 变化（如 permission-gate：一级=scope 会话/项目/用户，scope 层二级=命令/工具/目录，分析层二级=会话/项目/用户）。
+
+> 参考实现：`extensions/security/permission-gate/two-tab-panel.ts`（ADR-0029）。
 
 ### 6.2 `Ctrl+Shift+O` 折叠展开规范
 
@@ -447,6 +457,7 @@ const editorLines = editor.render(contentWidth).map((l) => truncateToWidth(l, W)
 2. **多列表格**（如 `quit.ts` 的 modelUsage 表）：需要 column 布局，用 `visibleWidth` 算列宽。
 3. **滚动 / 视口裁剪**：滚动窗自行做高度裁剪（`scrollOffset` 切片），每行仍需 `truncateToWidth` 兜底。
 4. **内容含 tab / emoji / 组合字符**：`visibleWidth` 可能少算，须额外 `truncateToWidth` 兜底（见第 1 章字符白名单）。
+5. **内容含 `\n` 多行文本**：`truncateToWidth` 不处理换行符——`graphemeWidth('\n')` 返回 0，`\n` 被原样保留在返回值里。含换行的字符串直接拼进「单行字段行」会撑爆渲染树（字段行溢出到 footer、后续字段重复渲染）。必须先 `wrapTextWithAnsi` 换行、或 `.replace(/\s*\n+\s*/g, ' · ')` 单行化，再交给 `truncateToWidth`。
 
 ---
 

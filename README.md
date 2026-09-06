@@ -136,6 +136,54 @@ import {
 > **对 coding agent**：commit/sync/ci-watch 等工具已被约束不使用 `--no-verify` 跳过 hook。
 > 手动维护时，提交前确保 `npm run format:check && npm run typecheck` 通过。
 
+## 🌿 分支与 worktree 工作流
+
+本项目采用三层分支模型，worktree 按 extensions 子类划分：
+
+```
+worktree(特性分支)  --squash-->  dev(集成主干)  --merge-->  main(发布分支)
+```
+
+| 边界           | 方式                 | 说明                                                                     |
+| -------------- | -------------------- | ------------------------------------------------------------------------ |
+| worktree → dev | `git merge --squash` | dev 历史干净，1 特性 = 1 提交；worktree 复用前需 `reset --hard dev` 对齐 |
+| dev → main     | `git merge --no-ff`  | dev 永不 reset、连续开发；main 历史 = dev 历史 + 1 个 release merge 提交 |
+
+### worktree 一键重建
+
+6 个 worktree 对应 extensions 子类（bugfix 为跨类修复）：
+
+| worktree      | 分支               | 对应                       |
+| ------------- | ------------------ | -------------------------- |
+| bugfix        | `wt/bugfix`        | 跨类 bug 修复              |
+| context       | `wt/context`       | `extensions/context`       |
+| observability | `wt/observability` | `extensions/observability` |
+| security      | `wt/security`      | `extensions/security`      |
+| tool          | `wt/tool`          | `extensions/accuracy`      |
+| verification  | `wt/verification`  | `extensions/verification`  |
+
+```bash
+# 清空并重建全部 worktree（从当前 dev 拉）
+bash scripts/recreate-worktrees.sh
+
+# 仅重建某一个
+bash scripts/recreate-worktrees.sh context
+```
+
+> ⚠️ 脚本会删除对应 worktree 目录及其分支，**未提交改动会丢失**。运行前请确认各 worktree 无未提交工作。
+
+### 发版流程
+
+```bash
+# ① 特性开发在 worktree 完成 → 合入 dev（squash）
+git checkout dev && git merge --squash wt/xxx && git commit -m "feat(xxx): ..."
+
+# ② 发版：dev → main（merge，不打乱 main）
+git checkout main && git merge --no-ff dev -m "release: vX.Y.Z" && git tag vX.Y.Z
+```
+
+详细规范见 [`AGENTS.md`](AGENTS.md#分支管理规范)。
+
 ## 📦 同步脚本
 
 详细用法、配置文件参考、内联模式、增量同步机制、npm install 处理等请参见 [docs/sync-tool.md](docs/sync-tool.md)。
@@ -159,6 +207,39 @@ npx tsx scripts/sync-to-local-pi.ts --ext sandbox --target ./.pi/test
 ## 本地依赖解析
 
 当扩展通过 `file:` 协议引用本地包（如 `@zenone/pi-logger`）时，同步脚本会自动处理依赖解析。详见 [docs/sync-tool.md](docs/sync-tool.md#本地依赖处理)。
+
+## 🌐 离线环境部署
+
+`scripts/offline.sh` 把整个 pi 插件体系（pi 运行时 + 用户级扩展 + 本地包 + 第三方插件）打包成单个 bundle，在无网络的 Linux 目标机上解压恢复即可用。
+
+```bash
+# ① 源机（macOS，有网）打包
+bash scripts/offline.sh pack -o pi-offline-bundle.tar.gz
+
+# 常用选项
+#   --arch arm64            目标 linux 架构（默认 x64）
+#   --with-node             附带 node 运行时（目标机无 node 时用）
+#   --with-project          附带项目 .pi/ 目录（本项目开发用）
+#   --with-repo             附带仓库源码 + node_modules（离线开发扩展用）
+#   --keep-sessions         保留会话历史
+#   --keep-auth             保留 auth.json（含密钥）
+
+# ② 目标机（Linux，离线）——拷贝 bundle + .sha256 过去后
+bash scripts/offline.sh restore pi-offline-bundle.tar.gz
+
+# restore 选项
+#   --pi-prefix DIR         pi 安装位置（默认 ~/.local/share/pi-runtime）
+#   --bin-dir DIR           pi 软链目录（默认 ~/.local/bin）
+#   --force                 目标已存在时备份后覆盖
+#   --smoke                 启动 pi 冒烟自检
+```
+
+### 离线环境要点
+
+- **离线模式**：restore 生成的 `pi` 是 wrapper，默认设置 `PI_OFFLINE=1`（pi 内置离线模式），启动时不联网同步第三方插件；已安装的 npm/git 插件靠本地版本匹配正常加载。临时联网更新用 `PI_OFFLINE=0 pi`。
+- **模型配置**：`models.json` 需指向离线可达的本地模型（如 ollama `http://localhost:11434/v1`），否则 pi 报无 API key。
+- **已知降级**：dist 未构建的扩展（smart-context/secret-firewall/cloud-sessions/recap/DEMO:catch-the-fox）与 darwin-only 平台包（ast-grep/ffi-rs）在 restore 时会明确告警，不影响核心运行。
+- **符号链接**：`~/.pi/agent/node_modules/@zenone/*` 指向 worktree 绝对路径的问题由脚本在 pack 时记录映射、restore 时重建为相对链接，源机环境不被修改。
 
 ## 目录说明
 
@@ -186,30 +267,27 @@ Pi Coding Agent 的扩展在 [extensions](extensions) 目录中，按功能分�
 
 #### 🖥️ [tui/](extensions/tui) — 交互界面
 
-| 扩展                                                          | 说明                                                             | 快捷键          |
-| ------------------------------------------------------------- | ---------------------------------------------------------------- | --------------- |
-| [`answer.ts`](extensions/tui/answer.ts)                       | 逐个回答问题的交互式 TUI                                         | `a`             |
-| [`btw.ts`](extensions/tui/btw.ts)                             | 简易的 `/btw` 侧边聊天弹窗，关闭时可把摘要回注入主会话           |                 |
-| [`files.ts`](extensions/tui/files.ts)                         | 统一的文件浏览器，整合 git 状态、会话引用、reveal/open/edit/diff | `f o, f r, f q` |
-| [`qna.ts`](extensions/tui/qna.ts)                             | Q&A 提取，将问题加载到编辑器填写                                 |                 |
-| [`questionnaire.ts`](extensions/tui/questionnaire.ts)         | 问卷工具，支持单选/多标签页                                      |                 |
-| [`session-breakdown.ts`](extensions/tui/session-breakdown.ts) | 7/30/90 天会话与花费分析 TUI，带用量图表                         |                 |
-| [`split-fork.ts`](extensions/tui/split-fork.ts)               | `/split-fork` 命令，分叉到 Ghostty 分屏新 pi 进程                |                 |
-| [`whimsical.ts`](extensions/tui/whimsical.ts)                 | 用随机的 whimsical 句子替换默认思考提示                          |                 |
-| [`session-tree-label/`](extensions/tui/session-tree-label/)   | 快捷键给会话树节点打标签（子键 `l` + g/b 标记）                  | `l`             |
+| 扩展                                                        | 说明                                                             | 快捷键          |
+| ----------------------------------------------------------- | ---------------------------------------------------------------- | --------------- |
+| [`answer.ts`](extensions/tui/answer.ts)                     | 逐个回答问题的交互式 TUI                                         | `a`             |
+| [`btw.ts`](extensions/tui/btw.ts)                           | 简易的 `/btw` 侧边聊天弹窗，关闭时可把摘要回注入主会话           |                 |
+| [`files.ts`](extensions/tui/files.ts)                       | 统一的文件浏览器，整合 git 状态、会话引用、reveal/open/edit/diff | `f o, f r, f q` |
+| [`questionnaire.ts`](extensions/tui/questionnaire.ts)       | 问卷工具，支持单选/多标签页                                      |                 |
+| [`split-fork.ts`](extensions/tui/split-fork.ts)             | `/split-fork` 命令，分叉到 Ghostty 分屏新 pi 进程                |                 |
+| [`whimsical.ts`](extensions/tui/whimsical.ts)               | 用随机的 whimsical 句子替换默认思考提示                          |                 |
+| [`session-tree-label/`](extensions/tui/session-tree-label/) | 快捷键给会话树节点打标签（子键 `l` + g/b 标记）                  | `l`             |
 
 #### 🧩 [context/](extensions/context) — 上下文组装
 
-| 扩展                                                                              | 说明                                                                                   | 快捷键 |
-| --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------ |
-| [`claude-rules.ts`](extensions/context/claude-rules.ts)                           | 扫描 `.claude/rules/` 注入 system prompt                                               |        |
-| [`custom-compaction/`](extensions/context/custom-compaction/)                     | 自定义 compaction（触发时机 + 压缩机制双维度、adapter 插件体系、/custom-compact 命令） |        |
-| [`goal.ts`](extensions/context/goal.ts)                                           | 可选的 `/goal` 模式，支持长期目标持久化、状态控制                                      |        |
-| [`input-transform-streaming.ts`](extensions/context/input-transform-streaming.ts) | 流式输入转换，在 user input 到达模型前处理                                             |        |
-| [`prompt-customizer.ts`](extensions/context/prompt-customizer.ts)                 | 根据活跃工具和技能自定义 system prompt                                                 |        |
-| [`mode-switcher.ts`](extensions/meta/mode-switcher.ts)                            | 一键切换模型预设，支持持久化/快捷键                                                    | `m`    |
-| [`prompt-editor.ts`](extensions/meta/prompt-editor.ts)                            | 检查和控制 Pi 发送给模型的 prompt 组装过程，支持组件启用/禁用和内容编辑                | `e`    |
-| [`resources-tree/`](extensions/context/resources-tree/)                           | 资源树扫描，在 system header 中展示可用资源                                            | `r`    |
+| 扩展                                                                                        | 说明                                                                                   | 快捷键 |
+| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------ |
+| [`claude-rules.ts`](extensions/context/claude-rules.ts)                                     | 扫描 `.claude/rules/` 注入 system prompt                                               |        |
+| [`custom-compaction/`](extensions/context/custom-compaction/)                               | 自定义 compaction（触发时机 + 压缩机制双维度、adapter 插件体系、/custom-compact 命令） |        |
+| [`goal.ts`](extensions/context/goal.ts)                                                     | 可选的 `/goal` 模式，支持长期目标持久化、状态控制                                      |        |
+| [`DEMO:input-transform-streaming.ts`](extensions/context/DEMO:input-transform-streaming.ts) | 流式输入转换（演示：streamingBehavior）                                                |        |
+| [`DEMO:prompt-customizer.ts`](extensions/context/DEMO:prompt-customizer.ts)                 | 根据活跃工具和技能自定义 system prompt（演示）                                         |        |
+| [`prompt-editor.ts`](extensions/meta/prompt-editor.ts)                                      | 检查和控制 Pi 发送给模型的 prompt 组装过程，支持组件启用/禁用和内容编辑                | `e`    |
+| [`resources-tree/`](extensions/context/resources-tree/)                                     | 资源树扫描，在 system header 中展示可用资源                                            | `r`    |
 
 #### 🔒 [security/](extensions/security) — 审计与安全
 
@@ -219,40 +297,47 @@ Pi Coding Agent 的扩展在 [extensions](extensions) 目录中，按功能分�
 | [`dirty-repo-guard.ts`](extensions/security/dirty-repo-guard.ts)       | 有未提交变更时阻止会话切换                        |        |
 | [`permission-gate/`](extensions/security/permission-gate/)             | 危险 bash 命令前确认（rm -rf / sudo / chmod 777） |        |
 | [`protected-paths.ts`](extensions/security/protected-paths.ts)         | 阻止 write/edit 到敏感路径（.env / .git/）        |        |
-| [`project-trust.ts`](extensions/security/project-trust.ts)             | 项目信任机制                                      |        |
 | [`trust-github-repos.ts`](extensions/security/trust-github-repos.ts)   | 自动记住受信 GitHub 所有者的检出信任状态          |        |
 | [`sandbox/`](extensions/security/sandbox/)                             | OS 级沙箱执行 bash（sandbox-exec / bubblewrap）   |        |
 
 #### ⚙️ [auto/](extensions/auto) — 自动化
 
-| 扩展                                                              | 说明                                                    | 快捷键 |
-| ----------------------------------------------------------------- | ------------------------------------------------------- | ------ |
-| [`auto-stage-on-exit.ts`](extensions/auto/auto-stage-on-exit.ts)  | 退出时自动暂存变更文件                                  |        |
-| [`file-trigger.ts`](extensions/auto/file-trigger.ts)              | 文件触发器，外部系统可通过写入文件发消息                |        |
-| [`git-checkpoint.ts`](extensions/auto/git-checkpoint.ts)          | 每轮对话创建 git stash checkpoint                       |        |
-| [`git-merge-and-resolve`](extensions/auto/git-merge-and-resolve/) | 自动合并上游跟踪分支；`/git-merge-and-resolve` 控制面板 |        |
-| [`go-to-bed.ts`](extensions/auto/go-to-bed.ts)                    | 深夜安全保护，超过午夜后要求显式确认                    |        |
-| [`loop.ts`](extensions/auto/loop.ts)                              | 快速迭代编码的提示循环，支持可选自动继续                |        |
-| [`no-sleep.ts`](extensions/auto/no-sleep.ts)                      | 防止 macOS 在 agent 运行时休眠                          |        |
-| [`notify.ts`](extensions/auto/notify.ts)                          | 代理任务结束后发送桌面原生通知                          |        |
-| [`continue.ts`](extensions/auto/continue.ts)                      | 发送 "continue" 让 agent 继续（`isIdle` 守卫）          | `c`    |
+| 扩展                                                              | 说明                                                               | 快捷键 |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------ | ------ |
+| [`auto-stage-on-exit.ts`](extensions/auto/auto-stage-on-exit.ts)  | 退出时自动暂存变更文件                                             |        |
+| [`file-trigger.ts`](extensions/auto/file-trigger.ts)              | 文件触发器，外部系统可通过写入文件发消息                           |        |
+| [`git-checkpoint.ts`](extensions/auto/git-checkpoint.ts)          | 每轮对话创建 git stash checkpoint                                  |        |
+| [`git-merge-and-resolve`](extensions/auto/git-merge-and-resolve/) | 自动合并上游跟踪分支；`/git-merge-and-resolve` 控制面板            |        |
+| [`go-to-bed.ts`](extensions/auto/go-to-bed.ts)                    | 深夜安全保护，超过午夜后要求显式确认                               |        |
+| [`loop.ts`](extensions/auto/loop.ts)                              | 快速迭代编码的提示循环，支持可选自动继续                           |        |
+| [`no-sleep.ts`](extensions/auto/no-sleep.ts)                      | 防止 macOS 在 agent 运行时休眠                                     |        |
+| [`notify.ts`](extensions/auto/notify.ts)                          | 代理任务结束后发送桌面原生通知                                     |        |
+| [`continue.ts`](extensions/auto/continue.ts)                      | 发送 "continue" 让 agent 继续（`isIdle` 守卫）                     | `c`    |
+| [`control/`](extensions/auto/control/)                            | 会话控制辅助工具（列出可控会话、跨会话通信，需 --session-control） |        |
+| [`pi-rate-limiter/`](extensions/auto/pi-rate-limiter/)            | 速率限制，主动节流 + 自动恢复                                      |        |
 
 #### 🎯 [accuracy/](extensions/accuracy) — 更精准强大信息获取与操作工具
 
-| 扩展                                                               | 说明                                                       | 快捷键 |
-| ------------------------------------------------------------------ | ---------------------------------------------------------- | ------ |
-| [`control.ts`](extensions/accuracy/control.ts)                     | 会话控制辅助工具（列出可控会话、跨会话通信）               |        |
-| [`multi-edit.ts`](extensions/accuracy/multi-edit.ts)               | 替换内置 edit，支持批量 multi 和 Codex 风格 patch 及预检验 |        |
-| [`structured-output.ts`](extensions/accuracy/structured-output.ts) | 结构化输出工具，支持 terminate: true                       |        |
-| [`todos.ts`](extensions/accuracy/todos.ts)                         | 基于文件存储的 todo 管理扩展                               |        |
-| [`truncated-tool.ts`](extensions/accuracy/truncated-tool.ts)       | 工具输出截断示例（rg 包装器）                              |        |
-| [`uv.ts`](extensions/accuracy/uv.ts)                               | 面向 uv 的 Python 工作流辅助工具                           |        |
+| 扩展                                                               | 说明                                                        | 快捷键 |
+| ------------------------------------------------------------------ | ----------------------------------------------------------- | ------ |
+| [`bash-timeout.ts`](extensions/accuracy/bash-timeout.ts)           | bash 工具默认超时兜底（mac 无 GNU timeout，默认 300s 可配） |        |
+| [`edit/`](extensions/accuracy/edit/)                               | 替换内置 edit，支持批量 multi 和 Codex 风格 patch 及预检验  |        |
+| [`structured-output.ts`](extensions/accuracy/structured-output.ts) | 结构化输出工具，支持 terminate: true                        |        |
+| [`todos.ts`](extensions/accuracy/todos.ts)                         | 基于文件存储的 todo 管理扩展                                |        |
+| [`truncated-tool.ts`](extensions/accuracy/truncated-tool.ts)       | 工具输出截断示例（rg 包装器）                               |        |
+| [`uv.ts`](extensions/accuracy/uv.ts)                               | 面向 uv 的 Python 工作流辅助工具                            |        |
 
 #### ✅ [verification/](extensions/verification) — 验证与评估
 
-| 扩展                                             | 说明                                                   | 快捷键 |
-| ------------------------------------------------ | ------------------------------------------------------ | ------ |
-| [`review.ts`](extensions/verification/review.ts) | 代码评审命令，支持工作区、PR 风格 diff、提交、定制指令 |        |
+| 扩展                                        | 说明                                                      | 快捷键 |
+| ------------------------------------------- | --------------------------------------------------------- | ------ |
+| [`review/`](extensions/verification/review) | 代码评审 + 测试覆盖分析（profile 驱动，/review 先选方案） |        |
+
+#### 🔭 [observability/](extensions/observability) — 观察分析
+
+| 扩展                                                                    | 说明                                               | 快捷键 |
+| ----------------------------------------------------------------------- | -------------------------------------------------- | ------ |
+| [`session-analytics.ts`](extensions/observability/session-analytics.ts) | 7/30/90 天会话用量分析面板，带日历热力图与维度分解 |        |
 
 #### 🔧 [meta/](extensions/meta) — 元插件
 
@@ -263,7 +348,6 @@ Pi Coding Agent 的扩展在 [extensions](extensions) 目录中，按功能分�
 | [`skills.ts`](extensions/meta/skills.ts)                 | `/skills` 交互式启停技能，持久化配置                           |        |
 | [`tools.ts`](extensions/meta/tools.ts)                   | `/tools` 交互式启停工具，支持 MCP 延迟注册                     |        |
 | [`pi-logger/`](extensions/meta/pi-logger/)               | 统一日志基础设施，所有扩展通过 `createLogger()` 接入           |        |
-| [`pi-rate-limiter/`](extensions/meta/pi-rate-limiter/)   | 速率限制基础设施，主动节流 + 自动恢复                          |        |
 | [`_widget-wrangler/`](extensions/meta/_widget-wrangler/) | `/wrangle` 统一管理所有 widget/status 显示隐藏                 | `w`    |
 
 ### Pi Coding Agent Themes

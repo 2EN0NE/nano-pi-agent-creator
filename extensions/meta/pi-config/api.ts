@@ -1,7 +1,10 @@
 /**
  * @zenone/pi-config — 统一配置模块（纯库 API）
  *
- * 提供多层级配置加载、通用 deepMerge、原子写入、带缓存 ConfigStore。
+ * 提供多层级配置加载、带缓存 ConfigStore，以及 /config 命令。
+ *
+ * 底座函数（路径解析 / deepMerge / 原子 IO）已下沉到 @zenone/pi-state，
+ * 本模块依赖 pi-state 并从其 re-export（向后兼容，消费方零感知）。
  *
  * 层级优先级（高→低，每层 deepMerge）：
  *   1. session 级（可选）：~/.pi/agent/extensions-data/<plugin>/<sessionId>.json
@@ -12,10 +15,9 @@
  * 本模块不依赖 pi 扩展 API，可在任何 Node 环境下使用。
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
+import { deepMerge, readJsonFile, resolvePaths, writeJsonAtomic } from '@zenone/pi-state';
 import type {
 	ConfigPaths,
 	ConfigScope,
@@ -27,126 +29,17 @@ import type {
 
 const log = createLogger('pi-config');
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-	if (v === null || v === undefined) return false;
-	const proto = Object.getPrototypeOf(v);
-	return proto === Object.prototype || proto === null;
-}
-
-// ============================================================================
-// 1. Path resolution
-// ============================================================================
+// Re-export base functions (backward compatibility — 底座已下沉到 pi-state)
+export { deepMerge, readJsonFile, writeJsonAtomic };
 
 /**
- * Resolve all config file paths for a plugin.
- *
- * All paths are deterministic based on plugin name + homedir + cwd.
- * No import.meta.url used → safe across /reload.
- *
- * @param pluginName - Directory name under extensions-data/
- * @param opts.cwd   - Current working directory (default: process.cwd())
- * @param opts.homeDir - Home directory (default: os.homedir()). Injectable for testing.
+ * Resolve all config file paths for a plugin (delegates to pi-state).
  */
 export function resolveConfigPaths(
 	pluginName: string,
 	opts?: { cwd?: string; homeDir?: string },
 ): ConfigPaths {
-	const home = opts?.homeDir ?? homedir();
-	const cwd = opts?.cwd ?? process.cwd();
-
-	const userDir = join(home, '.pi', 'agent', 'extensions-data', pluginName);
-	const userFile = join(userDir, 'config.json');
-	const projectDir = join(cwd, '.pi', 'extensions-data', pluginName);
-	const projectFile = join(projectDir, 'config.json');
-
-	return { userDir, userFile, projectDir, projectFile };
-}
-
-// ============================================================================
-// 2. deepMerge
-// ============================================================================
-
-/**
- * Deep-merge two plain objects.
- *
- * Rules:
- *   - `undefined` values in override → skip (keep base)
- *   - Both values are plain objects → recurse
- *   - Otherwise (array, primitive, null, class instance) → override wins
- *   - Returns a new object, never mutates inputs
- *
- * Arrays are REPLACED, not concat — matches permission-gate's `patterns` semantics.
- */
-export function deepMerge<T>(base: T, override: Partial<T>): T {
-	const result = { ...base } as Record<string, unknown>;
-
-	for (const key of Object.keys(override)) {
-		const val = (override as Record<string, unknown>)[key];
-		if (val === undefined) continue;
-
-		const baseVal = (base as Record<string, unknown>)[key];
-		if (isPlainObject(baseVal) && isPlainObject(val)) {
-			result[key] = deepMerge(baseVal, val);
-		} else {
-			result[key] = val;
-		}
-	}
-
-	return result as T;
-}
-
-// ============================================================================
-// 3. File I/O
-// ============================================================================
-
-/**
- * Safely read and parse a JSON file.
- *
- * Returns null if:
- *   - File doesn't exist (ENOENT)
- *   - File content is not valid JSON
- *   - File content is not a plain object
- *
- * Logs a warning on parse failure (non-ENOENT).
- */
-export function readJsonFile(path: string): Record<string, unknown> | null {
-	try {
-		if (!existsSync(path)) return null;
-		const raw = readFileSync(path, 'utf-8');
-		const parsed = JSON.parse(raw);
-		if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-			log.warn('config file is not a plain object, skipping: %s', path);
-			return null;
-		}
-		return parsed as Record<string, unknown>;
-	} catch (err: unknown) {
-		const nodeErr = err as NodeJS.ErrnoException;
-		if (nodeErr.code === 'ENOENT') return null;
-		log.warn(
-			'failed to parse config file: %s — %s',
-			path,
-			(err as Error).message ?? String(err),
-		);
-		return null;
-	}
-}
-
-/**
- * Atomically write a JSON object to a file.
- *
- * Atomicity: write to `<path>.<pid>.tmp` → renameSync (absorbed from widget-wrangler).
- * Ensures parent directory exists (mkdirSync recursive).
- * Writes 2-space-indented JSON with trailing newline.
- */
-export function writeJsonAtomic(path: string, data: unknown): void {
-	mkdirSync(dirname(path), { recursive: true });
-	const tmp = `${path}.${process.pid}.tmp`;
-	writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf-8');
-	renameSync(tmp, path);
+	return resolvePaths(pluginName, opts) as ConfigPaths;
 }
 
 // ============================================================================

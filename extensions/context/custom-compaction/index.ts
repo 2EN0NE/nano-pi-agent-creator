@@ -28,13 +28,25 @@ import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-c
 import { createLogger } from '@zenone/pi-logger';
 import { showSelect } from '@zenone/pi-selector';
 import { createSessionTreeWithPi } from '@zenone/pi-session-tree';
-import { loadConfig, reloadConfig, setSessionId, getEffectiveProfile } from './config.js';
+import {
+	loadConfig,
+	reloadConfig,
+	setSessionId,
+	getEnabledProfiles,
+	getTriggerGranularity,
+} from './config.js';
 import {
 	buildCompactionHandler,
 	setPendingSupplement,
+	setPendingProfile,
 	getAndClearCompactResult,
 } from './compactor.js';
 import { openSettingsPanel } from './settings-panel.js';
+import {
+	resolveContinueDecision,
+	filterContextMessages,
+	INVISIBLE_CONTINUE_CUSTOM_TYPE,
+} from './continue.js';
 import {
 	initExperiments,
 	markCompactStart,
@@ -46,8 +58,14 @@ import {
 	resetLabState,
 	clearRecentCompact,
 } from './lab.js';
-import { type CompactionProfile, describeTrigger, toModelSpec } from './types.js';
-import { shouldTrigger, isApproaching } from './trigger.js';
+import {
+	type CompactionProfile,
+	type ComplexityLevel,
+	describeTrigger,
+	toModelSpec,
+} from './types.js';
+import { shouldTrigger, selectProfileFromTriggered } from './trigger.js';
+import { updateStatus } from './status.js';
 
 // Auto-register available compaction adapters
 import './mechanisms/smart-compact.js';
@@ -58,7 +76,6 @@ const log = createLogger('custom-compaction');
 let compactingInProgress = false;
 
 /** Track the current model spec (provider/id) to detect model changes */
-let currentModelSpec: string | undefined;
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -74,7 +91,7 @@ function getLeafId(ctx: { sessionManager?: { getLeafId?: () => string | null } }
 /**
  * Execute compaction with the active profile's settings.
  */
-async function doCompact(
+export async function doCompact(
 	pi: ExtensionAPI,
 	ctx: Parameters<Parameters<typeof pi.on>[1]>[1],
 	profile: CompactionProfile,
@@ -86,6 +103,8 @@ async function doCompact(
 	}
 
 	compactingInProgress = true;
+	// 立即刷新状态栏 → 「压缩中」状态（避免停留在触发前的陈旧 percent）
+	updateStatus(ctx, compactingInProgress);
 	const triggerProfile = profile;
 	const startTime = Date.now();
 
@@ -102,6 +121,10 @@ async function doCompact(
 	const leafBefore = getLeafId(ctx);
 	markCompactStart(ctx, profile.id, leafBefore, source);
 
+	// 写入触发决策选中的 profile，供 session_before_compact 拦截阶段读取
+	// （保证压缩机制/prompt/model 与触发决策一致，ADR-0036）
+	setPendingProfile(profile);
+
 	ctx.compact({
 		onComplete: () => {
 			log.info('Compaction completed successfully');
@@ -109,6 +132,10 @@ async function doCompact(
 			// 清理 supplement：无论本次是否被消费（如 pass_through/失败回退），
 			// 一次 compaction 结束后都不应残留到下一次
 			setPendingSupplement(undefined);
+			// 对称清理 pendingProfile：若本次 compact() 未触发 session_before_compact
+			//（如「Nothing to compact」把切分点顶到首条），残留 profile 会泄漏到
+			// 下一次无关压缩，用错误的 prompt/model/mechanism 做摘要。
+			setPendingProfile(undefined);
 
 			// 实验信号：记录压缩后 leaf + 过程指标（armId = 生效 profile id）
 			markCompactEnd(ctx, getLeafId(ctx));
@@ -121,8 +148,11 @@ async function doCompact(
 				});
 			}
 
-			// ctx 在压缩后可能已 stale（会话替换/重载）——UI 通知安全降级
+			// 压缩完成 → 立即脱离「压缩中」状态刷新状态栏（否则无后续 turn 时
+			// 会停留在压缩开始写入的 accent 陈旧 usage）。ctx 在压缩后可能已
+			// stale（会话替换/重载）——状态刷新与 UI 通知一并安全降级。
 			try {
+				updateStatus(ctx, compactingInProgress);
 				if (ctx.hasUI) {
 					ctx.ui.notify('Compaction completed', 'info');
 				}
@@ -134,23 +164,43 @@ async function doCompact(
 			}
 
 			if (triggerProfile.autoContinue) {
-				const msg = triggerProfile.autoContinueMessage || 'continue';
-				log.info('Auto-continue: sending message:', msg);
-				pi.sendUserMessage(msg, {
-					deliverAs: 'followUp',
-				});
+				const decision = resolveContinueDecision(triggerProfile);
+				if (decision.kind === 'message') {
+					log.info('Auto-continue: sending message:', decision.text);
+					pi.sendUserMessage(decision.text, {
+						deliverAs: 'followUp',
+					});
+				} else if (decision.kind === 'invisible') {
+					// 隐形 continue：隐藏 marker 触发 turn，context hook 过滤，LLM 零文本
+					log.info('Auto-continue: sending invisible marker');
+					void pi.sendMessage(
+						{
+							customType: INVISIBLE_CONTINUE_CUSTOM_TYPE,
+							content: [],
+							display: false,
+							details: undefined,
+						},
+						{
+							triggerTurn: true,
+							deliverAs: 'followUp',
+						},
+					);
+				}
 			}
 		},
 		onError: (err) => {
 			log.error('Compaction failed:', err.message);
 			compactingInProgress = false;
 			setPendingSupplement(undefined);
+			setPendingProfile(undefined);
 			// 压缩失败不产生可归因信号：清除最近压缩记录，防止后续
 			// detectRollback 把「失败后 leaf 未推进」误判为用户回退不满。
 			clearRecentCompact();
 
-			// ctx 在压缩失败后可能已 stale（会话替换/重载）——UI 通知安全降级
+			// 压缩失败 → 同样立即脱离「压缩中」状态刷新（失败后无后续 turn，
+			// 不刷新会一直显示压缩中）。ctx 可能已 stale——与通知一并安全降级。
 			try {
+				updateStatus(ctx, compactingInProgress);
 				if (ctx.hasUI) {
 					ctx.ui.notify(`Compaction failed: ${err.message}`, 'error');
 				}
@@ -164,6 +214,79 @@ async function doCompact(
 	});
 }
 
+/**
+ * 触发评估核心（ADR-0036）：启用集 → 触发集 → tiebreak 择一 → doCompact。
+ * 由三个触发粒度事件按配置调用（user_turn / agent_turn / tool）。
+ * 导出供单元测试直接断言编排行为（事件接线仍通过 stubPi 收集 handler 验证）。
+ */
+export async function evaluateProactiveTrigger(
+	pi: ExtensionAPI,
+	ctx: Parameters<Parameters<typeof pi.on>[1]>[1],
+): Promise<void> {
+	if (compactingInProgress) return;
+
+	const contextUsage = ctx.getContextUsage();
+	if (!contextUsage) {
+		log.info('Proactive trigger: getContextUsage() returned undefined');
+		return;
+	}
+	if (contextUsage.tokens === null) {
+		log.info('Proactive trigger: tokens is null');
+		return;
+	}
+
+	const contextWindow = ctx.model?.contextWindow;
+
+	// 启用集 → 触发集（第一/二道闸）
+	const enabled = getEnabledProfiles();
+	if (enabled.length === 0) return;
+	const usage = contextUsage as { tokens: number; percent: number | null };
+	const triggered = enabled.filter((p) => shouldTrigger(p.trigger, usage, contextWindow));
+	// 「Proactive trigger check:」每次评估都输出（e2e 靠它定位日志，触发与否都要有）
+	log.info(
+		'Proactive trigger check:',
+		`${usage.tokens.toLocaleString()} tokens`,
+		usage.percent !== null ? `(${usage.percent.toFixed(1)}%)` : '',
+		'enabled:',
+		enabled.map((p) => p.id),
+		'triggered:',
+		triggered.map((p) => p.id),
+	);
+	if (triggered.length === 0) return;
+
+	// 复杂度 level（仅在存在复杂度维度路由规则时计算，省开销）
+	const routingRules = loadConfig().routingRules;
+	let complexityLevel: ComplexityLevel | undefined;
+	if (routingRules.some((r) => r.complexity !== undefined)) {
+		try {
+			const tree = createSessionTreeWithPi(
+				ctx.sessionManager as Parameters<typeof createSessionTreeWithPi>[0],
+			);
+			complexityLevel = tree.analyzeComplexity().level;
+		} catch (e) {
+			log.warn('complexity analysis failed:', e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	// 选择算法三层：路由规则 → matchModel 隐式 → tiebreak（ADR-0036）
+	const profile = selectProfileFromTriggered(triggered, {
+		modelSpec: toModelSpec(ctx.model),
+		complexityLevel,
+		routingRules,
+	});
+	if (!profile) return;
+
+	log.info('Proactive compaction triggered', {
+		type: profile.trigger.type,
+		threshold: profile.trigger.threshold,
+		tokens: contextUsage.tokens,
+		percent: contextUsage.percent,
+		profile: profile.id,
+		enabled: enabled.map((p) => p.id),
+	});
+	await doCompact(pi, ctx, profile, 'auto');
+}
+
 // ── Extension entry ─────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -172,118 +295,12 @@ export default function (pi: ExtensionAPI) {
 	// Load config on startup
 	loadConfig();
 
-	// ── Token 格式化辅助函数 ──────────────────────────────────
-	function fmtTokens(n: number): string {
-		const abs = Math.abs(n);
-		if (abs >= 1_000_000) {
-			const scaled = n / 1_000_000;
-			return `${Number.isInteger(scaled) ? scaled.toFixed(0) : scaled.toFixed(1)}M`;
-		}
-		if (abs >= 1_000) {
-			const scaled = n / 1_000;
-			return `${Number.isInteger(scaled) ? scaled.toFixed(0) : scaled.toFixed(1)}K`;
-		}
-		return String(n);
-	}
-
-	// ── 状态栏更新 ────────────────────────────────────────────
-	function updateStatus(ctx: {
-		hasUI: boolean;
-		ui: {
-			setStatus: (key: string, value: string | undefined) => void;
-			theme: { fg: (...args: any[]) => string };
-		};
-		getContextUsage?: () =>
-			{ tokens: number | null; percent: number | null } | null | undefined;
-		model?: { provider: string; id: string; contextWindow?: number };
-	}): void {
-		if (!ctx.hasUI) return;
-
-		// Resolve current model spec and get the effective profile
-		const modelSpec = toModelSpec(ctx.model);
-		const profile = getEffectiveProfile(modelSpec);
-		if (!profile) {
-			ctx.ui.setStatus('custom-compact', undefined);
-			return;
-		}
-		const theme = ctx.ui.theme;
-		const contextUsage = ctx.getContextUsage?.() ?? null;
-		const tokens = contextUsage?.tokens ?? null;
-		const percent = contextUsage?.percent ?? null;
-		const pid = profile.id;
-		let extra: string;
-		switch (profile.trigger.type) {
-			case 'context_percent': {
-				if (percent !== null) {
-					extra = `${percent.toFixed(0)}%/${profile.trigger.threshold}%`;
-				} else {
-					extra = `${profile.trigger.threshold}%`;
-				}
-				break;
-			}
-			case 'fixed': {
-				if (tokens !== null) {
-					extra = `${fmtTokens(tokens)}/${fmtTokens(profile.trigger.threshold)}`;
-				} else {
-					extra = `${fmtTokens(profile.trigger.threshold)}`;
-				}
-				break;
-			}
-			case 'reserve': {
-				let windowTokens: number | null = null;
-				let cw: number | undefined;
-				if (tokens !== null) {
-					cw = ctx.model?.contextWindow;
-					windowTokens =
-						cw !== undefined && cw > 0
-							? cw
-							: percent !== null && percent > 0
-								? Math.round(tokens / (percent / 100))
-								: null;
-				}
-				if (tokens !== null && windowTokens !== null) {
-					extra = `${fmtTokens(windowTokens - tokens)}/${fmtTokens(profile.trigger.threshold)}`;
-				} else {
-					extra = `${fmtTokens(profile.trigger.threshold)}`;
-				}
-				break;
-			}
-			default:
-				extra = `${fmtTokens(profile.trigger.threshold)}`;
-		}
-		// 阈值是否已触发（需要用户关注）
-		const triggered =
-			contextUsage &&
-			contextUsage.tokens !== null &&
-			shouldTrigger(
-				profile.trigger,
-				contextUsage as { tokens: number; percent: number | null },
-				ctx.model?.contextWindow,
-			);
-		// 是否接近阈值（>=80% 但未触发）
-		const approaching =
-			!compactingInProgress &&
-			contextUsage &&
-			contextUsage.tokens !== null &&
-			!triggered &&
-			isApproaching(
-				profile.trigger,
-				contextUsage as { tokens: number; percent: number | null },
-				ctx.model?.contextWindow,
-			);
-
-		let statusText: string;
-		if (compactingInProgress) {
-			statusText = theme.fg('accent', `|compact:${pid}-${extra}`);
-		} else if (triggered) {
-			statusText = theme.fg('error', `|compact:${pid}-${extra}`);
-		} else if (approaching) {
-			statusText = theme.fg('warning', `|compact:${pid}-${extra}`);
-		} else {
-			statusText = theme.fg('text', `|compact:${pid}-${extra}`);
-		}
-		ctx.ui.setStatus('custom-compact', statusText);
-	}
+	// 隐形 continue：provider 序列化前移除隐藏 marker（吸收 pi-invisible-continue 技术）。
+	// invisible 模式发送的 custom marker 在此被过滤，LLM 收到零新文本；
+	// 可见的 autoContinueMessage（injectContinueText=true）不受影响。
+	pi.on('context', (event) => {
+		return filterContextMessages(event.messages);
+	});
 
 	// ── On session start/reload: set session ID, track model, load session-specific config ──
 	pi.on('session_start', async (_event, ctx) => {
@@ -293,19 +310,17 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			reloadConfig();
 		}
-		// Track current model spec for model-aware profile selection
-		currentModelSpec = toModelSpec(ctx.model);
-		const modelSpec = currentModelSpec;
-		const profile = getEffectiveProfile(modelSpec);
+		// 记录当前模型 + 启用集（日志用）
+		const modelSpec = toModelSpec(ctx.model);
 		log.info(
 			'Session start — model:',
 			modelSpec ?? 'unknown',
-			'profile:',
-			profile?.id ?? 'none',
+			'enabled:',
+			getEnabledProfiles().map((p) => p.id),
 		);
 		// 注册 pi-lab 实验（弱依赖，不可用时降级）；臂 = 当前 config 的 profile id
 		initExperiments(ctx, Object.values(loadConfig().profiles));
-		updateStatus(ctx);
+		updateStatus(ctx, compactingInProgress);
 	});
 
 	// ── Register /custom-compaction-setting command ───────────
@@ -314,7 +329,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			reloadConfig();
 			await openSettingsPanel(ctx);
-			updateStatus(ctx);
+			updateStatus(ctx, compactingInProgress);
 		},
 	});
 
@@ -387,13 +402,21 @@ export default function (pi: ExtensionAPI) {
 		handler: triggerHandler,
 	});
 
+	// ── /tree 分支切换后刷新状态栏 ───────────────────────
+	// navigateTree 切换分支会立即替换 agent context（buildSessionContext），
+	// 但不触发 agent_end，widget 若不刷新会停留在旧分支的 percent/tokens。
+	// session_tree 在切换完成后 emit（带 newLeafId/oldLeafId），此处取实时 usage 刷新。
+	pi.on('session_tree', async (_event, ctx) => {
+		updateStatus(ctx, compactingInProgress);
+	});
+
 	// ── Proactive trigger: monitor context usage on agent_end ──
 	// agent_end fires when the agent has completed its processing loop.
 	// We do NOT check isIdle() here because pi's internal isStreaming
 	// flag is still true when agent_end fires (even though processing is done).
 	// The compactingInProgress flag prevents re-entry.
 	pi.on('agent_end', async (_event, ctx) => {
-		updateStatus(ctx);
+		updateStatus(ctx, compactingInProgress);
 
 		// 回退信号检测：用户是否回到压缩之前的位置（对最近一次压缩不满）。
 		// 树判断委托 pi-session-tree 的 detectDiverge 基础原语（ADR 0023）。
@@ -406,78 +429,26 @@ export default function (pi: ExtensionAPI) {
 
 		if (compactingInProgress) return;
 
-		// Track model changes for model-aware profile selection
-		const newSpec = toModelSpec(ctx.model);
-		if (newSpec && newSpec !== currentModelSpec) {
-			const oldProfile = getEffectiveProfile(currentModelSpec);
-			const newProfile = getEffectiveProfile(newSpec);
-			if (oldProfile && newProfile && oldProfile.id !== newProfile.id) {
-				log.info(
-					'Model changed, profile switched:',
-					currentModelSpec,
-					'>',
-					newSpec,
-					'| profile:',
-					oldProfile.id,
-					'>',
-					newProfile.id,
-				);
-				if (ctx.hasUI) {
-					ctx.ui.notify(
-						`Compaction profile switched: ${oldProfile.name} > ${newProfile.name}`,
-						'info',
-					);
-				}
-			}
-			currentModelSpec = newSpec;
+		// 触发评估（agent_turn 粒度，ADR-0036）
+		if (getTriggerGranularity() === 'agent_turn') {
+			await evaluateProactiveTrigger(pi, ctx);
 		}
+	});
 
-		const modelSpec = currentModelSpec;
-		const profile = getEffectiveProfile(modelSpec);
-		if (!profile) return;
-
-		// 直接按生效 profile 的 trigger 判断（无实验臂覆盖）
-		const trigger = profile.trigger;
-
-		const contextUsage = ctx.getContextUsage();
-		if (!contextUsage) {
-			log.info('Proactive trigger: getContextUsage() returned undefined');
-			return;
+	// ── widget 分子刷新（Ticket 05）+ user_turn 粒度触发评估（Ticket 03）──
+	pi.on('message_end', async (event, ctx) => {
+		// 每次消息结束（user/assistant/toolResult）刷新 widget 分子，
+		// 对齐 pi 原生 footer；流式 message_update 不在此处理（避免逐 token 重绘）
+		updateStatus(ctx, compactingInProgress);
+		if (getTriggerGranularity() === 'user_turn' && event.message?.role === 'user') {
+			await evaluateProactiveTrigger(pi, ctx);
 		}
-		if (contextUsage.tokens === null) {
-			log.info('Proactive trigger: tokens is null');
-			return;
-		}
+	});
 
-		const contextWindow = ctx.model?.contextWindow;
-		log.info(
-			'Proactive trigger check:',
-			`${contextUsage.tokens.toLocaleString()} tokens`,
-			contextUsage.percent !== null ? `(${contextUsage.percent.toFixed(1)}%)` : '',
-			'trigger type:',
-			trigger.type,
-			'threshold:',
-			trigger.threshold,
-			'profile:',
-			profile.id,
-		);
-
-		if (
-			shouldTrigger(
-				trigger,
-				contextUsage as { tokens: number; percent: number | null },
-				contextWindow,
-			)
-		) {
-			log.info('Proactive compaction triggered', {
-				type: trigger.type,
-				threshold: trigger.threshold,
-				tokens: contextUsage.tokens,
-				percent: contextUsage.percent,
-				profile: profile.id,
-			});
-			await doCompact(pi, ctx, profile, 'auto');
-		}
+	// ── tool 粒度：每次工具执行结束评估 ──
+	pi.on('tool_execution_end', async (_event, ctx) => {
+		if (getTriggerGranularity() !== 'tool') return;
+		await evaluateProactiveTrigger(pi, ctx);
 	});
 
 	// ── Intercept compaction: custom summarization ────────────
@@ -492,6 +463,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on('session_shutdown', async () => {
 		compactingInProgress = false;
 		setPendingSupplement(undefined);
+		setPendingProfile(undefined);
 		resetLabState();
 	});
 }

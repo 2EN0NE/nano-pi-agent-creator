@@ -8,7 +8,8 @@
  */
 import { truncateToWidth, visibleWidth, matchesKey, getKeybindings } from '@earendil-works/pi-tui';
 import type { ManagedWorktree } from './paths.js';
-import type { NodeModulesStrategy, SymlinkSelections } from '../types.js';
+import { getManagedWorktrees } from './paths.js';
+import type { NodeModulesStrategy, SymlinkSelections, MergeStrategy } from '../types.js';
 import { PRESET_SYMLINK_TARGETS } from '../types.js';
 import {
 	setLastNodeModulesStrategy,
@@ -16,7 +17,7 @@ import {
 	getLastSymlinkTargetIds,
 	getLastNodeModulesStrategy,
 } from '../state.js';
-import { getDirtyCount, getAheadBehind } from './git.js';
+import { getDirtyCount, getAheadBehind, getCurrentBranch, listBranches } from './git.js';
 
 // ── 常量 ──
 
@@ -282,8 +283,11 @@ export async function showWorktreeTui(
 				{
 					type: 'main',
 					name: 'main',
-					branch: 'current',
-					dirty: 0,
+					// 主工作区行：Branch 列显示真实 checkout 分支（而非硬编码 "current"），
+					// dirty 读取主仓库脏文件数。两者在面板打开时读取一次（同步 git 命令），
+					// 面板是即选即关的切换器，无需持续刷新。
+					branch: getCurrentBranch(repoRoot),
+					dirty: getDirtyCount(repoRoot),
 					ahead: 0,
 					behind: 0,
 				},
@@ -721,6 +725,41 @@ export async function askMergeStrategy(ctx: any): Promise<'merge' | 'squash' | '
 			invalidate: () => selector.invalidate(),
 		};
 	});
+}
+
+// ═══════════════════════════════════════════
+// 合并目标分支选择
+// ═══════════════════════════════════════════
+
+/**
+ * 列出所有本地分支供选择合并目标。
+ * 排除被其他 worktree checkout 的分支——git 禁止从主仓库 checkout 它们
+ * （merge 需先在主仓库 checkout 目标分支，占用分支会 checkout 失败）。
+ */
+export async function askMergeTarget(ctx: any, repoRoot: string): Promise<string | null> {
+	const occupied = new Set(getManagedWorktrees(repoRoot).map((wt) => wt.branch));
+	const candidates = listBranches(repoRoot).filter((b) => !occupied.has(b));
+	if (candidates.length === 0) return null;
+
+	const options = candidates.map((b) => ({ value: b, label: b }));
+
+	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<string | null>(
+		(tui, theme, _kb, done) => {
+			const selector = new ListSelector({
+				tui,
+				theme,
+				done,
+				title: '选择合并目标分支：',
+				options,
+				footer: 'up/down 导航  Enter 确认  Esc 取消',
+			});
+			return {
+				render: (w: number) => selector.render(w),
+				handleInput: (d: string) => selector.handleInput(d),
+				invalidate: () => selector.invalidate(),
+			};
+		},
+	);
 }
 
 export async function askNodeModulesStrategy(
@@ -1387,6 +1426,86 @@ export async function showConflictPanel(
 }
 
 // ═══════════════════════════════════════════
+// 合并失败面板（非冲突失败）
+// ═══════════════════════════════════════════
+
+export interface MergeFailurePanelAction {
+	action: 'agent' | 'retry' | 'shell' | 'pull' | 'close';
+}
+
+/**
+ * 非冲突合并失败（checkout 失败、工作区脏、rebase 失败等）的处理面板。
+ * 展示失败原因 + 可执行建议，提供「让 Agent 处理 / 重试 / 打开终端 / 拉取最新 / 关闭」。
+ * 「拉取最新」为非首位可选操作（本地优先原则：merge 纯本地，需要同步时用户主动选择）。
+ */
+export async function showMergeFailurePanel(
+	ctx: any,
+	failureTitle: string,
+	suggestion: string,
+): Promise<MergeFailurePanelAction> {
+	if (!ctx.hasUI) return { action: 'close' };
+
+	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<MergeFailurePanelAction>(
+		(tui, theme, _kb, done) => {
+			const options: Array<{ value: MergeFailurePanelAction['action']; label: string }> = [
+				{ value: 'agent', label: '让 Agent 处理（给出建议命令）' },
+				{ value: 'retry', label: '重试合并' },
+				{ value: 'shell', label: '打开终端手动处理' },
+				{ value: 'pull', label: '拉取最新后重试' },
+				{ value: 'close', label: '关闭' },
+			];
+			let cursor = 0;
+
+			return {
+				render(w: number): string[] {
+					const th = theme;
+					const lines: string[] = [];
+					lines.push(truncateToWidth(th.fg('error', th.bold(' 合并失败')), w));
+					lines.push(truncateToWidth(th.fg('warning', ' 原因：' + failureTitle), w));
+					if (suggestion) {
+						lines.push(truncateToWidth(th.fg('dim', ' 建议：' + suggestion), w));
+					}
+					lines.push(truncateToWidth(th.fg('dim', '─'.repeat(w)), w));
+					for (let i = 0; i < options.length; i++) {
+						const opt = options[i];
+						const arrow = i === cursor ? th.fg('accent', '>') : ' ';
+						const label =
+							i === cursor ? th.fg('accent', opt.label) : th.fg('text', opt.label);
+						lines.push(truncateToWidth(` ${arrow} ${label}`, w));
+					}
+					lines.push(truncateToWidth(th.fg('dim', '─'.repeat(w)), w));
+					lines.push(
+						truncateToWidth(th.fg('dim', ' 上下键导航  Enter 确认  Esc 关闭'), w),
+					);
+					return lines;
+				},
+				handleInput(data: string): void {
+					const kb = getKeybindings();
+					if (kb.matches(data, 'tui.select.up') || matchesKey(data, 'up')) {
+						cursor = Math.max(0, cursor - 1);
+						tui.requestRender();
+						return;
+					}
+					if (kb.matches(data, 'tui.select.down') || matchesKey(data, 'down')) {
+						cursor = Math.min(options.length - 1, cursor + 1);
+						tui.requestRender();
+						return;
+					}
+					if (matchesKey(data, 'enter') || matchesKey(data, 'space')) {
+						done({ action: options[cursor].value });
+						return;
+					}
+					if (matchesKey(data, 'escape')) {
+						done({ action: 'close' });
+					}
+				},
+				invalidate(): void {},
+			};
+		},
+	);
+}
+
+// ═══════════════════════════════════════════
 // 合并/变基后步骤引导（P0-2）
 // ═══════════════════════════════════════════
 
@@ -1465,14 +1584,18 @@ export async function showPostMergeGuide(
 // ═══════════════════════════════════════════
 
 export interface MergeSuccessResult {
-	action: 'switch' | 'menu' | 'dismiss';
+	action: 'switch' | 'pull' | 'menu' | 'dismiss';
 }
 
 /**
- * merge 成功后显示两选项面板：
+ * merge 成功后显示面板：
  *   - 「切换到 <target>」：切到合并目标分支（复用 handleUse）
+ *   - 「拉取最新」：仅当本地 target 落后远端时显示（非首位可选，本地优先）
  *   - 「回到主菜单」：重新进入 WorktreeSwitcherPanel 主列表
  *   - Esc：关闭面板，原地不动（成功合并后已切回合并前的原分支，而非 target）
+ *
+ * 同步差距提示：targetSync 非空且 behind > 0 时显示「本地落后远端 N 提交」；
+ * 无远端/远端分支不存在时 targetSync 为 null，静默不显示。
  *
  * 仅当 merge 从面板触发（fromPanel）时调用；命令触发则直接 notify 一句。
  */
@@ -1480,15 +1603,20 @@ export async function showMergeSuccessPanel(
 	ctx: any,
 	sourceBranch: string,
 	targetBranch: string,
+	targetSync: { ahead: number; behind: number } | null = null,
 ): Promise<MergeSuccessResult> {
 	if (!ctx.hasUI) return { action: 'dismiss' };
 
 	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<MergeSuccessResult>(
 		(tui, theme, _kb, done) => {
+			const showSync = !!targetSync && targetSync.behind > 0;
 			const options: Array<{ value: MergeSuccessResult['action']; label: string }> = [
 				{ value: 'switch', label: `切换到 ${targetBranch}` },
-				{ value: 'menu', label: '回到主菜单' },
 			];
+			if (showSync) {
+				options.push({ value: 'pull', label: '拉取最新' });
+			}
+			options.push({ value: 'menu', label: '回到主菜单' });
 			let cursor = 0;
 
 			return {
@@ -1501,6 +1629,17 @@ export async function showMergeSuccessPanel(
 							w,
 						),
 					);
+					if (showSync) {
+						lines.push(
+							truncateToWidth(
+								th.fg(
+									'warning',
+									` 注意：本地 ${targetBranch} 落后远端 ${targetSync!.behind} 个提交（push 前建议先同步）`,
+								),
+								w,
+							),
+						);
+					}
 					lines.push(truncateToWidth(th.fg('dim', '─'.repeat(w)), w));
 					for (let i = 0; i < options.length; i++) {
 						const opt = options[i];
@@ -1581,5 +1720,45 @@ export function buildConflictResolvePrompt(opts: {
 		'',
 		'冲突文件：',
 		...opts.conflicts.map((c) => '  - ' + c.file),
+	].join('\n');
+}
+
+/**
+ * 合并失败面板「让 Agent 处理」的三段式 prompt：
+ * ① 合并建议原则（本地优先、保留双方意图、完成后验证、只给命令不执行）
+ * ② 当前准确情况（失败命令/错误、source/target 拓扑、同步状态）
+ * ③ 任务（给出建议操作命令步骤）。
+ * 参照 review 插件的 RUBRIC + 动态信息组合模式。
+ */
+export function buildMergeAdvicePrompt(opts: {
+	sourceBranch: string;
+	targetBranch: string;
+	strategy: MergeStrategy;
+	failureMessage: string;
+	targetSync: { ahead: number; behind: number } | null;
+	sourceAheadBehind: { ahead: number; behind: number };
+}): string {
+	const syncLine = opts.targetSync
+		? `- 目标分支同步状态：本地 ${opts.targetBranch} 相对 origin/${opts.targetBranch} ahead=${opts.targetSync.ahead}, behind=${opts.targetSync.behind}`
+		: `- 目标分支同步状态：无远端（未配置 origin，或 origin/${opts.targetBranch} 不存在）`;
+
+	return [
+		'你是 git 工作流顾问。worktree 合并失败，请基于以下原则给出建议（只给建议命令步骤，不执行任何命令）。',
+		'',
+		'## 原则',
+		'1. 本地优先：worktree 主要用于本地开发，默认不 push 到远端。建议命令不得包含 push/远程写操作；如确需远端操作，单独标注「需用户手动执行」。',
+		'2. 先诊断再建议：基于「当前情况」解释失败根因，再给出解决步骤。',
+		'3. 保留双方意图：合并建议应保留 source 与 target 双方改动意图，不发明新行为。',
+		'4. 完成后验证：合并完成后运行项目自动化检查（typecheck → 测试 → 格式）。',
+		'5. 输出可执行命令步骤：清晰、可直接复制的 git 命令，分步骤列出。',
+		'',
+		'## 当前情况',
+		`- 命令：/worktree merge --source ${opts.sourceBranch} --target ${opts.targetBranch} (${opts.strategy})`,
+		`- 失败信息：${opts.failureMessage}`,
+		`- source 分支：${opts.sourceBranch}（相对 main ahead=${opts.sourceAheadBehind.ahead}, behind=${opts.sourceAheadBehind.behind}）`,
+		syncLine,
+		'',
+		'## 任务',
+		`请给出把 ${opts.sourceBranch} 合并到 ${opts.targetBranch} 的建议操作命令步骤。`,
 	].join('\n');
 }

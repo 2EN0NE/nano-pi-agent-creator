@@ -167,10 +167,12 @@ tui_setup_sandbox_home() {
 	fi
 
 	# node_modules 本地包链接（扩展 import '@zenone/...' 需要能找到本地包）
+	# 映射格式：目录名:包名 —— selector 目录导出 @zenone/pi-selector（目录名≠包名）。
 	mkdir -p "$test_home/node_modules"
-	for pkg in pi-logger selector pi-config; do
+	for entry in "pi-logger:pi-logger" "selector:pi-selector" "pi-config:pi-config" "pi-state:pi-state" "pi-session-tree:pi-session-tree"; do
+		local pkg="${entry%%:*}" pkg_name="${entry##*:}"
 		local pkg_src="$ROOT_DIR/extensions/meta/$pkg"
-		local pkg_dir="$test_home/node_modules/@zenone/$pkg"
+		local pkg_dir="$test_home/node_modules/@zenone/$pkg_name"
 		if [[ -d "$pkg_src" && ! -e "$pkg_dir" ]]; then
 			mkdir -p "$(dirname "$pkg_dir")"
 			ln -sf "$pkg_src" "$pkg_dir"
@@ -199,12 +201,19 @@ tui_setup_sandbox_home() {
 	fi
 	if [[ -d "$test_home/node_modules/@zenone" ]]; then
 		mkdir -p "$HOME/node_modules/@zenone"
-		for pkg in pi-logger selector pi-config; do
-			if [[ -d "$test_home/node_modules/@zenone/$pkg" && ! -e "$HOME/node_modules/@zenone/$pkg" ]]; then
-				ln -sf "$test_home/node_modules/@zenone/$pkg" "$HOME/node_modules/@zenone/$pkg"
+		for entry in "pi-logger:pi-logger" "selector:pi-selector" "pi-config:pi-config" "pi-state:pi-state" "pi-session-tree:pi-session-tree"; do
+			local pkg_name="${entry##*:}"
+			if [[ -d "$test_home/node_modules/@zenone/$pkg_name" && ! -e "$HOME/node_modules/@zenone/$pkg_name" ]]; then
+				ln -sf "$test_home/node_modules/@zenone/$pkg_name" "$HOME/node_modules/@zenone/$pkg_name"
 			fi
 		done
 	fi
+	# 顶层 npm 依赖（tree-sitter 等动态 import）也链接到 HOME 侧
+	for pkg in web-tree-sitter tree-sitter-bash; do
+		if [[ -d "$test_home/node_modules/$pkg" && ! -e "$HOME/node_modules/$pkg" ]]; then
+			ln -sf "$test_home/node_modules/$pkg" "$HOME/node_modules/$pkg"
+		fi
+	done
 
 	# 模型配置：CI 模式写 mock-llm providers（models.json 的 providers 结构让 pi 启动即识别模型，
 	# 仅 models-store.json 时启动显示 "No models available"）；非 CI 复制真实配置。
@@ -418,6 +427,21 @@ tui_assert_contains() {
 	return 0
 }
 
+# 用法：tui_assert_not_contains <keyword> [error_message]
+tui_assert_not_contains() {
+	local keyword="$1"
+	local msg="${2:-Expected TUI output to NOT contain: $keyword}"
+	if tui_output_contains "$TUI_OUTPUT_FILE" "$keyword"; then
+		echo "FAIL: $msg"
+		echo "--- TUI output (visible text) ---"
+		extract_visible_text "$TUI_OUTPUT_FILE" | tail -50
+		echo "---"
+		return 1
+	fi
+	echo "PASS: '$keyword' absent from TUI output"
+	return 0
+}
+
 # 用法：tui_assert_matches <regex> [error_message]
 tui_assert_matches() {
 	local pattern="$1"
@@ -468,12 +492,16 @@ tui_cleanup() {
 #   - 中间状态可验证（如 "按 m 后标记是否出现"）
 #   - 退出码精确传递
 #
-# 用法：tui_expect_test <extension_list> <expect_commands> <timeout_seconds> [cols] [cwd]
-#   extension_list   - 逗号分隔的依赖扩展列表
-#   expect_commands  - expect 交互命令（多行字符串）
-#   timeout_seconds  - 超时秒数（默认：15）
-#   cols             - 终端宽度列数（默认：80）
-#   cwd              - pi 工作目录（默认：沙箱目录）
+# 用法：tui_expect_test <extension_list> <expect_commands> <timeout_seconds> [cols] [cwd] [preset_home_dir]
+#   extension_list    - 逗号分隔的依赖扩展列表
+#   expect_commands   - expect 交互命令（多行字符串）
+#   timeout_seconds   - 超时秒数（默认：15）
+#   cols              - 终端宽度列数（默认：80）
+#   cwd               - pi 工作目录（默认：沙箱目录）
+#   preset_home_dir   - 可选：镜像 $HOME 目录结构的预置目录（如含
+#                       .pi/agent/extensions-data/<plugin>/config.json），
+#                       在沙箱 HOME 就绪后、pi 启动前复制到 $HOME/
+#                       （用于预置扩展配置，使面板交互可确定性落盘）
 #
 # expect_commands 中可以使用的上下文：
 #   - send "text\r"      发送文本（\r = Enter）
@@ -502,6 +530,7 @@ tui_expect_test() {
 	local timeout_seconds="${3:-15}"
 	local cols="${4:-80}"
 	local cwd="${5:-}"
+	local preset_home_dir="${6:-}"
 
 	local PI_CI_MODE=${CI:-false}
 	local slug="tui-exp-$$-$RANDOM"
@@ -521,6 +550,14 @@ tui_expect_test() {
 	fi
 
 	tui_setup_sandbox_home "$test_home"
+
+	# ── 预置沙箱 HOME 内容（可选）──
+	# preset_home_dir 镜像 $HOME 目录结构（tui_setup_sandbox_home 已 export HOME 为沙箱路径）：
+	# 例 .pi/agent/extensions-data/custom-rename/config.json → $HOME/.pi/agent/extensions-data/...
+	# 用于预置扩展配置，使面板交互可在隔离 HOME 内确定性落盘，不依赖宿主机器 extensions-data。
+	if [[ -n "$preset_home_dir" && -d "$preset_home_dir" ]]; then
+		cp -r "$preset_home_dir/." "$HOME/"
+	fi
 
 	# git init
 	if ! git -C "$test_home" rev-parse --git-dir &>/dev/null; then

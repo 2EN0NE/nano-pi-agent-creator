@@ -1,32 +1,24 @@
 /**
- * Permission Gate — 审批记录持久化
+ * Permission Gate — 审批记录与策略纯函数
  *
- * 将审批历史独立于配置文件存储，按项目（git remote / 路径）隔离。
- * 每笔记录包含完整命令、触发维度、放行方式，可溯源。
- *
- * 存储位置：~/.pi/agent/extensions-data/permission-gate/approvals.json
- *
- * 结构：
- * {
- *   "projects": {
- *     "<project_key>": {
- *       "path": "/Users/jojo/Projects/...",
- *       "git": "github.com/user/repo",
- *       "entries": [
- *         { "ts": "2026-...", "cmd": "rm -rf ./t", "tool": "rm",
- *           "dir": "/abs/path", "dim": "sameCommand", "action": "auto" }
- *       ]
- *     }
- *   }
- * }
+ * ADR-0027 落地后：
+ * - 完整命令审计 → audit-log.ts（JSONL 按天分片，append-only）
+ * - 放行规则计数   → approval-store.ts（pi-state 三层）
+ * - 本文件仅保留：项目 key 生成、策略维度汇总/widget 文本等纯函数，
+ *   以及旧 approvals.json → audit + pi-state 的一次性迁移。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { createLogger } from '@zenone/pi-logger';
+import { readJsonFile, writeJsonAtomic } from '@zenone/pi-state';
+import type { DangerTier } from './config.js';
+import { makeCommandKey, makeFolderKey, makeToolKey } from './config.js';
+import { appendAudit, type AuditDecision } from './audit-log.js';
+import { recordApproval, importRuleCounts } from './approval-store.js';
 
 const log = createLogger('permission-gate:records');
 
@@ -43,13 +35,12 @@ export interface ApprovalEntry {
 	tool: string;
 	/** 目标目录绝对路径 */
 	dir: string;
-	/** 触发维度。
-	 *  新版（after-v2-migration）：string[] | null，记录所有经由并行检查通过的维度。
-	 *  旧版（before migration）：单维度字符串 'sameCommand' | 'sameTool' | 'sameFolder' | null。
-	 *  读取时统一标准化。 */
+	/** 触发维度（旧格式：string | string[] | null） */
 	dim: string[] | string | null;
 	/** 放行方式 */
 	action: 'auto' | 'confirmed' | 'blocked';
+	/** 危险分级（ADR-0025）：决定放行规则的持久化层级 */
+	tier?: DangerTier;
 	/** 原始复合命令（如 "rm -rf /tmp && echo done"） */
 	originalCommand?: string;
 	/** 拆分后的子命令列表 */
@@ -87,12 +78,25 @@ interface ApprovalsFile {
 // 路径 & key 生成
 // ============================================================================
 
-const RECORDS_DIR = join(homedir(), '.pi', 'agent', 'extensions-data', 'permission-gate');
-const RECORDS_FILE = join(RECORDS_DIR, 'approvals.json');
+let recordsHomeDir: string = homedir();
+
+function recordsDir(): string {
+	return join(recordsHomeDir, '.pi', 'agent', 'extensions-data', 'permission-gate');
+}
+
+function recordsFile(): string {
+	return join(recordsDir(), 'approvals.json');
+}
+
+/** 测试专用：注入 homeDir 隔离真实用户目录（approvals.json 落盘路径） */
+export function resetRecordsStore(homeDir: string): void {
+	recordsHomeDir = homeDir;
+}
 
 function ensureDir(): void {
-	if (!existsSync(RECORDS_DIR)) {
-		mkdirSync(RECORDS_DIR, { recursive: true });
+	const dir = recordsDir();
+	if (!existsSync(dir)) {
+		mkdirSync(dir, { recursive: true });
 	}
 }
 
@@ -114,26 +118,39 @@ function getGitRemote(cwd: string): string | null {
 }
 
 /**
+ * 项目 key 缓存（per-cwd）——避免在每次 bash 工具调用的热路径上
+ * spawn 一个阻塞的 git 子进程（超时 5s）。git remote 在会话内不会变化。
+ */
+const projectKeyCache = new Map<string, string>();
+
+/**
  * 生成项目唯一 key：
  * 优先用 git remote origin 的 SHA256 前缀，
  * 回退到项目路径的 SHA256 前缀。
  */
 export function getProjectKey(cwd: string): string {
 	const absPath = resolve(cwd);
+	const cached = projectKeyCache.get(absPath);
+	if (cached !== undefined) return cached;
+
 	const gitRemote = getGitRemote(absPath);
-	if (gitRemote) return `git:${sha256(gitRemote).slice(0, 12)}`;
-	return `path:${sha256(absPath).slice(0, 12)}`;
+	const key = gitRemote
+		? `git:${sha256(gitRemote).slice(0, 12)}`
+		: `path:${sha256(absPath).slice(0, 12)}`;
+	projectKeyCache.set(absPath, key);
+	return key;
 }
 
 // ============================================================================
-// 文件读写
+// 旧 approvals.json 读写（仅迁移用）
 // ============================================================================
 
 function readApprovalsFile(): ApprovalsFile {
 	ensureDir();
 	try {
-		if (!existsSync(RECORDS_FILE)) return { projects: {} };
-		const raw = readFileSync(RECORDS_FILE, 'utf-8');
+		const file = recordsFile();
+		if (!existsSync(file)) return { projects: {} };
+		const raw = readFileSync(file, 'utf-8');
 		return JSON.parse(raw) as ApprovalsFile;
 	} catch (err) {
 		log.error('Failed to read approvals file', err);
@@ -144,228 +161,21 @@ function readApprovalsFile(): ApprovalsFile {
 function writeApprovalsFile(data: ApprovalsFile): void {
 	ensureDir();
 	try {
-		writeFileSync(RECORDS_FILE, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+		writeFileSync(recordsFile(), JSON.stringify(data, null, 2) + '\n', 'utf-8');
 	} catch (err) {
 		log.error('Failed to write approvals file', err);
 	}
 }
 
 // ============================================================================
-// 公共 API
+// 纯函数（策略汇总 / widget / 命令拆分）
 // ============================================================================
 
 /**
- * 计算当前项目非 blocked 记录总数（用于 widget gate() 显示）。
+ * 计算非 blocked 记录总数（供迁移统计与测试使用）。
  */
 export function countNonBlockedEntries(entries: ApprovalEntry[]): number {
 	return entries.filter((e) => e.action !== 'blocked').length;
-}
-
-/**
- * 从记录中重建 counts（用于阈值检查）。
- * counts 使用与原来一致的 key 格式：
- *   cmd:<hash> → 同命令计数
- *   tool:<name> → 同工具计数
- *   dir:<path> → 同目录计数
- */
-function deriveCounts(entries: ApprovalEntry[]): Record<string, number> {
-	const counts: Record<string, number> = {};
-
-	for (const entry of entries) {
-		// blocked 记录不计入阈值计数（避免 block 行为消耗 auto-approve 配额）
-		if (entry.action === 'blocked') continue;
-
-		// cmd key（与原 makeCommandKey 逻辑一致）
-		const normalized = entry.cmd.trim().replace(/\s+/g, ' ');
-		const cmdHash = createHash('sha256').update(normalized).digest('hex').slice(0, 16);
-		const cmdKey = `cmd:${cmdHash}`;
-		counts[cmdKey] = (counts[cmdKey] ?? 0) + 1;
-
-		// tool key
-		const toolKey = `tool:${entry.tool}`;
-		counts[toolKey] = (counts[toolKey] ?? 0) + 1;
-
-		// dir key
-		const dirKey = `dir:${entry.dir}`;
-		counts[dirKey] = (counts[dirKey] ?? 0) + 1;
-	}
-
-	return counts;
-}
-
-/**
- * 从旧版 config.json 中读取 approvalCounts。
- * 用于迁移：直接读原始 JSON 提取 legacy 计数。
- */
-function readLegacyCounts(cwd: string): Record<string, number> | null {
-	const paths = [
-		// 项目级
-		join(cwd, '.pi', 'extensions-data', 'permission-gate', 'config.json'),
-		// 用户级
-		join(homedir(), '.pi', 'agent', 'extensions-data', 'permission-gate', 'config.json'),
-	];
-	for (const p of paths) {
-		try {
-			if (!existsSync(p)) continue;
-			const raw = JSON.parse(readFileSync(p, 'utf-8'));
-			if (raw.approvalCounts && typeof raw.approvalCounts === 'object') {
-				return raw.approvalCounts as Record<string, number>;
-			}
-		} catch {}
-	}
-	return null;
-}
-
-/**
- * 加载项目记录及派生计数。
- * 如存在旧版 config.json 中的 approvalCounts，自动迁移。
- *
- * 旧版 counts（cmd:hash / tool:name / dir:path）本就是合法的 _counts 格式，
- * 迁移时直接保留原始计数，无需重新哈希。仅创建一条审计摘要记录。
- */
-export function loadRecords(cwd: string): {
-	entries: ApprovalEntry[];
-	counts: Record<string, number>;
-} {
-	const file = readApprovalsFile();
-	const key = getProjectKey(cwd);
-	const project = file.projects[key];
-
-	if (!project) {
-		// 尝试迁移旧版数据
-		const legacy = readLegacyCounts(cwd);
-		if (legacy && Object.keys(legacy).length > 0) {
-			return migrateFromLegacy(cwd, legacy);
-		}
-		return { entries: [], counts: {} };
-	}
-
-	return { entries: project.entries, counts: deriveCounts(project.entries) };
-}
-
-/**
- * 追加一条审批记录并持久化。
- * 同时更新内存中的 counts。
- */
-export function appendRecord(
-	cwd: string,
-	entry: ApprovalEntry,
-	counts: Record<string, number>,
-): void {
-	const file = readApprovalsFile();
-	const key = getProjectKey(cwd);
-	const absPath = resolve(cwd);
-
-	if (!file.projects[key]) {
-		file.projects[key] = {
-			path: absPath,
-			git: getGitRemote(absPath) ?? undefined,
-			entries: [],
-		};
-	}
-
-	// 追加记录
-	file.projects[key].entries.push(entry);
-	writeApprovalsFile(file);
-
-	// 更新内存 counts
-	const normalized = entry.cmd.trim().replace(/\s+/g, ' ');
-	const cmdHash = createHash('sha256').update(normalized).digest('hex').slice(0, 16);
-	const cmdKey = `cmd:${cmdHash}`;
-	counts[cmdKey] = (counts[cmdKey] ?? 0) + 1;
-	const toolKey = `tool:${entry.tool}`;
-	counts[toolKey] = (counts[toolKey] ?? 0) + 1;
-	const dirKey = `dir:${entry.dir}`;
-	counts[dirKey] = (counts[dirKey] ?? 0) + 1;
-}
-
-/**
- * 重置当前项目的审批记录。
- */
-export function resetRecords(cwd: string): void {
-	const file = readApprovalsFile();
-	const key = getProjectKey(cwd);
-	delete file.projects[key];
-	writeApprovalsFile(file);
-	log.info('Approval records reset for project %s (key=%s)', resolve(cwd), key);
-}
-
-/**
- * 追加一条 blocked 记录（被拦截/拒绝的命令）。
- * blocked 记录不计入 _counts，仅供历史审计。
- */
-export function appendBlockedRecord(cwd: string, entry: ApprovalEntry): void {
-	const file = readApprovalsFile();
-	const key = getProjectKey(cwd);
-	const absPath = resolve(cwd);
-
-	if (!file.projects[key]) {
-		file.projects[key] = {
-			path: absPath,
-			git: getGitRemote(absPath) ?? undefined,
-			entries: [],
-		};
-	}
-
-	file.projects[key].entries.push(entry);
-	writeApprovalsFile(file);
-	log.debug('Blocked record appended for project %s', key);
-}
-
-/**
- * 删除指定维度下某个 key 的所有审批记录。
- * 返回删除后重建的 counts。
- *
- * @param cwd 项目工作目录
- * @param dimension 维度：'cmd' | 'tool' | 'dir'
- * @param key 完整的计数 key（如 "cmd:abc123", "tool:rm", "dir:/path"）
- */
-export function deleteStrategy(
-	cwd: string,
-	dimension: 'cmd' | 'tool' | 'dir',
-	key: string,
-): { entries: ApprovalEntry[]; counts: Record<string, number> } {
-	const file = readApprovalsFile();
-	const projectKey = getProjectKey(cwd);
-	const project = file.projects[projectKey];
-
-	if (!project) {
-		return { entries: [], counts: {} };
-	}
-
-	// 根据维度筛选要删除的条目
-	project.entries = project.entries.filter((entry) => {
-		if (entry.action === 'blocked') {
-			// blocked 条目不受策略删除影响
-			return true;
-		}
-		switch (dimension) {
-			case 'cmd': {
-				const normalized = entry.cmd.trim().replace(/\s+/g, ' ');
-				const cmdHash = createHash('sha256').update(normalized).digest('hex').slice(0, 16);
-				return `cmd:${cmdHash}` !== key;
-			}
-			case 'tool':
-				return `tool:${entry.tool}` !== key;
-			case 'dir':
-				return `dir:${entry.dir}` !== key;
-			default:
-				return true;
-		}
-	});
-
-	writeApprovalsFile(file);
-
-	const newCounts = deriveCounts(project.entries);
-	log.info(
-		'Deleted strategy %s:%s for project %s, remaining entries: %d',
-		dimension,
-		key,
-		projectKey,
-		project.entries.length,
-	);
-
-	return { entries: [...project.entries], counts: newCounts };
 }
 
 /**
@@ -405,14 +215,6 @@ export function getStrategySummary(
 
 /**
  * 计算 widget 纯文本（无 ANSI 颜色），供 updateWidgetStatus 和单元测试使用。
- *
- * Gate OFF:              "|gate:off"
- * Gate ON + Dynamic OFF: "|gate(100):on[cmd(42),tool(1),folder(1)]"
- *                         (100 = 总记录数; 括号内为各维度历史策略数)
- * Gate ON + Dynamic ON:  "|dynamic-gate(100[8]):on[cmd(40[0]):1/2,tool(1[0]):0/3,folder(1[0]):0/4]"
- *                         (100 = 总记录数, [8] = 已沉淀策略总数)
- *
- * 注意：当某维度阈值 <= 0 时，该维度的已沉淀数强制为 0（阈值 0 表示不自动放行）。
  */
 export function calcWidgetContentText(
 	enabled: boolean,
@@ -427,7 +229,6 @@ export function calcWidgetContentText(
 	const cmdTotal = summary.cmd.total;
 	const toolTotal = summary.tool.total;
 	const dirTotal = summary.dir.total;
-	const totalStrategies = cmdTotal + toolTotal + dirTotal;
 
 	if (!dynamicEnabled) {
 		// Dynamic OFF: 显示记录总数 + 策略数
@@ -473,64 +274,6 @@ export function calcWidgetContentText(
 		parts.length > 0 ? `(${totalRecords}[${totalAuto}]):on[${parts.join(',')}]` : ':on';
 	return `|dynamic-gate${suffix}`;
 }
-
-// ============================================================================
-// 迁移：旧版 approvalCounts → 新版记录格式
-// ============================================================================
-
-/**
- * 将旧版 `Record<string, number>` 迁移到新版审批记录。
- *
- * 旧数据的 key 格式（cmd:hash / tool:name / dir:path）本就是合法的 _counts 格式，
- * 因此直接保留原始计数作为 _counts。同时创建一条审计摘要记录到 approvals.json。
- */
-function migrateFromLegacy(
-	cwd: string,
-	legacyCounts: Record<string, number>,
-): { entries: ApprovalEntry[]; counts: Record<string, number> } {
-	const absPath = resolve(cwd);
-	const ts = new Date().toISOString();
-	const cmdKeys = Object.keys(legacyCounts).filter((k) => k.startsWith('cmd:'));
-	const toolKeys = Object.keys(legacyCounts).filter((k) => k.startsWith('tool:'));
-	const dirKeys = Object.keys(legacyCounts).filter((k) => k.startsWith('dir:'));
-
-	// 审计摘要记录
-	const entry: ApprovalEntry = {
-		ts,
-		cmd: `(migrated: ${cmdKeys.length} cmd keys, ${toolKeys.length} tool keys, ${dirKeys.length} dir keys)`,
-		tool: '(migrated)',
-		dir: absPath,
-		dim: ['sameCommand'],
-		action: 'confirmed',
-	};
-
-	// 写入新文件
-	const file = readApprovalsFile();
-	const key = getProjectKey(cwd);
-	file.projects[key] = {
-		path: absPath,
-		git: getGitRemote(absPath) ?? undefined,
-		entries: [entry],
-	};
-	writeApprovalsFile(file);
-
-	log.info(
-		'Migrated %d legacy count entries (%d cmd, %d tool, %d dir) for %s — counts preserved as-is',
-		Object.keys(legacyCounts).length,
-		cmdKeys.length,
-		toolKeys.length,
-		dirKeys.length,
-		absPath,
-	);
-
-	// ⚠ 直接返回原始计数，不再重新哈希
-	// 旧数据的 cmd:hash 已经是合法 key，makeCommandKey 与 deriveCounts 的 SHA256 算法一致
-	return { entries: [entry], counts: { ...legacyCounts } };
-}
-
-// ============================================================================
-// 命令拆分
-// ============================================================================
 
 /**
  * 拆分组合命令（按 &&、||、;、| 分隔），保留引号和子 shell 内的分隔符。
@@ -613,4 +356,134 @@ export function splitCompoundCommand(command: string): string[] {
 
 	if (current.trim()) parts.push(current.trim());
 	return parts.length > 0 ? parts : [command];
+}
+
+// ============================================================================
+// 一次性迁移：旧 approvals.json / config.json approvalCounts → audit + pi-state
+// ============================================================================
+
+function mapActionToDecision(action: ApprovalEntry['action']): AuditDecision {
+	switch (action) {
+		case 'auto':
+			return 'auto';
+		case 'confirmed':
+			return 'ask';
+		case 'blocked':
+			return 'deny';
+	}
+}
+
+/** 命令摘要（截断到 120 字符，与 index.ts 的 summarizeCommand 一致） */
+function summarizeForAudit(command: string): string {
+	const firstLine = command.split('\n')[0].trim();
+	return firstLine.length > 120 ? firstLine.slice(0, 117) + '...' : firstLine;
+}
+
+/**
+ * 迁移旧 config.json 中的 approvalCounts（string→count）到 pi-state warning 层。
+ * 旧 approvalCounts 的 key 本就是 cmd:/tool:/dir: 格式，直接导入。
+ */
+function migrateLegacyCounts(cwd: string): number {
+	const paths = [
+		// 项目级
+		join(cwd, '.pi', 'extensions-data', 'permission-gate', 'config.json'),
+		// 用户级
+		join(recordsHomeDir, '.pi', 'agent', 'extensions-data', 'permission-gate', 'config.json'),
+	];
+	let total = 0;
+	for (const p of paths) {
+		const raw = readJsonFile(p);
+		if (!raw) continue;
+		const counts = raw.approvalCounts;
+		if (!counts || typeof counts !== 'object' || Array.isArray(counts)) continue;
+		const entries = Object.entries(counts as Record<string, number>);
+		if (entries.length === 0) continue;
+
+		importRuleCounts(counts as Record<string, number>, 'warning');
+		// 删除源字段并写回，作为"已迁移"标记，保证幂等——
+		// 否则每次 session_start 都会重入，warning 层计数持续膨胀。
+		delete raw.approvalCounts;
+		writeJsonAtomic(p, raw);
+		total += entries.length;
+		log.info(
+			'Migrated legacy approvalCounts (%d keys) to pi-state warning layer',
+			entries.length,
+		);
+	}
+	return total;
+}
+
+/**
+ * 一次性迁移：旧 approvals.json 的当前项目 entries → audit JSONL + pi-state 计数。
+ *
+ * - 每条 entry 转成 audit 记录（补 projectKey/originalCommand/subCommands）
+ * - 非 blocked 且带 tier 的 entry 累加到 pi-state 对应层（旧记录无 tier 保守归 warning）
+ * - 迁移后从 approvals.json 移除当前项目；文件为空则重命名 `.migrated-<ts>` 备份
+ *
+ * @returns 迁移的 entry 数 + 是否已备份整个旧文件
+ */
+export function migrateApprovalsToAudit(cwd: string): { migrated: number; backedUp: boolean } {
+	const file = readApprovalsFile();
+	const key = getProjectKey(cwd);
+	const project = file.projects[key];
+
+	if (!project || project.entries.length === 0) {
+		// 无当前项目 entry → 尝试迁移 config.json 的旧 approvalCounts
+		const legacy = migrateLegacyCounts(cwd);
+		return legacy > 0
+			? { migrated: legacy, backedUp: false }
+			: { migrated: 0, backedUp: false };
+	}
+
+	// ── 先落"消费标记"（write-ahead），再追加审计/计数 ──
+	// 旧顺序（先 appendAudit/recordApproval、后删源）在两者之间崩溃会让同一批条目
+	// 在下一次 session_start 重放：审计重复 + 信任计数翻倍（提前触发阈值自动放行）。
+	// 新顺序：先把本项目从源文件移除（写回或改名备份），从内存数据追加——
+	// 中途崩溃只会丢失剩余未追加的旧条目（备份仍在，可手工恢复），不会重复累加信任。
+	const entries = project.entries;
+	delete file.projects[key];
+
+	if (Object.keys(file.projects).length === 0) {
+		try {
+			renameSync(recordsFile(), `${recordsFile()}.migrated-${Date.now()}`);
+		} catch (err) {
+			// 改名失败 → 源文件原样保留，本次不迁移（下次启动重试，不会重放）
+			log.error('Failed to rename approvals.json before migration: %s', String(err));
+			return { migrated: 0, backedUp: false };
+		}
+	} else {
+		try {
+			writeApprovalsFile(file);
+		} catch (err) {
+			log.error('Failed to persist migration marker, aborting: %s', String(err));
+			return { migrated: 0, backedUp: false };
+		}
+	}
+
+	for (const e of entries) {
+		appendAudit({
+			id: randomUUID(),
+			ts: e.ts,
+			tool: e.tool,
+			command: summarizeForAudit(e.cmd),
+			tier: e.tier ?? null,
+			decision: mapActionToDecision(e.action),
+			reasons: [],
+			projectKey: key,
+			originalCommand: e.originalCommand ?? e.cmd,
+			subCommands: e.subCommands,
+		});
+		// 累加 pi-state 计数：blocked 不计数；旧记录无 tier 保守归 warning（项目级）
+		if (e.action !== 'blocked') {
+			const tier = e.tier ?? 'warning';
+			recordApproval(tier, [
+				makeCommandKey(e.cmd),
+				makeToolKey(e.tool),
+				makeFolderKey(e.dir),
+			]);
+		}
+	}
+
+	// 单项目（改名备份）路径：备份文件保留，与既有契约一致（可审计恢复）
+	return { migrated: entries.length, backedUp: true };
 }

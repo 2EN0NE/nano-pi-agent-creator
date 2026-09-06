@@ -8,6 +8,12 @@ node_modules
 test/results/
 openspec/
 
+# bench — 评测运行时产物与缓存
+bench/results/
+bench/.cache/
+bench/.smoke/
+bench/.ruff_cache/
+
 # pi-lens — runtime caches and work state (regenerated automatically)
 .pi-lens/
 
@@ -28,3 +34,6 @@ wt/
 extensions/meta/pi-logger/pi-logger
 extensions/meta/pi-config/pi-config
 extensions/meta/selector/selector
+
+# e2e 夹具：preset-home 故意内嵌 .pi 目录结构（预置扩展配置），需要提交
+!test/e2e/extensions/custom-rename/preset-home/.pi/

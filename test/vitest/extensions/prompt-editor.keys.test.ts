@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { stripAnsi, assertWithinWidth } from '../../../src/tui-testing/index.js';
-import { showPromptPanel } from '../../../extensions/meta/prompt-editor.js';
+import { showPromptPanel } from '../../../extensions/meta/preset/prompt-editor.js';
 import type { BuildSystemPromptOptions } from '@earendil-works/pi-coding-agent';
 
 // ── Mock options（discoverComponents 输入）──
@@ -30,7 +30,7 @@ function mockOptions(): BuildSystemPromptOptions {
 		toolSnippets: { bash: 'run bash', edit: 'edit files' },
 		promptGuidelines: ['guideline one'],
 		skills: [{ name: 'skill-a', description: 'skill a desc' }],
-	} as BuildSystemPromptOptions;
+	} as unknown as BuildSystemPromptOptions;
 }
 
 // ── Mock theme / keybindings（对齐 pi-lab-panel.tui.test.ts 模式）──

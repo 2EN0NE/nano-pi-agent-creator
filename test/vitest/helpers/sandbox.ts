@@ -275,6 +275,20 @@ export function createSandbox(options: SandboxOptions = {}): string {
 		}
 	}
 
+	// @zenone/pi-state：pi-config/pi-logger 底座（ADR-0026，与 bash run-e2e.sh 行为一致）
+	const piStateTarget = resolve(sandboxNodeModules, 'pi-state');
+	if (!existsSync(piStateTarget)) {
+		try {
+			rmSync(piStateTarget, { force: true });
+		} catch {
+			/* ignore */
+		}
+		const piStateSrc = resolve(ROOT_DIR, 'extensions/meta/pi-state');
+		if (existsSync(piStateSrc)) {
+			cpSync(piStateSrc, piStateTarget, { recursive: true });
+		}
+	}
+
 	const piCfgH = resolve(testHome, '.pi/pi-logger.json');
 	if (existsSync(piCfgH)) {
 		cpSync(piCfgH, resolve(homeAgent, 'pi-logger.json'));

@@ -1,5 +1,9 @@
-<pastie>{
-  "activeProfileId": "default",
+{
+  "enabledProfileIds": ["default"],
+  "triggerGranularity": "agent_turn",
+  "routingRules": [
+    { "model": "openai/", "targetProfileId": "default" }
+  ],
   "profiles": {
     "default": {
       "id": "default",
@@ -9,6 +13,7 @@
       "mechanism": { "type": "summarize" },
       "prompt": "",
       "autoContinue": true,
+      "injectContinueText": false,
       "autoContinueMessage": "continue"
     },
     "smart-compact": {
@@ -22,4 +27,4 @@
       "autoContinueMessage": "continue"
     }
   }
-}</pastie>
+}

@@ -209,12 +209,6 @@ export default function (pi: ExtensionAPI): void {
 				].slice(0, 3);
 			}
 		}
-
-		if (event.text.startsWith('/reload')) {
-			state.loadedSkills = null;
-			state.loadedContextFiles = null;
-			updateWidget(ctx);
-		}
 	});
 
 	pi.on('message_start', (event, ctx) => {

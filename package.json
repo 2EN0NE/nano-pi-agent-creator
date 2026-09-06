@@ -43,15 +43,16 @@
 	},
 	"devDependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.26",
-		"@earendil-works/pi-ai": "^0.84.1",
-		"@earendil-works/pi-coding-agent": "^0.84.1",
-		"@earendil-works/pi-tui": "^0.84.1",
+		"@earendil-works/pi-ai": "^0.84.4",
+		"@earendil-works/pi-coding-agent": "^0.84.4",
+		"@earendil-works/pi-tui": "^0.84.4",
 		"@eslint/js": "^10.0.1",
 		"@types/js-yaml": "^4.0.9",
 		"@zenone/pi-config": "file:extensions/meta/pi-config",
 		"@zenone/pi-logger": "file:extensions/meta/pi-logger",
 		"@zenone/pi-selector": "file:extensions/meta/selector",
 		"@zenone/pi-session-tree": "file:extensions/meta/pi-session-tree",
+		"@zenone/pi-state": "file:extensions/meta/pi-state",
 		"eslint": "^10.4.1",
 		"eslint-config-prettier": "^10.1.8",
 		"husky": "^9.1.7",
@@ -60,8 +61,10 @@
 		"node-pty": "^1.1.0",
 		"prettier": "^3.9.5",
 		"strip-ansi": "^7.2.0",
+		"tree-sitter-bash": "^0.25.1",
 		"tsx": "^4.23.1",
-		"vitest": "^4.1.10"
+		"vitest": "^4.1.10",
+		"web-tree-sitter": "^0.26.13"
 	},
 	"scripts": {
 		"prepare": "husky",

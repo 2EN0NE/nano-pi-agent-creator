@@ -3,9 +3,11 @@
 	"version": "0.1.0",
 	"description": "Session tree query service for pi — structural metrics, path analysis, content extraction, retry detection, and TUI inspection over Pi's append-only session tree",
 	"type": "module",
+	"main": "./index.ts",
 	"exports": {
 		".": {
-			"import": "./index.ts"
+			"import": "./index.ts",
+			"default": "./index.ts"
 		},
 		"./types": {
 			"import": "./types.ts"

@@ -1,7 +1,7 @@
 /**
  * pi-worktree — Git 辅助函数（单 repo 版）
  */
-import { execSync, spawnSync } from 'node:child_process';
+import { execSync, spawnSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
@@ -115,6 +115,24 @@ export function getDirtyCount(repoPath: string): number {
 		return out.trim() ? out.trim().split('\n').length : 0;
 	} catch {
 		return 0;
+	}
+}
+
+/**
+ * 列出所有本地分支名（refname:short）。
+ * 供 merge 目标分支选择等场景使用。
+ */
+export function listBranches(repoPath: string): string[] {
+	try {
+		const res = spawnSync('git', ['branch', '--format=%(refname:short)'], {
+			cwd: repoPath,
+			encoding: 'utf-8',
+			maxBuffer: 16 * 1024 * 1024,
+		});
+		if (res.status !== 0) return [];
+		return (res.stdout || '').trim().split('\n').filter(Boolean);
+	} catch {
+		return [];
 	}
 }
 
@@ -362,6 +380,9 @@ export function popWorktreeStash(repoPath: string): boolean {
  * 基准固定为 `main` 分支（而非 main checkout 的 HEAD），避免 main checkout
  * 停留在其他分支时语义漂移。分支名经参数数组传递，规避 shell 注入。
  */
+/** 远端 fetch 超时（毫秒）。fetch 走网络，给足时间避免误杀；挂起时 kill 并静默降级。 */
+export const REMOTE_FETCH_TIMEOUT_MS = 120_000;
+
 export function getAheadBehind(
 	repoPath: string,
 	branch: string,
@@ -382,5 +403,96 @@ export function getAheadBehind(
 		};
 	} catch {
 		return { ahead: 0, behind: 0 };
+	}
+}
+
+/**
+ * 异步执行 git 命令（spawn + Promise），带超时 kill。
+ * 与 handlers.ts 的 runGit 同构，但 git.ts 不能依赖 handlers.ts（避免循环依赖），
+ * 故在此独立实现，用于网络类命令（fetch）避免同步 spawnSync 阻塞 TUI 事件循环。
+ */
+function runGitAsync(
+	cwd: string,
+	args: string[],
+	timeoutMs: number,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+	return new Promise((resolve) => {
+		const child = spawn('git', args, { cwd });
+		let stdout = '';
+		let stderr = '';
+		let timedOut = false;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			child.kill('SIGKILL');
+		}, timeoutMs);
+		child.stdout?.on('data', (d: Buffer) => {
+			stdout += d.toString('utf-8');
+		});
+		child.stderr?.on('data', (d: Buffer) => {
+			stderr += d.toString('utf-8');
+		});
+		child.on('error', (err) => {
+			clearTimeout(timer);
+			resolve({ status: null, stdout, stderr: stderr || err.message });
+		});
+		child.on('close', (code) => {
+			clearTimeout(timer);
+			resolve({ status: timedOut ? null : code, stdout, stderr });
+		});
+	});
+}
+
+/**
+ * 只读远端同步差距诊断：本地分支与远端对应分支的 ahead/behind。
+ * 无 remote、远端分支不存在、网络失败时返回 null（静默，绝不报错）。
+ * 供 merge 前/后提示「本地落后远端 N 提交」使用（本地优先原则：只诊断、不自动同步）。
+ *
+ * ahead = 本地领先远端（有未 push 提交）；behind = 本地落后远端（远端有新提交）。
+ * 内部 fetch origin <branch>（只读：更新 remote-tracking ref，不改本地分支/工作区），
+ * 再 rev-list 对比 branch 与 origin/<branch>。
+ *
+ * fetch 用异步 spawn（带超时 kill），不阻塞 TUI 事件循环；挂起（网络黑洞/VPN 断连）
+ * 时超时 kill 后 status=null → 静默 null，绝不冻结 merge 确认 UI。
+ */
+export async function getRemoteAheadBehind(
+	repoPath: string,
+	branch: string,
+	timeoutMs = REMOTE_FETCH_TIMEOUT_MS,
+): Promise<{ ahead: number; behind: number } | null> {
+	try {
+		// 1. 是否有 remote origin（本地，快）
+		const remote = spawnSync('git', ['remote', 'get-url', 'origin'], {
+			cwd: repoPath,
+			encoding: 'utf-8',
+		});
+		if (remote.status !== 0) return null;
+
+		// 2. fetch 远端分支（异步，只读；远端分支不存在时 git 报 couldn't find remote ref → null）
+		const fetch = await runGitAsync(
+			repoPath,
+			['fetch', 'origin', branch, '--quiet'],
+			timeoutMs,
+		);
+		if (fetch.status !== 0) return null;
+
+		// 3. 本地 vs 远端差距（本地，快）
+		const count = spawnSync(
+			'git',
+			['rev-list', '--left-right', '--count', `${branch}...origin/${branch}`],
+			{
+				cwd: repoPath,
+				encoding: 'utf-8',
+				maxBuffer: 16 * 1024 * 1024,
+			},
+		);
+		if (count.status !== 0) return null;
+		const parts = (count.stdout || '').trim().split(/\s+/);
+		return {
+			// left = 本地独有 → ahead；right = 远端独有 → behind
+			ahead: parseInt(parts[0] || '0', 10),
+			behind: parseInt(parts[1] || '0', 10),
+		};
+	} catch {
+		return null;
 	}
 }

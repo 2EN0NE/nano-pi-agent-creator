@@ -43,3 +43,45 @@ test_it "/preset command does not crash in print mode" <<'TEST'
   # 非 TUI 模式下 /preset 可能提示 "requires TUI mode"，不崩溃即可
   exit 0
 TEST
+
+# ── 用例 4：preset-usage 实验（record 型）注册 + 结算 ──
+test_it "preset-usage experiment registers and records duration (pi-lab + mock-llm)" <<'TEST'
+  local slug="e2e-preset-s4-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  setup_lab_sandbox "$test_home"
+  cp -r "$ROOT_DIR/extensions/meta/preset" "$test_home/.pi/extensions/preset"
+  mkdir -p "$test_home/.pi/extensions-data/preset"
+  cat > "$test_home/.pi/extensions-data/preset/config.json" <<'JSON'
+{ "test": { "thinkingLevel": "low" }, "plan": { "thinkingLevel": "medium" } }
+JSON
+
+  cd "$test_home"
+  set +e
+  HOME="$test_home/home" pi -a --no-session --preset test -p "hi" >"$test_home/pi-stdout.log" 2>&1
+  local ec=$?
+  set -e
+  cd "$ROOT_DIR"
+  if [[ "$ec" -ne 0 && "$ec" -ne 124 ]]; then
+    echo "FAIL: unexpected exit code $ec"
+    cat "$test_home/pi-stdout.log"
+    exit 1
+  fi
+
+  local jsonl="$test_home/home/.pi/agent/extensions-data/pi-lab/preset-usage.jsonl"
+  if [[ ! -f "$jsonl" ]]; then
+    echo "FAIL: preset-usage jsonl not created (settle 未在 session_shutdown 落盘)"
+    echo "(no jsonl at $jsonl)"
+    exit 1
+  fi
+  if grep -q '"armId":"test"' "$jsonl" && grep -q '"use_duration_ms"' "$jsonl"; then
+    echo "PASS: preset-usage recorded arm=test with duration metric"
+    cat "$jsonl"
+  else
+    echo "FAIL: preset-usage event missing (arm=test or use_duration_ms)"
+    cat "$jsonl"
+    exit 1
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST

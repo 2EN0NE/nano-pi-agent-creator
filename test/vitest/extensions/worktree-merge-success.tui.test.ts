@@ -17,7 +17,11 @@ function mockTheme(): any {
 	};
 }
 
-function mountPanel(sourceBranch: string, targetBranch: string) {
+function mountPanel(
+	sourceBranch: string,
+	targetBranch: string,
+	targetSync: { ahead: number; behind: number } | null = null,
+) {
 	let component: any = null;
 	let doneValue: any = undefined;
 	const tui = { requestRender: () => {} } as any;
@@ -37,7 +41,7 @@ function mountPanel(sourceBranch: string, targetBranch: string) {
 			},
 		},
 	} as any;
-	void showMergeSuccessPanel(ctx, sourceBranch, targetBranch);
+	void showMergeSuccessPanel(ctx, sourceBranch, targetBranch, targetSync);
 	return {
 		render: (width: number) => component.render(width),
 		handleInput: (data: string) => component.handleInput(data),
@@ -83,5 +87,39 @@ describe('showMergeSuccessPanel (headless)', () => {
 		handleInput('\x1b[B');
 		const after = stripAnsi(render(80).join('\n'));
 		expect(after).not.toEqual(before);
+	});
+
+	// ── 同步差距提示 + 拉取最新（本地优先改造）──
+
+	it('targetSync behind>0 时显示差距提示 + 「拉取最新」选项', () => {
+		const { render } = mountPanel('wt/pi-lab', 'main', { ahead: 0, behind: 3 });
+		const text = stripAnsi(render(80).join('\n'));
+		expect(text).toContain('落后远端 3 个提交');
+		expect(text).toContain('拉取最新');
+	});
+
+	it('targetSync=null（无远端）时不显示差距、无「拉取最新」选项', () => {
+		const { render } = mountPanel('wt/pi-lab', 'main', null);
+		const text = stripAnsi(render(80).join('\n'));
+		expect(text).not.toContain('落后远端');
+		expect(text).not.toContain('拉取最新');
+	});
+
+	it('「拉取最新」位于「切换到」之后、主菜单之前（非首位）', () => {
+		const { render } = mountPanel('wt/pi-lab', 'main', { ahead: 0, behind: 2 });
+		const text = stripAnsi(render(80).join('\n'));
+		const iSwitch = text.indexOf('切换到 main');
+		const iPull = text.indexOf('拉取最新');
+		const iMenu = text.indexOf('回到主菜单');
+		expect(iSwitch).toBeGreaterThanOrEqual(0);
+		expect(iPull).toBeGreaterThan(iSwitch);
+		expect(iMenu).toBeGreaterThan(iPull);
+	});
+
+	it('有差距时 Down + Enter → pull', () => {
+		const { handleInput, getDone } = mountPanel('wt/pi-lab', 'main', { ahead: 0, behind: 2 });
+		handleInput('\x1b[B');
+		handleInput('\r');
+		expect(getDone()).toEqual({ action: 'pull' });
 	});
 });

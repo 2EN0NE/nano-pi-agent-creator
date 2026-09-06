@@ -102,7 +102,7 @@ export function findExistingSession(
 				const sm = SessionManager.open(fp);
 				if (sm && sm.getCwd() === targetCwd) return fp;
 			} catch {
-				continue;
+				/* 跳过损坏的 session 文件 */
 			}
 		}
 	}
@@ -163,6 +163,66 @@ export function createSession(targetCwd: string, repoRoot: string, targetName: s
 	return filePath;
 }
 
+// ── 路径改写（clone / fork 共用） ──
+
+/**
+ * 递归改写值中的源 cwd 路径 → 目标 cwd 路径。
+ *
+ * clone/fork 复制源会话的完整历史——包括源 cwd 绝对路径（bash `cd` 命令、
+ * read/write/edit 的绝对路径）以及 pi 默认注入在会话头部的 context 内容
+ * （如 skills-cache 等 custom entry 里的 filePath）。软切换后 agent 会沿这些
+ * 历史路径继续操作源目录（心智残留），产物落回源目录而非目标 worktree。
+ *
+ * 左右边界断言既匹配 `cd <cwd>`、`"<cwd>/…`、字符串末尾的 `<cwd>`，又避免误伤兄弟目录
+ * `<cwd>-worktrees/…`：
+ *   - lookbehind：cwd 前不能是路径字符（字母数字、. _ -）
+ *   - lookahead：cwd 后不能是路径字符，也不能是「空格 + 路径字符」
+ *     （表示空格后仍是更长路径的组成部分，如 `<cwd> backup/…`），
+ *     但不排除 `cd <cwd> && …` 这类命令分隔（空格后是 & 等命令字符）
+ *
+ * 已知局限：targetCwd 嵌套在 sourceCwd 之下（如 `<repo>/wt/<name>`）时本函数
+ * 整体跳过改写（见下方守卫）——sourceCwd 是 targetCwd 的前缀，无法用单字符
+ * 断言区分「sourceCwd 独立出现」与「作为 target 子路径出现」，改写真会双重
+ * 改写历史中已有的 target 路径。保守跳过（保留源路径）比改写错更安全。
+ */
+function rewriteCwdPaths(value: any, sourceCwd: string, targetCwd: string): any {
+	// 嵌套 worktree（target 是 source 的子路径）：跳过改写，避免前缀双重改写
+	if (targetCwd.startsWith(sourceCwd + sep)) return value;
+
+	const escapedSource = sourceCwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const sourceCwdRe = new RegExp(
+		'(?<![A-Za-z0-9._-])' + escapedSource + '(?![A-Za-z0-9._-]| [A-Za-z0-9._-])',
+		'g',
+	);
+	const rewrite = (v: any): any => {
+		if (typeof v === 'string') return v.replace(sourceCwdRe, targetCwd);
+		if (Array.isArray(v)) return v.map(rewrite);
+		if (v && typeof v === 'object') {
+			const out: any = {};
+			for (const [k, val] of Object.entries(v)) out[k] = rewrite(val);
+			return out;
+		}
+		return v;
+	};
+	return rewrite(value);
+}
+
+/**
+ * 读 session 文件 header 的 cwd（首行 JSON 的 cwd 字段）。
+ * 失败返回 null（调用方降级为不改写路径）。
+ */
+function readSessionCwd(filePath: string): string | null {
+	try {
+		const content = readFileSync(filePath, 'utf-8');
+		const firstLine = content.trim().split('\n')[0];
+		if (!firstLine) return null;
+		const header = JSON.parse(firstLine);
+		return typeof header.cwd === 'string' ? header.cwd : null;
+	} catch {
+		return null;
+	}
+}
+
 // ── 克隆 ──
 
 /**
@@ -208,10 +268,17 @@ export function cloneSession(sourcePath: string, targetCwd: string): string {
 	// 3. 新 header：保持 version，更新 id/timestamp/cwd
 	const newHeader = { ...oldHeader, id: newId, timestamp: now, cwd: targetCwd };
 
-	// 4. 重映射 parentId：所有指向旧 header id 的改为新 id
+	// 4. 重映射 parentId + 路径改写（源 cwd → 目标 cwd）
+	// clone/fork 复制历史会带源 cwd 路径，需改写——见 rewriteCwdPaths 注释。
+	// 与 fork 策略对齐：sourceCwd 缺失/为空/等于 targetCwd 时跳过改写
+	// （空串会使正则匹配每个边界位置，造成全局污染；undefined 会直接抛错）。
+	const sourceCwd = oldHeader.cwd;
+	const shouldRewrite = sourceCwd && sourceCwd !== targetCwd;
+
 	const newEntries = entries.map((e: any) => {
 		if (e.type === 'session') return newHeader;
-		return { ...e, parentId: e.parentId === oldId ? newId : e.parentId };
+		const remapped = { ...e, parentId: e.parentId === oldId ? newId : e.parentId };
+		return shouldRewrite ? rewriteCwdPaths(remapped, sourceCwd, targetCwd) : remapped;
 	});
 
 	// 5. 写入 targetCwd 的 session 目录
@@ -364,9 +431,26 @@ export function forkToNewSession(
 			const forkedFile = sm.getSessionFile();
 			if (forkedFile) {
 				log.info('fork: SessionManager.forkFrom ok', { source: sourceFile, forkedFile });
-				// 复制到标准路径 worktree-<name>.jsonl
-				const src = readFileSync(forkedFile, 'utf-8');
-				writeFileSync(filePath, src, 'utf-8');
+				// 路径改写：forkFrom 只改 header cwd，历史里的源 cwd 绝对路径仍会
+				// 诱导 agent 操作源目录。改写后写入标准路径 worktree-<name>.jsonl。
+				const sourceCwd = readSessionCwd(sourceFile);
+				if (sourceCwd && sourceCwd !== targetCwd) {
+					const lines = readFileSync(forkedFile, 'utf-8')
+						.trim()
+						.split('\n')
+						.filter(Boolean);
+					const rewritten = lines
+						.map((l) => JSON.parse(l))
+						.map((e: any) => rewriteCwdPaths(e, sourceCwd, targetCwd));
+					writeFileSync(
+						filePath,
+						rewritten.map((e) => JSON.stringify(e)).join('\n') + '\n',
+						'utf-8',
+					);
+				} else {
+					const src = readFileSync(forkedFile, 'utf-8');
+					writeFileSync(filePath, src, 'utf-8');
+				}
 				return filePath;
 			}
 		}
@@ -412,12 +496,16 @@ export function forkToNewSession(
 
 			// 保留原始 entry 的 id/parentId 链，添加新 header
 			// 重映射：将旧的 parentId 指向旧 header 的改为指向新 header id
+			// 路径改写：源 cwd → 目标 cwd（fork 复制历史带源路径，见 rewriteCwdPaths）
+			const sourceCwd = sourceHeader?.cwd ?? '';
 			const remapped = filteredEntries.map((e: any) => {
 				const entry = { ...e };
 				if (oldHeaderId && entry.parentId === oldHeaderId) {
 					entry.parentId = newId;
 				}
-				return entry;
+				return sourceCwd && sourceCwd !== targetCwd
+					? rewriteCwdPaths(entry, sourceCwd, targetCwd)
+					: entry;
 			});
 			const allEntries = [header, ...remapped];
 			writeFileSync(

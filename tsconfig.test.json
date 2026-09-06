@@ -5,7 +5,21 @@
 	},
 	"include": [
 		"test/vitest/extensions/custom-compaction*.test.ts",
-		"test/vitest/extensions/pi-session-tree-tag-notify.test.ts"
+		"test/vitest/extensions/custom-rename*.test.ts",
+		"test/vitest/extensions/pi-session-tree-tag-notify.test.ts",
+		"test/vitest/extensions/ci-watch-logic.test.ts",
+		"test/vitest/extensions/ci-watch-config.test.ts",
+		"test/vitest/extensions/pi-lab.core.test.ts",
+		"test/vitest/extensions/preset-usage.test.ts",
+		"test/vitest/extensions/preset.tui.test.ts",
+		"test/vitest/extensions/preset.integration.test.ts",
+		"test/vitest/extensions/uv.test.ts",
+		"test/vitest/extensions/prompt-editor.extension.test.ts",
+		"test/vitest/extensions/pi-session-tree-package.test.ts",
+		"test/vitest/extensions/smart-context*.test.ts",
+		"test/vitest/extensions/tool-range*.test.ts",
+		"test/vitest/extensions/widget-wrangler.test.ts",
+		"test/vitest/scripts/**/*.test.ts"
 	],
 	"exclude": ["node_modules", "dist", ".pi", "test/results"]
 }

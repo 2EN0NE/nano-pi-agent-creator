@@ -46,16 +46,27 @@ interface Question {
 	prompt: string;
 	options: QuestionOption[];
 	allowOther: boolean;
+	/** 是否允许多选（空格切换选择，Enter 确认） */
+	multiSelect?: boolean;
 }
 
 interface Answer {
 	id: string;
+	/**
+	 * 单选：被选选项的 value。
+	 * 多选：所有选中项 value 用 ', ' 拼接的字符串；结构化数据见 values/labels/indexes。
+	 */
 	value: string;
+	/** 单选：被选选项的 label；多选：所有选中项 label 用 ', ' 拼接。 */
 	label: string;
 	wasCustom: boolean;
 	/** Tab supplement text (extra info user entered via Tab key) */
 	supplement?: string;
 	index?: number;
+	/** 多选模式：所有选中项的值/标签/序号 */
+	values?: string[];
+	labels?: string[];
+	indexes?: number[];
 }
 
 interface QuestionnaireResult {
@@ -92,6 +103,12 @@ const QuestionSchema = Type.Object({
 			description: "允许 '输入其他' 选项（默认：true）",
 		}),
 	),
+	multiSelect: Type.Optional(
+		Type.Boolean({
+			description:
+				'是否允许多选（空格切换选择，Enter 确认；与 allowOther 同用时，"输入其他" 的自定义回答将作为该问题唯一答案，默认：false）',
+		}),
+	),
 });
 
 const QuestionnaireParams = Type.Object({
@@ -123,9 +140,17 @@ function formatAnswerLine(q: Question, a: Answer): string {
 	if (a.wasCustom) {
 		return `${qLabel}: user wrote: ${a.label}`;
 	}
-	const base = a.index
-		? `${qLabel}: user selected: ${a.index}. ${a.label}`
-		: `${qLabel}: user selected: ${a.label}`;
+	let base: string;
+	if (a.values && a.values.length > 0) {
+		const items = a.indexes
+			? a.indexes.map((idx, i) => `${idx}. ${a.labels?.[i] ?? a.values?.[i] ?? ''}`)
+			: (a.labels ?? a.values);
+		base = `${qLabel}: user selected: ${items.join(', ')}`;
+	} else if (a.index) {
+		base = `${qLabel}: user selected: ${a.index}. ${a.label}`;
+	} else {
+		base = `${qLabel}: user selected: ${a.label}`;
+	}
 	if (a.supplement) {
 		return `${base}\n    supplement: ${a.supplement}`;
 	}
@@ -167,14 +192,16 @@ export default function questionnaire(pi: ExtensionAPI) {
 				...q,
 				label: q.label || `Q${i + 1}`,
 				allowOther: q.allowOther !== false,
+				multiSelect: q.multiSelect === true,
 			}));
 
-			// ── Single question: delegate to showSelect ──
-			if (questions.length === 1) {
+			// ── Single question without multi-select: delegate to showSelect ──
+			const anyMultiSelect = questions.some((q) => q.multiSelect === true);
+			if (questions.length === 1 && !anyMultiSelect) {
 				return handleSingleQuestion(questions[0], ctx);
 			}
 
-			// ── Multiple questions: custom tabbed UI ──
+			// ── Multi-select or multiple questions: custom tabbed UI ──
 			return handleMultiQuestion(questions, ctx);
 		},
 
@@ -203,7 +230,16 @@ export default function questionnaire(pi: ExtensionAPI) {
 				if (a.wasCustom) {
 					return `${theme.fg('success', '[OK] ')}${theme.fg('accent', a.id)}: ${theme.fg('muted', '(wrote) ')}${a.label}`;
 				}
-				const display = a.index ? `${a.index}. ${a.label}` : a.label;
+				let display: string;
+				if (a.indexes && a.indexes.length > 0) {
+					display = a.indexes
+						.map((idx, i) => `${idx}. ${a.labels?.[i] ?? a.values?.[i] ?? ''}`)
+						.join(', ');
+				} else if (a.index) {
+					display = `${a.index}. ${a.label}`;
+				} else {
+					display = a.label;
+				}
 				let result = `${theme.fg('success', '[OK] ')}${theme.fg('accent', a.id)}: ${display}`;
 				if (a.supplement) {
 					result += `\n  ${theme.fg('dim', 'supplement:')} ${a.supplement}`;
@@ -223,6 +259,7 @@ async function handleSingleQuestion(
 ): Promise<{
 	content: { type: 'text'; text: string }[];
 	details: QuestionnaireResult;
+	terminate?: boolean;
 }> {
 	const options = q.options.map((o) => ({
 		value: o.value,
@@ -240,6 +277,7 @@ async function handleSingleQuestion(
 		return {
 			content: [{ type: 'text', text: 'User cancelled the questionnaire' }],
 			details: { questions: [q], answers: [], cancelled: true },
+			terminate: true,
 		};
 	}
 
@@ -298,6 +336,7 @@ async function handleMultiQuestion(
 ): Promise<{
 	content: { type: 'text'; text: string }[];
 	details: QuestionnaireResult;
+	terminate?: boolean;
 }> {
 	const totalTabs = questions.length + 1; // questions + Submit
 
@@ -312,6 +351,8 @@ async function handleMultiQuestion(
 		let wrapMode = false;
 		let cachedLines: string[] | undefined;
 		const answers = new Map<string, Answer>();
+		/** 多选模式：每个问题的已勾选选项下标集合 */
+		const multiSelectedIndices = new Map<string, Set<number>>();
 
 		// Editor for "Type something" custom input
 		const editorTheme: EditorTheme = {
@@ -364,6 +405,19 @@ async function handleMultiQuestion(
 			return questions.every((q) => answers.has(q.id));
 		}
 
+		function isMultiSelectQuestion(q?: Question): q is Question {
+			return q?.multiSelect === true;
+		}
+
+		function toggledSetFor(q: Question): Set<number> {
+			let set = multiSelectedIndices.get(q.id);
+			if (!set) {
+				set = new Set();
+				multiSelectedIndices.set(q.id, set);
+			}
+			return set;
+		}
+
 		/** Track last-selected index per tab so returning preserves scroll position */
 		const tabSelectedIndices = new Map<number, number>();
 
@@ -381,6 +435,15 @@ async function handleMultiQuestion(
 					if (answer.wasCustom) {
 						const otherIdx = opts.findIndex((o) => o.isOther);
 						if (otherIdx >= 0) return otherIdx;
+					}
+					// Multi-select: restore toggled set and jump to first selected option
+					if (q.multiSelect && answer.indexes && answer.indexes.length > 0) {
+						const set = toggledSetFor(q);
+						set.clear();
+						for (const idx of answer.indexes) {
+							set.add(idx - 1);
+						}
+						return answer.indexes[0] - 1;
 					}
 					// Match by value
 					const idx = opts.findIndex((o) => !o.isOther && o.value === answer.value);
@@ -424,11 +487,54 @@ async function handleMultiQuestion(
 			answers.set(questionId, { id: questionId, value, label, wasCustom, supplement, index });
 		}
 
+		/**
+		 * 保存当前问题的选择（单选：当前高亮项；多选：所有已勾选项）。
+		 * 返回 false 表示多选模式下尚未勾选任何选项。
+		 */
+		function saveCurrentSelection(supplement?: string): boolean {
+			const q = currentQuestion();
+			if (!q) return false;
+			const opts = currentOptions();
+			if (q.multiSelect) {
+				const set = toggledSetFor(q);
+				const sorted = [...set]
+					.filter((i) => i >= 0 && i < opts.length && !opts[i].isOther)
+					.sort((a, b) => a - b);
+				if (sorted.length === 0) return false;
+				const values = sorted.map((i) => opts[i].value);
+				const labels = sorted.map((i) => opts[i].label);
+				const indexes = sorted.map((i) => i + 1);
+				answers.set(q.id, {
+					id: q.id,
+					value: values.join(', '),
+					label: labels.join(', '),
+					values,
+					labels,
+					indexes,
+					wasCustom: false,
+					supplement,
+				});
+				return true;
+			}
+			const opt = opts[selectedIndex];
+			if (!opt) return false;
+			saveAnswer(q.id, opt.value, opt.label, false, supplement, selectedIndex + 1);
+			return true;
+		}
+
 		// Editor submit callback for custom input (allowOther)
 		editor.onSubmit = (value) => {
 			if (!customInputQuestionId) return;
 			const trimmed = value.trim() || '(no response)';
 			saveAnswer(customInputQuestionId, trimmed, trimmed, true);
+			// 多选问题：自定义文本即该问题的最终答案（覆盖勾选项，与单选 "输入其他"
+			// 语义一致）。必须同步清空该问题的勾选集合，否则提交后回访时复选框仍按
+			// 残留 set 渲染 [x]，与存储的 wasCustom 答案矛盾，再次 Enter 还会把
+			// 已废弃的勾选项写回并覆盖自定义文本。
+			const customQ = questions.find((qq) => qq.id === customInputQuestionId);
+			if (customQ?.multiSelect) {
+				multiSelectedIndices.get(customQ.id)?.clear();
+			}
 			customInputMode = false;
 			customInputQuestionId = null;
 			editor.setText('');
@@ -473,16 +579,12 @@ async function handleMultiQuestion(
 						}
 
 						const supplement = supplementText.trim() || undefined;
-						saveAnswer(
-							q.id,
-							opt.value,
-							opt.label,
-							false,
-							supplement,
-							selectedIndex + 1,
-						);
 						supplementMode = false;
 						supplementText = '';
+						if (!saveCurrentSelection(supplement)) {
+							refresh();
+							return;
+						}
 						advanceOrSubmit();
 					}
 					return;
@@ -551,6 +653,20 @@ async function handleMultiQuestion(
 
 			// Tab supplement: on a selected option, press Tab to add extra info
 			const q = currentQuestion();
+			// Space toggles selection in multi-select mode
+			if (isMultiSelectQuestion(q) && matchesKey(data, Key.space)) {
+				const opt = opts[selectedIndex];
+				if (!opt.isOther) {
+					const set = toggledSetFor(q);
+					if (set.has(selectedIndex)) {
+						set.delete(selectedIndex);
+					} else {
+						set.add(selectedIndex);
+					}
+					refresh();
+				}
+				return;
+			}
 			if (matchesKey(data, Key.enter) && q) {
 				const opt = opts[selectedIndex];
 				if (opt.isOther) {
@@ -561,8 +677,11 @@ async function handleMultiQuestion(
 					refresh();
 					return;
 				}
-				// If the option is already answered (user re-selected), we re-save
-				saveAnswer(q.id, opt.value, opt.label, false, undefined, selectedIndex + 1);
+				// Multi-select: confirm all toggled options; single-select: confirm current
+				if (!saveCurrentSelection()) {
+					refresh();
+					return;
+				}
 				advanceOrSubmit();
 				return;
 			}
@@ -606,6 +725,8 @@ async function handleMultiQuestion(
 			const lines: string[] = [];
 			const q = currentQuestion();
 			const opts = currentOptions();
+			const multi = isMultiSelectQuestion(q);
+			const toggled = multi ? toggledSetFor(q) : new Set<number>();
 
 			const add = (s: string) => lines.push(truncateToWidth(s, width));
 			// For content that should wrap (option descriptions)
@@ -664,7 +785,7 @@ async function handleMultiQuestion(
 				// ── Custom input (allowOther) ──
 				add(theme.fg('text', ` ${q.prompt}`));
 				add('');
-				renderOptions(opts, selectedIndex, theme, add, addContent, true);
+				renderOptions(opts, selectedIndex, theme, add, addContent, true, multi, toggled);
 				add('');
 				add(theme.fg('muted', ' Your answer:'));
 				for (const editorLine of editor.render(width - 2)) {
@@ -676,7 +797,7 @@ async function handleMultiQuestion(
 				// ── Supplement mode (Tab) ──
 				add(theme.fg('text', ` ${q.prompt}`));
 				add('');
-				renderOptions(opts, selectedIndex, theme, add, addContent, false);
+				renderOptions(opts, selectedIndex, theme, add, addContent, false, multi, toggled);
 				add('');
 				// Supplement input line
 				const isEmpty = !supplementText;
@@ -694,8 +815,24 @@ async function handleMultiQuestion(
 				for (const question of questions) {
 					const answer = answers.get(question.id);
 					if (answer) {
-						const prefix = answer.wasCustom ? '(wrote) ' : `${answer.index || '?'}. `;
-						let line = `${theme.fg('muted', ` ${question.label}: `)}${theme.fg('text', prefix + answer.label)}`;
+						let prefix: string;
+						let displayLabel: string;
+						if (answer.wasCustom) {
+							prefix = '(wrote) ';
+							displayLabel = answer.label;
+						} else if (answer.indexes && answer.indexes.length > 0) {
+							prefix = '';
+							displayLabel = answer.indexes
+								.map(
+									(idx, i) =>
+										`${idx}. ${answer.labels?.[i] ?? answer.values?.[i] ?? ''}`,
+								)
+								.join(', ');
+						} else {
+							prefix = `${answer.index || '?'}. `;
+							displayLabel = answer.label;
+						}
+						let line = `${theme.fg('muted', ` ${question.label}: `)}${theme.fg('text', prefix + displayLabel)}`;
 						if (answer.supplement) {
 							line += `\n   ${theme.fg('dim', 'supplement:')} ${theme.fg('muted', answer.supplement)}`;
 						}
@@ -724,7 +861,7 @@ async function handleMultiQuestion(
 				// ── Question options ──
 				add(theme.fg('text', ` ${q.prompt}`));
 				add('');
-				renderOptions(opts, selectedIndex, theme, add, addContent, false);
+				renderOptions(opts, selectedIndex, theme, add, addContent, false, multi, toggled);
 			}
 
 			// Bottom help bar
@@ -748,12 +885,10 @@ async function handleMultiQuestion(
 					);
 				}
 			} else {
-				add(
-					theme.fg(
-						'dim',
-						' ↑ ↓ select · ← → switch question · Tab supplement · Ctrl+Shift+O expand · Enter confirm · Esc cancel',
-					),
-				);
+				const hint = multi
+					? ' ↑ ↓ 移动 · 空格 多选 · ← → 切换问题 · Tab 补充 · Ctrl+Shift+O 展开 · Enter 确认 · Esc 取消'
+					: ' ↑ ↓ select · ← → switch question · Tab supplement · Ctrl+Shift+O expand · Enter confirm · Esc cancel';
+				add(theme.fg('dim', hint));
 			}
 			add(theme.fg('accent', '─'.repeat(width)));
 
@@ -780,6 +915,7 @@ async function handleMultiQuestion(
 		return {
 			content: [{ type: 'text', text: 'User cancelled the questionnaire' }],
 			details: result,
+			terminate: true,
 		};
 	}
 
@@ -793,26 +929,31 @@ async function handleMultiQuestion(
 
 // ── Render options helper ──
 
-function renderOptions(
+/** 导出供 headless snapshot 测试使用（不依赖 pi 生命周期的纯渲染函数）。 */
+export function renderOptions(
 	opts: RenderOption[],
 	selectedIndex: number,
 	theme: any,
 	add: (s: string) => void,
 	addContent: (s: string, indent?: string) => void,
 	showInputIndicator: boolean,
+	multiSelect: boolean,
+	toggled: Set<number>,
 ): void {
 	for (let i = 0; i < opts.length; i++) {
 		const opt = opts[i];
 		const isSelected = i === selectedIndex;
 		const isOther = opt.isOther === true;
+		const isToggled = multiSelect && !isOther && toggled.has(i);
 		const prefix = isSelected ? theme.fg('accent', ' › ') : '   ';
-		const color = isSelected ? 'accent' : 'text';
+		const color = isSelected ? 'accent' : isToggled ? 'success' : 'text';
+		const checkbox = multiSelect && !isOther ? (isToggled ? '[x] ' : '[ ] ') : '';
 		const label = isOther
 			? showInputIndicator
 				? `${opt.label} [输入]`
 				: opt.label
 			: opt.label;
-		add(`${prefix}${theme.fg(color, `${i + 1}. ${label}`)}`);
+		add(`${prefix}${theme.fg(color, `${checkbox}${i + 1}. ${label}`)}`);
 		if (opt.description) {
 			addContent(`     ${theme.fg('muted', opt.description)}`, '     ');
 		}

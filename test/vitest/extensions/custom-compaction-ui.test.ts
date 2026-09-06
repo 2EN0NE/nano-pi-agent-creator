@@ -26,12 +26,14 @@ function makeData(overrides: Partial<SettingsPanelData> = {}): SettingsPanelData
 		configLabel: 'Default (user)',
 		activePath: '/home/xx/.pi/agent/extensions-data/custom-compaction/config.json',
 		saveScope: 'user',
+		triggerGranularityLabel: 'Agent 轮',
+		routingRules: [],
 		modelLine: '当前模型: openai/gpt-4o > Profile: Default',
 		profiles: [
 			{
 				id: 'default',
 				name: 'Default',
-				active: true,
+				enabled: true,
 				description: '触发: 上下文使用达 20% 时压缩 | 机制: LLM 全量摘要',
 				fields: [
 					{ key: 'name', label: '名称', value: 'Default' },
@@ -46,7 +48,7 @@ function makeData(overrides: Partial<SettingsPanelData> = {}): SettingsPanelData
 			{
 				id: 'smart-compact',
 				name: 'EESV Smart Compact',
-				active: false,
+				enabled: false,
 				description: '触发: 上下文使用达 70% 时压缩 | 机制: 外部适配器',
 				fields: [
 					{ key: 'name', label: '名称', value: 'EESV Smart Compact' },
@@ -82,7 +84,7 @@ function makeData(overrides: Partial<SettingsPanelData> = {}): SettingsPanelData
 // ── render width ─────────────────────────────────────────────────
 
 describe('SettingsComponent render width (TUI 铁律)', () => {
-	const widths = [60, 80, 120];
+	const widths = [60, 80, 120, 160];
 
 	for (const w of widths) {
 		it(`main mode does not exceed width at ${w}`, () => {
@@ -265,5 +267,82 @@ describe('SettingsComponent keyboard', () => {
 			profileId: 'default',
 			fieldKey: 'threshold',
 		});
+	});
+
+	it('Space emits toggle-enable for selected profile', () => {
+		const { comp, actions } = capture(makeData());
+		comp.handleInput(' ');
+		expect(actions).toHaveLength(1);
+		expect(actions[0]).toEqual({ type: 'toggle-enable', profileId: 'default' });
+	});
+
+	it('Space after Down emits toggle-enable for second profile', () => {
+		const { comp, actions } = capture(makeData());
+		comp.handleInput('\x1b[B'); // Down -> smart-compact
+		comp.handleInput(' ');
+		expect(actions[0]).toEqual({ type: 'toggle-enable', profileId: 'smart-compact' });
+	});
+
+	it('Space does NOT emit in fields mode', () => {
+		const { comp, actions } = capture(makeData(), 'fields', 'default');
+		comp.handleInput(' ');
+		expect(actions).toHaveLength(0);
+	});
+
+	it('render shows [x] for enabled and [ ] for disabled', () => {
+		const { comp } = capture(makeData());
+		const text = stripAnsi(comp.render(80).join('\n'));
+		expect(text).toContain('[x]');
+		expect(text).toContain('[ ]');
+	});
+
+	it('g emits toggle-granularity action', () => {
+		const { comp, actions } = capture(makeData());
+		comp.handleInput('g');
+		expect(actions).toHaveLength(1);
+		expect(actions[0]).toEqual({ type: 'toggle-granularity' });
+	});
+
+	it('uppercase G also emits toggle-granularity (case-insensitive)', () => {
+		const { comp, actions } = capture(makeData());
+		comp.handleInput('G');
+		expect(actions[0]).toEqual({ type: 'toggle-granularity' });
+	});
+
+	it('g does NOT emit in fields mode', () => {
+		const { comp, actions } = capture(makeData(), 'fields', 'default');
+		comp.handleInput('g');
+		expect(actions).toHaveLength(0);
+	});
+
+	it('render shows trigger granularity label', () => {
+		const { comp } = capture(makeData());
+		const text = stripAnsi(comp.render(80).join('\n'));
+		expect(text).toContain('触发粒度: Agent 轮');
+	});
+
+	it('r emits manage-rules action', () => {
+		const { comp, actions } = capture(makeData());
+		comp.handleInput('r');
+		expect(actions).toHaveLength(1);
+		expect(actions[0]).toEqual({ type: 'manage-rules' });
+	});
+
+	it('r does NOT emit in fields mode', () => {
+		const { comp, actions } = capture(makeData(), 'fields', 'default');
+		comp.handleInput('r');
+		expect(actions).toHaveLength(0);
+	});
+
+	it('render shows routing rules', () => {
+		const { comp } = capture(makeData({ routingRules: ['模型 openai/ → Default'] }));
+		const text = stripAnsi(comp.render(80).join('\n'));
+		expect(text).toContain('模型 openai/ → Default');
+	});
+
+	it('render shows empty routing rules placeholder', () => {
+		const { comp } = capture(makeData());
+		const text = stripAnsi(comp.render(80).join('\n'));
+		expect(text).toContain('(无规则)');
 	});
 });

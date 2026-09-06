@@ -4,7 +4,12 @@
  * Pure functions — no Pi API dependency, no side effects.
  * Extracted from index.ts for testability.
  */
-import type { CompactionProfile } from './types.js';
+import {
+	modelMatchScore,
+	type CompactionProfile,
+	type ComplexityLevel,
+	type RoutingRule,
+} from './types.js';
 
 /**
  * Check whether a trigger threshold has been crossed based on current context usage.
@@ -95,4 +100,86 @@ export function isApproaching(
 		default:
 			return false;
 	}
+}
+
+/**
+ * Select the profile to compact from the enabled set (ADR-0036).
+ *
+ * 启用集 → 触发集 → tiebreak（阈值倒序）择一：
+ * 1. 过滤出满足触发条件的 profile（触发集 = 启用集 ∩ 触发）
+ * 2. 触发集非空时，按 tiebreak 择一：同 trigger.type 内阈值倒序（大优先），
+ *    不同 type 按类型名稳定排序（保证结果可预测、与 profiles 定义顺序无关）
+ *
+ * Returns undefined when no enabled profile satisfies its trigger.
+ */
+export function selectTriggeredProfile(
+	enabled: CompactionProfile[],
+	contextUsage: { tokens: number; percent: number | null },
+	contextWindow: number | undefined,
+): CompactionProfile | undefined {
+	const triggered = enabled.filter((p) => shouldTrigger(p.trigger, contextUsage, contextWindow));
+	if (triggered.length === 0) return undefined;
+	return [...triggered].sort(tiebreakCompare)[0];
+}
+
+/**
+ * 在触发集内择一（ADR-0036 选择算法三层）：
+ * 1. 显式路由规则（有序，首条命中且 target 在触发集内）
+ * 2. matchModel 隐式规则（兼容旧字段，最具体匹配优先）
+ * 3. tiebreak（阈值倒序）
+ */
+export function selectProfileFromTriggered(
+	triggered: CompactionProfile[],
+	opts: {
+		modelSpec?: string;
+		complexityLevel?: ComplexityLevel;
+		routingRules: RoutingRule[];
+	},
+): CompactionProfile | undefined {
+	if (triggered.length === 0) return undefined;
+
+	// 第一层：显式路由规则
+	for (const rule of opts.routingRules) {
+		if (
+			rule.model !== undefined &&
+			(!opts.modelSpec || modelMatchScore(rule.model, opts.modelSpec) === undefined)
+		) {
+			continue; // 模型维度不匹配
+		}
+		if (rule.complexity !== undefined && rule.complexity !== opts.complexityLevel) {
+			continue; // 复杂度维度不匹配
+		}
+		const target = triggered.find((p) => p.id === rule.targetProfileId);
+		if (target) return target;
+	}
+
+	// 第二层：matchModel 隐式规则（旧字段兼容）—— 最具体匹配优先
+	if (opts.modelSpec) {
+		let best: CompactionProfile | undefined;
+		let bestScore = Infinity;
+		let bestLen = 0;
+		for (const p of triggered) {
+			if (!p.matchModel) continue;
+			const score = modelMatchScore(p.matchModel, opts.modelSpec);
+			if (score === undefined) continue;
+			const len = p.matchModel.length;
+			if (score < bestScore || (score === bestScore && len > bestLen)) {
+				best = p;
+				bestScore = score;
+				bestLen = len;
+			}
+		}
+		if (best) return best;
+	}
+
+	// 第三层：tiebreak（阈值倒序）
+	return [...triggered].sort(tiebreakCompare)[0];
+}
+
+/** tiebreak：同 type 内阈值倒序（大优先），不同 type 按类型名稳定排序 */
+function tiebreakCompare(a: CompactionProfile, b: CompactionProfile): number {
+	if (a.trigger.type !== b.trigger.type) {
+		return a.trigger.type.localeCompare(b.trigger.type);
+	}
+	return b.trigger.threshold - a.trigger.threshold;
 }

@@ -14,6 +14,8 @@ import {
 	getMergeSourceBranch,
 	isRebaseConflictPaused,
 	popWorktreeStash,
+	getRemoteAheadBehind,
+	getAheadBehind,
 } from './git.js';
 import {
 	createWorktree,
@@ -36,6 +38,7 @@ import {
 	askDeleteLeaveChoice,
 	askSymlinkTargetsPanel,
 	askMergeStrategy,
+	askMergeTarget,
 	promptWorktreeName,
 	confirmDelete,
 	confirmRebaseFF,
@@ -44,7 +47,9 @@ import {
 	showConflictPanel,
 	showPostMergeGuide,
 	showMergeSuccessPanel,
+	showMergeFailurePanel,
 	buildConflictResolvePrompt,
+	buildMergeAdvicePrompt,
 } from './ui.js';
 import {
 	switchToSession,
@@ -492,8 +497,8 @@ async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: a
 			// 已有 clone, 询问是否覆盖
 			try {
 				const overwrite = await ctx.ui.confirm?.(
-					`Worktree '${target}' already has a cloned session from this project.\n` +
-						'用当前会话覆盖？[Y] 是 [N] 保留现有 [Esc] 取消',
+					`Worktree '${target}' already has a cloned session from this project.`,
+					'用当前会话覆盖？[Y] 是 [N] 保留现有 [Esc] 取消',
 				);
 				if (overwrite === false) {
 					// 保留现有 clone 会话（sourceCwd 可能是 worktree，须与 hasClonedSession 检测一致）
@@ -665,7 +670,7 @@ async function handleDelete(
 // merge
 // ═══════════════════════════════════════════
 
-/** git 命令超时（毫秒）。pull 走网络，给足时间避免误杀。 */
+/** git 命令超时（毫秒）。本地 merge/rebase 命令的上限。 */
 export const GIT_TIMEOUT_MS = 120_000;
 
 export interface GitRunResult {
@@ -724,32 +729,98 @@ export interface MergeResult {
 	stashed?: boolean;
 	/** 切换 stash 前的原始分支（用于 abort 时恢复） */
 	originalBranch?: string;
-	/** 是否因超时失败（git 命令超时被 kill） */
-	timedOut?: boolean;
-	/** 超时发生在 rebase 已成功之后（worktree 分支已前进，未被回滚） */
-	timedOutAfterRebase?: boolean;
-	/** rebase 已成功后主仓库操作失败（二次 pull / ff-merge），worktree 分支已前进、未被回滚 */
+	/** rebase 已成功后主仓库 ff-merge 失败，worktree 分支已前进、未被回滚 */
 	failedAfterRebase?: boolean;
 	/** 合并已成功，但恢复未提交改动（stash pop）时冲突（无 MERGE_HEAD，需手动解决或放弃） */
 	stashPopConflict?: boolean;
 }
 
 /**
- * 非冲突失败的中文提示映射（含 timeout 单独提示）。
+ * 非冲突失败的中文提示映射。
  * execMerge/execRebaseFF 的 message 保持英文（测试依赖），此处做用户可读映射。
  */
 export function formatMergeFailure(result: MergeResult, targetBranch: string): string {
-	if (result.timedOutAfterRebase)
-		return '拉取超时（120s，可能网络慢）。源分支已在 worktree 内完成 rebase（未回滚），可稍后重试合并或手动处理';
 	if (result.failedAfterRebase)
-		return '合并失败（拉取或 fast-forward 失败）。源分支已在 worktree 内完成 rebase（未回滚），可稍后重试合并或手动处理';
-	if (result.timedOut) return '拉取超时（120s，可能网络慢），已中止并回滚';
+		return '合并失败（fast-forward 失败）。源分支已在 worktree 内完成 rebase（未回滚），可稍后重试合并或手动处理';
 	const m = result.message;
 	if (m.includes('Cannot stash')) return '无法 stash 你的未提交改动，请先提交或手动 stash';
 	if (m.includes('Cannot checkout')) return `无法切换到 ${targetBranch}，已回滚`;
-	if (m.includes('Pull on')) return `拉取 origin/${targetBranch} 失败，已回滚`;
 	if (m.includes('commit failed')) return 'squash 合并成功但提交失败，已回滚';
 	return '合并失败，已回滚：' + m;
+}
+
+/**
+ * 拉取 target 最新（用户主动触发的远端同步，本地优先：不自动调用）。
+ * checkout target → pull --ff-only → checkout 回原分支，任何一步失败都恢复原分支并返回错误。
+ * 回切原分支失败时视为拉取失败（返回 ok=false 且 error 说明当前停留分支），绝不静默。
+ */
+export function pullTargetLatest(
+	repoRoot: string,
+	targetBranch: string,
+): { ok: boolean; error: string } {
+	const orig = getCurrentBranch(repoRoot);
+	let ok = false;
+	let error = '';
+	try {
+		const co = spawnSync('git', ['checkout', targetBranch], { cwd: repoRoot, stdio: 'ignore' });
+		if (co.status !== 0) throw new Error('checkout ' + targetBranch + ' failed');
+		const pl = spawnSync('git', ['pull', 'origin', targetBranch, '--ff-only'], {
+			cwd: repoRoot,
+			encoding: 'utf-8',
+			timeout: GIT_TIMEOUT_MS,
+		});
+		if (pl.status === null) {
+			// 超时被 kill（status=null）：给用户可读提示，而非 stderr 为空的 "unknown error"
+			throw new Error('拉取超时（' + GIT_TIMEOUT_MS / 1000 + 's），请检查网络后重试');
+		}
+		if (pl.status !== 0) throw new Error((pl.stderr || '').trim());
+		ok = true;
+	} catch (e: any) {
+		error =
+			String(e?.stderr || e?.message || '')
+				.trim()
+				.split('\n')
+				.pop() || 'unknown error';
+	} finally {
+		if (orig) {
+			const back = spawnSync('git', ['checkout', orig], { cwd: repoRoot, stdio: 'ignore' });
+			if (back.status !== 0) {
+				// 回切失败：明确告知当前停留分支，避免用户仓库被静默留在 target 分支
+				ok = false;
+				error = error || 'checkout ' + targetBranch + ' failed';
+				error += `；切换回 ${orig} 失败，当前停留在 ${targetBranch}`;
+			}
+		}
+	}
+	return { ok, error };
+}
+
+/**
+ * 清理残留的合并状态（merge 失败后的统一收尾）。
+ * 存在 MERGE_HEAD 说明合并被中断（如超时 kill 遗留）→ 用 --abort 重置工作区，与「已回滚」文案一致；
+ * 否则用 --quit（无 merge 时静默成功，不产生 fatal 噪音）。
+ */
+function cleanupMergeState(repoRoot: string): void {
+	let inMerge = false;
+	try {
+		inMerge = !!execSync('git rev-parse -q --verify MERGE_HEAD', {
+			cwd: repoRoot,
+			encoding: 'utf-8',
+			timeout: 5000,
+		}).trim();
+	} catch {
+		inMerge = false;
+	}
+	try {
+		execSync(inMerge ? 'git merge --abort' : 'git merge --quit', {
+			cwd: repoRoot,
+			encoding: 'utf-8',
+			timeout: 5000,
+			stdio: 'ignore',
+		});
+	} catch {
+		/* best-effort cleanup */
+	}
 }
 
 /**
@@ -808,31 +879,8 @@ export async function execMerge(
 		return { ok: false, message: "Cannot checkout '" + targetBranch + "'", conflicts: [] };
 	}
 
-	const remote = await git(['remote', 'get-url', 'origin']);
-	const hasRemote = remote.status === 0;
-	if (hasRemote) {
-		const pull = await git(['pull', 'origin', targetBranch, '--ff-only']);
-		if (pull.timedOut) {
-			await git(['checkout', origBranch]);
-			if (stashed) await git(['stash', 'pop']);
-			return {
-				ok: false,
-				message: 'Pull timed out after ' + timeoutMs / 1000 + 's',
-				conflicts: [],
-				timedOut: true,
-			};
-		}
-		if (pull.status !== 0) {
-			await git(['checkout', origBranch]);
-			if (stashed) await git(['stash', 'pop']);
-			return {
-				ok: false,
-				message: "Pull on '" + targetBranch + "' failed, aborting.",
-				conflicts: [],
-			};
-		}
-	}
-
+	// 本地优先：merge 纯本地执行，不自动 pull 远端。
+	// 需要与远端同步时由用户在面板手动「拉取最新」。
 	const isSquash = strategy === 'squash';
 	const merge = await git(
 		isSquash
@@ -948,8 +996,8 @@ export async function execMerge(
  *
  * 流程：
  *   1. stash 主仓库 dirty
- *   2. fetch + checkout target（主仓库内完成，target 即 main，不是 worktree branch）
- *   3. 在 worktree 目录内 `git rebase origin/<target>`（当前 HEAD = sourceBranch）
+ *   2. checkout target（主仓库内完成，target 即 main，不是 worktree branch）
+ *   3. 在 worktree 目录内 `git rebase <targetBranch>`（当前 HEAD = sourceBranch）
  *   4. 若冲突 → abort（从 worktree 内），恢复原始状态，报告
  *   5. 切回主仓库 target → `git merge <sourceBranch> --ff-only`（此时已可 ff）
  *   6. 恢复原始分支，pop stash
@@ -1027,47 +1075,18 @@ export async function execRebaseFF(
 		mainStashed = true;
 	}
 
-	// Fetch + checkout target（主仓库内）
-	const remote = await mainGit(['remote', 'get-url', 'origin']);
-	const hasRemote = remote.status === 0;
-	if (hasRemote) {
-		await mainGit(['fetch', 'origin', targetBranch, '--quiet']);
-	}
-
+	// 本地优先：不 fetch/pull 远端，rebase 目标直接指向本地 target 分支
 	const checkout = await mainGit(['checkout', targetBranch]);
 	if (checkout.status !== 0) {
 		if (mainStashed) await mainGit(['stash', 'pop']);
 		return { ok: false, message: "Cannot checkout '" + targetBranch + "'", conflicts: [] };
 	}
 
-	if (hasRemote) {
-		const pull = await mainGit(['pull', 'origin', targetBranch, '--ff-only']);
-		if (pull.timedOut) {
-			await mainGit(['checkout', origBranch]);
-			if (mainStashed) await mainGit(['stash', 'pop']);
-			return {
-				ok: false,
-				message: 'Pull timed out after ' + timeoutMs / 1000 + 's',
-				conflicts: [],
-				timedOut: true,
-			};
-		}
-		if (pull.status !== 0) {
-			await mainGit(['checkout', origBranch]);
-			if (mainStashed) await mainGit(['stash', 'pop']);
-			return {
-				ok: false,
-				message: "Pull on '" + targetBranch + "' failed, aborting.",
-				conflicts: [],
-			};
-		}
-	}
-
 	// ═══════════════════════════════════════════════
 	// Rebase 在 worktree 目录内执行
 	// 不需要指定 branch——worktree 的 HEAD 就是 sourceBranch
 	// ═══════════════════════════════════════════════
-	const ontoRef = hasRemote ? 'origin/' + targetBranch : targetBranch;
+	const ontoRef = targetBranch;
 	const rebase = await wtGit(['rebase', ontoRef]);
 
 	if (rebase.status !== 0) {
@@ -1115,34 +1134,8 @@ export async function execRebaseFF(
 		};
 	}
 
-	// Rebase 成功 → 切回主仓库 target → fast-forward merge
+	// Rebase 成功 → 切回主仓库 target → fast-forward merge（纯本地）
 	await mainGit(['checkout', targetBranch]);
-	if (hasRemote) {
-		const pull = await mainGit(['pull', 'origin', targetBranch, '--ff-only']);
-		if (pull.timedOut) {
-			// rebase 已成功（worktree 分支已前进）；此处只回滚主仓库的 checkout/stash，
-			// 不撤销 worktree 的 rebase——超时消息需区别于「已回滚」。
-			await mainGit(['checkout', origBranch]);
-			if (mainStashed) await mainGit(['stash', 'pop']);
-			return {
-				ok: false,
-				message: 'Pull timed out after ' + timeoutMs / 1000 + 's',
-				conflicts: [],
-				timedOut: true,
-				timedOutAfterRebase: true,
-			};
-		}
-		if (pull.status !== 0) {
-			await mainGit(['checkout', origBranch]);
-			if (mainStashed) await mainGit(['stash', 'pop']);
-			return {
-				ok: false,
-				message: "Pull on '" + targetBranch + "' failed after rebase, aborting.",
-				conflicts: [],
-				failedAfterRebase: true,
-			};
-		}
-	}
 
 	const ffMerge = await mainGit(['merge', sourceBranch, '--ff-only']);
 	if (ffMerge.status !== 0) {
@@ -1230,11 +1223,26 @@ export async function handleMerge(
 	}
 
 	const sourceBranch = 'wt/' + sourceWorktree;
-	const targetBranch = flags.target || 'main';
+
+	// ── 目标分支选择 ──
+	// 显式 --target 优先；有 UI 时列出所有本地分支让用户选择（排除被其他
+	// worktree checkout 的分支），避免误合并到非预期分支；无 UI 且未指定时
+	// 默认 main。
+	let targetBranch = flags.target || '';
+	if (!targetBranch && ctx.hasUI) {
+		const picked = await askMergeTarget(ctx, repoRoot);
+		if (!picked) return; // 用户取消
+		targetBranch = picked;
+	}
+	if (!targetBranch) targetBranch = 'main';
 
 	// ── 策略选择 ──
 	let strategy: MergeStrategy = 'merge';
-	if (flags.strategy === 'squash' || flags.strategy === 'rebase-ff') {
+	if (
+		flags.strategy === 'merge' ||
+		flags.strategy === 'squash' ||
+		flags.strategy === 'rebase-ff'
+	) {
 		strategy = flags.strategy;
 	} else if (ctx.hasUI) {
 		const picked = await askMergeStrategy(ctx);
@@ -1254,14 +1262,22 @@ export async function handleMerge(
 		repo: basename(repoRoot),
 	});
 
-	// P2-6: 合并前确认
+	// P2-6: 合并前确认（含只读同步差距提示）
 	if (ctx.hasUI) {
 		let confirmed: boolean;
 		if (strategy === 'rebase-ff') {
 			confirmed = await confirmRebaseFF(ctx, sourceWorktree, sourceBranch, targetBranch);
 		} else {
+			// 只读诊断：本地 target 落后远端 N 提交。无远端/远端分支不存在/失败 → null，静默不显示。
+			// 仅非 rebase-ff 策略需要此提示（rebase-ff 走 confirmRebaseFF，不显示差距），避免白做网络 fetch。
+			const sync = await getRemoteAheadBehind(repoRoot, targetBranch);
+			const syncHint =
+				sync && sync.behind > 0
+					? `\n注意：本地 ${targetBranch} 落后远端 ${sync.behind} 个提交（push 前建议先同步）`
+					: '';
 			confirmed = await ctx.ui.confirm(
 				`Merge '${sourceBranch}' -> '${targetBranch}'? (${strategyLabel})`,
+				syncHint,
 			);
 		}
 		if (!confirmed) {
@@ -1270,10 +1286,16 @@ export async function handleMerge(
 		}
 	}
 
-	// 进行中提示：notify（即时可见 toast）+ TUI 状态栏（footer 持续，异步化后实时可见）
-	ctx.ui.notify(`合并中 ${sourceBranch} -> ${targetBranch}... (${strategyLabel})`, 'info');
+	// 进行中提示：仅用 TUI 状态栏（footer 持续显示，异步化后实时可见，finally 清除）。
+	// 不用 ctx.ui.notify：pi 的 notify('info') 是聊天区持久行（非 toast），merge 完成后
+	// 若无紧随的成功 notify 替换会残留「合并中」，失败/冲突分支的 error/warning 也不替换。
 	if (ctx.hasUI) {
-		ctx.ui.setStatus?.('pi-worktree', `合并中 ${sourceBranch} -> ${targetBranch}...`);
+		const statusMsg = `合并中 ${sourceBranch} -> ${targetBranch}...`;
+		// 状态栏文本支持 ANSI 颜色（footer 仅去除换行/tab），用主题色高亮
+		ctx.ui.setStatus?.(
+			'pi-worktree',
+			ctx.theme?.fg ? ctx.theme.fg('warning', statusMsg) : statusMsg,
+		);
 	}
 
 	let result: MergeResult;
@@ -1292,9 +1314,17 @@ export async function handleMerge(
 
 	if (result.ok) {
 		if (ctx.hasUI && fromPanel) {
-			const choice = await showMergeSuccessPanel(ctx, sourceBranch, targetBranch);
+			const targetSync = await getRemoteAheadBehind(repoRoot, targetBranch);
+			const choice = await showMergeSuccessPanel(ctx, sourceBranch, targetBranch, targetSync);
 			if (choice.action === 'switch') {
 				await handleUse(repoRoot, { _positional: targetBranch }, ctx);
+			} else if (choice.action === 'pull') {
+				const pullRes = pullTargetLatest(repoRoot, targetBranch);
+				if (pullRes.ok) {
+					ctx.ui.notify(`已拉取 ${targetBranch} 最新`, 'success');
+				} else {
+					ctx.ui.notify('拉取失败：' + pullRes.error, 'error');
+				}
 			} else if (choice.action === 'menu') {
 				await handlePanel(repoRoot, ctx);
 			}
@@ -1394,18 +1424,69 @@ export async function handleMerge(
 			);
 		}
 	} else {
-		ctx.ui.notify(formatMergeFailure(result, targetBranch), 'error');
-		if (fromPanel) await handlePanel(repoRoot, ctx);
-		// execMerge 可能在冲突后留下 MERGE_HEAD，需要清理
-		// execRebaseFF 已自行清理，此处 abort 无害——无 merge 时 git 静默失败
-		try {
-			execSync('git merge --abort', {
-				cwd: repoRoot,
-				encoding: 'utf-8',
-				timeout: 5000,
-			});
-		} catch {
-			/* no merge in progress, nothing to abort */
+		// 非冲突失败（checkout 失败、工作区脏、rebase 失败等）
+		const failureMsg = formatMergeFailure(result, targetBranch);
+		// 统一清理残留合并状态：在分发任何 action 前执行，覆盖 retry/pull/close 全部路径。
+		cleanupMergeState(repoRoot);
+		if (ctx.hasUI) {
+			const m = result.message;
+			let suggestion: string;
+			if (m.includes('Cannot checkout'))
+				suggestion = '检查目标分支是否存在、是否被其他 worktree 占用';
+			else if (m.includes('Cannot stash'))
+				suggestion = '先提交或手动 stash 未提交改动，再重试';
+			else if (m.includes('commit failed'))
+				suggestion = 'squash 已成功但提交失败，检查 git 提交配置';
+			else if (m.includes('Rebase failed'))
+				suggestion = '查看源 worktree 内 rebase 状态，或让 Agent 诊断根因';
+			else suggestion = '让 Agent 诊断根因，或打开终端手动 git 处理';
+
+			const action = await showMergeFailurePanel(ctx, failureMsg, suggestion);
+			if (action.action === 'agent') {
+				const confirmed = await ctx.ui.confirm?.(
+					'让 Agent 分析并给出建议命令？',
+					'Agent 只给建议命令步骤，不执行、不 push。你确认后手动执行。',
+				);
+				if (confirmed && _pi) {
+					const prompt = buildMergeAdvicePrompt({
+						sourceBranch,
+						targetBranch,
+						strategy,
+						failureMessage: result.message,
+						targetSync: await getRemoteAheadBehind(repoRoot, targetBranch),
+						sourceAheadBehind: getAheadBehind(repoRoot, sourceBranch),
+					});
+					await _pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
+				}
+			} else if (action.action === 'retry') {
+				await handleMerge(
+					repoRoot,
+					{ source: sourceWorktree, target: targetBranch, strategy },
+					ctx,
+					fromPanel,
+				);
+				return;
+			} else if (action.action === 'shell') {
+				await handleShell(repoRoot, ctx, targetBranch);
+			} else if (action.action === 'pull') {
+				// 用户主动拉取 target 最新（本地优先：仅此路径触发远端同步），成功后重试
+				const pullRes = pullTargetLatest(repoRoot, targetBranch);
+				if (pullRes.ok) {
+					await handleMerge(
+						repoRoot,
+						{ source: sourceWorktree, target: targetBranch, strategy },
+						ctx,
+						fromPanel,
+					);
+				} else {
+					ctx.ui.notify('拉取失败：' + pullRes.error, 'error');
+				}
+				return;
+			}
+			// close: 不动
+			if (fromPanel) await handlePanel(repoRoot, ctx);
+		} else {
+			ctx.ui.notify(failureMsg, 'error');
 		}
 	}
 }
@@ -1456,7 +1537,8 @@ export async function handleRebase(
 	const sourceDir = resolveWorktreePath(repoRoot, sourceWorktree);
 
 	log.info('rebasing', { source: sourceBranch, onto: ontoBranch, repo: basename(repoRoot) });
-	ctx.ui.notify(`Rebasing '${sourceBranch}' onto '${ontoBranch}'...`, 'info');
+	// 进行中提示：本地 rebase 很快且 execRebase 同步阻塞，无需 notify/setStatus 进行中提示。
+	// （pi 的 notify('info') 是聊天区持久行，rebase 完成后无紧随成功 notify 替换会残留）
 
 	// Worktree-Local Rebase（ADR-0018）：变基在持有该分支的 worktree 目录内执行
 	const result = execRebase(repoRoot, sourceBranch, ontoBranch, sourceDir);
@@ -1588,9 +1670,10 @@ async function handleClean(
 
 	// P1-1: 确认弹窗
 	if (ctx.hasUI) {
-		const confirmed = await ctx.ui.confirm(`Delete ${merged.length} merged worktree(s)?`, {
-			detail: merged.map((m) => `  ${m.name} (${m.branch})`).join('\n'),
-		});
+		const confirmed = await ctx.ui.confirm(
+			`Delete ${merged.length} merged worktree(s)?`,
+			merged.map((m) => `  ${m.name} (${m.branch})`).join('\n'),
+		);
 		if (!confirmed) {
 			ctx.ui.notify('已取消清理。', 'info');
 			return;

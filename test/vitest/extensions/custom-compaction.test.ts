@@ -10,14 +10,16 @@
 import { describe, it, expect } from 'vitest';
 import {
 	modelMatchScore,
-	selectBestProfile,
 	toModelSpec,
 	type CompactionProfile,
 	type CompactionConfig,
+	type RoutingRule,
 } from '../../../extensions/context/custom-compaction/types.js';
 import {
 	shouldTrigger,
 	isApproaching,
+	selectTriggeredProfile,
+	selectProfileFromTriggered,
 } from '../../../extensions/context/custom-compaction/trigger.js';
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -31,17 +33,20 @@ function makeProfile(
 		mechanism: { type: 'summarize' },
 		prompt: '',
 		autoContinue: true,
+		injectContinueText: false,
 		autoContinueMessage: 'continue',
 		...overrides,
 	};
 }
 
-function makeConfig(profiles: CompactionProfile[], activeProfileId?: string): CompactionConfig {
+function makeConfig(profiles: CompactionProfile[]): CompactionConfig {
 	const record: Record<string, CompactionProfile> = {};
 	for (const p of profiles) record[p.id] = p;
 	return {
 		profiles: record,
-		activeProfileId: activeProfileId ?? profiles[0]?.id ?? 'default',
+		enabledProfileIds: Object.keys(record),
+		triggerGranularity: 'agent_turn',
+		routingRules: [],
 	};
 }
 
@@ -97,114 +102,6 @@ describe('modelMatchScore', () => {
 		// "openai/gpt-4o" matches itself exactly (0) and as prefix (starts with itself)
 		// Should return 0 (exact), not 1 (prefix) — exact check runs first
 		expect(modelMatchScore('openai/gpt-4o', 'openai/gpt-4o')).toBe(0);
-	});
-});
-
-// ── selectBestProfile ───────────────────────────────────────────
-
-describe('selectBestProfile', () => {
-	it('returns undefined for empty profiles', () => {
-		expect(selectBestProfile(makeConfig([]), 'openai/gpt-4o')).toBeUndefined();
-	});
-
-	it('returns first profile as last resort when nothing matches', () => {
-		const p = makeProfile({ id: 'only', name: 'Only' });
-		expect(selectBestProfile(makeConfig([p]), 'openai/gpt-4o')).toBe(p);
-	});
-
-	it('prefers exact match over prefix over substring over universal', () => {
-		const universal = makeProfile({ id: 'u', name: 'Universal' });
-		const prefix = makeProfile({ id: 'p', name: 'Prefix', matchModel: 'openai/' });
-		const substring = makeProfile({ id: 's', name: 'Substring', matchModel: 'gpt-4o' });
-		const exact = makeProfile({
-			id: 'e',
-			name: 'Exact',
-			matchModel: 'openai/gpt-4o',
-		});
-
-		const config = makeConfig([universal, prefix, substring, exact]);
-		expect(selectBestProfile(config, 'openai/gpt-4o')?.id).toBe('e');
-	});
-
-	it('prefers prefix over substring over universal', () => {
-		const universal = makeProfile({ id: 'u', name: 'Universal' });
-		const prefix = makeProfile({ id: 'p', name: 'Prefix', matchModel: 'openai/' });
-		const substring = makeProfile({ id: 's', name: 'Substring', matchModel: 'gpt-4o' });
-
-		// For "openai/gpt-4o":
-		// - prefix matches (score 1)
-		// - substring matches (score 2)
-		// Should pick prefix (lower score)
-		const config = makeConfig([universal, substring, prefix]);
-		expect(selectBestProfile(config, 'openai/gpt-4o')?.id).toBe('p');
-	});
-
-	it('prefers substring over universal', () => {
-		const universal = makeProfile({ id: 'u', name: 'Universal' });
-		const substring = makeProfile({ id: 's', name: 'Substring', matchModel: 'gpt' });
-
-		const config = makeConfig([universal, substring]);
-		expect(selectBestProfile(config, 'openai/gpt-4o')?.id).toBe('s');
-	});
-
-	it('falls back to universal when no matchModel matches', () => {
-		const universal = makeProfile({ id: 'u', name: 'Universal' });
-		const anthropic = makeProfile({ id: 'a', name: 'Anthropic', matchModel: 'anthropic/' });
-
-		const config = makeConfig([anthropic, universal]);
-		expect(selectBestProfile(config, 'openai/gpt-4o')?.id).toBe('u');
-	});
-
-	it('tie-breaks by longer matchModel when same score', () => {
-		// Both are prefix matches (score 1), but "openai/gpt-4o-mini" is longer
-		const shorter = makeProfile({ id: 'short', name: 'Short', matchModel: 'openai/' });
-		const longer = makeProfile({
-			id: 'long',
-			name: 'Long',
-			matchModel: 'openai/gpt-4o-mini',
-		});
-
-		const config = makeConfig([shorter, longer]);
-		expect(selectBestProfile(config, 'openai/gpt-4o-mini')?.id).toBe('long');
-	});
-
-	it('tie-breaks by longer matchModel for substring matches', () => {
-		const shorter = makeProfile({ id: 'short', name: 'Short', matchModel: '4o' });
-		const longer = makeProfile({
-			id: 'long',
-			name: 'Long',
-			matchModel: 'gpt-4o',
-		});
-
-		const config = makeConfig([shorter, longer]);
-		expect(selectBestProfile(config, 'openai/gpt-4o')?.id).toBe('long');
-	});
-
-	it('prefers universal fallback when no model spec is available', () => {
-		const universal = makeProfile({ id: 'u', name: 'Universal' });
-		const specific = makeProfile({ id: 's', name: 'Specific', matchModel: 'openai/' });
-
-		const config = makeConfig([specific, universal]);
-		expect(selectBestProfile(config, undefined)?.id).toBe('u');
-	});
-
-	it('falls back to first profile when no universal and no model spec', () => {
-		const specific = makeProfile({ id: 's', name: 'Specific', matchModel: 'openai/' });
-
-		const config = makeConfig([specific]);
-		expect(selectBestProfile(config, undefined)?.id).toBe('s');
-	});
-
-	it('case-insensitive matching', () => {
-		const p = makeProfile({ id: 'c', name: 'Case', matchModel: 'OPENAI/GPT-4O' });
-		const config = makeConfig([p]);
-		expect(selectBestProfile(config, 'openai/gpt-4o')?.id).toBe('c');
-	});
-
-	it('works with only universal profiles', () => {
-		const p = makeProfile({ id: 'd', name: 'Default' });
-		const config = makeConfig([p]);
-		expect(selectBestProfile(config, 'openai/gpt-4o')?.id).toBe('d');
 	});
 });
 
@@ -406,5 +303,168 @@ describe('isApproaching', () => {
 			expect(isApproaching(makeTrigger('reserve', 10_000), usage, contextWindow)).toBe(true);
 			expect(isApproaching(makeTrigger('reserve', 5_000), usage, contextWindow)).toBe(false);
 		});
+	});
+});
+
+// ── selectTriggeredProfile (ADR-0036 启用集择一) ─────────────────
+
+describe('selectTriggeredProfile', () => {
+	const usage = { tokens: 60_000, percent: 60 };
+
+	it('空启用集 → undefined', () => {
+		expect(selectTriggeredProfile([], usage, undefined)).toBeUndefined();
+	});
+
+	it('无 profile 满足触发 → undefined', () => {
+		const p = makeProfile({
+			id: 'a',
+			name: 'A',
+			trigger: { type: 'context_percent', threshold: 80 },
+		});
+		expect(selectTriggeredProfile([p], usage, undefined)).toBeUndefined();
+	});
+
+	it('单个触发 → 返回它', () => {
+		const p = makeProfile({
+			id: 'a',
+			name: 'A',
+			trigger: { type: 'context_percent', threshold: 20 },
+		});
+		expect(selectTriggeredProfile([p], usage, undefined)).toBe(p);
+	});
+
+	it('同 type 多触发 → 阈值倒序（大优先）', () => {
+		const low = makeProfile({
+			id: 'low',
+			name: 'Low',
+			trigger: { type: 'context_percent', threshold: 20 },
+		});
+		const high = makeProfile({
+			id: 'high',
+			name: 'High',
+			trigger: { type: 'context_percent', threshold: 50 },
+		});
+		// 60% 下两个都触发；阈值倒序 → 选 50%（high）
+		expect(selectTriggeredProfile([low, high], usage, undefined)?.id).toBe('high');
+	});
+
+	it('只从触发集里择一（未触发的排除）', () => {
+		const triggered = makeProfile({
+			id: 't',
+			name: 'T',
+			trigger: { type: 'context_percent', threshold: 30 },
+		});
+		const notTriggered = makeProfile({
+			id: 'n',
+			name: 'N',
+			trigger: { type: 'context_percent', threshold: 90 },
+		});
+		expect(selectTriggeredProfile([notTriggered, triggered], usage, undefined)?.id).toBe('t');
+	});
+
+	it('不同 type 多触发 → 按 type 名稳定排序', () => {
+		const percent = makeProfile({
+			id: 'p',
+			name: 'P',
+			trigger: { type: 'context_percent', threshold: 50 },
+		});
+		const fixed = makeProfile({
+			id: 'f',
+			name: 'F',
+			trigger: { type: 'fixed', threshold: 1000 },
+		});
+		// context_percent < fixed（字典序），两个都触发 → 选 percent
+		expect(selectTriggeredProfile([fixed, percent], usage, undefined)?.id).toBe('p');
+	});
+});
+
+// ── selectProfileFromTriggered (ADR-0036 选择算法三层) ───────────
+
+describe('selectProfileFromTriggered', () => {
+	const triggeredProfiles = (): CompactionProfile[] => [
+		makeProfile({ id: 'a', name: 'A', trigger: { type: 'context_percent', threshold: 20 } }),
+		makeProfile({ id: 'b', name: 'B', trigger: { type: 'context_percent', threshold: 50 } }),
+	];
+
+	it('空触发集 → undefined', () => {
+		expect(selectProfileFromTriggered([], { routingRules: [] })).toBeUndefined();
+	});
+
+	it('模型路由规则命中 → 返回 target', () => {
+		const rules: RoutingRule[] = [{ model: 'openai/', targetProfileId: 'a' }];
+		expect(
+			selectProfileFromTriggered(triggeredProfiles(), {
+				modelSpec: 'openai/gpt-4o',
+				routingRules: rules,
+			})?.id,
+		).toBe('a');
+	});
+
+	it('复杂度路由规则命中 → 返回 target', () => {
+		const rules: RoutingRule[] = [{ complexity: 'high', targetProfileId: 'b' }];
+		expect(
+			selectProfileFromTriggered(triggeredProfiles(), {
+				complexityLevel: 'high',
+				routingRules: rules,
+			})?.id,
+		).toBe('b');
+	});
+
+	it('路由规则有序：首条命中优先', () => {
+		const rules: RoutingRule[] = [
+			{ model: 'openai/', targetProfileId: 'a' },
+			{ model: 'openai/', targetProfileId: 'b' },
+		];
+		expect(
+			selectProfileFromTriggered(triggeredProfiles(), {
+				modelSpec: 'openai/gpt-4o',
+				routingRules: rules,
+			})?.id,
+		).toBe('a');
+	});
+
+	it('规则 target 不在触发集 → 跳过，退 tiebreak', () => {
+		const rules: RoutingRule[] = [{ model: 'openai/', targetProfileId: 'ghost' }];
+		expect(
+			selectProfileFromTriggered(triggeredProfiles(), {
+				modelSpec: 'openai/gpt-4o',
+				routingRules: rules,
+			})?.id,
+		).toBe('b');
+	});
+
+	it('规则模型不匹配 → 跳过，退 tiebreak', () => {
+		const rules: RoutingRule[] = [{ model: 'anthropic/', targetProfileId: 'a' }];
+		expect(
+			selectProfileFromTriggered(triggeredProfiles(), {
+				modelSpec: 'openai/gpt-4o',
+				routingRules: rules,
+			})?.id,
+		).toBe('b');
+	});
+
+	it('无规则命中 → matchModel 隐式（最具体优先）', () => {
+		const specific = makeProfile({
+			id: 'specific',
+			name: 'S',
+			matchModel: 'openai/gpt-4o',
+			trigger: { type: 'context_percent', threshold: 30 },
+		});
+		const generic = makeProfile({
+			id: 'generic',
+			name: 'G',
+			matchModel: 'openai/',
+			trigger: { type: 'context_percent', threshold: 40 },
+		});
+		expect(
+			selectProfileFromTriggered([generic, specific], {
+				modelSpec: 'openai/gpt-4o',
+				routingRules: [],
+			})?.id,
+		).toBe('specific');
+	});
+
+	it('无规则无 matchModel → tiebreak（阈值倒序）', () => {
+		expect(selectProfileFromTriggered(triggeredProfiles(), { routingRules: [] })?.id).toBe('b');
 	});
 });

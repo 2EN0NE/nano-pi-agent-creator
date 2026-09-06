@@ -16,11 +16,6 @@
 		"multi-armed-bandit",
 		"thompson-sampling"
 	],
-	"dependencies": {
-		"@zenone/pi-logger": "file:../pi-logger",
-		"@zenone/pi-config": "file:../pi-config",
-		"@zenone/pi-session-tree": "file:../pi-session-tree"
-	},
 	"devDependencies": {
 		"typescript": "^7.0.2"
 	}

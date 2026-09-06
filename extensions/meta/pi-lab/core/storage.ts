@@ -6,13 +6,16 @@
  */
 
 import { appendFile, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { resolveConfigPaths } from '@zenone/pi-config';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { ExperimentEvent } from '../types.js';
 import { createLogger } from '@zenone/pi-logger';
 
 const log = createLogger('pi-lab:storage');
+
+/** flush 写盘失败后的有界重试次数（首次 + 重试 MAX_FLUSH_RETRIES 次） */
+const MAX_FLUSH_RETRIES = 2;
 
 export class ExperimentStorage {
 	private _experimentName: string;
@@ -59,7 +62,9 @@ export class ExperimentStorage {
 		if (this._flushPromise) await this._flushPromise;
 		// 先写盘清空，成功后再清内存——写失败时内存态保持，磁盘旧数据可下次加载，
 		// 不会出现「内存已清、磁盘未清」的静默假成功。
-		await writeFile(this._getFilePath(), '', 'utf8');
+		const filePath = this._getFilePath();
+		mkdirSync(dirname(filePath), { recursive: true });
+		await writeFile(filePath, '', 'utf8');
 		this._events = [];
 		this._flushedCount = 0;
 	}
@@ -91,23 +96,40 @@ export class ExperimentStorage {
 
 	private async _doFlush(): Promise<void> {
 		const filePath = this._getFilePath();
-		try {
-			// 记录本次 flush 的起点，只推进到「本次实际写入」的数量——
-			// 若 appendEvent 在 await appendFile 期间并发 push，新事件不在 pending 内，
-			// 不能把它们标记为已落盘（否则下一次 flush 会因长度相等而跳过，导致丢事件）。
-			const startCount = this._flushedCount;
-			const pending = this._events.slice(startCount);
-			const lines = pending.map((e) => JSON.stringify(e)).join('\n');
-			const content = lines.length > 0 ? lines + '\n' : '';
-			await appendFile(filePath, content, 'utf8');
-			this._flushedCount = startCount + pending.length;
-		} catch (err) {
-			// 写失败不阻塞业务：保持 _flushedCount 不变，下次 flush 重试增量
-			log.error('Failed to flush events', {
-				experiment: this._experimentName,
-				error: err instanceof Error ? err.message : String(err),
-			});
+		// 记录本次 flush 的起点，只推进到「本次实际写入」的数量——
+		// 若 appendEvent 在 await appendFile 期间并发 push，新事件不在 pending 内，
+		// 不能把它们标记为已落盘（否则下一次 flush 会因长度相等而跳过，导致丢事件）。
+		const startCount = this._flushedCount;
+		// 有界重试：写失败可能是瞬时错误（磁盘满、句柄竞争等），先重试 MAX_FLUSH_RETRIES 次。
+		// 每次重试重新 slice，把重试期间并发新增的事件一并写入，推进口径始终一致。
+		let lastError: unknown;
+		for (let attempt = 0; attempt <= MAX_FLUSH_RETRIES; attempt++) {
+			try {
+				// 确保目录存在：首次使用 pi-lab 时 extensions-data/pi-lab/ 尚未创建，
+				// appendFile 会因 ENOENT 抛错；若不推进 _flushedCount，flush() 的
+				// while 循环会无限重试同一批事件导致死循环（pi 进程卡死不退出）。
+				mkdirSync(dirname(filePath), { recursive: true });
+
+				const pending = this._events.slice(startCount);
+				const lines = pending.map((e) => JSON.stringify(e)).join('\n');
+				const content = lines.length > 0 ? lines + '\n' : '';
+				await appendFile(filePath, content, 'utf8');
+				this._flushedCount = startCount + pending.length;
+				return;
+			} catch (err) {
+				lastError = err;
+			}
 		}
+		// 重试耗尽仍失败：丢弃本批事件（fail-open 遥测语义——实验数据可接受丢失）。
+		// 必须推进 _flushedCount，否则 flush() 的 while 循环会永久重试、进程卡死；
+		// 被丢弃的事件未落盘、下次会话无法重载，属不可恢复。
+		log.error('Failed to flush events (dropping unsaved events after retries)', {
+			experiment: this._experimentName,
+			dropped: this._events.length - startCount,
+			attempts: MAX_FLUSH_RETRIES + 1,
+			error: lastError instanceof Error ? lastError.message : String(lastError),
+		});
+		this._flushedCount = this._events.length;
 	}
 
 	private _getFilePath(): string {

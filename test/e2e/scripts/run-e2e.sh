@@ -332,6 +332,13 @@ if [[ -f "$TUI_HELPERS" ]]; then
 	source "$TUI_HELPERS"
 fi
 
+# ── pi-lab 实验沙箱辅助（消费方实验 e2e 用例复用） ──
+LAB_SANDBOX_HELPERS="$ROOT_DIR/test/e2e/helpers/lab-sandbox.sh"
+if [[ -f "$LAB_SANDBOX_HELPERS" ]]; then
+	# shellcheck disable=SC1090,SC1091
+	source "$LAB_SANDBOX_HELPERS"
+fi
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 测试执行引擎
 # ══════════════════════════════════════════════════════════════════════════════
@@ -440,10 +447,12 @@ run_exp_file() {
 	fi
 
 	# node_modules 链接
+	# 映射格式：目录名:包名 —— selector 目录导出 @zenone/pi-selector（目录名≠包名）。
 	mkdir -p "$test_home/node_modules"
-	for pkg in pi-logger selector pi-config pi-session-tree; do
+	for entry in "pi-logger:pi-logger" "selector:pi-selector" "pi-config:pi-config" "pi-session-tree:pi-session-tree"; do
+		local pkg="${entry%%:*}" pkg_name="${entry##*:}"
 		local pkg_src="$ROOT_DIR/extensions/meta/$pkg"
-		local pkg_dir="$test_home/node_modules/@zenone/$pkg"
+		local pkg_dir="$test_home/node_modules/@zenone/$pkg_name"
 		if [[ -d "$pkg_src" && ! -e "$pkg_dir" ]]; then
 			mkdir -p "$(dirname "$pkg_dir")"
 			ln -sf "$pkg_src" "$pkg_dir"

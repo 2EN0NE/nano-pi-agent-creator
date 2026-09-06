@@ -1,0 +1,77 @@
+#!/usr/bin/env expect
+# ──────────────────────────────────────────────────────────────────────────────
+# sync-tool 配置重置 — expect 交互测试（ADR-0037）
+#
+# 验证 raw-mode 多选提示的按键闭环：
+#   1. 更新插件（有 config.json）→ 弹出聚合多选
+#   2. Space 勾选 → Enter 确认
+#   3. 勾选项的 config.json 被删除（回落默认 profile）
+#
+# 由 run-e2e.sh 自动发现并执行（约定命名 tui-integration.test.exp）。
+# 直接调试：expect test/e2e/extensions/sync-tool/tui-integration.test.exp
+# ──────────────────────────────────────────────────────────────────────────────
+
+set timeout 60
+
+# ROOT_DIR 从脚本自身路径推导（run-e2e.sh 不 export ROOT_DIR，直接调试也不依赖环境变量）
+set script_dir [file dirname [file normalize $argv0]]
+set ROOT_DIR [file normalize "$script_dir/../../../.."]
+set TSX "$ROOT_DIR/node_modules/.bin/tsx"
+set SYNC_SCRIPT "$ROOT_DIR/scripts/sync-to-local-pi.ts"
+
+set tmp_root [exec mktemp -d]
+set target "$tmp_root/target"
+set cfg "$tmp_root/sync-profiles.yaml"
+
+# 预置旧版 quit.ts（内容不同 → sync 判定 UPDATE）+ quit 的 pi-config profile
+exec mkdir -p "$target/extensions" "$target/extensions-data/quit"
+exec sh -c "echo old > '$target/extensions/quit.ts'"
+exec sh -c "echo '{\"k\":\"v\"}' > '$target/extensions-data/quit/config.json'"
+
+# 写临时 sync config（块式 YAML，避免 Tcl 方括号替换）
+set fh [open "$cfg" w]
+puts $fh "profiles:"
+puts $fh "  reset-test:"
+puts $fh "    target: '$target'"
+puts $fh "    extensions:"
+puts $fh "      - quit"
+close $fh
+
+spawn "$TSX" "$SYNC_SCRIPT" --config "$cfg" --profile reset-test
+
+# 等待多选提示
+expect {
+	-re {配置重置} { }
+	timeout {
+		send_error "FAIL: prompt not shown\n"
+		exit 1
+	}
+}
+
+sleep 1
+
+# Space 勾选第一项（quit）
+send " "
+sleep 0.3
+# Enter 确认
+send "\r"
+
+expect {
+	-re {All done} { }
+	eof { }
+	timeout {
+		send_error "FAIL: sync did not finish\n"
+		exit 1
+	}
+}
+
+# 勾选项的 config.json 应被删除（回落默认）
+if {[file exists "$target/extensions-data/quit/config.json"]} {
+	send_error "FAIL: config.json not reset after space+enter\n"
+	exit 1
+} else {
+	puts "PASS: config.json reset via space+enter"
+}
+
+exec rm -rf "$tmp_root"
+exit 0

@@ -1,0 +1,25 @@
+{
+	"name": "@zenone/pi-state",
+	"version": "0.1.0",
+	"description": "Layered persistence state base for pi extensions — layered state store (user/project/session), incremental upsert, session lifecycle, atomic writes",
+	"type": "module",
+	"exports": {
+		".": {
+			"import": "./api.ts",
+			"default": "./api.ts"
+		},
+		"./types": {
+			"import": "./types.ts"
+		}
+	},
+	"keywords": [
+		"pi-extension",
+		"state",
+		"store",
+		"persistence"
+	],
+	"devDependencies": {
+		"typescript": "^7.0.2"
+	},
+	"main": "./api.ts"
+}

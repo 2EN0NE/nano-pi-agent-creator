@@ -1,0 +1,21 @@
+{
+	"name": "@zenone/custom-rename",
+	"version": "0.1.0",
+	"description": "pi extension that auto-renames a new session after its first successful turn with a slug-style title from the session tree's core work",
+	"type": "module",
+	"main": "index.ts",
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"keywords": [
+		"pi-extension",
+		"session",
+		"rename",
+		"title"
+	],
+	"devDependencies": {
+		"typescript": "^7.0.2"
+	}
+}

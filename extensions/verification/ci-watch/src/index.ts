@@ -1,4 +1,8 @@
-import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+} from '@earendil-works/pi-coding-agent';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
 import { Type } from '@earendil-works/pi-ai/compat';
 import { execSync } from 'node:child_process';
@@ -16,6 +20,20 @@ import {
 	type Component,
 } from '@earendil-works/pi-tui';
 import type { SelectItem } from '@earendil-works/pi-tui';
+import {
+	decidePollStep,
+	extractPushInfo,
+	evaluateBranchRuns,
+	evaluatePrChecks,
+	isPrRef,
+	isValidBranch,
+	nextPollDelay,
+	type CiCheckResult,
+	type PollConfig,
+	type PollResult,
+	type PrCheck,
+	type RunInfo,
+} from './ci-logic';
 
 const log = createLogger('ci-watch');
 
@@ -42,40 +60,27 @@ const MAX_ATTEMPTS = 3;
 const DEFAULT_POLL_MIN_MS = 30_000;
 const DEFAULT_POLL_MAX_MS = 60_000;
 const DEFAULT_POLL_STEP_MS = 15_000;
+/** 手动监控（面板/命令路径）最长等待：15 分钟 */
+const MANUAL_MAX_WAIT_MS = 15 * 60 * 1000;
+/** 自动监控（tool_result 触发）最长等待：10 分钟 */
+const DEFAULT_AUTO_MAX_WAIT_MS = 10 * 60 * 1000;
+/** 分支模式下轮询拉取的 run 数量上限 */
+const RUNS_LIMIT = 20;
 
-interface CiCheckResult {
-	status: 'pass' | 'fail' | 'pending' | 'error';
-	/**
-	 * 失败的检查/run 名称列表。
-	 * - PR 模式：check 的 name（来自 `gh pr checks`）
-	 * - 分支模式：workflow run 的 name（来自 `gh run list`）
-	 */
-	failedRuns: string[];
-	logs: string;
-	/**
-	 * 分支模式专用：标记 pending 是因为分支还没有 run（可能是 CI 尚未触发），
-	 * 区别于 run 正在执行中的 pending。轮询循环利用此字段对空 run 场景快速超时。
-	 */
-	noRunsFound?: boolean;
-}
+// ====================================================================
+// 会话代际管理：防止"捕获的 ctx 在会话替换/重载后变 stale"导致崩溃
+// ====================================================================
+// session_shutdown 时递增代际 + abort 在途轮询；轮询结束后若代际变化，
+// 说明会话已被替换/重载，此时不得再使用捕获的 ctx/pi（Pi 会抛
+// "This extension ctx is stale"），只写日志安全退出。
+let sessionGeneration = 0;
+let monitoringAbort: AbortController | null = null;
 
-interface PollConfig {
-	minMs: number;
-	maxMs: number;
-	stepMs: number;
-}
-
-interface PollResult {
-	outcome: 'pass' | 'fail' | 'error' | 'timeout' | 'cancelled';
-	message: string;
-	logs?: string;
-	failedRuns?: string[];
-}
-
-function nextPollDelay(current: number, config: PollConfig): number {
-	const next = current + config.stepMs;
-	if (next > config.maxMs) return config.minMs;
-	return next;
+/** 启动一次监控：中止上一个在途监控，返回本次的 AbortSignal */
+function beginMonitoring(): AbortSignal {
+	monitoringAbort?.abort();
+	monitoringAbort = new AbortController();
+	return monitoringAbort.signal;
 }
 
 function runGh(args: string, cwd: string): string {
@@ -87,16 +92,6 @@ function runGh(args: string, cwd: string): string {
 	}
 }
 
-/** Validate that a branch name contains only safe characters for shell interpolation. */
-function isValidBranch(branch: string): boolean {
-	return /^[a-zA-Z0-9_\-./]+$/.test(branch);
-}
-
-/** Check if input is a PR number (digits only) */
-function isPrRef(input: string): boolean {
-	return /^\d+$/.test(input);
-}
-
 /** Resolve input to a branch name — PR numbers resolved via gh, branch names returned as-is */
 function resolveBranch(prOrBranch: string, cwd: string): string {
 	if (isPrRef(prOrBranch)) {
@@ -106,34 +101,21 @@ function resolveBranch(prOrBranch: string, cwd: string): string {
 }
 
 /**
- * 兼容旧版 gh CLI：获取某分支的最近 workflow runs。
+ * 获取某分支的最近 workflow runs。
  *
- * gh CLI v2.12.0+ 支持 `run list --branch <name>`，但旧版不支持。
- * 为确保兼容所有版本，改为：
- *   gh run list -L <limit> --json headBranch,databaseId,status,conclusion,name
- * 然后 JavaScript 端按分支过滤。
- *
- * @param branch 要过滤的分支名
- * @param cwd gh 命令执行的 git 仓库目录
- * @param limit 最多拉取多少个 runs（默认为 20，兼容旧版 gh 需要更大值）
+ * 使用 `gh run list --branch <name>`（gh CLI v2.12.0+ 支持，服务端按分支过滤），
+ * 避免旧实现"全局 `-L N` 再按 headBranch 过滤"在活跃仓库里把目标分支的 run
+ * 挤出窗口导致误判"该分支没有 run"。
  */
-function getRunsForBranch(
-	branch: string,
-	cwd: string,
-	limit: number = 20,
-): Array<{
-	name: string;
-	status: string;
-	conclusion: string;
-	databaseId: number;
-}> {
+function getRunsForBranch(branch: string, cwd: string, limit: number = RUNS_LIMIT): RunInfo[] {
 	try {
 		const output = runGh(
-			`run list -L ${limit} --json headBranch,databaseId,status,conclusion,name`,
+			`run list --branch ${branch} -L ${limit} --json headBranch,headSha,databaseId,status,conclusion,name`,
 			cwd,
 		);
 		const allRuns = JSON.parse(output) as Array<{
 			headBranch: string;
+			headSha: string;
 			name: string;
 			status: string;
 			conclusion: string;
@@ -151,28 +133,33 @@ function getRunsForBranch(
 function getCiStatusFromPr(prNumber: string, cwd: string): CiCheckResult {
 	try {
 		const output = runGh(`pr checks ${prNumber} --json name,state,bucket`, cwd);
-		const checks = JSON.parse(output) as Array<{ name: string; state: string; bucket: string }>;
-
-		const pending = checks.some((c) => c.bucket === 'pending');
-		if (pending) return { status: 'pending', failedRuns: [], logs: '' };
-
-		const failed = checks.filter((c) => c.bucket === 'fail');
-		if (failed.length === 0) return { status: 'pass', failedRuns: [], logs: '' };
-
-		return { status: 'fail', failedRuns: failed.map((f) => f.name), logs: '' };
+		const checks = JSON.parse(output) as PrCheck[];
+		return evaluatePrChecks(checks);
 	} catch (e) {
 		return { status: 'error', failedRuns: [], logs: String(e) };
 	}
 }
 
-function getCiStatusFromBranch(branch: string, cwd: string): CiCheckResult {
+/**
+ * 分支模式：按 expectedSha 匹配目标 run 评估状态。
+ * - expectedSha 提供（自动监控 push 后）：等待 headSha 匹配的新 run 出现，
+ *   避免读到上一次 push 的旧 run 而误报。
+ * - 未提供（手动监控分支）：评估最新 run。
+ */
+function getCiStatusFromBranch(
+	branch: string,
+	cwd: string,
+	expectedSha?: string | null,
+): CiCheckResult {
 	try {
 		if (!isValidBranch(branch)) {
 			return { status: 'error', failedRuns: [], logs: `Invalid branch name: ${branch}` };
 		}
-		const runs = getRunsForBranch(branch, cwd, 5);
-		const latest = runs[0];
-		if (!latest) {
+		const runs = getRunsForBranch(branch, cwd, RUNS_LIMIT);
+		const result = evaluateBranchRuns(runs, expectedSha);
+
+		// 手动监控分支且该分支完全没有 run：区分"仓库无任何 run"与"分支无 run"
+		if (result.noRunsFound && !expectedSha) {
 			try {
 				const repoOutput = runGh('run list -L 1 --json databaseId', cwd);
 				const repoRuns = JSON.parse(repoOutput) as Array<{ databaseId: number }>;
@@ -186,33 +173,19 @@ function getCiStatusFromBranch(branch: string, cwd: string): CiCheckResult {
 			} catch {
 				// repo 级检查失败时降级到 pending，防止因 gh API 波动误报
 			}
-			return {
-				status: 'pending',
-				failedRuns: [],
-				logs: '',
-				noRunsFound: true,
-			};
 		}
-		if (latest.status !== 'completed') return { status: 'pending', failedRuns: [], logs: '' };
-		if (latest.conclusion === 'success' || latest.conclusion === 'neutral') {
-			return { status: 'pass', failedRuns: [], logs: '' };
-		}
-		return {
-			status: 'fail',
-			failedRuns: [latest.name ?? `run#${latest.databaseId}`],
-			logs: '',
-		};
+		return result;
 	} catch (e) {
 		return { status: 'error', failedRuns: [], logs: String(e) };
 	}
 }
 
 /** 根据输入自动选择 PR 模式或分支模式 */
-function getCiStatus(prOrBranch: string, cwd: string): CiCheckResult {
+function getCiStatus(prOrBranch: string, cwd: string, expectedSha?: string | null): CiCheckResult {
 	if (isPrRef(prOrBranch)) {
 		return getCiStatusFromPr(prOrBranch, cwd);
 	}
-	return getCiStatusFromBranch(prOrBranch, cwd);
+	return getCiStatusFromBranch(prOrBranch, cwd, expectedSha);
 }
 
 function getFailedLogs(prOrBranch: string, cwd: string): string {
@@ -234,8 +207,21 @@ function getFailedLogs(prOrBranch: string, cwd: string): string {
 	}
 }
 
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve) => {
+		if (signal?.aborted) return resolve();
+		let timer: ReturnType<typeof setTimeout>;
+		const onAbort = () => {
+			clearTimeout(timer);
+			resolve();
+		};
+		signal?.addEventListener('abort', onAbort, { once: true });
+		timer = setTimeout(() => {
+			// 正常超时后移除 listener，避免长轮询期间在 signal 上累积未触发的 abort 监听
+			signal?.removeEventListener('abort', onAbort);
+			resolve();
+		}, ms);
+	});
 }
 
 // ====================================================================
@@ -245,7 +231,13 @@ function sleep(ms: number): Promise<void> {
 /**
  * 轮询 CI 状态直到完成，返回结果。
  * 不涉及 LLM，纯代码实现。
- * @param cwd - 执行 gh 命令的 git 仓库根目录（通常为 ctx.cwd）
+ *
+ * @param cwd        执行 gh 命令的 git 仓库根目录（通常为 ctx.cwd）
+ * @param signal     中止信号（session_shutdown / 新监控启动时 abort）
+ * @param expectedSha 分支模式专用：期望监控的 commit SHA（完整 40 位）。
+ *                    push 后新 run 创建/索引有延迟（实测 5~30s），
+ *                    提供此参数时轮询会等待 headSha 匹配的 run 出现，
+ *                    避免读到上一次 push 的旧 run 状态而误报。
  */
 async function pollCiCompletion(
 	pr: string,
@@ -255,6 +247,7 @@ async function pollCiCompletion(
 	refShort: string,
 	cwd?: string,
 	signal?: AbortSignal,
+	expectedSha?: string | null,
 	onUpdate?: (msg: string) => void,
 ): Promise<PollResult> {
 	let elapsed = 0;
@@ -264,45 +257,50 @@ async function pollCiCompletion(
 	const workDir = cwd ?? process.cwd();
 
 	while (!signal?.aborted) {
-		const result = getCiStatus(pr, workDir);
+		const result = getCiStatus(pr, workDir, expectedSha);
+		const decision = decidePollStep({
+			status: result.status,
+			noRunsFound: result.noRunsFound,
+			expectedSha,
+			consecutiveEmptyPolls,
+			maxEmptyPolls,
+			elapsed,
+			maxWaitMs,
+		});
 
-		if (result.status === 'error') {
-			return { outcome: 'error', message: `检查 CI 出错：${result.logs}` };
-		}
-
-		if (result.status === 'pass') {
-			return { outcome: 'pass', message: `[PASS] ${refLabel} CI 通过！` };
-		}
-
-		if (result.status === 'fail') {
-			const logs = getFailedLogs(pr, workDir);
-			return {
-				outcome: 'fail',
-				message: `[FAIL] ${refLabel} CI 失败。`,
-				logs,
-				failedRuns: result.failedRuns,
-			};
-		}
-
-		// 分支模式：连续多次无 run → fast-fail
-		if (result.noRunsFound) {
-			consecutiveEmptyPolls++;
-			if (consecutiveEmptyPolls >= maxEmptyPolls) {
-				return {
-					outcome: 'error',
-					message: `[STOP] ${refLabel} 在 ${maxEmptyPolls} 次检查后仍未发现 CI 运行。请确认分支名和 CI 触发条件。`,
-				};
+		if (decision.action === 'return') {
+			switch (decision.outcome) {
+				case 'error':
+					return { outcome: 'error', message: `检查 CI 出错：${result.logs}` };
+				case 'no-runs':
+					// 手动监控分支连续多次无 run（fast-fail）：恢复可操作的 [STOP] 指引
+					return {
+						outcome: 'error',
+						message: `[STOP] ${refLabel} 在 ${maxEmptyPolls} 次检查后仍未发现 CI 运行。请确认分支名和 CI 触发条件。`,
+					};
+				case 'pass':
+					return { outcome: 'pass', message: `[PASS] ${refLabel} CI 通过！` };
+				case 'fail': {
+					const logs = getFailedLogs(pr, workDir);
+					return {
+						outcome: 'fail',
+						message: `[FAIL] ${refLabel} CI 失败。`,
+						logs,
+						failedRuns: result.failedRuns,
+					};
+				}
+				case 'timeout':
+					return {
+						outcome: 'timeout',
+						message: `[TIMEOUT] ${refLabel} CI 在 ${Math.round(maxWaitMs / 60000)} 分钟内未完成，请手动检查。`,
+					};
+				default:
+					// 穷尽性保护：PollStepDecision 新增 outcome 时强制显式处理
+					throw new Error(`Unexpected poll outcome: ${decision.outcome}`);
 			}
-		} else {
-			consecutiveEmptyPolls = 0;
 		}
 
-		if (elapsed >= maxWaitMs) {
-			return {
-				outcome: 'timeout',
-				message: `[TIMEOUT] ${refLabel} CI 在 ${Math.round(maxWaitMs / 60000)} 分钟内未完成，请手动检查。`,
-			};
-		}
+		consecutiveEmptyPolls = decision.consecutiveEmptyPolls;
 
 		await sleep(currentDelay);
 		elapsed += currentDelay;
@@ -319,31 +317,34 @@ async function pollCiCompletion(
 // TUI 面板逻辑
 // ====================================================================
 
-interface TuiState {
+export interface TuiState {
 	autoMode: boolean;
 	pollConfig: PollConfig;
 	pollConfigExpanded: boolean;
-	menuIndex: number;
+	/** 上次选中的菜单项 value（用于面板重开时恢复选中，基于 value 而非 index） */
+	menuValue: string | null;
 	monitoringStatus: string | null;
+	autoMaxWaitMs: number;
 }
 
 function makeCiWatchPanel(
 	ctx: ExtensionCommandContext,
 	state: TuiState,
-	configStore: ConfigStore<{ pollConfig: PollConfig }> | null,
+	configStore: ConfigStore<{ pollConfig: PollConfig; autoMaxWaitMs?: number }> | null,
 	ghAvailable: boolean,
 	pi: ExtensionAPI,
 ): void {
+	// 监控分支放在第一项（日常主力：main/dev 分支监控）
 	const items: SelectItem[] = [
-		{
-			value: '__monitor_pr',
-			label: '> 监控 PR',
-			description: '输入 PR 编号来监控其 CI 状态',
-		},
 		{
 			value: '__monitor_branch',
 			label: '> 监控分支',
 			description: '输入分支名来监控其 CI 状态',
+		},
+		{
+			value: '__monitor_pr',
+			label: '> 监控 PR',
+			description: '输入 PR 编号来监控其 CI 状态',
 		},
 		{
 			value: '__toggle_auto',
@@ -402,20 +403,28 @@ function makeCiWatchPanel(
 			noMatch: (t) => theme.fg('warning', t),
 		});
 
-		if (state.menuIndex > 0 && state.menuIndex < items.length) {
-			selectList.setSelectedIndex(state.menuIndex);
+		// 恢复上次选中的菜单项（基于 value，顺序调整不影响）
+		if (state.menuValue) {
+			const savedIndex = items.findIndex((i) => i.value === state.menuValue);
+			if (savedIndex >= 0) {
+				selectList.setSelectedIndex(savedIndex);
+			}
 		}
 
 		selectList.onSelect = async (item) => {
-			const value = item.value;
-			done();
-			await handlePanelAction(value, ctx, state, configStore, ghAvailable, pi);
-			// 重新打开面板（除非是监控操作，监控完成后会通知用户）
-			if (value !== '__monitor_pr' && value !== '__monitor_branch') {
-				makeCiWatchPanel(ctx, state, configStore, ghAvailable, pi);
+			try {
+				const value = item.value;
+				done();
+				await handlePanelAction(value, ctx, state, configStore, ghAvailable, pi);
+				// 重新打开面板（除非是监控操作，监控完成后会通知用户）
+				if (value !== '__monitor_pr' && value !== '__monitor_branch') {
+					makeCiWatchPanel(ctx, state, configStore, ghAvailable, pi);
+				}
+			} catch (e) {
+				// 防止面板异步操作（输入/监控）抛出的 rejection 变成 unhandled rejection 拖垮进程
+				log.error('面板操作执行异常', { value: item.value, error: String(e) });
 			}
 		};
-		let currentIndex = state.menuIndex;
 		selectList.onCancel = () => done();
 
 		container.addChild(selectList);
@@ -436,10 +445,10 @@ function makeCiWatchPanel(
 					return;
 				}
 				selectList.handleInput(data);
-				currentIndex = selectList.getSelectedItem()
-					? items.findIndex((i) => i.value === selectList.getSelectedItem()?.value)
-					: currentIndex;
-				state.menuIndex = currentIndex >= 0 ? currentIndex : state.menuIndex;
+				const selected = selectList.getSelectedItem();
+				if (selected) {
+					state.menuValue = selected.value;
+				}
 				tui.requestRender();
 				container.invalidate();
 			},
@@ -451,7 +460,7 @@ async function handlePanelAction(
 	value: string,
 	ctx: ExtensionCommandContext,
 	state: TuiState,
-	configStore: ConfigStore<{ pollConfig: PollConfig }> | null,
+	configStore: ConfigStore<{ pollConfig: PollConfig; autoMaxWaitMs?: number }> | null,
 	ghAvailable: boolean,
 	pi: ExtensionAPI,
 ): Promise<void> {
@@ -486,9 +495,17 @@ async function handlePanelAction(
 			} catch {
 				/* ignore */
 			}
-			const branchInput = await ctx.ui.input('请输入分支名', defaultBranch);
-			if (!branchInput || !branchInput.trim()) return;
-			const branch = branchInput.trim();
+			// 编辑心智：进入时提示当前值（pi 的 placeholder 不渲染，只能放标题）；
+			// 空输入回车 = 使用当前分支（确认），escape = 取消
+			const branchInput = await ctx.ui.input(
+				defaultBranch
+					? `请输入分支名（当前：${defaultBranch}，直接回车使用）`
+					: '请输入分支名',
+				defaultBranch,
+			);
+			if (branchInput === undefined) return; // escape/ctrl+c 取消
+			const branch = branchInput.trim() || defaultBranch;
+			if (!branch) return;
 			if (!isValidBranch(branch)) {
 				ctx.ui.notify(`无效的分支名：${branch}`, 'error');
 				return;
@@ -509,11 +526,12 @@ async function handlePanelAction(
 			break;
 		}
 		case '__config_min': {
+			const cur = state.pollConfig.minMs / 1000;
 			const val = await ctx.ui.input(
-				'最小轮询间隔（秒）',
-				String(state.pollConfig.minMs / 1000),
+				`最小轮询间隔（秒）（当前：${cur}，直接回车保留）`,
+				String(cur),
 			);
-			if (!val) return;
+			if (!val || !val.trim()) return; // 空输入 = 保留原值
 			const n = Number(val.trim());
 			if (isNaN(n) || n < 1) {
 				ctx.ui.notify('无效的值', 'error');
@@ -525,11 +543,12 @@ async function handlePanelAction(
 			break;
 		}
 		case '__config_max': {
+			const cur = state.pollConfig.maxMs / 1000;
 			const val = await ctx.ui.input(
-				'最大轮询间隔（秒）',
-				String(state.pollConfig.maxMs / 1000),
+				`最大轮询间隔（秒）（当前：${cur}，直接回车保留）`,
+				String(cur),
 			);
-			if (!val) return;
+			if (!val || !val.trim()) return; // 空输入 = 保留原值
 			const n = Number(val.trim());
 			if (isNaN(n) || n < 1) {
 				ctx.ui.notify('无效的值', 'error');
@@ -541,11 +560,12 @@ async function handlePanelAction(
 			break;
 		}
 		case '__config_step': {
+			const cur = state.pollConfig.stepMs / 1000;
 			const val = await ctx.ui.input(
-				'轮询间隔步长（秒）',
-				String(state.pollConfig.stepMs / 1000),
+				`轮询间隔步长（秒）（当前：${cur}，直接回车保留）`,
+				String(cur),
 			);
-			if (!val) return;
+			if (!val || !val.trim()) return; // 空输入 = 保留原值
 			const n = Number(val.trim());
 			if (isNaN(n) || n < 1) {
 				ctx.ui.notify('无效的值', 'error');
@@ -559,18 +579,56 @@ async function handlePanelAction(
 	}
 }
 
-function saveConfig(
+export function saveConfig(
 	state: TuiState,
-	configStore: ConfigStore<{ pollConfig: PollConfig }> | null,
+	configStore: ConfigStore<{ pollConfig: PollConfig; autoMaxWaitMs?: number }> | null,
 ): void {
 	if (configStore) {
-		configStore.save({ pollConfig: state.pollConfig }, 'user');
+		configStore.save(
+			{ pollConfig: state.pollConfig, autoMaxWaitMs: state.autoMaxWaitMs },
+			'user',
+		);
 	}
 }
 
 // ====================================================================
-// 监控启动逻辑（带状态更新）
+// 监控启动 + 结果通知
 // ====================================================================
+
+/**
+ * 通知监控结果。统一写日志（可观测），并区分：
+ * - pass/fail → notify / sendUserMessage（通知 agent 处理）
+ * - 其余（error/timeout/cancelled）→ notify
+ */
+function notifyResult(
+	result: PollResult,
+	refLabel: string,
+	refShort: string,
+	mode: '手动' | '自动',
+	ctx: ExtensionContext,
+	pi: ExtensionAPI,
+): void {
+	const prefix = mode === '自动' ? '自动：' : '';
+
+	if (result.outcome === 'pass') {
+		log.info('CI 通过', { refLabel, mode });
+		ctx.ui.notify(`[ci-watch] ${prefix}${refLabel} CI 通过！`, 'info');
+	} else if (result.outcome === 'fail') {
+		log.info('CI 失败', { refLabel, mode, failedRuns: result.failedRuns });
+		pi.sendUserMessage(
+			`[ci-watch] ${prefix}${refLabel} CI 失败。\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n请修复代码，并在提交前先本地验证（如类型检查、测试、格式化等），再 commit 和 push，然后${mode === '自动' ? ' /ci-watch' : '执行 /ci-watch'} ${refShort} 重新监控。`,
+			{ deliverAs: 'followUp' },
+		);
+	} else {
+		log.info('CI 监控结束', {
+			refLabel,
+			mode,
+			outcome: result.outcome,
+			message: result.message,
+		});
+		ctx.ui.notify(`[ci-watch] ${prefix}${result.message}`, 'error');
+	}
+}
 
 async function startCiWatch(
 	ref: string,
@@ -578,33 +636,39 @@ async function startCiWatch(
 	state: TuiState,
 	pi: ExtensionAPI,
 ): Promise<void> {
+	const myGen = sessionGeneration;
+	const signal = beginMonitoring();
+	const myController = monitoringAbort;
 	const refLabel = isPrRef(ref) ? `PR ${ref}` : `分支 ${ref}`;
 	const refShort = isPrRef(ref) ? `PR ${ref}` : ref;
 
 	state.monitoringStatus = `正在监控 ${refLabel}...`;
 	ctx.ui.notify(`[ci-watch] 开始监控 ${refLabel}...`, 'info');
+	log.info('开始监控', { ref, label: refLabel });
 
 	const result = await pollCiCompletion(
 		ref,
 		state.pollConfig,
-		15 * 60 * 1000,
+		MANUAL_MAX_WAIT_MS,
 		refLabel,
 		refShort,
 		ctx.cwd,
+		signal,
 	);
 
-	state.monitoringStatus = null;
-
-	if (result.outcome === 'pass') {
-		ctx.ui.notify(`[ci-watch] ${refLabel} CI 通过！`, 'info');
-	} else if (result.outcome === 'fail') {
-		pi.sendUserMessage(
-			`[ci-watch] ${refLabel} CI 失败。\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n请修复代码，并在提交前先本地验证（如类型检查、测试、格式化等），再 commit 和 push，然后执行 /ci-watch ${refShort} 重新监控。`,
-			{ deliverAs: 'followUp' },
-		);
-	} else {
-		ctx.ui.notify(`[ci-watch] ${result.message}`, 'error');
+	// 会话被替换/重载：旧 ctx 已 stale，不得再使用，只写日志安全退出
+	if (sessionGeneration !== myGen) {
+		log.warn('会话已替换/重载，跳过 CI 结果通知', { ref });
+		return;
 	}
+	// 监控已被更新的监控取代（手动 ↔ 自动并发）：不再触碰共享 UI 状态，
+	// 避免旧监控把新监控设置的 monitoringStatus 清掉
+	if (monitoringAbort !== myController) {
+		log.warn('监控已被新的监控取代，跳过 CI 结果通知', { ref });
+		return;
+	}
+	state.monitoringStatus = null;
+	notifyResult(result, refLabel, refShort, '手动', ctx, pi);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -616,20 +680,24 @@ export default function (pi: ExtensionAPI) {
 			stepMs: DEFAULT_POLL_STEP_MS,
 		},
 		pollConfigExpanded: false,
-		menuIndex: 0,
+		menuValue: null,
 		monitoringStatus: null,
+		autoMaxWaitMs: DEFAULT_AUTO_MAX_WAIT_MS,
 	};
 
 	// 从持久化存储加载配置
-	let configStore: ConfigStore<{ pollConfig: PollConfig }> | null = null;
+	let configStore: ConfigStore<{ pollConfig: PollConfig; autoMaxWaitMs?: number }> | null = null;
 	try {
-		configStore = createConfigStore<{ pollConfig: PollConfig }>({
+		configStore = createConfigStore<{ pollConfig: PollConfig; autoMaxWaitMs?: number }>({
 			pluginName: 'ci-watch',
-			defaults: { pollConfig: state.pollConfig },
+			defaults: { pollConfig: state.pollConfig, autoMaxWaitMs: state.autoMaxWaitMs },
 		});
 		const saved = configStore.get();
 		if (saved.pollConfig) {
 			state.pollConfig = saved.pollConfig;
+		}
+		if (typeof saved.autoMaxWaitMs === 'number') {
+			state.autoMaxWaitMs = saved.autoMaxWaitMs;
 		}
 	} catch {
 		// 配置加载失败时使用默认值
@@ -637,6 +705,16 @@ export default function (pi: ExtensionAPI) {
 
 	let ghAvailable = false;
 	let ghChecked = false;
+
+	// ====================================================================
+	// session_shutdown：会话替换/重载前中止在途监控、递增代际
+	// ====================================================================
+	pi.on('session_shutdown', () => {
+		sessionGeneration++;
+		monitoringAbort?.abort();
+		monitoringAbort = null;
+		state.monitoringStatus = null;
+	});
 
 	// ====================================================================
 	// session_start：检测 gh CLI
@@ -647,12 +725,14 @@ export default function (pi: ExtensionAPI) {
 		try {
 			execSync('command -v gh', { encoding: 'utf-8', stdio: 'pipe' });
 			ghAvailable = true;
+			log.info('gh CLI 检测成功', { autoMode: state.autoMode });
 			if (state.autoMode) {
 				ctx.ui.notify('[ci-watch] 已检测到 gh CLI，自动监控已启用', 'info');
 			}
 		} catch {
 			ghAvailable = false;
 			state.autoMode = false;
+			log.warn('未找到 gh CLI，自动监控已禁用');
 			ctx.ui.notify(
 				'[ci-watch] 未找到 gh CLI。请安装：brew install gh / apt install gh',
 				'error',
@@ -661,20 +741,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ====================================================================
-	// 自动触发：检测 git push → 直接轮询 CI
+	// 自动触发：检测 git push → 等待该次 push 触发的新 CI run
 	// ====================================================================
 
 	// 从推送输出中提取分支名
-	function extractBranch(text: string): string | null {
-		const trackMatch = text.match(/branch '([^']+)' set up to track/);
-		if (trackMatch) return trackMatch[1];
-		const newBranchMatch = text.match(/\*\s+\[new branch\]\s+(\S+)\s*->\s*\S+/);
-		if (newBranchMatch) return newBranchMatch[1];
-		const existingMatch = text.match(/\S+\.\.\S+\s+(\S+)\s*->\s*\S+/);
-		if (existingMatch) return existingMatch[1];
-		return null;
-	}
-
 	pi.on('tool_result', async (event, ctx) => {
 		if (!state.autoMode || !ghAvailable) return;
 		if (event.toolName !== 'bash') return;
@@ -689,22 +759,17 @@ export default function (pi: ExtensionAPI) {
 		if (!/To github\.com/.test(text)) return;
 		log.debug('bash 输出中检测到 GitHub push');
 
-		let branch: string | null = extractBranch(text);
+		const { branch, sha } = extractPushInfo(text);
 
 		if (!branch) {
-			try {
-				branch = execSync('git branch --show-current', {
-					cwd: ctx.cwd,
-					encoding: 'utf-8',
-					timeout: 5000,
-				}).trim();
-			} catch (gitErr) {
-				log.debug('git branch --show-current 兜底失败', { error: String(gitErr) });
+			if (/\[new tag\]/.test(text)) {
+				// tag push 不触发分支 CI 监控
+				log.info('检测到 tag push，跳过自动监控');
+			} else {
+				log.warn('无法从 push 输出确定分支，跳过自动监控', {
+					excerpt: text.slice(0, 200),
+				});
 			}
-		}
-
-		if (!branch) {
-			log.debug('无法从 push 输出确定分支');
 			return;
 		}
 		log.debug('自动监控检测到分支', { branch });
@@ -714,77 +779,83 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		try {
-			const prOutput = runGh(
-				`pr list --head ${branch} --json number -q .[0].number`,
-				ctx.cwd,
-			);
-
-			const refLabel = prOutput ? `PR ${prOutput}` : `分支 ${branch}`;
-			const refShort = prOutput ?? branch;
-
-			if (prOutput) {
-				let hasChecks = false;
-				try {
-					const checksOutput = runGh(`pr checks ${prOutput} --json name`, ctx.cwd);
-					const checks = JSON.parse(checksOutput);
-					if (Array.isArray(checks) && checks.length > 0) hasChecks = true;
-				} catch (checksErr) {
-					log.warn('检查 CI 状态失败，跳过自动监控', {
-						pr: prOutput,
-						error: String(checksErr),
-					});
-					return;
-				}
-				if (!hasChecks) {
-					log.debug('该 PR 没有 CI 检查，跳过自动监控', { pr: prOutput });
-					return;
-				}
-			} else {
-				let hasRuns = false;
-				try {
-					const runs = getRunsForBranch(branch, ctx.cwd, 5);
-					if (runs.length > 0) hasRuns = true;
-				} catch (runsErr) {
-					log.warn('检查分支 CI 状态失败，跳过自动监控', {
-						branch,
-						error: String(runsErr),
-					});
-					return;
-				}
-				if (!hasRuns) {
-					log.debug('该分支没有 CI run，跳过自动监控', { branch });
-					return;
-				}
+		// 目标 SHA（完整 40 位）：优先用 push 输出里的短 SHA 补全，否则从本地分支解析
+		let targetSha = sha ?? null;
+		if (targetSha && targetSha.length < 40) {
+			try {
+				targetSha = execSync(`git rev-parse ${targetSha}`, {
+					cwd: ctx.cwd,
+					encoding: 'utf-8',
+					timeout: 5000,
+				}).trim();
+			} catch {
+				targetSha = null;
 			}
+		}
+		if (!targetSha) {
+			try {
+				targetSha = execSync(`git rev-parse --verify refs/heads/${branch}`, {
+					cwd: ctx.cwd,
+					encoding: 'utf-8',
+					timeout: 5000,
+				}).trim();
+			} catch (shaErr) {
+				log.warn('无法解析分支 HEAD SHA，跳过自动监控', {
+					branch,
+					error: String(shaErr),
+				});
+				return;
+			}
+		}
 
-			log.info('触发 CI 自动监控', { pr: prOutput, branch });
-			state.monitoringStatus = `正在监控 ${refLabel}（自动）...`;
+		const myGen = sessionGeneration;
+		const signal = beginMonitoring();
+		const myController = monitoringAbort;
 
-			// 直接轮询，不经过 LLM
+		// 分支存在 PR → PR 模式（轮询 pr checks，等待新 checks 注册）；
+		// 无 PR（如直接推 main）→ 分支模式（等待 headSha 匹配的新 run 出现）
+		let prOutput = '';
+		try {
+			prOutput = runGh(`pr list --head ${branch} --json number -q .[0].number`, ctx.cwd);
+		} catch {
+			prOutput = '';
+		}
+
+		const refLabel = prOutput ? `PR ${prOutput}` : `分支 ${branch}`;
+		const refShort = prOutput ?? branch;
+
+		log.info('触发 CI 自动监控', { branch, pr: prOutput, sha: targetSha });
+		state.monitoringStatus = `正在监控 ${refLabel}（自动）...`;
+
+		try {
 			const result = await pollCiCompletion(
-				prOutput ?? branch,
+				prOutput || branch,
 				state.pollConfig,
-				10 * 60 * 1000,
+				state.autoMaxWaitMs,
 				refLabel,
 				refShort,
+				ctx.cwd,
+				signal,
+				prOutput ? null : targetSha,
 			);
 
-			state.monitoringStatus = null;
-
-			if (result.outcome === 'pass') {
-				ctx.ui.notify(`[ci-watch] 自动：${refLabel} CI 通过！`, 'info');
-			} else if (result.outcome === 'fail') {
-				pi.sendUserMessage(
-					`[ci-watch] 自动：${refLabel} CI 失败。\n\n失败的检查项：${result.failedRuns?.join(', ')}\n\n--- 失败日志（最后 100 行） ---\n${result.logs}\n\n---\n请修复代码，并在提交前先本地验证（如类型检查、测试、格式化等），再 commit 和 push，然后 /ci-watch ${prOutput ?? branch} 重新监控。`,
-					{ deliverAs: 'followUp' },
-				);
-			} else {
-				ctx.ui.notify(`[ci-watch] 自动：${result.message}`, 'error');
+			// 会话被替换/重载：旧 ctx/pi 已 stale，不得再使用
+			if (sessionGeneration !== myGen) {
+				log.warn('会话已替换/重载，跳过自动监控结果', { branch });
+				return;
 			}
-		} catch (autoErr) {
-			log.warn('自动监控异常', { branch, error: String(autoErr) });
-			state.monitoringStatus = null;
+			// 监控已被更新的监控取代：跳过通知，避免误导性"已取消"噪音干扰新监控
+			if (monitoringAbort !== myController) {
+				log.warn('自动监控已被新的监控取代，跳过结果通知', { branch });
+				return;
+			}
+			notifyResult(result, refLabel, refShort, '自动', ctx, pi);
+		} finally {
+			// 无论正常/异常都清理状态；仅当自己仍是当前监控（避免并发互相覆盖）。
+			// 异常不在此吞掉——向上传播由 extensionRunner.emit() 记录，此处只保证状态一致。
+			if (monitoringAbort === myController) {
+				state.monitoringStatus = null;
+			}
 		}
 	});
 
@@ -846,6 +917,7 @@ export default function (pi: ExtensionAPI) {
 				refShort,
 				_ctx.cwd,
 				signal,
+				null,
 				(msg: string) =>
 					onUpdate?.({
 						content: [{ type: 'text', text: msg }],

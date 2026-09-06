@@ -53,8 +53,9 @@ npx tsx scripts/sync-to-local-pi.ts --profile user-install
 > ⚠️ **警告**：`--target` 内联模式**只应指向隔离测试目录**（如 `./.pi/test`），
 > **不要**用 `--target ~/.pi/agent` 直接同步到用户目录——请使用
 > `--profile user-install`（由 `sync-profiles.yaml` 管理资源边界）。
-> 默认行为下 sync 工具**从不删除**目标中任何文件；如需显式清空目标中
-> 不属于本次同步的资源，必须加 `--purge` 参数（会有 WARN 强警告）。
+> 内联模式**默认不删除**目标中任何文件；如需清空目标中不属于本次同步的
+> 资源，必须加 `--purge` 参数（会有 WARN 强警告）。
+> （profile 模式的默认删除行为见下文「删除语义」——只剪「受管资产」。）
 
 ## 配置文件结构
 
@@ -142,7 +143,7 @@ profiles:
         extensions: '*'
         # npmBuild 是可选的显式声明，仅用于文档目的。
         # 脚本会自动检测所有 npm 包风格扩展，无需手动列出。
-        npmBuild: ['_widget-wrangler', 'catch-the-fox']
+        npmBuild: ['_widget-wrangler', 'DEMO:catch-the-fox']
 ```
 
 > **注意**：桥接文件指向 `src/index.ts` 而非编译后的 `dist/index.js`，
@@ -213,17 +214,24 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 
 ## 排除项 / 资源变更（stale 处理）
 
-当 Profile 的 `exclude` 列表排除了某些资源，或 Profile 的 include 列表不再包含之前同步过的资源时，目标目录中对应的旧文件/目录会被识别为 **stale**：
+当 Profile 的 `exclude` 列表排除了某些资源，或 Profile 的 include 列表不再包含之前同步过的资源时，目标目录中对应的旧文件/目录会被识别为 **stale**。
 
-删除逻辑：
+删除谓词（ADR-0037，profile 模式默认生效，无需 `--purge`）：
 
-1. 扫描目标目录下每个资源类型的所有现有项目
-2. 与当前 Profile 要同步的资源列表对比
-3. 不在要同步列表中的项目视为 **stale**
-4. **默认不删除**——仅以 `WARN` 提示（控制台 + 日志），提醒你目标目录存在未被本次同步覆盖的资源
-5. 只有显式加 `--purge` 才真正删除；仅 `--dry-run --purge` 组合下显示 `[would delete]` 预览（不带 `--purge` 的 dry-run 不显示删除预览，因为真实运行也不会删除）
+```text
+受管资产（名字 ∈ 本仓库源清单） ∧ 不在当前 profile 有效集合 ∧ 不在保护名单 → 删除
+```
 
-此行为适用于所有资源类型：extensions、skills、themes、prompts。
+- **受管资产**：目标中名字能在本仓库源清单（`extensions/`、`skills/`、`themes/`、`prompts/`）按名匹配到的资产。
+- **有效集合** = include（`*` 或显式清单）减去 exclude。
+- **第三方资产**（名字不在源清单，如 herdr 安装的集成）默认**永不删除**，仅 `--purge` 清。
+- **保护名单**（`PROTECTED_EXTERNAL`）中的第三方集成，`--purge` 也跳过。
+- **形态冲突残留**：目标里名字在源清单、但形态与源不一致的残留（源是目录扩展、目标残留同名单文件
+  `.ts`，或反向）也会被删除，且**所有模式**（profile / inline，含无 `--purge`）都修正——这属于形态
+  一致性修正，而非 stale 剪枝。典型：`review` 重构为目录后残留旧 `review.ts`，pi 会加载
+  `review.ts` + `review/` 两次 → `review:1` / `review:2` 重名。
+
+内联模式默认不删（仅 `--purge` 才清）。此行为适用于所有资源类型：extensions、skills、themes、prompts。
 
 ## 日志
 
@@ -253,18 +261,30 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 
 ## 删除语义与 --purge（安全机制）
 
-**默认安全模式（重要）**：sync 工具**永远不删除**目标目录中的任何文件——它只复制/更新本次同步的资源。目标中存在的、但不属于本次同步的资源会被识别为 _stale_ 并以 `WARN` 提示（控制台 + 日志），但**不会删除**。
+**profile 模式默认「严格剪枝」**：sync 删除目标中「受管但不在当前 profile 有效集合」的资产（第三方资产保留），根治插件在 profile 间迁移后的重名/孤儿副本。
 
-**显式清空：`--purge`**：如需将目标目录镜像为"仅包含本次同步资源"（删除所有非同步文件），必须显式加 `--purge`：
+**显式全量镜像：`--purge`**：如需将目标目录镜像为"仅包含本次同步资源"（连第三方一起删除），显式加 `--purge`（仍跳过保护名单）：
 
 ```bash
-# 清空 ./.pi/test 中不属于 pi-logger 的文件
+# 内联模式：清空 ./.pi/test 中不属于 pi-logger 的文件
 npx tsx scripts/sync-to-local-pi.ts --ext pi-logger --target ./.pi/test --purge
 
-# profile 模式下同样有效（清理目标中 profile 未管理的资源）
+# profile 模式：全量镜像（连第三方资产也删）
 npx tsx scripts/sync-to-local-pi.ts --profile user-install --purge
 ```
 
 每次使用 `--target`（内联模式）或 `--purge` 时，控制台输出与日志文件
 （`scripts/sync-to-local-pi.log`）都会写入 `WARN` 级别警告，提示该操作的范围
 与清理行为，便于审计追溯。
+
+## 配置重置（pi-config profile）
+
+被**删除**或**更新**、且目标下存在 `extensions-data/<plugin>/config.json`
+（即该插件保存过 pi-config profile）的插件，sync 结束后会弹出一个聚合多选列表：
+
+- `↑/↓` 移动、`空格` 勾选、`a` 全选/全不选、`回车` 确认、`Ctrl+C` 中止（=全保留）
+- 勾选 = 重置：删除 `config.json`，插件下次启动回落内嵌默认 profile
+- 未勾选 = 保留现有配置
+
+非交互环境（CI / husky / e2e / 管道）自动降级为**全保留**并打印 `WARN`；
+`--dry-run` 不弹交互提示、不落盘，仅打印 `[would reset] <plugin>` 预览。

@@ -12,8 +12,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
 
-import { computeSigma, pickWorstDimension, computeColorLevel } from './sigma.js';
-import type { ColorLevel } from './sigma.js';
+import { computeSigma, pickWorstDimension } from './sigma.js';
 import { MetricsTracker } from './metrics.js';
 import {
 	appendSession,
@@ -138,23 +137,26 @@ export default function whimsicalExtension(pi: ExtensionAPI) {
 
 		const msg = pickMessage(worst.dimension as DimensionKey, worst.result.level);
 
-		// Compute max color level across all dimensions
-		let maxColorLevel: ColorLevel = 0;
+		// Compute max anomaly level across all dimensions (0 = normal, 1 = elevated, 2 = extreme)
+		let maxColorLevel: 0 | 1 | 2 = 0;
 		for (const dim of DIMENSION_KEYS) {
-			const cl = computeColorLevel(results[dim].zScore);
-			if (cl > maxColorLevel) maxColorLevel = cl;
+			const lvl = results[dim].level;
+			if (lvl > maxColorLevel) maxColorLevel = lvl;
 		}
 
-		// Map color level to theme color name
-		const colorNames: Record<ColorLevel, string> = {
-			0: 'thinkingOff',
-			1: 'thinkingMinimal',
-			2: 'thinkingLow',
-			3: 'thinkingMedium',
-			4: 'thinkingHigh',
-			5: 'thinkingXhigh',
-		};
-		const coloredMsg = ctx.ui.theme.fg(colorNames[maxColorLevel] as any, msg);
+		// Color the message by anomaly level:
+		//   level 0 (|z| < 1)  -> default (no styling, follows the editor border color)
+		//   level 1 (1<=|z|<2) -> warning (yellow, clearly elevated)
+		//   level 2 (|z| >= 2) -> error   (red, extreme)
+		let coloredMsg = msg;
+		let colorName = 'default';
+		if (maxColorLevel === 1) {
+			colorName = 'warning';
+			coloredMsg = ctx.ui.theme.fg('warning', msg);
+		} else if (maxColorLevel === 2) {
+			colorName = 'error';
+			coloredMsg = ctx.ui.theme.fg('error', msg);
+		}
 
 		// Structured info log — fires only when metrics actually change
 		log.info(
@@ -163,7 +165,7 @@ export default function whimsicalExtension(pi: ExtensionAPI) {
 			worst.result.level,
 			worst.result.zScore.toFixed(3),
 			maxColorLevel,
-			colorNames[maxColorLevel],
+			colorName,
 			msg,
 			snapshot.thinkingSteps,
 			snapshot.avgTurnsPerQuestion.toFixed(3),

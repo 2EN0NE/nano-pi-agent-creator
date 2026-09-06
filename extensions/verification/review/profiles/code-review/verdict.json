@@ -1,0 +1,23 @@
+{
+	"verdict": {
+		"safeValues": ["correct"],
+		"blockingValues": ["needs attention"],
+		"headings": ["verdict", "overall verdict"],
+		"stopHeadings": ["review scope", "findings", "fix queue", "constraints"]
+	},
+	"findings": {
+		"headings": ["findings"],
+		"boundaryHeadings": [
+			"review scope",
+			"verdict",
+			"overall verdict",
+			"fix queue",
+			"constraints"
+		]
+	},
+	"findingLine": {
+		"priorityTag": "\\[P[0-3]\\]",
+		"excludeDefinitionPatterns": ["drop everything", "urgent", "normal", "low", "nice to have"],
+		"excludePlaceholderPatterns": []
+	}
+}

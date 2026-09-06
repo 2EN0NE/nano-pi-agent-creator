@@ -11,7 +11,7 @@
  *   3. padEnd/repeat 配 .length 的对齐写法（提示性，需人工确认）
  *
  * 豁免（ADR-0023）：catch-the-fox（像素网格）、pi-tmux-status（tmux 状态栏）、
- * session-breakdown / resources-tree（连续色阶热力图，theme 无对应 API）
+ * session-analytics / resources-tree（连续色阶热力图，theme 无对应 API）
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -19,10 +19,10 @@ import { join, relative } from 'node:path';
 
 const SCAN_DIRS = ['extensions', 'src/tui'];
 const EXEMPT_FILES = new Set([
-	'extensions/tui/catch-the-fox', // 像素网格渲染，直接输出 ANSI 转义
+	'extensions/tui/DEMO:catch-the-fox', // 像素网格渲染，直接输出 ANSI 转义
 	'extensions/auto/pi-tmux-status', // tmux 状态栏 emoji，非 Pi TUI 渲染路径
 	'extensions/meta/pi-logger', // 日志基础设施，给终端日志着色（ADR-0023：日志文本不受限）
-	'extensions/tui/session-breakdown', // 日历热力图：模型颜色加权 RGB + 亮度，连续色阶
+	'extensions/observability/session-analytics', // 日历热力图：模型颜色加权 RGB + 亮度，连续色阶
 	'extensions/context/resources-tree/utils', // 用量比例 256 色渐变，连续色阶
 ]);
 

@@ -78,6 +78,16 @@ export function resolveTriggerThresholdAfterTypeChange(
 	return { threshold: DEFAULT_TRIGGER_THRESHOLDS[type], reset: true };
 }
 
+// ── Trigger granularity: how often to evaluate triggers ────────
+
+export type TriggerGranularity = 'user_turn' | 'agent_turn' | 'tool';
+
+export const TRIGGER_GRANULARITY_LABELS: Record<TriggerGranularity, string> = {
+	user_turn: '用户轮',
+	agent_turn: 'Agent 轮',
+	tool: '工具调用',
+};
+
 // ── Mechanism: how to compact ───────────────────────────────────
 
 export type MechanismType = 'summarize' | 'pass_through' | 'adapter';
@@ -151,15 +161,42 @@ export interface CompactionProfile {
 	prompt: string;
 	/** Whether to automatically resume work after compaction succeeds */
 	autoContinue: boolean;
+	/**
+	 * Whether to inject autoContinueMessage as a visible user message after
+	 * compaction. When false (default), the continuation is invisible — a
+	 * hidden custom marker resumes the loop without the LLM seeing new text.
+	 */
+	injectContinueText: boolean;
 	/** Message sent via pi.sendUserMessage() when autoContinue is true */
 	autoContinueMessage: string;
 }
 
 // ── Config ──────────────────────────────────────────────────────
 
+/** 会话复杂度等级（来自 pi-session-tree 的 ComplexityReport.level） */
+export type ComplexityLevel = 'low' | 'medium' | 'high';
+
+/**
+ * 选择算法第一层的路由规则：当 [环境条件] 满足 → 指定 profile。
+ * 规则有序，首条命中生效。条件维度目前为 model / complexity（均可选）。
+ */
+export interface RoutingRule {
+	/** 模型匹配（与 matchModel 同语义：大小写不敏感、前缀/子串） */
+	model?: string;
+	/** 复杂度等级匹配 */
+	complexity?: ComplexityLevel;
+	/** 命中的目标 profile id */
+	targetProfileId: string;
+}
+
 export interface CompactionConfig {
 	profiles: Record<string, CompactionProfile>;
-	activeProfileId: string;
+	/** 启用集：Space 勾选、参与自动压缩触发评估的 profile id 集合（第一道闸） */
+	enabledProfileIds: string[];
+	/** 触发粒度：触发条件评估频率 */
+	triggerGranularity: TriggerGranularity;
+	/** 路由规则：有序、首条命中生效（选择算法第一层） */
+	routingRules: RoutingRule[];
 }
 
 // ── Default values ──────────────────────────────────────────────
@@ -196,6 +233,7 @@ export function createDefaultProfile(): CompactionProfile {
 		},
 		prompt: DEFAULT_COMPACTION_PROMPT,
 		autoContinue: true,
+		injectContinueText: false,
 		autoContinueMessage: DEFAULT_AUTO_CONTINUE_MESSAGE,
 	};
 }
@@ -205,7 +243,9 @@ export function createDefaultConfig(): CompactionConfig {
 		profiles: {
 			default: createDefaultProfile(),
 		},
-		activeProfileId: 'default',
+		enabledProfileIds: ['default'],
+		triggerGranularity: 'agent_turn',
+		routingRules: [],
 	};
 }
 
@@ -236,57 +276,4 @@ export function modelMatchScore(
 	if (target.startsWith(pattern)) return 1; // prefix match (e.g. "openai/" matches "openai/gpt-4o")
 	if (target.includes(pattern)) return 2; // substring match (e.g. "gpt-4o" matches "openai/gpt-4o")
 	return undefined; // no match
-}
-
-/**
- * Select the best-matching profile for a given model spec.
- *
- * Priority:
- * 1. Exact model spec match (score 0)
- * 2. Prefix match (score 1)
- * 3. Substring match (score 2)
- * 4. Universal fallback (matchModel undefined)
- * 5. First profile in the list (last resort)
- */
-export function selectBestProfile(
-	config: CompactionConfig,
-	modelSpec: string | undefined,
-): CompactionProfile | undefined {
-	const entries = Object.entries(config.profiles);
-	if (entries.length === 0) return undefined;
-
-	if (!modelSpec) {
-		// No model info — prefer a universal profile, fall back to first
-		const universal = entries.find(([, p]) => !p.matchModel);
-		if (universal) return universal[1];
-		return entries[0][1];
-	}
-
-	// Score all profiles against the model spec
-	let bestProfile: CompactionProfile | undefined;
-	let bestScore = Infinity;
-	let bestPatternLen = 0;
-
-	for (const [, p] of entries) {
-		if (!p.matchModel) {
-			// Universal fallback — lowest priority among matched
-			if (bestScore > 100) {
-				bestScore = 100;
-				bestProfile = p;
-				bestPatternLen = 0;
-			}
-			continue;
-		}
-		const score = modelMatchScore(p.matchModel, modelSpec);
-		if (score === undefined) continue;
-		const len = p.matchModel.length;
-		// Same score → longer pattern wins (more specific)
-		if (score < bestScore || (score === bestScore && len > bestPatternLen)) {
-			bestScore = score;
-			bestProfile = p;
-			bestPatternLen = len;
-		}
-	}
-
-	return bestProfile ?? entries[0][1];
 }

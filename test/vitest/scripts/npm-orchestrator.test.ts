@@ -6,6 +6,7 @@
  *   - PackageManager.scanLocalPackages
  *   - PackageManager.writeRootPackageJson
  *   - PackageManager.hasRootDependencyChanged
+ *   - PackageManager.installExtensions（收口：只装第三方依赖）
  *   - BridgeBuilder.ensureBridges
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -309,7 +310,82 @@ describe('PackageManager.hasRootDependencyChanged', () => {
 });
 
 // ============================================================================
-// 5. BridgeBuilder.ensureBridges
+// 6. PackageManager.installExtensions（收口：只装第三方依赖）
+// ============================================================================
+
+describe('PackageManager.installExtensions', () => {
+	it('skips extensions whose dependencies are only @zenone/* (root-managed)', async () => {
+		const extDir = join(tmpDir, 'extensions');
+		createDirExt(extDir, 'pi-lab', {
+			dependencies: {
+				'@zenone/pi-logger': 'file:../pi-logger',
+				'@zenone/pi-config': 'file:../pi-config',
+			},
+		});
+
+		const pm = new PackageManager({ targetDir: tmpDir, projectRoot: tmpDir, dryRun: true });
+		const summary = await pm.installExtensions([makeResource('pi-lab', tmpDir, true)]);
+
+		expect(summary.skipped).toBe(0);
+	});
+
+	it('installs extensions with third-party dependencies', async () => {
+		const extDir = join(tmpDir, 'extensions');
+		createDirExt(extDir, 'with-third-party', {
+			dependencies: { 'tree-sitter-bash': '^0.25.1' },
+		});
+
+		const pm = new PackageManager({ targetDir: tmpDir, projectRoot: tmpDir, dryRun: true });
+		const summary = await pm.installExtensions([
+			makeResource('with-third-party', tmpDir, true),
+		]);
+
+		expect(summary.skipped).toBe(1);
+	});
+
+	it('skips npm-style extensions (pi.extensions) even with third-party deps', async () => {
+		const extDir = join(tmpDir, 'extensions');
+		createDirExt(extDir, 'npm-ext', {
+			pi: { extensions: ['./dist/index.js'] },
+			dependencies: { 'tree-sitter-bash': '^0.25.1' },
+		});
+
+		const pm = new PackageManager({ targetDir: tmpDir, projectRoot: tmpDir, dryRun: true });
+		const summary = await pm.installExtensions([makeResource('npm-ext', tmpDir, true)]);
+
+		expect(summary.skipped).toBe(0);
+	});
+
+	it('skips extensions with only devDependencies (e.g. typescript)', async () => {
+		const extDir = join(tmpDir, 'extensions');
+		createDirExt(extDir, 'dev-only', {
+			devDependencies: { typescript: '^7.0.2' },
+		});
+
+		const pm = new PackageManager({ targetDir: tmpDir, projectRoot: tmpDir, dryRun: true });
+		const summary = await pm.installExtensions([makeResource('dev-only', tmpDir, true)]);
+
+		expect(summary.skipped).toBe(0);
+	});
+
+	it('installs mixed @zenone/* + third-party dependencies (third-party wins)', async () => {
+		const extDir = join(tmpDir, 'extensions');
+		createDirExt(extDir, 'mixed', {
+			dependencies: {
+				'@zenone/pi-logger': 'file:../pi-logger',
+				'tree-sitter-bash': '^0.25.1',
+			},
+		});
+
+		const pm = new PackageManager({ targetDir: tmpDir, projectRoot: tmpDir, dryRun: true });
+		const summary = await pm.installExtensions([makeResource('mixed', tmpDir, true)]);
+
+		expect(summary.skipped).toBe(1);
+	});
+});
+
+// ============================================================================
+// 7. BridgeBuilder.ensureBridges
 // ============================================================================
 
 describe('BridgeBuilder.ensureBridges', () => {

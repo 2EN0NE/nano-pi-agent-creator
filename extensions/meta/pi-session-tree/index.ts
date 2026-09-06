@@ -104,31 +104,63 @@ function pairwiseBM25(text1: string, text2: string): number {
 	return score;
 }
 
-/** 将 Pi SessionTreeNode 转为自有 TreeNode */
+/** 将 Pi SessionTreeNode 转为自有 TreeNode。
+ *  迭代后序实现：深会话树可达数千层，递归遍历会触发
+ *  JS 调用栈溢出（Maximum call stack size exceeded），
+ *  故用显式栈逐层构建（Pi 官方 getTree() 对 children 排序同样用迭代规避）。 */
 function wrapNode(piNode: SessionTreeNode, depth: number, branchIndex: number): TreeNode {
-	const children = piNode.children.map((child, i) => wrapNode(child, depth + 1, i));
-	const entry = piNode.entry;
-	return {
-		id: entry.id,
-		parentId: entry.parentId,
-		type: entry.type as EntryType,
-		timestamp: entry.timestamp,
-		depth,
-		branchIndex,
-		children,
-		label: piNode.label,
-		raw: entry,
-	};
+	type Frame = { node: SessionTreeNode; depth: number; branchIndex: number; expanded: boolean };
+	const rootFrame: Frame = { node: piNode, depth, branchIndex, expanded: false };
+	const stack: Frame[] = [rootFrame];
+	const built = new Map<SessionTreeNode, TreeNode>();
+	// 防御环（异常会话文件可能形成 parentId 环），避免无限压栈。
+	const seen = new Set<SessionTreeNode>([piNode]);
+
+	while (stack.length > 0) {
+		const frame = stack[stack.length - 1];
+		if (frame.expanded) {
+			stack.pop();
+			const entry = frame.node.entry;
+			const children = frame.node.children.map((c) => built.get(c)!);
+			built.set(frame.node, {
+				id: entry.id,
+				parentId: entry.parentId,
+				type: entry.type as EntryType,
+				timestamp: entry.timestamp,
+				depth: frame.depth,
+				branchIndex: frame.branchIndex,
+				children,
+				label: frame.node.label,
+				raw: entry,
+			});
+		} else {
+			frame.expanded = true;
+			// 子节点逆序压栈，保证出栈处理顺序与原始 children 顺序一致。
+			for (let i = frame.node.children.length - 1; i >= 0; i--) {
+				const child = frame.node.children[i];
+				if (seen.has(child)) continue;
+				seen.add(child);
+				stack.push({
+					node: child,
+					depth: frame.depth + 1,
+					branchIndex: i,
+					expanded: false,
+				});
+			}
+		}
+	}
+	return built.get(piNode)!;
 }
 
-/** 从根节点遍历收集所有节点 */
+/** 从根节点遍历收集所有节点（迭代前序，避免深树栈溢出） */
 function collectNodes(roots: TreeNode[]): TreeNode[] {
 	const result: TreeNode[] = [];
-	function walk(n: TreeNode) {
+	const stack: TreeNode[] = [...roots].reverse();
+	while (stack.length > 0) {
+		const n = stack.pop()!;
 		result.push(n);
-		for (const c of n.children) walk(c);
+		for (let i = n.children.length - 1; i >= 0; i--) stack.push(n.children[i]);
 	}
-	for (const r of roots) walk(r);
 	return result;
 }
 
@@ -154,18 +186,20 @@ function dimensionLevel(dimension: keyof ComplexityDimensions, value: number): n
 
 const COMPLEXITY_LEVELS: ComplexityLevel[] = ['low', 'medium', 'high'];
 
-/** 找从根到目标节点的路径 */
+/** 找从根到目标节点的路径（迭代 DFS，避免深树栈溢出） */
 function findPath(roots: TreeNode[], targetId: string): TreeNode[] {
-	function search(nodes: TreeNode[], path: TreeNode[]): TreeNode[] | null {
-		for (const n of nodes) {
-			const p = [...path, n];
-			if (n.id === targetId) return p;
-			const r = search(n.children, p);
-			if (r) return r;
-		}
-		return null;
+	const stack: Array<{ node: TreeNode; path: TreeNode[] }> = [];
+	for (let i = roots.length - 1; i >= 0; i--) {
+		stack.push({ node: roots[i], path: [roots[i]] });
 	}
-	return search(roots, []) ?? [];
+	while (stack.length > 0) {
+		const { node, path } = stack.pop()!;
+		if (node.id === targetId) return path;
+		for (let i = node.children.length - 1; i >= 0; i--) {
+			stack.push({ node: node.children[i], path: [...path, node.children[i]] });
+		}
+	}
+	return [];
 }
 
 /** DFS 偏移：从 fromId 向前/后 offset 步（负=后），跳过无文本 assistant。
@@ -506,7 +540,10 @@ export function createSessionTree(sessionManager: {
 
 		maxDepth(): number {
 			const nodes = collectNodes(getRoots());
-			return nodes.length > 0 ? Math.max(...nodes.map((n) => n.depth)) : 0;
+			// 迭代求最大深度，避免深树时 Math.max(...arr) 展开大量参数触发栈溢出。
+			let max = 0;
+			for (const n of nodes) if (n.depth > max) max = n.depth;
+			return max;
 		},
 
 		pathLength(id?: string): number {

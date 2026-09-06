@@ -178,6 +178,192 @@ test_it "expect: rebase+ff via /worktree command" <<'TEST'
   tui_cleanup
 TEST
 
+# ── 测试 6.5：merge 到未 push 的 target（本地优先：不 pull，直接本地 merge）──
+test_it "expect: merge to unpushed target succeeds (local-first)" <<'TEST'
+  local sandbox test_repo bare_repo wt_dir wt_name
+  sandbox=$(mktemp -d "/tmp/pi-wt-local-merge-e2e-$$.XXXXXX")
+  test_repo="$sandbox/repo"
+  bare_repo="$sandbox/origin.git"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  # dev 分支（未 push）+ wt/x（有独立提交）
+  git -C "$test_repo" checkout -b dev >/dev/null 2>&1
+  echo dev > "$test_repo/dev.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m dev >/dev/null 2>&1
+
+  wt_name="local-merge"
+  git -C "$test_repo" checkout -b "wt/$wt_name" >/dev/null 2>&1
+  echo feature > "$test_repo/feat.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m local-feat >/dev/null 2>&1
+  git -C "$test_repo" checkout dev >/dev/null 2>&1
+
+  local wt_parent="${test_repo}-worktrees"
+  wt_dir="$wt_parent/$wt_name"
+  mkdir -p "$wt_parent"
+  git -C "$test_repo" worktree add "$wt_dir" "wt/$wt_name" >/dev/null 2>&1
+
+  # 有 remote，但 dev 从未 push（origin/dev 不存在 → 旧代码 pull 会失败并回滚）
+  git init --bare "$bare_repo" >/dev/null 2>&1
+  git -C "$test_repo" remote add origin "file://$bare_repo" >/dev/null 2>&1
+
+  tui_expect_test "pi-logger,worktree" "
+    send \"/worktree merge --source $wt_name --target dev --strategy merge\r\"
+    expect -re {Merge} { }
+    sleep 1
+    send \"\r\"
+    sleep 4
+  " 20 "" "$test_repo"
+
+  # 严格断言：wt 分支已合入 dev（本地 merge 成功，未 pull）
+  if git -C "$test_repo" merge-base --is-ancestor "wt/$wt_name" dev; then
+    echo "PASS: merge to unpushed dev succeeded (wt/$wt_name merged into dev)"
+  else
+    echo "FAIL: wt/$wt_name not merged into dev"
+    git -C "$test_repo" log dev --oneline | head -5
+    exit 1
+  fi
+
+  git -C "$test_repo" worktree remove "$wt_dir" --force >/dev/null 2>&1 || true
+  rm -rf "$sandbox"
+  tui_cleanup
+TEST
+
+# ── 测试 6.6：merge 到落后远端的 target → confirm 提示「落后远端」→ 本地 merge 成功 ──
+test_it "expect: merge to remote-behind target shows sync hint (local-first)" <<'TEST'
+  local sandbox test_repo bare_repo other_repo wt_dir wt_name
+  sandbox=$(mktemp -d "/tmp/pi-wt-sync-hint-e2e-$$.XXXXXX")
+  test_repo="$sandbox/repo"
+  bare_repo="$sandbox/origin.git"
+  other_repo="$sandbox/other"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  # 远端：origin（bare）+ other 创建 dev 并 push（origin/dev 领先本地）
+  git init --bare "$bare_repo" >/dev/null 2>&1
+  git -C "$test_repo" remote add origin "file://$bare_repo" >/dev/null 2>&1
+  git -C "$test_repo" push -u origin main >/dev/null 2>&1
+  git clone "file://$bare_repo" "$other_repo" >/dev/null 2>&1
+  git -C "$other_repo" checkout -b dev >/dev/null 2>&1
+  echo remote-dev > "$other_repo/remote-dev.txt"
+  git -C "$other_repo" add . && git -C "$other_repo" commit -m remote-dev >/dev/null 2>&1
+  git -C "$other_repo" push -u origin dev >/dev/null 2>&1
+
+  # 本地 dev 基于旧 main（behind=1，无独有提交 → ahead=0）
+  git -C "$test_repo" fetch origin >/dev/null 2>&1
+  git -C "$test_repo" checkout -b dev origin/main >/dev/null 2>&1
+
+  wt_name="sync-hint"
+  git -C "$test_repo" checkout -b "wt/$wt_name" >/dev/null 2>&1
+  echo feature > "$test_repo/feat.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m local-feat >/dev/null 2>&1
+  git -C "$test_repo" checkout dev >/dev/null 2>&1
+
+  local wt_parent="${test_repo}-worktrees"
+  wt_dir="$wt_parent/$wt_name"
+  mkdir -p "$wt_parent"
+  git -C "$test_repo" worktree add "$wt_dir" "wt/$wt_name" >/dev/null 2>&1
+
+  # confirm 对话框应出现「本地 dev 落后远端」提示（getRemoteAheadBehind 真实 fetch 生效）
+  tui_expect_test "pi-logger,worktree" "
+    send \"/worktree merge --source $wt_name --target dev --strategy merge\r\"
+    expect -re {落后远端} { }
+    sleep 1
+    send \"\r\"
+    sleep 4
+  " 20 "" "$test_repo"
+
+  # 严格断言：merge 成功（wt 分支已合入 dev）
+  if git -C "$test_repo" merge-base --is-ancestor "wt/$wt_name" dev; then
+    echo "PASS: merge to remote-behind dev succeeded (sync hint shown)"
+  else
+    echo "FAIL: wt/$wt_name not merged into dev"
+    git -C "$test_repo" log dev --oneline | head -5
+    exit 1
+  fi
+
+  git -C "$test_repo" worktree remove "$wt_dir" --force >/dev/null 2>&1 || true
+  rm -rf "$sandbox"
+  tui_cleanup
+TEST
+
+# ── 测试 6.7：merge 失败（target 被 worktree 占用）→ 失败面板「拉取最新」→ 仓库终态正确 ──
+test_it "expect: merge failure panel pull leaves repo consistent" <<'TEST'
+  local sandbox test_repo wt_dir dev_wt wt_name
+  sandbox=$(mktemp -d "/tmp/pi-wt-fail-pull-e2e-$$.XXXXXX")
+  test_repo="$sandbox/repo"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  # target dev 被 worktree 占用 → 主仓库 checkout dev 失败（Cannot checkout）
+  git -C "$test_repo" checkout -b dev >/dev/null 2>&1
+  git -C "$test_repo" checkout main >/dev/null 2>&1
+  local wt_parent="${test_repo}-worktrees"
+  mkdir -p "$wt_parent"
+  dev_wt="$wt_parent/dev"
+  git -C "$test_repo" worktree add "$dev_wt" dev >/dev/null 2>&1
+
+  wt_name="fail-pull"
+  git -C "$test_repo" checkout -b "wt/$wt_name" >/dev/null 2>&1
+  echo feature > "$test_repo/feat.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m local-feat >/dev/null 2>&1
+  git -C "$test_repo" checkout main >/dev/null 2>&1
+  wt_dir="$wt_parent/$wt_name"
+  git -C "$test_repo" worktree add "$wt_dir" "wt/$wt_name" >/dev/null 2>&1
+
+  # merge 失败 → 失败面板出现 → 选「拉取最新」（第 4 项：Down×3 + Enter）
+  tui_expect_test "pi-logger,worktree" "
+    send \"/worktree merge --source $wt_name --target dev --strategy merge\r\"
+    expect -re {Merge} { }
+    sleep 1
+    send \"\r\"
+    expect -re {合并失败} { }
+    sleep 1
+    send \"\x1b[B\"
+    sleep 0.3
+    send \"\x1b[B\"
+    sleep 0.3
+    send \"\x1b[B\"
+    sleep 0.3
+    send \"\r\"
+    sleep 3
+  " 20 "" "$test_repo"
+
+  # 严格断言：
+  # 1) merge 未发生（dev 被占用 → Cannot checkout，未污染 dev）
+  if git -C "$test_repo" merge-base --is-ancestor "wt/$wt_name" dev 2>/dev/null; then
+    echo "FAIL: wt/$wt_name unexpectedly merged into dev"
+    exit 1
+  fi
+  echo "PASS: merge blocked (target dev checked out in another worktree)"
+  # 2) 拉取失败后主仓库回切原分支（pullTargetLatest finally 恢复 main）
+  local head_branch
+  head_branch=$(git -C "$test_repo" rev-parse --abbrev-ref HEAD)
+  if [[ "$head_branch" == "main" ]]; then
+    echo "PASS: repo remains on main after failed pull"
+  else
+    echo "FAIL: repo on '$head_branch' (expected main)"
+    exit 1
+  fi
+  # 3) 无 MERGE_HEAD 残留
+  if git -C "$test_repo" rev-parse --verify MERGE_HEAD >/dev/null 2>&1; then
+    echo "FAIL: MERGE_HEAD left behind after failure panel pull"
+    exit 1
+  fi
+  echo "PASS: no MERGE_HEAD residue"
+
+  git -C "$test_repo" worktree remove "$wt_dir" --force >/dev/null 2>&1 || true
+  git -C "$test_repo" worktree remove "$dev_wt" --force >/dev/null 2>&1 || true
+  rm -rf "$sandbox"
+  tui_cleanup
+TEST
+
 # ── 测试 7：plain rebase（sync 别名）e2e ──
 test_it "expect: plain rebase via /worktree command" <<'TEST'
   local sandbox test_repo wt_dir wt_name

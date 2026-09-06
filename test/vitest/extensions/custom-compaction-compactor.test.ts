@@ -17,6 +17,8 @@ import {
 	getAndClearCompactResult,
 	setPendingSupplement,
 	getAndClearPendingSupplement,
+	setPendingProfile,
+	getAndClearPendingProfile,
 } from '../../../extensions/context/custom-compaction/compactor.js';
 
 beforeEach(() => {
@@ -105,13 +107,6 @@ vi.mock('@earendil-works/pi-ai/compat', async (importOriginal) => {
 	const mod = await importOriginal<typeof import('@earendil-works/pi-ai/compat')>();
 	return { ...mod, complete: vi.fn() };
 });
-vi.mock('../../../extensions/context/custom-compaction/config.js', async (importOriginal) => {
-	const mod =
-		await importOriginal<
-			typeof import('../../../extensions/context/custom-compaction/config.js')
-		>();
-	return { ...mod, getEffectiveProfile: vi.fn() };
-});
 vi.mock(
 	'../../../extensions/context/custom-compaction/mechanisms/index.js',
 	async (importOriginal) => {
@@ -124,7 +119,6 @@ vi.mock(
 );
 import { vi } from 'vitest';
 import { complete } from '@earendil-works/pi-ai/compat';
-import { getEffectiveProfile } from '../../../extensions/context/custom-compaction/config.js';
 import { getAdapter } from '../../../extensions/context/custom-compaction/mechanisms/index.js';
 import {
 	createDefaultProfile,
@@ -171,7 +165,7 @@ describe('buildCompactionHandler — uses profile prompt', () => {
 	}
 
 	async function summarize(): Promise<string> {
-		vi.mocked(getEffectiveProfile).mockReturnValue(makeProfile());
+		setPendingProfile(makeProfile());
 		vi.mocked(getAdapter).mockReturnValue(undefined);
 		vi.mocked(complete).mockResolvedValue({
 			content: [{ type: 'text', text: 'summary ok' }],

@@ -11,7 +11,9 @@ import {
 	validateTriggerThreshold,
 	resolveTriggerThresholdAfterTypeChange,
 	describeTrigger,
+	createDefaultProfile,
 	DEFAULT_TRIGGER_THRESHOLDS,
+	DEFAULT_AUTO_CONTINUE_MESSAGE,
 } from '../../../extensions/context/custom-compaction/types.js';
 
 // ── validateTriggerThreshold 边界 ───────────────────────────────
@@ -105,5 +107,18 @@ describe('describeTrigger', () => {
 		expect(describeTrigger({ type: 'reserve', threshold: 10000 })).toContain(
 			(10000).toLocaleString(),
 		);
+	});
+});
+
+// ── injectContinueText 默认值 ───────────────────────────────────
+
+describe('createDefaultProfile — injectContinueText', () => {
+	it('defaults injectContinueText to false (invisible continue)', () => {
+		expect(createDefaultProfile().injectContinueText).toBe(false);
+	});
+
+	it('keeps autoContinueMessage default as "continue" (fallback text)', () => {
+		expect(createDefaultProfile().autoContinueMessage).toBe(DEFAULT_AUTO_CONTINUE_MESSAGE);
+		expect(DEFAULT_AUTO_CONTINUE_MESSAGE).toBe('continue');
 	});
 });

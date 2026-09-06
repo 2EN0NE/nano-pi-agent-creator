@@ -43,6 +43,26 @@ jobs:
             - run: npm ci
             - name: TypeScript check
               run: npm run typecheck
+            - name: TypeScript check (smart-context)
+              run: |
+                  cd extensions/context/smart-context
+                  npx tsc --noEmit
+
+    # ── ci-watch 独立类型检查（根 tsconfig exclude 该扩展，需独立 job）──
+    # ci-watch 是带自己 tsconfig 的独立包；此前其类型错误只能在 e2e 的 dist
+    # 构建时（间接、分钟级）暴露，这里提供秒级快速门禁。
+    ci-watch-typecheck:
+        name: ci-watch TypeScript
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: npm
+            - run: npm ci
+            - name: ci-watch type check
+              run: cd extensions/verification/ci-watch && npx tsc --noEmit
 
     # ── Linting ──
     lint:
@@ -131,6 +151,36 @@ jobs:
               run: bash scripts/setup-ci.sh
             - name: Run Vitest tests
               run: npm test
+
+    # ── Bench Unit（analyze.py 统计口径，阻塞）──
+    bench-unit:
+        name: Bench Analyze Unit
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - uses: actions/checkout@v4
+            - name: Run analyze.py unit tests
+              run: python3 bench/test_analyze.py
+
+    # ── Bench Smoke（verify.sh 失败侧判定 + 骨架，阻塞，mock-llm 不烧钱）──
+    bench-smoke:
+        name: Bench Smoke
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: npm
+            - uses: actions/setup-go@v5
+              with:
+                  go-version: '1.25.2'
+            - run: npm ci
+            - name: Setup CI environment (installs pi)
+              run: bash scripts/setup-ci.sh
+            - name: Run bench smoke (scc, mock-llm)
+              run: bash bench/smoke-test.sh --task scc-bounded-memory-spilling
 
     # ── E2E Tests（bash 集成测试，阻塞）──
     e2e:

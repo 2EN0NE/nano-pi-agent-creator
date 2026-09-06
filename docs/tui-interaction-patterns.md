@@ -108,6 +108,16 @@ ctx.ui.setFooter((tui, theme, footerData) => new MyFooter(/* ... */));
 - 字段聚焦用 `>` 前缀，编辑态用 `theme.bg('selectedBg', ...)` 高亮
 - 参考：`extensions/auto/cloud-sessions/src/index.ts`
 
+**编辑类输入必显当前值（强制）**：进入编辑/输入 UI 时必须展示**当前使用的值**，让用户基于现有值修改，而不是凭空重写。
+
+- **pi 的 `ctx.ui.input(title, placeholder)` 的 placeholder 不渲染**（pi-mono `ExtensionInputComponent` 构造函数忽略该参数，输入框恒为空）。当前值只能放进标题提示：
+    - 有当前值：`请输入分支名（当前：main，直接回车使用）`
+    - 无当前值（纯新建）：保持简洁标题即可
+- **空输入语义**：空输入回车 = 确认/保留当前值（编辑心智，非放弃）；`escape`/`ctrl+c` = 取消（返回 `undefined`）
+    - 分支监控：空回车 → 用当前分支；escape → 取消
+    - 配置项编辑：空回车 → 保留原值；escape → 取消
+- 反例（已修复）：ci-watch 的"监控分支"输入曾把当前分支名放进 placeholder（不渲染），空回车直接取消——用户看不到当前值、无法"回车确认"，只能重打。
+
 ### 3.4 确认菜单
 
 一次性选择（确认/取消），用于危险操作。

@@ -45,6 +45,15 @@ import * as yaml from 'js-yaml';
 import { isNpmPackageDir } from './lib/utils.js';
 import { PackageManager } from './lib/package-manager.js';
 import { BridgeBuilder } from './lib/bridge-builder.js';
+import {
+	classifyDeletionCandidates,
+	computeDeletionDecision,
+	collectConfigResetCandidates,
+	interactiveMultiSelect,
+	resetConfigProfiles,
+	findExtensionFormConflicts,
+	type ConfigResetCandidate,
+} from './lib/sync-prune.js';
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Constants
@@ -59,6 +68,16 @@ const LOG_FILE = join(SCRIPT_DIR, 'sync-to-local-pi.log');
 // Supported resource types (matching pi.dev resource directory names)
 const RESOURCE_TYPES = ['extensions', 'skills', 'themes', 'prompts'] as const;
 type ResourceType = (typeof RESOURCE_TYPES)[number];
+
+// ── 外部资源保护名单 ──
+// 目标目录中可能存在由第三方工具（如 herdr）直接安装的文件，不属于本仓库
+// sync 源。--purge 清理 stale 时须跳过这些文件，避免误删用户手动安装的集成。
+// key = 资源类型，value = 资源名（不带扩展名）。
+const PROTECTED_EXTERNAL: Partial<Record<ResourceType, Set<string>>> = {
+	extensions: new Set([
+		'herdr-agent-state', // herdr 集成（herdr integration install pi）
+	]),
+};
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Types
@@ -395,6 +414,11 @@ function scanExtensionsRecursively(dir: string, depth: number): string[] {
 			// If it has an index.ts, it's an extension directory
 			if (existsSync(join(fullPath, 'index.ts')) || isNpmPackageDir(fullPath)) {
 				results.push(entry.name);
+			} else if (existsSync(join(fullPath, 'package.json'))) {
+				// 含 package.json 的非扩展目录 = 纯库/资源包（如 @zenone/pi-state，
+				// pi 字段为空、无 index.ts）：其内部模块（api.ts/types.ts）不是独立
+				// 扩展，跳过不递归——否则 '*' 全量同步会把它们当单文件扩展拷进目标
+				// 顶层，被 pi 自动发现加载时报 "does not export a valid factory function"。
 			} else {
 				// Otherwise recurse into it (it's a category directory like tui/, auto/, etc.)
 				results.push(...scanExtensionsRecursively(fullPath, depth + 1));
@@ -476,11 +500,14 @@ function findExtensionByName(
 				return { relativePath: relative(extRoot, fullPath), isDirectory: true };
 			}
 			// Recurse into subdirectories, but skip directory extensions
-			// (directories with index.ts — their internals aren't separate extensions)
+			// (directories with index.ts — their internals aren't separate extensions),
+			// and skip pure-library packages (package.json without pi.extensions,
+			// e.g. @zenone/pi-state) — their internal modules aren't extensions either.
 			if (
 				entry.isDirectory() &&
 				!existsSync(join(fullPath, 'index.ts')) &&
-				!isNpmPackageDir(fullPath)
+				!isNpmPackageDir(fullPath) &&
+				!existsSync(join(fullPath, 'package.json'))
 			) {
 				const result = search(fullPath, depth + 1);
 				if (result) return result;
@@ -575,6 +602,10 @@ function buildExtensionIndex(
 							isDirectory: true,
 						});
 					}
+				} else if (existsSync(join(fullPath, 'package.json'))) {
+					// 含 package.json 的非扩展目录 = 纯库/资源包（如 @zenone/pi-state）：
+					// 内部模块（api.ts/types.ts）不是独立扩展，跳过不散开（否则 '*' 全量
+					// 同步会把它们当单文件扩展拷进目标顶层，被 pi 自动发现加载报错）。
 				} else {
 					scan(fullPath, depth + 1);
 				}
@@ -1084,8 +1115,12 @@ interface ProfileSummary {
 	newItems: Record<ResourceType, string[]>;
 	updatedItems: Record<ResourceType, string[]>;
 	staleItems: Record<ResourceType, string[]>;
-	/** 本 profile 是否实际执行了 stale 删除（--purge 且非 dry-run） */
-	staleRemoved: boolean;
+	/** 实际删除（或 dry-run 将删）的资产名，按类型 */
+	staleRemovedItems: Record<ResourceType, string[]>;
+	/** 保留在原地的资产名（第三方 / 内联默认），按类型 */
+	staleKeptItems: Record<ResourceType, string[]>;
+	/** 形态冲突残留删除（同名单文件 vs 目录）的名字，仅 extensions */
+	formConflictsRemoved: string[];
 	extensionNames: string[];
 	npmCount: number;
 	npmSkippedCount: number;
@@ -1118,7 +1153,9 @@ async function processProfile(
 			newItems: {} as Record<ResourceType, string[]>,
 			updatedItems: {} as Record<ResourceType, string[]>,
 			staleItems: {} as Record<ResourceType, string[]>,
-			staleRemoved: false,
+			staleRemovedItems: {} as Record<ResourceType, string[]>,
+			staleKeptItems: {} as Record<ResourceType, string[]>,
+			formConflictsRemoved: [],
 			extensionNames: [],
 			npmCount: 0,
 			npmSkippedCount: 0,
@@ -1164,6 +1201,20 @@ async function processProfile(
 		sourceNames[r.type].add(r.name);
 	}
 
+	// 完整源清单（本仓库所有可用资产名）——用于区分「受管资产」与「第三方资产」（ADR-0037）
+	const sourceInventory: Record<ResourceType, Set<string>> = {
+		extensions: new Set(resolveSourceItems('extensions', '*', [], PROJECT_ROOT)),
+		skills: new Set(resolveSourceItems('skills', '*', [], PROJECT_ROOT)),
+		themes: new Set(resolveSourceItems('themes', '*', [], PROJECT_ROOT)),
+		prompts: new Set(resolveSourceItems('prompts', '*', [], PROJECT_ROOT)),
+	};
+
+	// 源扩展形态索引（name -> isDirectory）——用于识别「同名单文件 vs 目录」残留（形态冲突）
+	const extSourceForm = new Map<string, boolean>();
+	for (const [name, info] of buildExtensionIndex(join(PROJECT_ROOT, 'extensions'))) {
+		extSourceForm.set(name, info.isDirectory);
+	}
+
 	// Sync each resource
 	const newItems: Record<ResourceType, string[]> = {
 		extensions: [],
@@ -1183,12 +1234,21 @@ async function processProfile(
 		themes: 0,
 		prompts: 0,
 	};
-	const staleCandidates: Record<ResourceType, string[]> = {
+	const removedItems: Record<ResourceType, string[]> = {
 		extensions: [],
 		skills: [],
 		themes: [],
 		prompts: [],
 	};
+	const keptItems: Record<ResourceType, string[]> = {
+		extensions: [],
+		skills: [],
+		themes: [],
+		prompts: [],
+	};
+	// 形态冲突残留删除（同名单文件 vs 目录）：独立于 stale 剪枝，所有模式都清理，
+	// 且不进入 removedItems（扩展仍在，不触发 config reset）。
+	const formConflictsRemoved: string[] = [];
 
 	for (const resource of resources) {
 		const result = syncResource(resource, opts.dryRun, true);
@@ -1437,8 +1497,9 @@ async function processProfile(
 	const summary = summaryParts.length > 0 ? summaryParts.join(', ') : 'no changes';
 	console.log(`\n  ✅ [${name}] Done — ${summary}`);
 
-	// ── Per-category breakdown (NEW / UPDATED / STALE CANDIDATES) ──
+	// ── Per-category breakdown (NEW / UPDATED / removed / kept) ──
 	const absTarget = expandTargetPath(profile.target, PROJECT_ROOT);
+	const isInline = opts.inline;
 	let hasStale = false;
 
 	console.log(`\n  🗂️  "${name}" — per-category breakdown:\n`);
@@ -1446,69 +1507,107 @@ async function processProfile(
 		const n = newItems[t].length;
 		const u = updatedItems[t].length;
 		const s = skipByType[t];
-		const candidates = targetExistingNames[t].filter((item) => !sourceNames[t].has(item));
-		const d = candidates.length;
+		const protectedSet = PROTECTED_EXTERNAL[t];
+		const { managed, thirdParty } = classifyDeletionCandidates(
+			targetExistingNames[t],
+			sourceNames[t],
+			sourceInventory[t],
+			protectedSet,
+		);
+		// 删除决策（ADR-0037）：--purge 全量镜像 / profile 默认严格剪枝 / inline 默认不删
+		const { toDelete, toKeep } = computeDeletionDecision(
+			managed,
+			thirdParty,
+			opts.purge,
+			isInline,
+		);
+		const d = toDelete.length;
+		const k = toKeep.length;
 
 		const parts: string[] = [];
 		if (n > 0) parts.push(`${n} NEW`);
 		if (u > 0) parts.push(`${u} UPDATED`);
 		if (s > 0) parts.push(`${s} skipped`);
-		if (d > 0) parts.push(`${d} stale`);
+		if (d > 0) parts.push(`${d} removed`);
+		if (k > 0) parts.push(`${k} kept`);
 		const status = parts.length > 0 ? ` [${parts.join(' | ')}]` : ' [no changes]';
 
 		console.log(`    ${t}/${status}`);
 
-		if (d > 0) {
+		for (const c of toDelete) {
 			hasStale = true;
-			for (const c of candidates) {
-				let delPath: string;
-				if (t === 'extensions') {
-					const tsPath = join(absTarget, t, c + '.ts');
-					if (existsSync(tsPath)) {
-						delPath = tsPath;
-					} else {
-						delPath = join(absTarget, t, c);
-					}
-				} else if (t === 'themes') {
-					delPath = join(absTarget, t, c + '.json');
-				} else {
-					delPath = join(absTarget, t, c);
-				}
+			let delPath: string;
+			if (t === 'extensions') {
+				const tsPath = join(absTarget, t, c + '.ts');
+				delPath = existsSync(tsPath) ? tsPath : join(absTarget, t, c);
+			} else if (t === 'themes') {
+				delPath = join(absTarget, t, c + '.json');
+			} else {
+				delPath = join(absTarget, t, c);
+			}
 
-				if (opts.dryRun && opts.purge) {
-					// dry-run + purge：仅预览将被删除的项（不实际删除）
-					console.log(`      ⚰️  [would delete] ${delPath}`);
-					staleCandidates[t].push(c);
-				} else if (!opts.dryRun && opts.purge) {
-					// 显式 --purge（非 dry-run）：清空目标中不属于本次同步的资源（危险操作，WARN 记录）
-					try {
-						if (existsSync(delPath)) {
-							const isDir = statSync(delPath).isDirectory();
-							if (isDir) {
-								rmSync(delPath, { recursive: true, force: true });
-							} else {
-								rmSync(delPath, { force: true });
-							}
-							staleCandidates[t].push(c);
-							writeLog('WARN', `[PURGE DELETE] ${t}:${c} → ${delPath}`);
+			if (opts.dryRun) {
+				console.log(`      🗑️  [would delete] ${delPath}`);
+				removedItems[t].push(c);
+			} else {
+				try {
+					if (existsSync(delPath)) {
+						const isDir = statSync(delPath).isDirectory();
+						if (isDir) {
+							rmSync(delPath, { recursive: true, force: true });
+						} else {
+							rmSync(delPath, { force: true });
 						}
-					} catch (err) {
-						console.error(`      ❌ Failed to delete ${delPath}: ${err}`);
-						writeLog('ERROR', `Failed to delete ${delPath}: ${err}`);
+						removedItems[t].push(c);
+						writeLog('WARN', `[DELETE] ${t}:${c} → ${delPath}`);
 					}
-				} else {
-					// 默认安全模式（无 --purge）或 dry-run 无 purge：不删除，仅记录 stale 并 WARN 提示
-					staleCandidates[t].push(c);
+				} catch (err) {
+					console.error(`      ❌ Failed to delete ${delPath}: ${err}`);
+					writeLog('ERROR', `Failed to delete ${delPath}: ${err}`);
 				}
 			}
-			if (!opts.purge) {
-				console.warn(
-					`      ⚠️  ${t}: ${d} stale item(s) left in place (not deleted — use --purge to clean)`,
-				);
-				writeLog(
-					'WARN',
-					`Profile "${name}" has ${d} stale ${t} item(s) left in place (use --purge to delete)`,
-				);
+		}
+
+		if (k > 0) {
+			hasStale = true;
+			for (const c of toKeep) {
+				keptItems[t].push(c);
+			}
+			const why = isInline
+				? ' (inline mode does not delete by default)'
+				: ' (third-party asset, not managed by this repo)';
+			console.warn(`      ⚠️  ${t}: ${k} stale item(s) kept in place${why}`);
+			writeLog('WARN', `Profile "${name}" kept ${k} ${t} item(s) in place${why}`);
+		}
+
+		// 形态冲突残留清理（仅 extensions）：同名单文件 vs 目录，名字在源清单但形态
+		// 已过时。独立于 stale 剪枝的 purge/inline 决策——所有模式都修正，避免
+		// review.ts + review/ 并存导致 pi 注册两个同名扩展（review:1 / review:2）。
+		if (t === 'extensions') {
+			const conflicts = findExtensionFormConflicts(
+				join(absTarget, 'extensions'),
+				extSourceForm,
+			);
+			for (const sc of conflicts) {
+				hasStale = true;
+				if (opts.dryRun) {
+					console.log(`      🗑️  [would delete form-conflict] ${sc.path}`);
+				} else {
+					try {
+						if (existsSync(sc.path)) {
+							if (statSync(sc.path).isDirectory()) {
+								rmSync(sc.path, { recursive: true, force: true });
+							} else {
+								rmSync(sc.path, { force: true });
+							}
+							formConflictsRemoved.push(sc.name);
+							writeLog('WARN', `[DELETE form-conflict] ${sc.name} → ${sc.path}`);
+						}
+					} catch (err) {
+						console.error(`      ❌ Failed to delete form-conflict ${sc.path}: ${err}`);
+						writeLog('ERROR', `Failed to delete form-conflict ${sc.path}: ${err}`);
+					}
+				}
 			}
 		}
 	}
@@ -1520,10 +1619,10 @@ async function processProfile(
 
 	writeLog('INFO', `Profile "${name}" completed (${resources.length} resources, ${summary})`);
 
-	// 收集 stale 候选项（是否实际删除由 staleRemoved 标记；默认安全模式仅保留在目标中）
+	// 收集 stale 汇总：staleItems = removed ∪ kept（最终汇总表计数用）
 	const staleItems: Record<ResourceType, string[]> = {} as Record<ResourceType, string[]>;
 	for (const t of RESOURCE_TYPES) {
-		staleItems[t] = staleCandidates[t];
+		staleItems[t] = [...removedItems[t], ...keptItems[t]];
 	}
 
 	// Collect extension names for overlap analysis
@@ -1541,7 +1640,9 @@ async function processProfile(
 		newItems,
 		updatedItems,
 		staleItems,
-		staleRemoved: opts.purge && !opts.dryRun,
+		staleRemovedItems: removedItems,
+		staleKeptItems: keptItems,
+		formConflictsRemoved,
 		extensionNames,
 		npmCount,
 		npmSkippedCount,
@@ -1623,29 +1724,56 @@ function printFinalSummaryTable(
 		}
 	}
 
-	// Stale items summary
-	const allStale: Array<{ profile: string; type: string; item: string }> = [];
+	// Stale items summary — 分「已删除」与「保留」两类展示（ADR-0037）
+	const removedStale: Array<{ profile: string; type: string; item: string }> = [];
+	const keptStale: Array<{ profile: string; type: string; item: string }> = [];
 	for (const s of summaries) {
 		for (const t of ['extensions', 'skills', 'themes', 'prompts'] as const) {
-			for (const item of s.staleItems[t]) {
-				allStale.push({ profile: s.name, type: t, item });
+			for (const item of s.staleRemovedItems[t]) {
+				removedStale.push({ profile: s.name, type: t, item });
+			}
+			for (const item of s.staleKeptItems[t]) {
+				keptStale.push({ profile: s.name, type: t, item });
 			}
 		}
 	}
-	if (allStale.length > 0) {
+
+	if (removedStale.length > 0) {
 		console.log();
-		// 只有实际执行了删除（--purge 且非 dry-run）才标「removed」；默认安全模式 stale 项被保留
-		const anyRemoved = summaries.some((s) => s.staleRemoved);
-		console.log(
-			anyRemoved
-				? '  🗑️  Stale items removed:'
-				: '  ⚠️  Stale items kept (not deleted — use --purge to remove):',
-		);
-		for (const { profile, type, item } of allStale.slice(0, 10)) {
+		console.log('  🗑️  Stale items removed:');
+		for (const { profile, type, item } of removedStale.slice(0, 10)) {
 			console.log(`      ${profile}/${type}/${item}`);
 		}
-		if (allStale.length > 10) {
-			console.log(`      ... and ${allStale.length - 10} more`);
+		if (removedStale.length > 10) {
+			console.log(`      ... and ${removedStale.length - 10} more`);
+		}
+	}
+	if (keptStale.length > 0) {
+		console.log();
+		console.log('  ⚠️  Stale items kept (not deleted):');
+		for (const { profile, type, item } of keptStale.slice(0, 10)) {
+			console.log(`      ${profile}/${type}/${item}`);
+		}
+		if (keptStale.length > 10) {
+			console.log(`      ... and ${keptStale.length - 10} more`);
+		}
+	}
+
+	// 形态冲突残留删除（同名单文件 vs 目录）
+	const formConflicts: Array<{ profile: string; item: string }> = [];
+	for (const s of summaries) {
+		for (const item of s.formConflictsRemoved) {
+			formConflicts.push({ profile: s.name, item });
+		}
+	}
+	if (formConflicts.length > 0) {
+		console.log();
+		console.log('  🔄  Form conflicts removed (single-file vs directory residue):');
+		for (const { profile, item } of formConflicts.slice(0, 10)) {
+			console.log(`      ${profile}/${item}`);
+		}
+		if (formConflicts.length > 10) {
+			console.log(`      ... and ${formConflicts.length - 10} more`);
 		}
 	}
 
@@ -1778,6 +1906,39 @@ async function main(): Promise<void> {
 	for (const { name, profile } of profiles) {
 		const s = await processProfile(name, profile, opts);
 		summaries.push(s);
+	}
+
+	// ── 配置重置交互（ADR-0037） ──────────────────────────────
+	// 收集「被删除 / 被更新、且目标下已保存过 pi-config profile」的插件。
+	// dry-run 仅预览 [would reset]，不交互、不落盘；非 TTY 由 interactiveMultiSelect 自动降级为全保留。
+	const resetCandidates: ConfigResetCandidate[] = [];
+	for (const s of summaries) {
+		resetCandidates.push(
+			...collectConfigResetCandidates(
+				s.target,
+				s.staleRemovedItems.extensions,
+				s.updatedItems.extensions,
+			),
+		);
+	}
+	if (resetCandidates.length > 0) {
+		if (opts.dryRun) {
+			for (const c of resetCandidates) {
+				console.log(`  🔄  [would reset] ${c.plugin} (${c.reason})`);
+			}
+		} else {
+			const items = resetCandidates.map((c) => `${c.plugin} [${c.reason}]`);
+			const selected = await interactiveMultiSelect(
+				'配置重置：以下插件已被删除/更新。勾选要重置为默认 profile 的项（未勾选 = 保留现有配置）',
+				items,
+			);
+			const resetNames = resetConfigProfiles(resetCandidates, selected, writeLog);
+			if (resetNames.length > 0) {
+				console.log(`  🔄  Config profiles reset: ${resetNames.join(', ')}`);
+			} else {
+				console.log('  (config profiles kept — nothing reset)');
+			}
+		}
 	}
 
 	printFinalSummaryTable(summaries, descriptors(profiles));

@@ -192,3 +192,143 @@ test_it "--purge against ~/.pi/agent is refused by safety guard" <<'TEST'
   [[ "$output" == *"Refusing --purge"* ]] || { echo "Missing refusal message"; exit 1; }
   echo "Verified: --purge against ~/.pi/agent refused"
 TEST
+
+# ── 用例 19：--purge 保留 PROTECTED_EXTERNAL（herdr-agent-state） ──
+test_it "--purge preserves PROTECTED_EXTERNAL (herdr-agent-state)" <<'TEST'
+  clean_test_dir
+  # 预置第三方集成（herdr 安装的扩展，非本仓库 sync 源），--purge 应跳过删除
+  mkdir -p "$ROOT_DIR/.pi/test/extensions/herdr-agent-state"
+  echo 'herdr' > "$ROOT_DIR/.pi/test/extensions/herdr-agent-state/index.ts"
+  npx tsx "$SYNC_SCRIPT" --ext pi-logger --target ./.pi/test --purge 2>&1
+  [[ -f "$ROOT_DIR/.pi/test/extensions/herdr-agent-state/index.ts" ]] || { echo "PROTECTED_EXTERNAL herdr-agent-state deleted by --purge"; exit 1; }
+  [[ -f "$ROOT_DIR/.pi/test/extensions/pi-logger/index.ts" ]] || { echo "synced resource missing after purge"; exit 1; }
+  echo "Verified: --purge preserved herdr-agent-state"
+  clean_test_dir
+TEST
+
+# ── 用例 20：profile 模式默认剪枝受管资产（无需 --purge，ADR-0037） ──
+test_it "profile mode prunes managed assets by default (no --purge)" <<'TEST'
+  tmp_root=$(mktemp -d)
+  target="$tmp_root/target"
+  cfg="$tmp_root/sync-profiles.yaml"
+  mkdir -p "$target/extensions/edit"
+  echo 'managed' > "$target/extensions/edit/index.ts"
+  mkdir -p "$target/extensions/third-party-ext"
+  echo 'third' > "$target/extensions/third-party-ext/index.ts"
+
+  cat > "$cfg" <<YAML
+profiles:
+  prune-test:
+    target: '$target'
+    extensions: ['quit']
+    skills: []
+    themes: []
+    prompts: []
+YAML
+
+  "$ROOT_DIR/node_modules/.bin/tsx" "$SYNC_SCRIPT" --config "$cfg" --profile prune-test 2>&1
+  # edit 是本仓库源清单里的受管资产（extensions/accuracy/edit），但不在 prune-test 清单 → 默认剪枝删除
+  [[ ! -e "$target/extensions/edit" ]] || { echo "managed asset 'edit' survived default prune"; exit 1; }
+  # third-party-ext 不在源清单 → 默认保留
+  [[ -f "$target/extensions/third-party-ext/index.ts" ]] || { echo "third-party asset deleted by default"; exit 1; }
+  # quit 应正常同步
+  [[ -f "$target/extensions/quit.ts" ]] || { echo "quit.ts not synced"; exit 1; }
+  echo "Verified: managed pruned, third-party kept, in-profile synced"
+  rm -rf "$tmp_root"
+TEST
+
+# ── 用例 21：--purge 全量镜像删除第三方资产（profile 模式，ADR-0037） ──
+test_it "--purge deletes third-party assets too (profile mode)" <<'TEST'
+  tmp_root=$(mktemp -d)
+  target="$tmp_root/target"
+  cfg="$tmp_root/sync-profiles.yaml"
+  mkdir -p "$target/extensions/edit"
+  echo 'managed' > "$target/extensions/edit/index.ts"
+  mkdir -p "$target/extensions/third-party-ext"
+  echo 'third' > "$target/extensions/third-party-ext/index.ts"
+
+  cat > "$cfg" <<YAML
+profiles:
+  prune-test:
+    target: '$target'
+    extensions: ['quit']
+    skills: []
+    themes: []
+    prompts: []
+YAML
+
+  "$ROOT_DIR/node_modules/.bin/tsx" "$SYNC_SCRIPT" --config "$cfg" --profile prune-test --purge 2>&1
+  [[ ! -e "$target/extensions/edit" ]] || { echo "managed asset 'edit' survived --purge"; exit 1; }
+  [[ ! -e "$target/extensions/third-party-ext" ]] || { echo "third-party asset survived --purge"; exit 1; }
+  [[ -f "$target/extensions/quit.ts" ]] || { echo "quit.ts not synced"; exit 1; }
+  echo "Verified: --purge removed managed + third-party"
+  rm -rf "$tmp_root"
+TEST
+
+# ── 用例 22：非 TTY 配置重置降级为全保留（ADR-0037） ──
+test_it "non-TTY config reset falls back to keep-all" <<'TEST'
+  tmp_root=$(mktemp -d)
+  target="$tmp_root/target"
+  cfg="$tmp_root/sync-profiles.yaml"
+  mkdir -p "$target/extensions"
+  # 预置不同内容的 quit.ts 使 sync 判定为 UPDATE
+  echo 'old' > "$target/extensions/quit.ts"
+  # 预置 quit 的 pi-config profile
+  mkdir -p "$target/extensions-data/quit"
+  echo '{"k":"v"}' > "$target/extensions-data/quit/config.json"
+
+  cat > "$cfg" <<YAML
+profiles:
+  reset-test:
+    target: '$target'
+    extensions: ['quit']
+    skills: []
+    themes: []
+    prompts: []
+YAML
+
+  # stdin 从 /dev/null → 非 TTY → interactiveMultiSelect 降级为全保留
+  output=$("$ROOT_DIR/node_modules/.bin/tsx" "$SYNC_SCRIPT" --config "$cfg" --profile reset-test < /dev/null 2>&1)
+  [[ -f "$target/extensions-data/quit/config.json" ]] || { echo "config.json deleted in non-TTY"; exit 1; }
+  [[ "$output" == *"Non-interactive environment"* ]] || { echo "Missing non-interactive WARN"; exit 1; }
+  echo "Verified: non-TTY kept config.json"
+  rm -rf "$tmp_root"
+TEST
+
+# ── 用例 23：形态冲突残留清理（同名单文件 vs 目录，ADR-0037） ──
+test_it "profile mode removes form-conflict residue (single-file vs directory)" <<'TEST'
+  tmp_root=$(mktemp -d)
+  target="$tmp_root/target"
+  cfg="$tmp_root/sync-profiles.yaml"
+  mkdir -p "$target/extensions"
+  # 预置旧版单文件 review.ts（review 已重构为目录扩展，源里是目录 → 形态冲突残留）
+  echo 'old-single-file' > "$target/extensions/review.ts"
+
+  cat > "$cfg" <<YAML
+profiles:
+  form-test:
+    target: '$target'
+    extensions: ['review']
+    skills: []
+    themes: []
+    prompts: []
+YAML
+
+  "$ROOT_DIR/node_modules/.bin/tsx" "$SYNC_SCRIPT" --config "$cfg" --profile form-test 2>&1
+  [[ ! -e "$target/extensions/review.ts" ]] || { echo "review.ts residue survived form-conflict cleanup"; exit 1; }
+  [[ -f "$target/extensions/review/index.ts" ]] || { echo "review/ dir not synced"; exit 1; }
+  echo "Verified: review.ts residue removed, review/ dir synced"
+  rm -rf "$tmp_root"
+TEST
+
+# ── 用例 24：内联模式同样清理形态冲突残留 ──
+test_it "inline mode also removes form-conflict residue" <<'TEST'
+  clean_test_dir
+  mkdir -p "$ROOT_DIR/.pi/test/extensions"
+  echo 'old' > "$ROOT_DIR/.pi/test/extensions/review.ts"
+  "$ROOT_DIR/node_modules/.bin/tsx" "$SYNC_SCRIPT" --ext review --target ./.pi/test 2>&1
+  [[ ! -e "$ROOT_DIR/.pi/test/extensions/review.ts" ]] || { echo "review.ts residue survived inline form-conflict cleanup"; exit 1; }
+  [[ -f "$ROOT_DIR/.pi/test/extensions/review/index.ts" ]] || { echo "review/ dir not synced (inline)"; exit 1; }
+  echo "Verified: inline form-conflict cleanup"
+  clean_test_dir
+TEST

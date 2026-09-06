@@ -16,9 +16,5 @@
 		"skills": [
 			"./skills"
 		]
-	},
-	"dependencies": {
-		"@zenone/pi-logger": "file:../pi-logger",
-		"@zenone/pi-config": "file:../pi-config"
 	}
 }

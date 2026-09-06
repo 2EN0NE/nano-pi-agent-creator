@@ -103,7 +103,7 @@
 
 **目标**：所有 `ctx.ui.select` 出口统一绕过一个公共的 `selectPanel` 辅助函数，实现 `── 标题 ──` 嵌名 + 一致的键盘交互（`↑↓`/`Enter`/`Esc`/`/`）+ 滚动上限。
 
-**实现**：在 `src/tui/helpers.ts` 新增 `selectPanel()`（`ctx.ui.custom` + `Container` + `TitleBar` + `SelectList`），接口对齐 `ctx.ui.select`（`(title, options, opts?) => Promise<string | undefined>`）。8 个插件（mode-switcher 6、custom-compaction 5、cloud-sessions 3、test-analysis 2、review 2、btw 2、commands 1、git-checkpoint 1）全部替换。
+**实现**：在 `src/tui/helpers.ts` 新增 `selectPanel()`（`ctx.ui.custom` + `Container` + `TitleBar` + `SelectList`），接口对齐 `ctx.ui.select`（`(title, options, opts?) => Promise<string | undefined>`）。7 个插件（custom-compaction 5、cloud-sessions 3、test-analysis 2、review 2、btw 2、commands 1、git-checkpoint 1）全部替换。
 
 **独立 tsconfig 插件**（`_widget-wrangler`、`ci-watch`）如遇 `src/tui` 无法 import，内联等价实现，但**交互行为保持一致**。
 

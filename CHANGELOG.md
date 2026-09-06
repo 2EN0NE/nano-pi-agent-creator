@@ -2,7 +2,53 @@
 
 All notable changes to mitsupi are documented here.
 
-## Unreleased
+## v0.2.0 (2026-09-06)
+
+### 安全门禁（permission-gate）
+
+- 危险命令分级阻断门禁落地：按危险等级分级确认，历史/分析支持会话-项目-用户三级溯源（ADR-0025/0027）。
+- critical 级命令放行与手动策略跨 `/reload` 保留，30 天过期清理（ADR-0033）。
+- 豁免 `/dev/null` 等无害设备文件，收窄块设备写拦截。
+- 阻断确认树多行命令压平渲染，限制叶子窗口。
+- 命中原因解释体系（ADR-0025/0030 补充）：多命中明细逐条陈列（每条带来源标记与解释文案）；内置解释文案 `notes.ts`（dangerCommands 15 条 / permissionCommands 22 条 / 默认拦截模式 8 条）；`sudo rm -rf /etc` 等提权前缀读写语义落到真实命令，不再误判为读取系统目录。
+- 命令清单对象化（`CommandEntry{command, note}`、`PatternEntry.note`）+ 危险/权限命令与路径空间三个设置页（增删 + 备注编辑）。
+
+### preset（预设 / 模式）
+
+- 吸收 mode-switcher，升级三级来源（内置/用户/项目）与 master-detail 面板（ADR-0031/0032）。
+- 迁移为文件夹插件，支持 skills 白名单与 SettingsList 多选编辑。
+- 四维度单选 + 锁定守卫 + `/mode` 命令 + 会话持久化（ADR-0034/0035）；锁定守卫在 turn 边界兜底回滚并修复 footer 按键提示。
+
+### 上下文与压缩
+
+- `custom-compaction` 支持隐形 continue，修复状态栏刷新时机；`selectBestProfile` 优先 activeProfileId 使手动激活真正生效；引入触发选择范式（启用集 + 触发集 + 路由规则择一，ADR-0036）。
+- `smart-context` 压缩时保留 assistant 的 toolCall 块，避免 tool/tool_calls 失配导致的 400。
+
+### 新增扩展
+
+- `offline`：pi 插件体系离线打包 / 恢复迁移工具。
+- `bench`：插件离线配对基准评测体系（ADR-0026/0028）。
+- `custom-rename`：会话自动命名（自动标题 + `/auto-rename` 面板）。
+- `bash-timeout`：为内置 bash 工具注入默认 300s 超时兜底（ADR-0025）。
+- `widget-wrangler`：status 缺 `|` 前缀时中间人自动补齐。
+
+### 工程与架构
+
+- `sync`：profile 架构调整（meta→auto、12 个扩展升为 user-install、演示插件 DEMO 前缀）；新增受管资产剪枝、配置重置与形态冲突清理（ADR-0037）；纯库包内部模块不再被误判为扩展。
+- `worktree`：本地优先合并策略与失败面板，fetch 诊断异步化；clone/fork 会话改写源 cwd 路径并迁移为全局插件；修复「合并中」状态不消失。
+- `pi-state`：会话状态跨 `/reload` 持久化与 30 天过期清理（ADR-0033）。
+- `pi-lab`：接入 smart-context / tools / preset / mode 实验。
+- `review`：合并 review 与 test-analysis 为 profile 驱动的目录插件（ADR-0025），跨会话记住最近 profile。
+- `questionnaire`：支持多选，修复取消后 400。
+- `quit`：金额对齐内置 footer 口径，新增分支费用分析。
+- 新增 observability（观察分析）第八分类，迁移 session-analytics（ADR-0029/0030）。
+
+### 修复
+
+- `ci-watch`：修复会话替换崩溃与自动监控误报旧 run。
+- `pi-session-tree`：递归遍历改迭代，修复长会话树栈溢出。
+- `questionnaire`：多选「输入其他」后清空勾选集合，避免回访残留复选框。
+- `whimsical`：颜色改为 default / warning / error 三档高对比。
 
 ## v0.1.0
 

@@ -10,11 +10,24 @@
  * - Thompson Sampling 行为
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+
+// ── flush 写失败丢弃路径测试：mock node:fs/promises.appendFile ──
+// vi.mock 文件级生效；默认转发真实实现，仅在写失败用例内 mockRejectedValueOnce。
+vi.mock('node:fs/promises', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('node:fs/promises')>();
+	return {
+		...actual,
+		appendFile: vi.fn(actual.appendFile),
+	};
+});
+
+const appendSpy = vi.mocked(appendFile);
 
 // ── 辅助：在临时目录模拟 extensions-data 路径 ──
 
@@ -724,6 +737,75 @@ describe('pi-lab: ExperimentStorage', () => {
 		expect(loaded.getEvents()).toHaveLength(1);
 		expect(loaded.getEvents()[0].armId).toBe('a');
 	});
+
+	it('flush 在目录不存在时自建目录，不卡死且不丢事件（回归：首次使用 pi-lab）', async () => {
+		// 模拟首次使用：删除 setupTempHome 预建的 pi-lab 目录，使 appendFile 目标目录不存在。
+		// 修复前：appendFile 抛 ENOENT 被 catch，但 _flushedCount 不推进，
+		// flush() 的 while 循环永久重试 → 死循环（pi 进程卡死不退出）。
+		rmSync(resolve(tmpHome, '.pi', 'agent', 'extensions-data', 'pi-lab'), {
+			recursive: true,
+			force: true,
+		});
+
+		storage.appendEvent({ ts: 't1', armId: 'a', ctxKey: 'm1', metrics: { success: 1 } });
+		// flush() 必须在有限时间内返回（目录自动创建 + 事件落盘）
+		await storage.flush();
+
+		// 事件已落盘：重新加载可读到（证明目录被创建且内容写入成功）
+		const storage2 = new ExperimentStorage(expName);
+		expect(storage2.getEvents()).toHaveLength(1);
+		expect(storage2.getEvents()[0].metrics['success']).toBe(1);
+	});
+
+	it('reset 在目录不存在时自建目录', async () => {
+		rmSync(resolve(tmpHome, '.pi', 'agent', 'extensions-data', 'pi-lab'), {
+			recursive: true,
+			force: true,
+		});
+
+		// reset 前目录不存在：writeFile 会因 ENOENT 抛错。修复后 mkdirSync 自建目录。
+		await storage.reset();
+		expect(storage.getEvents()).toEqual([]);
+	});
+
+	it('flush 瞬时写失败时重试后成功落盘（有界重试）', async () => {
+		// mockRejectedValueOnce 仅让第一次 appendFile 失败，重试（第 2 次尝试）应成功。
+		appendSpy.mockRejectedValueOnce(new Error('transient EIO'));
+
+		storage.appendEvent({ ts: 't1', armId: 'a', ctxKey: 'm1', metrics: { success: 1 } });
+		await storage.flush();
+
+		// 重试成功：事件已落盘，重新加载可读到
+		const storage2 = new ExperimentStorage(expName);
+		expect(storage2.getEvents()).toHaveLength(1);
+		expect(storage2.getEvents()[0].ts).toBe('t1');
+	});
+
+	it('flush 持续写失败时丢弃本批事件而非死循环重试（回归：session_shutdown 卡死）', async () => {
+		// 三次 mockRejectedValueOnce 覆盖「首次 + MAX_FLUSH_RETRIES 次重试」全部失败，
+		// 耗尽重试后丢弃本批；其后 appendFile 恢复真实实现。
+		appendSpy
+			.mockRejectedValueOnce(new Error('disk full'))
+			.mockRejectedValueOnce(new Error('disk full'))
+			.mockRejectedValueOnce(new Error('disk full'));
+		storage.appendEvent({ ts: 't1', armId: 'a', ctxKey: 'm1', metrics: { success: 1 } });
+
+		// flush() 必须在有限时间内返回（修复前：_flushedCount 不推进 → while 死循环挂起）
+		await storage.flush();
+
+		// 内存态保留（不假清空，避免误判丢事件），但本批已被标记为"已处理"：
+		// 再次 flush 应立即返回（不重试旧事件），证明丢弃语义生效
+		expect(storage.getEvents().map((e) => e.ts)).toEqual(['t1']);
+		await storage.flush();
+
+		// 恢复成功路径：新事件正常落盘，被丢弃的旧事件（t1）不会写入磁盘
+		storage.appendEvent({ ts: 't2', armId: 'b', ctxKey: 'm1', metrics: { success: 1 } });
+		await storage.flush();
+
+		const storage2 = new ExperimentStorage(expName);
+		expect(storage2.getEvents()).toHaveLength(1);
+		expect(storage2.getEvents()[0].ts).toBe('t2');
+	});
 });
 
 describe('pi-lab: stable hash allocation', () => {
@@ -1086,7 +1168,7 @@ describe('pi-lab: ingestion sources', () => {
 	});
 
 	it('ingest 过滤不属于本实验的 arm 信号', async () => {
-		const exp = manager.registerExperiment({
+		manager.registerExperiment({
 			owner: 'test',
 			name: 'ingest-foreign-arm',
 			contextKey: () => 'global',

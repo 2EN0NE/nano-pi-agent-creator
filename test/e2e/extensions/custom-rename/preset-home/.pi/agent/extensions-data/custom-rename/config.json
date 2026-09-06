@@ -1,0 +1,6 @@
+{
+	"enabled": false,
+	"model": { "type": "ref", "ref": "mock-llm/mock-model-1" },
+	"maxTitleLength": 50,
+	"thinkingLevel": "off"
+}

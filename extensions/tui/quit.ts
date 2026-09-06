@@ -2,20 +2,26 @@
  * quit — 退出时显示会话总结卡片
  *
  * 在退出时（原生 /quit 命令或 Ctrl+C）显示会话总结卡片
- * （含交互摘要、性能、模型用量）。
+ * （含交互摘要、性能、模型用量、分支费用）。
  *
  * 不再注册 /quit 命令——Pi 原生已提供，避免冲突。
  *
  * 分类：tui（交互界面）
  *
- * ── 增量计算设计 ──
- * 不在 session_shutdown 时遍历全部条目，而是在每次 turn_end 时
- * 增量处理新增条目。退出时只需最后一次 sync 即可渲染，O(1) 完成。
+ * ── 计算设计 ──
+ * 交互摘要（工具调用/标签/分支计数）在 turn_end 时增量累加，退出时 O(1) 读取。
+ * 金额（模型分桶 + 各分支叶子费用）在退出时一次性全量遍历 getEntries/getTree，
+ * 口径对齐内置 footer（累加 usage.cost.total），O(entries)。
  */
 
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	SessionEntry,
+	SessionTreeNode,
+} from '@earendil-works/pi-coding-agent';
+import type { Usage } from '@earendil-works/pi-ai';
 import { createLogger } from '@zenone/pi-logger';
-import { getModel } from '@earendil-works/pi-ai/compat';
 import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 import { bottomBorder, topBorder } from '../../src/tui/helpers.js';
 
@@ -37,17 +43,23 @@ interface ModelUsageRecord {
 	outputTokens: number;
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
-	inputCost: number;
-	outputCost: number;
-	cacheReadCost: number;
-	cacheWriteCost: number;
-	totalCost: number;
+	totalCost: number; // usage.cost.total 累加（官方口径，对齐内置 footer）
 }
 
 interface BranchLabelInfo {
 	branchCount: number;
 	labelCount: number;
 	lastLabel: string | undefined;
+}
+
+/** 单条 root→leaf 分支路径的累计用量/费用。 */
+export interface BranchCostInfo {
+	leafId: string;
+	summary: string;
+	cost: number;
+	tokens: number;
+	entryCount: number;
+	isCurrent: boolean;
 }
 
 export interface SessionCardData {
@@ -61,6 +73,7 @@ export interface SessionCardData {
 	toolExecMs: number;
 	modelUsage: ModelUsageRecord[];
 	totalCost: number;
+	branchCosts: BranchCostInfo[];
 }
 
 // ─── 增量累加器 ─────────────────────────────────────────────────────────────────
@@ -73,9 +86,6 @@ class IncrementalCardAccumulator {
 	toolSuccess = 0;
 	toolFailed = 0;
 	toolTotal = 0;
-
-	// 模型用量：key = provider/model
-	modelMap = new Map<string, ModelUsageRecord>();
 
 	// Label 信息
 	labelCount = 0;
@@ -122,40 +132,6 @@ class IncrementalCardAccumulator {
 					if (msg.isError) this.toolFailed++;
 					else this.toolSuccess++;
 				}
-
-				// 模型用量
-				if (msg.role === 'assistant' && msg.provider && msg.model) {
-					const provider = msg.provider as string;
-					const model = msg.model as string;
-					const key = `${provider}/${model}`;
-					const usage = msg.usage as Record<string, unknown> | undefined;
-
-					let rec = this.modelMap.get(key);
-					if (!rec) {
-						rec = {
-							provider,
-							model,
-							requests: 0,
-							inputTokens: 0,
-							outputTokens: 0,
-							cacheReadTokens: 0,
-							cacheWriteTokens: 0,
-							inputCost: 0,
-							outputCost: 0,
-							cacheReadCost: 0,
-							cacheWriteCost: 0,
-							totalCost: 0,
-						};
-						this.modelMap.set(key, rec);
-					}
-					rec.requests++;
-					if (usage) {
-						rec.inputTokens += (usage.input as number) ?? 0;
-						rec.outputTokens += (usage.output as number) ?? 0;
-						rec.cacheReadTokens += (usage.cacheRead as number) ?? 0;
-						rec.cacheWriteTokens += (usage.cacheWrite as number) ?? 0;
-					}
-				}
 			}
 
 			// Label 条目
@@ -172,43 +148,12 @@ class IncrementalCardAccumulator {
 		this.toolSuccess = 0;
 		this.toolFailed = 0;
 		this.toolTotal = 0;
-		this.modelMap.clear();
 		this.labelCount = 0;
 		this.lastLabel = undefined;
 		this.processedIds.clear();
 		this.parentCount.clear();
 		this.branchCount = 0;
 		this.totalEntriesSeen = 0;
-	}
-
-	/** 计算各模型费用（仅在退出时执行一次） */
-	computeCosts(): { modelUsage: ModelUsageRecord[]; totalCost: number } {
-		let totalCost = 0;
-		const modelUsage: ModelUsageRecord[] = [];
-		for (const rec of this.modelMap.values()) {
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const modelDef = (getModel as any)(rec.provider, rec.model);
-			if (modelDef) {
-				const inputCost = (modelDef.cost.input / 1_000_000) * rec.inputTokens;
-				const outputCost = (modelDef.cost.output / 1_000_000) * rec.outputTokens;
-				const cacheReadCost = (modelDef.cost.cacheRead / 1_000_000) * rec.cacheReadTokens;
-				const cacheWriteCost =
-					(modelDef.cost.cacheWrite / 1_000_000) * rec.cacheWriteTokens;
-				rec.inputCost = inputCost;
-				rec.outputCost = outputCost;
-				rec.cacheReadCost = cacheReadCost;
-				rec.cacheWriteCost = cacheWriteCost;
-				rec.totalCost = inputCost + outputCost + cacheReadCost + cacheWriteCost;
-			} else {
-				log.debug('模型定价未找到，费用将显示为 0', {
-					provider: rec.provider,
-					model: rec.model,
-				});
-			}
-			totalCost += rec.totalCost;
-			modelUsage.push(rec);
-		}
-		return { modelUsage, totalCost };
 	}
 
 	/** 获取分支/Label 信息（纯内存读取，O(1)） */
@@ -277,21 +222,196 @@ class QuitTracker {
 	}
 }
 
-// ─── 从累加器构建卡片数据（O(costModels + entriesForBranchCount)，极快） ──────
+// ─── 用量/费用聚合（官方口径：累加 usage.cost.total） ──────────────────────────
+//
+// 对齐内置 footer（FooterComponent / usage-totals.js）：
+//   - assistant 消息按 `${provider}/${responseModel ?? model}` 分桶
+//   - toolResult / compaction / branch_summary 的 usage 归入 "Tools/summaries"
+//   - 费用一律累加 usage.cost.total，不再用静态目录价自行推算
+
+/** 返回条目可计费的 usage（对齐 footer 的四类来源），否则 undefined。 */
+function usageOfEntry(entry: SessionEntry): Usage | undefined {
+	if (entry.type === 'message') {
+		if (entry.message.role === 'assistant') return entry.message.usage;
+		if (entry.message.role === 'toolResult' && entry.message.usage) return entry.message.usage;
+		return undefined;
+	}
+	if (entry.type === 'compaction' || entry.type === 'branch_summary') return entry.usage;
+	return undefined;
+}
+
+export function aggregateModelUsage(entries: SessionEntry[]): {
+	modelUsage: ModelUsageRecord[];
+	totalCost: number;
+} {
+	const map = new Map<string, ModelUsageRecord>();
+	let totalCost = 0;
+
+	for (const entry of entries) {
+		let key: string | null = null;
+		let usage: Usage | undefined;
+
+		if (entry.type === 'message' && entry.message.role === 'assistant') {
+			key = `${entry.message.provider}/${entry.message.responseModel ?? entry.message.model}`;
+			usage = entry.message.usage;
+		} else if (
+			entry.type === 'message' &&
+			entry.message.role === 'toolResult' &&
+			entry.message.usage
+		) {
+			key = 'Tools/summaries';
+			usage = entry.message.usage;
+		} else if (
+			(entry.type === 'compaction' || entry.type === 'branch_summary') &&
+			entry.usage
+		) {
+			key = 'Tools/summaries';
+			usage = entry.usage;
+		}
+
+		if (!key || !usage) continue;
+
+		let rec = map.get(key);
+		if (!rec) {
+			rec = {
+				provider: '',
+				model: '',
+				requests: 0,
+				inputTokens: 0,
+				outputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				totalCost: 0,
+			};
+			map.set(key, rec);
+		}
+		rec.requests++;
+		rec.inputTokens += usage.input;
+		rec.outputTokens += usage.output;
+		rec.cacheReadTokens += usage.cacheRead;
+		rec.cacheWriteTokens += usage.cacheWrite;
+		rec.totalCost += usage.cost.total;
+		totalCost += usage.cost.total;
+	}
+
+	const modelUsage: ModelUsageRecord[] = [];
+	for (const [key, rec] of map.entries()) {
+		const slash = key.indexOf('/');
+		rec.provider = slash === -1 ? key : key.slice(0, slash);
+		rec.model = slash === -1 ? '' : key.slice(slash + 1);
+		modelUsage.push(rec);
+	}
+	modelUsage.sort((a, b) => b.totalCost - a.totalCost);
+
+	return { modelUsage, totalCost };
+}
+
+// ─── 分支费用聚合 ────────────────────────────────────────────────────────────
+//
+// getTree() 返回完整会话树。每条 root→leaf 路径是一条分支；共享祖先会
+// 计入其下每一条分支（与 pi-branch-cost-footer 的语义一致）。
+
+function collectLeafPaths(
+	nodes: SessionTreeNode[],
+	path: SessionEntry[],
+	out: Array<{ path: SessionEntry[]; leafId: string }>,
+): void {
+	for (const node of nodes) {
+		const nextPath = [...path, node.entry];
+		if (node.children.length === 0) {
+			out.push({ path: nextPath, leafId: node.entry.id });
+		} else {
+			collectLeafPaths(node.children, nextPath, out);
+		}
+	}
+}
+
+/** 用路径上最后一条用户消息作为分支摘要，否则退回叶子条目类型+id。 */
+function summarizeBranch(path: SessionEntry[]): string {
+	for (let i = path.length - 1; i >= 0; i--) {
+		const entry = path[i];
+		if (entry.type !== 'message' || entry.message.role !== 'user') continue;
+
+		const content = entry.message.content;
+		let text = '';
+		if (typeof content === 'string') {
+			text = content;
+		} else if (Array.isArray(content)) {
+			text = content
+				.map((c) => {
+					if (typeof c === 'string') return c;
+					return (c as { text?: string }).text ?? '';
+				})
+				.join(' ');
+		}
+		text = text.trim().replace(/\s+/g, ' ');
+		if (!text) continue;
+		return text.length > 28 ? text.slice(0, 28) + '…' : text;
+	}
+
+	const leaf = path[path.length - 1];
+	return `${leaf.type}@${leaf.id.slice(0, 8)}`;
+}
+
+export function aggregateBranchCosts(
+	tree: SessionTreeNode[],
+	currentLeafId: string | null,
+): BranchCostInfo[] {
+	const paths: Array<{ path: SessionEntry[]; leafId: string }> = [];
+	collectLeafPaths(tree, [], paths);
+
+	const result: BranchCostInfo[] = paths.map(({ path, leafId }) => {
+		let cost = 0;
+		let tokens = 0;
+		for (const entry of path) {
+			const usage = usageOfEntry(entry);
+			if (!usage) continue;
+			cost += usage.cost.total;
+			tokens += usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+		}
+		return {
+			leafId,
+			summary: summarizeBranch(path),
+			cost,
+			tokens,
+			entryCount: path.length,
+			isCurrent: leafId === currentLeafId,
+		};
+	});
+
+	// 当前分支排最前，其余按费用降序
+	result.sort((a, b) => {
+		if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+		return b.cost - a.cost;
+	});
+	return result;
+}
+
+// ─── 从累加器构建卡片数据（金额部分退出时一次性全量遍历，O(entries)） ──────
 
 function buildCardData(
 	ctx: ExtensionContext,
 	tracker: QuitTracker,
 	accumulator: IncrementalCardAccumulator,
 ): SessionCardData {
-	// 计算费用（O(uniqueModels)，通常 1~3）
-	const { modelUsage, totalCost } = accumulator.computeCosts();
+	const sessionManager = ctx.sessionManager;
+
+	// 总金额 + 模型分桶：官方口径，全量条目（对齐 footer 的 getEntries）
+	const { modelUsage, totalCost } = aggregateModelUsage(
+		sessionManager.getEntries() as SessionEntry[],
+	);
+
+	// 各分支费用：树遍历每条 root→leaf 路径
+	const branchCosts = aggregateBranchCosts(
+		sessionManager.getTree() as SessionTreeNode[],
+		sessionManager.getLeafId(),
+	);
 
 	// 分支/Label 信息：纯内存读取（O(1)，已在增量中追踪）
 	const branchLabels = accumulator.getBranchLabelInfo();
 
-	const sessionId = ctx.sessionManager.getSessionId() ?? 'unknown';
-	const sessionFile = ctx.sessionManager.getSessionFile() ?? '';
+	const sessionId = sessionManager.getSessionId() ?? 'unknown';
+	const sessionFile = sessionManager.getSessionFile() ?? '';
 
 	return {
 		sessionId,
@@ -308,6 +428,7 @@ function buildCardData(
 		toolExecMs: tracker.toolExecMs,
 		modelUsage,
 		totalCost,
+		branchCosts,
 	};
 }
 
@@ -451,11 +572,30 @@ export function renderCard(
 			const rowStr = `    ${fg('text', displayName)}${' '.repeat(Math.max(1, 26 - visibleWidth(displayName)))}${fg('text', reqStr)}  ${fg('text', inStr)}  ${fg('text', outStr)}  ${fg('text', costStr)}`;
 			lines.push(row(rowStr));
 		}
-
-		lines.push(
-			row(`    ${mutedColor('总计费用')}:  ${successColor(formatCost(data.totalCost))}`),
-		);
 	}
+
+	// 分支费用（各分支金额 + 总计）
+	lines.push(sepLine);
+	lines.push(row('  ' + accentColor(bold('分支费用 Branch Costs'))));
+	if (data.branchCosts.length === 0) {
+		lines.push(row('    ' + mutedColor('(无分支数据)')));
+	} else {
+		for (let i = 0; i < data.branchCosts.length; i++) {
+			const bc = data.branchCosts[i];
+			const marker = bc.isCurrent ? accentColor('>') : ' ';
+			const curTag = bc.isCurrent ? ` ${successColor('当前')}` : '';
+			const head = `    ${marker} ${mutedColor('分支')} ${fg('text', String(i + 1))}${curTag}:`;
+			const body = `${successColor(formatCost(bc.cost))} · ${fg('text', formatTokens(bc.tokens))} ${mutedColor('tokens ·')} ${fg('text', String(bc.entryCount))} ${mutedColor('条')}`;
+			lines.push(row(head + ' ' + body));
+
+			if (bc.summary) {
+				const summary =
+					visibleWidth(bc.summary) > 22 ? bc.summary.slice(0, 21) + '…' : bc.summary;
+				lines.push(row(`      ${mutedColor('→')} ${fg('text', summary)}`));
+			}
+		}
+	}
+	lines.push(row(`    ${mutedColor('总计费用')}:  ${successColor(formatCost(data.totalCost))}`));
 
 	// 底边框（纯横线）
 	lines.push(indent + borderColor(bottomBorder(W)));
@@ -515,11 +655,10 @@ export default function (pi: ExtensionAPI): void {
 		syncIncremental(ctx);
 
 		log.debug(
-			'Incremental sync: toolSuccess=%d toolFailed=%d toolTotal=%d models=%d labels=%d seen=%d',
+			'Incremental sync: toolSuccess=%d toolFailed=%d toolTotal=%d labels=%d seen=%d',
 			accumulator.toolSuccess,
 			accumulator.toolFailed,
 			accumulator.toolTotal,
-			accumulator.modelMap.size,
 			accumulator.labelCount,
 			accumulator.totalEntriesSeen,
 		);

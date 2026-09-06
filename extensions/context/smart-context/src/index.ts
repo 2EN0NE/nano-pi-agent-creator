@@ -2,7 +2,8 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { createLogger } from '@zenone/pi-logger';
 import { createRouter } from './router.js';
-import { createCompressor } from './compression/pipeline.js';
+import { createCompressor, isWindowTight } from './compression/pipeline.js';
+import { initExperiments, runCompressionWithExperiment, recordRecoverContext } from './lab.js';
 import { createContentStore } from './compression/store.js';
 import { createSummarizer } from './compression/haiku-summarize.js';
 import { getDiagnostics } from './host-ai.js';
@@ -24,6 +25,11 @@ export default function (pi: ExtensionAPI) {
 
 	let enabled = true;
 	const debug = process.env.SMART_CONTEXT_DEBUG === '1';
+
+	// ── pi-lab 实验注册（compression-aggression，压缩维度 A）──
+	pi.on('session_start', async (_event, ctx) => {
+		initExperiments(ctx);
+	});
 
 	// ── 首次安装：输出默认配置文件，让用户可以看到完整策略并可编辑 ──
 	pi.on('session_start', async (_event, ctx) => {
@@ -121,21 +127,25 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on('context', async (event, ctx) => {
 		ctx.ui.setWorkingMessage('压缩中...');
-		const before = JSON.stringify(event.messages).length;
 		try {
-			const messages = await compressor.compress(event.messages as any[], ctx);
-			const after = JSON.stringify(messages).length;
-			const saved = before - after;
-			if (saved > 0) {
+			const windowTight = isWindowTight(ctx);
+			const run = await runCompressionWithExperiment(
+				compressor,
+				event.messages as unknown[],
+				ctx,
+				windowTight,
+			);
+			if (run.saved > 0) {
 				log.info(
-					'Context compressed | before=%s after=%s saved=%s ratio=%s%%',
-					before,
-					after,
-					saved,
-					Math.round((saved / before) * 100),
+					'Context compressed | arm=%s before=%s after=%s saved=%s ratio=%s%%',
+					run.armId,
+					run.before,
+					run.after,
+					run.saved,
+					Math.round((run.saved / run.before) * 100),
 				);
 			}
-			return { messages } as any;
+			return { messages: run.messages } as any;
 		} finally {
 			ctx.ui.setWorkingMessage();
 		}
@@ -182,6 +192,8 @@ export default function (pi: ExtensionAPI) {
 					details: {},
 				};
 			}
+			// 上报恢复信号（压缩过度 → agent 频繁恢复原文），异步不阻塞工具返回
+			void recordRecoverContext();
 			return {
 				content: [{ type: 'text', text: stored.original }],
 				details: { id: stored.id, chars: stored.chars, role: stored.role },

@@ -30,10 +30,22 @@ function makeData(): SessionCardData {
 				requests: 5,
 				inputTokens: 1000,
 				outputTokens: 500,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
 				totalCost: 0.5,
 			},
 		],
 		totalCost: 0.5,
+		branchCosts: [
+			{
+				leafId: 'leaf-1',
+				summary: '实现新功能',
+				cost: 0.5,
+				tokens: 1500,
+				entryCount: 8,
+				isCurrent: true,
+			},
+		],
 	} as SessionCardData;
 }
 

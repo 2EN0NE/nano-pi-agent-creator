@@ -110,6 +110,20 @@ cat test/results/$LATEST/extensions/pi-logger/summary.md
 
 `CI=true` 时自动注入 `mock-llm` 扩展，无需真实 API Key。所有测试可直接在 CI 中运行。
 
+### 压缩/继续类集成链路必须用 TUI 模式验证
+
+`ctx.compact()` 是 fire-and-forget：`--no-session` 下 pi 处理完 prompt 立即退出，
+摘要→onComplete 异步链来不及完成，只能验证「触发信号」而无法确定性验证
+压缩完成 + auto-continue。验证「压缩成功 → 后续动作（如 auto-continue）→ 新 turn」
+这类链路，必须用 `pi -a`（TUI 交互模式，pi 不退出）。
+
+同时注意：Pi 的 `prepareCompaction` 以 `keepRecentTokens=20000` 从后往前累积找
+切分点，单条超长 user 消息会把切分点顶到第一条消息（报 "Nothing to compact"）。
+需多条 user 消息（每条 <20000 tokens，累积 >20000）才能让切分点落在中间。
+
+完整用例参考 `test/e2e/extensions/custom-compaction/tui-expect.smoke.test.sh`
+的「invisible continue full chain」。
+
 ## 编写测试
 
 ### Vitest 测试

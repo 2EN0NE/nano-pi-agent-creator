@@ -10,6 +10,7 @@ import {
 	Container,
 	type SettingItem,
 	SettingsList,
+	stripTerminalSequences,
 	Text,
 	truncateToWidth,
 	visibleWidth,
@@ -37,6 +38,19 @@ function titleBar(title: string, color: (s: string) => string): Component {
 		},
 		invalidate() {},
 	};
+}
+
+/**
+ * 规范化状态栏文本前缀：确保以半角竖线 `|` 开头（tui-design-principles §2.1 格式约定）。
+ *
+ * - 已带 ANSI 序列（颜色 SGR / OSC 超链接等）时，先剥离序列再判断开头是否为 `|`——颜色码
+ *   通常位于字符串最前，`text.startsWith('|')` 会把所有带色文本误判为「缺竖线」；
+ * - 缺 `|` 时补在最前，颜色序列保持在后段（`|` 作为分隔符不着色）；
+ * - 空串是「清除/隐藏」信号，原样返回，不补竖线。
+ */
+export function ensureStatusPrefix(text: string): string {
+	if (text === '' || stripTerminalSequences(text).startsWith('|')) return text;
+	return '|' + text;
 }
 
 const CUSTOM_TYPE = 'widget-wrangler-config';
@@ -221,6 +235,11 @@ export default function widgetWranglerExtension(pi: ExtensionAPI) {
 				originalSetStatus?.(key, undefined);
 				return;
 			}
+			const normalized = ensureStatusPrefix(text);
+			if (normalized !== text) {
+				log.warn('status 缺少 "|" 前缀，已自动补齐', { key });
+			}
+			text = normalized;
 			const existing = statusRegistry.get(key);
 			statusRegistry.set(key, { text, rendered: existing?.rendered ?? false });
 			applyStatus(key);

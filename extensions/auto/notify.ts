@@ -11,17 +11,35 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Markdown, type MarkdownTheme } from '@earendil-works/pi-tui';
 import { createLogger } from '@zenone/pi-logger';
+import { execFile } from 'node:child_process';
 
 const log = createLogger('notify');
 
 log.debug('Extension loaded');
 
+/** macOS 原生桌面通知（osascript，异步不阻塞主流程） */
+const notifyOsascript = (title: string, body: string): void => {
+	if (process.platform !== 'darwin') return;
+	// 除反斜杠与双引号外，还须中和换行——换行会被 osascript 当作语句分隔符，
+	// body/title 来源半可信（命令文本/agent 输出），可注入额外 AppleScript 语句。
+	const esc = (s: string) =>
+		s
+			.replace(/\\/g, '\\\\')
+			.replace(/"/g, '\\"')
+			.replace(/[\r\n]+/g, ' ');
+	const script = `display notification "${esc(body)}" with title "${esc(title)}"`;
+	execFile('osascript', ['-e', script], () => {
+		// 忽略结果（通知失败不影响主流程）
+	});
+};
+
 /**
- * Send a desktop notification via OSC 777 escape sequence.
+ * Send a desktop notification via OSC 777 escape sequence + macOS osascript.
  */
 const notify = (title: string, body: string): void => {
 	// OSC 777 format: ESC ] 777 ; notify ; title ; body BEL
 	process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);
+	notifyOsascript(title, body);
 };
 
 const isTextPart = (part: unknown): part is { type: 'text'; text: string } =>
@@ -97,6 +115,12 @@ const formatNotification = (text: string | null): { title: string; body: string 
 };
 
 export default function (pi: ExtensionAPI) {
+	// SAFETY: globalThis 上挂载通知 API 弱桥接，运行时由本模块唯一写入
+	const notifyGlobal = globalThis as unknown as {
+		__notifyApi?: { notify: typeof notify };
+	};
+	notifyGlobal.__notifyApi = { notify };
+
 	pi.on('agent_end', async (event) => {
 		log.debug('event: agent_end');
 		const lastText = extractLastAssistantText(event.messages ?? []);

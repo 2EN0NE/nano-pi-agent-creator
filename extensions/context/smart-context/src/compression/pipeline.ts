@@ -23,7 +23,7 @@ interface ContentBlock {
 	[key: string]: any;
 }
 
-interface AggressionProfile {
+export interface AggressionProfile {
 	protectedTurns: number;
 	minSavingsRatio: number;
 	summarizeMinChars: number;
@@ -56,7 +56,8 @@ const AGGRESSIVE_PROFILE: AggressionProfile = {
 const SMALL_CONTEXT_WINDOW = 200_000;
 const HIGH_USAGE_RATIO = 0.6;
 
-function resolveProfile(ctx: any): AggressionProfile {
+/** 窗口是否紧张（安全阀条件）：小窗口模型或高用量 → 必须激进压缩 */
+export function isWindowTight(ctx: any): boolean {
 	const model = ctx.getModel?.();
 	const contextWindow: number | undefined = model?.contextWindow;
 	const usage = ctx.getContextUsage?.();
@@ -73,7 +74,16 @@ function resolveProfile(ctx: any): AggressionProfile {
 		contextWindow > 0 &&
 		usedTokens / contextWindow >= HIGH_USAGE_RATIO;
 
-	return smallWindow || highUsage ? AGGRESSIVE_PROFILE : BALANCED_PROFILE;
+	return smallWindow || highUsage;
+}
+
+/** 按实验臂取压缩 profile（compression-aggression 实验的臂映射） */
+export function profileForArm(armId: 'balanced' | 'aggressive'): AggressionProfile {
+	return armId === 'aggressive' ? AGGRESSIVE_PROFILE : BALANCED_PROFILE;
+}
+
+function resolveProfile(ctx: any): AggressionProfile {
+	return isWindowTight(ctx) ? AGGRESSIVE_PROFILE : BALANCED_PROFILE;
 }
 
 interface CompressorDeps {
@@ -92,7 +102,11 @@ export function createCompressor(deps: CompressorDeps) {
 		stableCompressions: new Map<string, string>(),
 	};
 
-	async function compress(messages: Message[], ctx: any): Promise<Message[]> {
+	async function compress(
+		messages: Message[],
+		ctx: any,
+		profileOverride?: AggressionProfile,
+	): Promise<Message[]> {
 		state.turnsProcessed++;
 		if (messages.length < 4) {
 			log.debug('Skipped (too few messages)', { count: messages.length });
@@ -105,7 +119,7 @@ export function createCompressor(deps: CompressorDeps) {
 			return messages;
 		}
 
-		const profile = resolveProfile(ctx);
+		const profile = profileOverride ?? resolveProfile(ctx);
 		const cacheActive = detectActiveCache(ctx);
 		const query = extractText(messages[lastUserIdx]);
 		const protectedBoundary = findProtectedBoundary(messages, profile.protectedTurns);
@@ -403,9 +417,14 @@ function replaceText(msg: Message, text: string): Message {
 	if (typeof msg.content === 'string') {
 		return { ...msg, content: text };
 	}
+	// 保留非 text 块（thinking / toolCall / image）。
+	// 若整体覆盖为单个 text 块，会丢掉 assistant 的 toolCall 块，
+	// 使后续 toolResult 失去配对的 tool_calls，provider 报 400：
+	// "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
+	const nonText = msg.content.filter((block: any) => block.type !== 'text');
 	return {
 		...msg,
-		content: [{ type: 'text', text }],
+		content: [{ type: 'text', text }, ...nonText],
 	};
 }
 

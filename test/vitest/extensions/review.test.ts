@@ -1,5 +1,5 @@
 /**
- * review / test-analysis — 模式选择逻辑回归测试
+ * review（profile 驱动）— 模式选择逻辑回归测试
  *
  * ## Bug 记录
  *
@@ -11,41 +11,36 @@
  *   useFreshSession = choice === 'Empty branch';  // ← 永远为 false
  *                    // '新分支' !== 'Empty branch'
  *
- * 此问题同时存在于 review.ts 和 test-analysis.ts:
- *   extensions/verification/review.ts:2046
- *   extensions/verification/test-analysis.ts:2213
+ * 合并 review + test-analysis 为 profile 驱动插件后（ADR-0025），
+ * 两个文件收敛为 extensions/verification/review/index.ts，
+ * 模式选择逻辑只剩一份，但回归防护仍需保留。
  *
  * ## 测试设计
  *
- * 由于比较逻辑嵌在 ctx.ui.select() + registerCommand handler 闭包内,
+ * 由于比较逻辑嵌在 registerCommand handler 闭包内,
  * 无法直接导出单元测试。采用源码扫描方法直接验证:
  *
  *   - 读取源文件, 提取 select 选项数组和紧随的 choice === 'X' 比较值
  *   - 断言两者一致
  *
- * ## 红线体系
- *
- *   修复前 → 修复后:
- *   - verification/empty-branch-exists PASS → FAIL   (确认残留还在)
- *   - verification/empty-branch-absent FAIL → PASS     (确认已移除)
- *   - select-comparison-consistent     FAIL → PASS     (select 与比较值匹配)
- *
- * @see extensions/verification/review.ts:2035-2046
- * @see extensions/verification/test-analysis.ts:2202-2213
+ * @see extensions/verification/review/index.ts
  */
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { getLatestReviewSettings } from '../../../extensions/verification/review/index.js';
+import type { CustomEntry } from '@earendil-works/pi-coding-agent';
 
 // ============================================================================
 // 辅助: 从源文件中提取 select 选项与 choice === 'X' 的配对
 // ============================================================================
 
-const SOURCE_DIR = resolve(__dirname, '../../../extensions/verification');
+const SOURCE_DIR = resolve(__dirname, '../../../extensions/verification/review');
+const SOURCE_FILE = resolve(SOURCE_DIR, 'index.ts');
 
-function readSource(file: string): string {
-	return readFileSync(resolve(SOURCE_DIR, file), 'utf-8');
+function readSource(): string {
+	return readFileSync(SOURCE_FILE, 'utf-8');
 }
 
 /**
@@ -60,11 +55,9 @@ function extractSelectPair(
 ): { options: string[]; comparisonValue: string } | null {
 	const lines = source.split('\n');
 
-	// 找到包含 select 标题的行
 	const selectIdx = lines.findIndex((l) => l.includes(selectTitlePattern));
 	if (selectIdx < 0) return null;
 
-	// 从 select 行提取选项数组 [...]
 	const selectLine = lines[selectIdx];
 	const bracketMatch = selectLine.match(/\[([^\]]+)\]/);
 	if (!bracketMatch) return null;
@@ -74,7 +67,6 @@ function extractSelectPair(
 		.map((s) => s.trim().replace(/^['"]|['"]$/g, ''))
 		.filter(Boolean);
 
-	// 在后 20 行内找 choice === 'X'
 	for (let i = selectIdx; i < Math.min(selectIdx + 50, lines.length); i++) {
 		const line = lines[i];
 		const match = line.match(/choice\s*===\s*'([^']+)'/);
@@ -87,43 +79,24 @@ function extractSelectPair(
 }
 
 // ============================================================================
-// 测试: review.ts
+// 测试: review/index.ts 模式选择
 // ============================================================================
 
-describe('review.ts 模式选择', () => {
-	const source = readSource('review.ts');
-	const pair = extractSelectPair(source, "'Review Mode:'");
+describe('review/index.ts 模式选择', () => {
+	const source = readSource();
 
-	it('找到了模式选择调用', () => {
+	it('找到了 Review Mode 选择调用', () => {
+		const pair = extractSelectPair(source, "'Review Mode:'");
 		expect(pair).not.toBeNull();
 	});
 
-	it('select 选项为 ["新分支", "当前会话"]', () => {
+	it('Review Mode select 选项为 ["新分支", "当前会话"]', () => {
+		const pair = extractSelectPair(source, "'Review Mode:'");
 		expect(pair?.options).toEqual(['新分支', '当前会话']);
 	});
 
-	it('comparisonValue 是 "新分支" (与 select 选项一致)', () => {
-		expect(pair?.comparisonValue).toBe('新分支');
-	});
-});
-
-// ============================================================================
-// 测试: test-analysis.ts
-// ============================================================================
-
-describe('test-analysis.ts 模式选择', () => {
-	const source = readSource('test-analysis.ts');
-	const pair = extractSelectPair(source, "'Analysis Mode:'");
-
-	it('找到了模式选择调用', () => {
-		expect(pair).not.toBeNull();
-	});
-
-	it('select 选项为 ["新分支", "当前会话"]', () => {
-		expect(pair?.options).toEqual(['新分支', '当前会话']);
-	});
-
-	it('comparisonValue 是 "新分支" (与 select 选项一致)', () => {
+	it('Review Mode comparisonValue 是 "新分支" (与 select 选项一致)', () => {
+		const pair = extractSelectPair(source, "'Review Mode:'");
 		expect(pair?.comparisonValue).toBe('新分支');
 	});
 });
@@ -170,11 +143,10 @@ describe('整体验证', () => {
 			.filter(Boolean);
 	}
 
-	it('review.ts 的所有 select 调用都有匹配的 choice 比较', () => {
-		const source = readSource('review.ts');
+	it('index.ts 的所有 select 调用都有匹配的 choice 比较', () => {
+		const source = readSource();
 		const lines = source.split('\n');
 
-		// 找所有 select 调用
 		for (let i = 0; i < lines.length; i++) {
 			if (
 				!lines[i].includes('selectPanel(ctx, ') &&
@@ -190,7 +162,6 @@ describe('整体验证', () => {
 			// 跳过动作选择器（无 choice === 'X' 精确比较的行）
 			if (!hasChoiceComparison(lines, i)) continue;
 
-			// 找 choice === 'X' 比较
 			let hasMatch = false;
 			for (let j = i; j < Math.min(i + 20, lines.length); j++) {
 				const m = lines[j].match(/choice\s*===\s*'([^']+)'/);
@@ -203,36 +174,43 @@ describe('整体验证', () => {
 			expect(hasMatch).toBe(true);
 		}
 	});
+});
 
-	it('test-analysis.ts 的所有 select 调用都有匹配的 choice 比较', () => {
-		const source = readSource('test-analysis.ts');
-		const lines = source.split('\n');
+// ============================================================================
+// lastProfileId 持久化回归测试（修复：跨会话记住最近使用的 profile）
+// 行为级测试：getLatestReviewSettings 必须取「最新」一条 review-settings 条目
+// ============================================================================
 
-		for (let i = 0; i < lines.length; i++) {
-			if (
-				!lines[i].includes('selectPanel(ctx, ') &&
-				!lines[i].includes('ctx.ui.select(') &&
-				!lines[i].includes('ctx.ui.picker(') &&
-				!lines[i].includes('ctx.ui.menu(')
-			)
-				continue;
+function makeCustomEntry(customType: string, data: unknown, id: string): CustomEntry<unknown> {
+	return {
+		type: 'custom',
+		customType,
+		data,
+		id,
+		parentId: null,
+		timestamp: '2026-01-01T00:00:00.000Z',
+	};
+}
 
-			const options = extractOptions(lines, i);
-			if (!options) continue;
+describe('getLatestReviewSettings（lastProfileId 持久化回归）', () => {
+	it('多条 review-settings 条目时返回最新一条（反向遍历，而非最旧）', () => {
+		const entries = [
+			makeCustomEntry('review-settings', { lastProfileId: 'code-review' }, 'e1'),
+			makeCustomEntry('review-settings', { lastProfileId: 'test-analysis' }, 'e2'),
+		];
+		expect(getLatestReviewSettings(entries)?.lastProfileId).toBe('test-analysis');
+	});
 
-			// 跳过动作选择器（无 choice === 'X' 精确比较的行）
-			if (!hasChoiceComparison(lines, i)) continue;
+	it('跳过不匹配 customType 的条目，仍取最新一条 review-settings', () => {
+		const entries = [
+			makeCustomEntry('review-settings', { lastProfileId: 'code-review' }, 'e1'),
+			makeCustomEntry('other-type', { lastProfileId: 'should-be-ignored' }, 'x1'),
+			makeCustomEntry('review-settings', { lastProfileId: 'test-analysis' }, 'e2'),
+		];
+		expect(getLatestReviewSettings(entries)?.lastProfileId).toBe('test-analysis');
+	});
 
-			let hasMatch = false;
-			for (let j = i; j < Math.min(i + 20, lines.length); j++) {
-				const m = lines[j].match(/choice\s*===\s*'([^']+)'/);
-				if (m && options.includes(m[1])) {
-					hasMatch = true;
-					break;
-				}
-			}
-
-			expect(hasMatch).toBe(true);
-		}
+	it('无匹配条目时返回 undefined', () => {
+		expect(getLatestReviewSettings([])).toBeUndefined();
 	});
 });

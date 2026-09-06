@@ -71,6 +71,15 @@ cat test/results/$LATEST/summary.md
 3. 查看结果汇总，对 `[REVIEW]` 用例逐条 AI 衡量（≤20 条全量，>20 条建议手动）
 4. 确认所有用例通过后，同步到用户目录，再告知完成
 
+#### Pi 启动参数约定（e2e 测试与调试）
+
+启动 pi 做 e2e 测试或任何调试时，**如非必要一律加 `--no-session`**（不落历史会话记录，避免污染会话树、残留测试数据）。
+
+**例外**：当确实需要对话记录来定位或验证问题时（如验证会话持久化、分析 session 树、复现依赖历史上下文的行为），可以不加 `--no-session`。
+
+- 反例：随手 `pi -a -p "hi"` 做冒烟，却留下一条无意义的历史会话
+- 正例：调试跨会话持久化行为，需要真实会话文件 → 不加 `--no-session`
+
 #### Husky Hook 体系
 
 项目使用 husky v9 管理 git hooks，按分层策略组织：**CI 是绝对标准（全部阻塞），本地 hook 轻重分层对齐 CI，但跳过耗时步骤。**
@@ -122,17 +131,18 @@ Pi 扩展放在 [extensions](extensions) 目录中；修改时请在这里更新
 
 ### 扩展分类体系
 
-`extensions/` 按功能分为 7 个子目录，新扩展必须归入对应分类，不得放回顶层：
+`extensions/` 按功能分为 8 个子目录，新扩展必须归入对应分类，不得放回顶层：
 
-| 目录            | 分类                         | 说明                                                                                                                                                                                                                                                                   |
-| --------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tui/`          | 交互界面                     | 提供终端交互式 UI 的插件（命令面板、选择器、编辑器等）                                                                                                                                                                                                                 |
-| `context/`      | 上下文组装                   | 修改/增强/组装 system prompt 或会话上下文的插件                                                                                                                                                                                                                        |
-| `security/`     | 审计与安全                   | 提供安全保护、审计、权限控制的插件                                                                                                                                                                                                                                     |
-| `auto/`         | 自动化                       | 自动执行任务的插件，无需或少量用户交互                                                                                                                                                                                                                                 |
-| `accuracy/`     | 更精准强大信息获取与操作工具 | 增强或替换内置工具，提供更强大/精准的操作能力                                                                                                                                                                                                                          |
-| `verification/` | 验证与评估                   | 代码审查、质量评估、验证检查的插件                                                                                                                                                                                                                                     |
-| `meta/`         | 元插件                       | 管理其他插件/工具的插件、管理预设配置的插件，以及提供基础服务的插件。注意这里面的插件设计定位是最基础层的，其他插件可以依赖这里面的插件，这里面的插件应避免依赖其他类别的插件。npm install应把这里面的插件变为本地包，其他插件对其的依赖通过包引用，而不是相对路径引用 |
+| 目录             | 分类                         | 说明                                                                                                                                                                                                                                                                   |
+| ---------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tui/`           | 交互界面                     | 提供终端交互式 UI 的插件（命令面板、选择器、编辑器等）                                                                                                                                                                                                                 |
+| `context/`       | 上下文组装                   | 修改/增强/组装 system prompt 或会话上下文的插件                                                                                                                                                                                                                        |
+| `security/`      | 审计与安全                   | 提供安全保护、审计、权限控制的插件                                                                                                                                                                                                                                     |
+| `auto/`          | 自动化                       | 自动执行任务的插件，无需或少量用户交互                                                                                                                                                                                                                                 |
+| `accuracy/`      | 更精准强大信息获取与操作工具 | 增强或替换内置工具，提供更强大/精准的操作能力                                                                                                                                                                                                                          |
+| `verification/`  | 验证与评估                   | 代码审查、质量评估、验证检查的插件                                                                                                                                                                                                                                     |
+| `observability/` | 观察分析                     | 以观测/分析 pi 自身（插件、工具、skill、会话）的运行与效果为核心目的的插件（如会话用量分析面板、指标采集）                                                                                                                                                             |
+| `meta/`          | 元插件                       | 管理其他插件/工具的插件、管理预设配置的插件，以及提供基础服务的插件。注意这里面的插件设计定位是最基础层的，其他插件可以依赖这里面的插件，这里面的插件应避免依赖其他类别的插件。npm install应把这里面的插件变为本地包，其他插件对其的依赖通过包引用，而不是相对路径引用 |
 
 **分类原则：**
 
@@ -152,7 +162,7 @@ mkdir -p extensions/auto/my-watcher
 touch extensions/auto/my-watcher/index.ts
 ```
 
-> ⚠️ **注意**：`pi-logger/` 和 `pi-rate-limiter/` 虽然本质是基础设施，但它们是作为 Pi 扩展机制实现的，因此归入 `meta/`（元插件）。
+> ⚠️ **注意**：`pi-logger/` 虽然本质是基础设施，但它是作为 Pi 扩展机制实现的，因此归入 `meta/`（元插件）。`pi-rate-limiter/`（限流）和 `control/`（会话控制）属于自动化/特殊场景插件，归入 `auto/`。
 
 ### 日志接入要求
 
@@ -287,7 +297,13 @@ store.reload();
 **关键实现要点：**
 
 ```typescript
-import { registerFauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai';
+// 注意：registerFauxProvider 只在 `@earendil-works/pi-ai/compat` 子路径导出，
+// 主入口 `@earendil-works/pi-ai` 无此导出（会导致类型推断为 any）。
+import {
+	registerFauxProvider,
+	fauxAssistantMessage,
+	fauxToolCall,
+} from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-agent';
 
 export default function (pi: ExtensionAPI) {
@@ -331,6 +347,28 @@ HOME="$test_home/home" pi -a --no-session -p "hi"
 ```
 
 **完整示例：** `test/extensions/pi-rate-limiter/smoke.test.sh`
+
+**环境变量（可叠加）：**
+
+| 变量                        | 作用                                                                       |
+| --------------------------- | -------------------------------------------------------------------------- |
+| `MOCK_LLM_REPEAT=N`         | 补足 N 个相同响应，构造多条消息的稳定长树（>20 节点触发滚动路径）          |
+| `MOCK_LLM_TOOL_CALLS=N`     | 前 N 轮返回 bash 工具调用（echo），让 agent 执行产生多轮 entry             |
+| `MOCK_LLM_RECORD_CONTEXT=1` | 记录每次请求的 provider 序列化 context 到 stdout，供断言「LLM 收到零文本」 |
+
+**压缩/继续类集成链路必须用 TUI 模式验证。** 两个关键事实：
+
+1. `ctx.compact()` 是 fire-and-forget——`--no-session` 下 pi 处理完 prompt 立即退出，
+   摘要→onComplete 异步链来不及完成，日志只见「触发信号」、无 onComplete/onError。
+   只有 `pi -a`（TUI 交互模式，pi 不退出）才能确定性验证压缩完成 + auto-continue。
+2. Pi 的 `prepareCompaction` 用 `keepRecentTokens=20000` 从后往前累积找切分点。
+   **单条超长 user 消息会把切分点顶到第一条消息**，`messagesToSummarize` 为空
+   （报 "Nothing to compact"）。要触发成功压缩，需**多条 user 消息**（每条 <20000
+   tokens，累积 >20000）让切分点落在中间——可通过连续发多个 prompt，或用
+   `MOCK_LLM_TOOL_CALLS` 叠加 `MOCK_LLM_RECORD_CONTEXT` 让工具调用积累多轮 entry。
+
+完整链路用例参考：`test/e2e/extensions/custom-compaction/tui-expect.smoke.test.sh`
+的「invisible continue full chain」用例。
 
 详见 [e2e-test 技能的 Mock LLM 测试章节](.pi/skills/e2e-test/SKILL.md#mock-llm-测试)。
 
@@ -427,6 +465,10 @@ lines.push(th.fg('accent', title));
 
 完整清单见 [`docs/tui-design-principles.md` 第 7 节](docs/tui-design-principles.md#7-边框与布局) 与 [ADR-0023](docs/adr/0023-tui-visual-spec-completion.md)。
 
+#### 状态栏文本 `|` 前缀约定
+
+`ctx.ui.setStatus(key, text)` 的文本必须以半角 `|` 开头（`| prefix:text`，见 `docs/tui-design-principles.md` §2.1）。widget-wrangler 会在中间人层自动补齐缺失的 `|` 前缀并 `log.warn` 留痕——插件侧仍应主动遵守，不要依赖兜底。
+
 #### 普通测试辅助扩展示例
 
 **`test/extensions/tools/helpers/dynamic-registrar.ts`**
@@ -470,6 +512,7 @@ TUI 设计按三轴正交分类，详见 [`docs/tui-interaction-patterns.md`](do
 2. **再定交互模式**：只读展示 / 导航选择 / 表单编辑 / 确认菜单，四选一。
 3. **导航选择强制 master-detail 两级导航**：一级列表（选中 → 二级详情/操作），**一级列表必带滚动上限**。禁止把操作菜单与导航列表拍平在同一级。
 4. **实现策略**：规则选择 → 组件化（`Container`/`SelectList`）；不规则复杂布局 → 手绘 `render()`。`Focusable` 是横切能力（硬件光标定位），非分类维度。
+5. **编辑类输入必显当前值**：进入编辑/输入 UI 时必须展示当前使用的值，支持"基于现有值修改"。pi 的 `ctx.ui.input(title, placeholder)` **placeholder 不渲染**（pi-mono 的 `ExtensionInputComponent` 忽略该参数），当前值只能放进标题提示（如 `请输入分支名（当前：main，直接回车使用）`）；且空输入回车 = 确认/保留当前值，escape = 取消。详见 [`docs/tui-interaction-patterns.md` 3.3 节](docs/tui-interaction-patterns.md#33-表单编辑)。
 
 > 反例警示：pi-lab 面板曾把「选实验」和「选操作」拍平为每实验内嵌一个 SelectList，导致高度膨胀 + 焦点失效。开发前先读该文档第 6 节反模式清单。
 
@@ -681,13 +724,14 @@ pi.on('session_start', async (_event, ctx) => {
 
 从多个扩展的 e2e 测试中总结：
 
-| 陷阱                          | 原因                          | 修复                                               |
-| ----------------------------- | ----------------------------- | -------------------------------------------------- |
-| **日志检查用 stdout**         | pi-logger 写文件，非 stdout   | 检查 `.pi/logs/<name>_*.log`                       |
-| **`npx pi` vs `$(which pi)`** | `npx pi` 的参数集可能不同     | 测试脚本用 `$(which pi)`                           |
-| **print 模式下扩展不加载**    | `pi -p` 不触发全部 life cycle | 用 `pi -a --no-session`                            |
-| **测试数据残留**              | 会话文件持久化                | 每次测试前 `rm -rf ~/.pi/agent/sessions/--tmp-*--` |
-| **assert stdout 文本**        | TUI/ANSI escape 序列干扰      | grep 模式匹配而非全文比对                          |
+| 陷阱                          | 原因                          | 修复                                                 |
+| ----------------------------- | ----------------------------- | ---------------------------------------------------- |
+| **日志检查用 stdout**         | pi-logger 写文件，非 stdout   | 检查 `.pi/logs/<name>_*.log`                         |
+| **`npx pi` vs `$(which pi)`** | `npx pi` 的参数集可能不同     | 测试脚本用 `$(which pi)`                             |
+| **print 模式下扩展不加载**    | `pi -p` 不触发全部 life cycle | 用 `pi -a --no-session`                              |
+| **测试数据残留**              | 会话文件持久化                | 每次测试前 `rm -rf ~/.pi/agent/sessions/--tmp-*--`   |
+| **无意义会话残留**            | 忘记加 `--no-session`         | 启动 pi 默认加 `--no-session`（见"Pi 启动参数约定"） |
+| **assert stdout 文本**        | TUI/ANSI escape 序列干扰      | grep 模式匹配而非全文比对                            |
 
 ### 10. 累加式指标追踪器的 checkpoint 设计模式
 
@@ -754,7 +798,74 @@ pi-lab（`extensions/meta/pi-lab/`）是实验框架，不自带实验。消费�
 - **e2e 盲区**：固定 80 列 + 短树（< pageSize 行）时滚动路径零覆盖——滚动类 bug 必须用长树用例（mock-llm 的 `MOCK_LLM_REPEAT` 发多条消息造 50+ 稳定节点树）。
 - 附带：扩展运行时 `setInterval`/`setTimeout` 回调不执行——需要定时器的逻辑改用事件驱动（与 #8 的 /reload 定时器失效不同，这里是运行时根本不触发）。
 
+### 14. 内置 bash 工具 timeout 无默认值 + 两条干预路径
+
+Pi 内置 bash 工具的 `timeout` 参数 schema 是 `optional, no default timeout`——agent 不显式传就无限等待（macOS 无 GNU `timeout`，尤为危险）。`bash-timeout` 扩展（`extensions/accuracy/bash-timeout.ts`）在 `tool_call` 钩子里补默认 300s 兜底（`@zenone/pi-config` 双层可配，配置项 `defaultTimeoutSeconds`，设 0 即禁用），仅当 agent 未指定时注入、不设上限。
+
+干预内置 bash 工具有两条路径，单个扩展须二选一。两条路径可共存（tool_call 钩子注入不与 sandbox 的 operations 替换冲突）；真正互斥的是同用 operations 替换的多个扩展之间：
+
+| 路径               | 机制                                       | 采用者           |
+| ------------------ | ------------------------------------------ | ---------------- |
+| tool_call 钩子注入 | `pi.on('tool_call', ...)` mutate `input`   | uv、bash-timeout |
+| operations 替换    | `createBashTool(cwd, { operations })` 接管 | sandbox          |
+
+超时语义（改 `input.timeout` 不改变 Pi 的 kill 逻辑）：`spawn(bash, ["-c", 整条命令])` 后自 spawn 起计墙钟时间，超时 `killProcessTree` 用 `kill(-pid, SIGKILL)` 杀进程组。`a | b` 共享一个超时、`a; b` 合计、`a & b` 中 shell 提前退出则超时不触发且后台孤儿可能漏杀——均为 Pi 既有边界，非扩展引入（详见 ADR-0025）。
+
 ---
+
+## 分支管理规范
+
+本仓库采用三层分支模型，worktree 按 extensions 子类划分：
+
+```
+worktree(特性分支)  --squash-->  dev(集成主干)  --merge-->  main(发布分支)
+```
+
+### 合并规则（强制）
+
+| 边界           | 方式                 | 约束                                                                   |
+| -------------- | -------------------- | ---------------------------------------------------------------------- |
+| worktree → dev | `git merge --squash` | 1 特性 = 1 提交，dev 历史保持干净                                      |
+| dev → main     | `git merge --no-ff`  | dev 永不 reset、连续开发；**禁止 squash dev → main**（丢历史导致分叉） |
+
+**worktree 复用铁律**：worktree 通过 squash 合入 dev 后，自身与 dev 分叉。**复用前必须先 `git reset --hard dev` 对齐**，否则会带上已合并的旧历史。
+
+**特殊情况**：仅在 dev 历史严重混乱（如大量 merge 提交）且用户明确要求时，才允许 squash dev → main 一次性压平；压平后立即 `git reset --hard main` 让 dev 重新对齐，并在压平前打 `archive/dev-<日期>` tag 保留历史。
+
+### worktree 重建
+
+6 个 worktree 对应 extensions 子类（bugfix 为跨类修复）：
+
+| worktree      | 分支               | 对应                       |
+| ------------- | ------------------ | -------------------------- |
+| bugfix        | `wt/bugfix`        | 跨类 bug 修复              |
+| context       | `wt/context`       | `extensions/context`       |
+| observability | `wt/observability` | `extensions/observability` |
+| security      | `wt/security`      | `extensions/security`      |
+| tool          | `wt/tool`          | `extensions/accuracy`      |
+| verification  | `wt/verification`  | `extensions/verification`  |
+
+```bash
+# 清空并重建全部 worktree（从当前 dev 拉）
+bash scripts/recreate-worktrees.sh
+
+# 仅重建某一个
+bash scripts/recreate-worktrees.sh context
+```
+
+> ⚠️ 脚本会删除对应 worktree 目录及其分支，**未提交改动会丢失**。运行前先 `git -C <worktree> status --short` 检查无未提交工作。
+
+### 发版流程
+
+```bash
+# ① 特性开发在 worktree 完成 → 合入 dev（squash，1 特性 1 提交）
+git checkout dev && git merge --squash wt/xxx && git commit -m "feat(xxx): 完整特性"
+
+# ② 发版：dev → main（merge --no-ff，dev 不 reset）
+git checkout main && git merge --no-ff dev -m "release: vX.Y.Z" && git tag vX.Y.Z
+```
+
+发版提交规范：`release: vX.Y.Z`，CHANGELOG 同步 `## Unreleased` → `## vX.Y.Z (日期)`。
 
 ## 本地同步
 
@@ -804,3 +915,25 @@ npx tsx scripts/sync-to-local-pi.ts --dry-run
 > 必须加 `--purge` 参数（每次使用 `--target` 或 `--purge` 时控制台与日志都会输出 `WARN` 警告）。
 
 详细用法参考 [docs/sync-tool.md](docs/sync-tool.md)。
+
+### 离线部署（`scripts/offline.sh`）
+
+把整个插件体系（pi 运行时 + `~/.pi/agent` 用户目录 + 本地包 + 第三方插件）打包成单个 bundle，在无网络 Linux 目标机解压恢复。
+
+```bash
+# 源机（macOS，有网）打包
+bash scripts/offline.sh pack -o pi-offline-bundle.tar.gz [--arch x64|arm64] [--with-node]
+
+# 目标机（Linux，离线）恢复
+bash scripts/offline.sh restore pi-offline-bundle.tar.gz [--force]
+```
+
+**要点（改脚本前先读）：**
+
+1. **离线模式**：restore 生成的 `pi` 是 wrapper，默认 `export PI_OFFLINE=1`（pi 内置离线模式，`PI_OFFLINE` 环境变量）。启动时不联网同步第三方插件；已装的 npm/git 插件靠本地版本匹配（`satisfies()` 纯本地比较）正常加载。这是**保留 settings.json `packages` 字段**而非清空的原因——清空会让第三方插件全部失效。
+2. **符号链接重建**：`~/.pi/agent/node_modules/@zenone/*` 可能指向仓库外绝对路径（worktree），打包时记录映射（`AGENT_LINKS` / `VENDOR_LINKS` 段），restore 时重建为相对链接。源机环境不改动。
+3. **本地包三分类**：agent 内置 → 重建链接；外部源码可用（非 `dist/` 入口或 dist 已构建）→ 解析进 `vendor/`（不在扩展发现路径）；dist 缺失 → 跳过并告警。
+4. **裁剪清单**：默认排除 `sessions/tmp/state/bin/fff/chat/compact-backups/cache/.cache`、`*.log`、`auth.json`（`--keep-sessions`/`--keep-auth` 保留）；`agent/bin`（fd/rg 的 macOS 二进制）必须排除，否则 Linux 不可用。
+5. **bash 3.2 兼容坑**：macOS 自带 bash 3.2 + `set -u` 下，① `local VAR` 分离声明后命令替换赋值可能丢值，一律用单行 `local VAR="$(...)"`；② `$VAR` 后紧跟中文全角标点（`（`/`）` 等，UTF-8 首字节 0xEF）会被吞进变量名报 unbound，须用 `${VAR}` 花括号界定。改脚本时新增中文消息必须遵守。
+6. **平台包补位**：pack 时（有网）用 `npm pack` 下载目标平台的 ast-grep/ffi-rs linux 包进 `offline-tgz/`，restore 时补装；darwin-only 包在 restore 时仅告警（功能降级）。
+7. **模型**：离线机需在 `models.json` 配本地 provider（如 ollama `http://localhost:11434/v1`），`model_check` 只做提示不自动改。

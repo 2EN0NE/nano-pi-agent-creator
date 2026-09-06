@@ -22,6 +22,8 @@
 			"@zenone/pi-selector": ["./extensions/meta/selector/index.ts"],
 			"@zenone/pi-config": ["./extensions/meta/pi-config/api.ts"],
 			"@zenone/pi-config/types": ["./extensions/meta/pi-config/types.ts"],
+			"@zenone/pi-state": ["./extensions/meta/pi-state/api.ts"],
+			"@zenone/pi-state/types": ["./extensions/meta/pi-state/types.ts"],
 			"@zenone/pi-lab": ["./extensions/meta/pi-lab/api.ts"],
 			"@zenone/pi-session-tree/ui/panel": ["./extensions/meta/pi-session-tree/ui/panel.ts"]
 		}
@@ -33,7 +35,7 @@
 		".pi",
 		"extensions/*/node_modules",
 		"extensions/tui/recap",
-		"extensions/tui/catch-the-fox",
+		"extensions/tui/DEMO:catch-the-fox",
 		"extensions/meta/_widget-wrangler",
 		"extensions/security/secret-firewall",
 		"extensions/context/smart-context",

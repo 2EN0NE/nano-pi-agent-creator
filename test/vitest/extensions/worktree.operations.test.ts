@@ -706,6 +706,13 @@ describe('worktree git helpers', () => {
 		gitCheckout(repoDir, 'main');
 	});
 
+	it('listBranches returns all local branches', async () => {
+		const { listBranches } = await import(resolve(EXT_LIB, 'git.ts'));
+		const branches = listBranches(repoDir);
+		expect(branches).toContain('main');
+		expect(branches).toContain('feature/helper-test');
+	});
+
 	it('getDefaultBranch returns null for repo without remote', async () => {
 		const { getDefaultBranch } = await import(resolve(EXT_LIB, 'git.ts'));
 		// 没有 remote 时，getDefaultBranch 无法知道默认分支
@@ -806,6 +813,31 @@ describe('worktree git helpers', () => {
 		expect(typeof result.behind).toBe('number');
 		// 清理测试分支，避免污染后续用例
 		execSync(`git branch -D ${JSON.stringify(evilBranch)}`, { cwd: repoDir, stdio: 'pipe' });
+	});
+
+	it('merge target 候选排除被 worktree 占用的分支（askMergeTarget 过滤逻辑）', async () => {
+		const { listBranches } = await import(resolve(EXT_LIB, 'git.ts'));
+		const { getManagedWorktrees, getWorktreesDir } = await import(resolve(EXT_LIB, 'paths.ts'));
+
+		// 创建 worktree 占用 wt/target-candidate 分支（约定目录 <repo>-worktrees/）
+		const wtDir = join(getWorktreesDir(repoDir), 'target-candidate');
+		execSync(`git worktree add ${JSON.stringify(wtDir)} -b wt/target-candidate`, {
+			cwd: repoDir,
+		});
+
+		// 候选 = 所有本地分支 - 被 worktree 占用的分支（与 askMergeTarget 一致）
+		const occupied = new Set(
+			getManagedWorktrees(repoDir).map((wt: { branch: string }) => wt.branch),
+		);
+		const candidates = listBranches(repoDir).filter((b: string) => !occupied.has(b));
+
+		expect(candidates).toContain('main');
+		expect(candidates).toContain('feature/helper-test');
+		expect(candidates).not.toContain('wt/target-candidate');
+
+		// 清理
+		execSync(`git worktree remove ${JSON.stringify(wtDir)} --force`, { cwd: repoDir });
+		execSync('git branch -D wt/target-candidate', { cwd: repoDir, stdio: 'pipe' });
 	});
 });
 
@@ -1370,5 +1402,283 @@ describe('worktree hasClonedSession 路径归一化（06）', () => {
 		const other = join(baseDir, 'unrelated-dir');
 		mkdirSync(other, { recursive: true });
 		expect(hasClonedSession(targetDir, other)).toBeNull();
+	});
+});
+
+// ═══════════════════════════════════════════
+// 套件：cloneSession 路径改写（源 cwd → 目标 cwd）
+// 背景：clone 保留源会话完整历史（含源 cwd 绝对路径、pi 默认注入的头部
+// context 如 skills-cache）。软切换后 agent 沿历史路径继续操作源目录，
+// 产物落回源目录。修复要求 clone 时把所有「源 cwd 路径」改写为目标 cwd。
+// ═══════════════════════════════════════════
+
+describe('worktree cloneSession 路径改写（07）', () => {
+	let baseDir: string;
+	let sourceCwd: string;
+	let targetCwd: string;
+
+	beforeAll(async () => {
+		baseDir = resolve(tmpdir(), 'pi-wt-clone-rewrite-' + Date.now());
+		mkdirSync(baseDir, { recursive: true });
+		// 源 cwd 与目标 cwd 取兄弟路径，模拟「主仓库 → worktree」的 clone 场景。
+		sourceCwd = join(baseDir, 'nano-pi-agent-creator');
+		targetCwd = join(baseDir, 'nano-pi-agent-creator-worktrees', 'observability');
+		// 隔离 agentDir，避免污染真实 ~/.pi/agent
+		process.env.PI_CODING_AGENT_DIR = join(baseDir, '.agent');
+	});
+
+	afterAll(() => {
+		delete process.env.PI_CODING_AGENT_DIR;
+		rmSync(baseDir, { recursive: true, force: true });
+	});
+
+	function buildSourceSession(): string {
+		const entries = [
+			{
+				type: 'session',
+				version: 3,
+				id: 'src-id',
+				timestamp: '2026-01-01T00:00:00.000Z',
+				cwd: sourceCwd,
+			},
+			{
+				type: 'model_change',
+				id: 'm1',
+				parentId: null,
+				timestamp: '2026-01-01T00:00:01.000Z',
+				provider: 'mock',
+				modelId: 'mock-1',
+			},
+			{
+				type: 'custom',
+				customType: 'skills-cache',
+				data: {
+					skills: [
+						{
+							name: 'code-review',
+							filePath: `${sourceCwd}/.pi/skills/code-review/SKILL.md`,
+							sourceInfo: { source: 'auto', scope: 'project' },
+						},
+					],
+				},
+				id: 'c1',
+				parentId: null,
+				timestamp: '2026-01-01T00:00:02.000Z',
+			},
+			{
+				type: 'message',
+				id: 'msg1',
+				parentId: 'src-id',
+				timestamp: '2026-01-01T00:00:03.000Z',
+				message: {
+					role: 'assistant',
+					content: [
+						{
+							type: 'toolCall',
+							id: 'tc1',
+							name: 'bash',
+							arguments: { command: `cd ${sourceCwd} && ls -la extensions/` },
+						},
+						{
+							type: 'toolCall',
+							id: 'tc2',
+							name: 'write',
+							arguments: {
+								path: `${sourceCwd}/extensions/context/smart-context/src/lab.ts`,
+								content: 'x',
+							},
+						},
+					],
+				},
+			},
+			{
+				type: 'message',
+				id: 'msg2',
+				parentId: 'msg1',
+				timestamp: '2026-01-01T00:00:04.000Z',
+				message: {
+					role: 'user',
+					content: [
+						{
+							type: 'text',
+							text: `参考兄弟路径 ${sourceCwd}-worktrees/other 与 ${sourceCwd}/README.md`,
+						},
+					],
+				},
+			},
+		];
+		const file = join(baseDir, 'src-session.jsonl');
+		writeFileSync(file, entries.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf-8');
+		return file;
+	}
+
+	function readClonedEntries(clonedFile: string): any[] {
+		const lines = readFileSync(clonedFile, 'utf-8').trim().split('\n').filter(Boolean);
+		return lines.map((l) => JSON.parse(l));
+	}
+
+	it('clone 后源 cwd 路径全部改写为目标 cwd，兄弟路径不受影响', async () => {
+		const { cloneSession } = await import(resolve(EXT_LIB, 'session.ts'));
+		const srcFile = buildSourceSession();
+		const clonedFile = cloneSession(srcFile, targetCwd);
+
+		expect(existsSync(clonedFile)).toBe(true);
+		const entries = readClonedEntries(clonedFile);
+
+		// header cwd 指向目标
+		const header = entries.find((e: any) => e.type === 'session');
+		expect(header.cwd).toBe(targetCwd);
+		expect(header.id).not.toBe('src-id');
+
+		// skills-cache filePath 改写（sourceCwd 后跟 /）
+		const skills = entries.find(
+			(e: any) => e.type === 'custom' && e.customType === 'skills-cache',
+		);
+		expect(skills.data.skills[0].filePath).toBe(`${targetCwd}/.pi/skills/code-review/SKILL.md`);
+
+		// bash command 改写（sourceCwd 后跟空格）
+		const assistant = entries.find((e: any) => e.type === 'message' && e.id === 'msg1');
+		const bashCall = assistant.message.content.find((c: any) => c.name === 'bash');
+		expect(bashCall.arguments.command).toBe(`cd ${targetCwd} && ls -la extensions/`);
+
+		// write path 改写（sourceCwd 后跟 /）
+		const writeCall = assistant.message.content.find((c: any) => c.name === 'write');
+		expect(writeCall.arguments.path).toBe(
+			`${targetCwd}/extensions/context/smart-context/src/lab.ts`,
+		);
+
+		// 兄弟路径不误伤 + 正常路径改写
+		const user = entries.find((e: any) => e.type === 'message' && e.id === 'msg2');
+		const text = user.message.content[0].text;
+		expect(text).toContain(`${sourceCwd}-worktrees/other`); // 兄弟路径保留
+		expect(text).toContain(`${targetCwd}/README.md`); // 正常路径改写
+		expect(text).not.toContain(`${sourceCwd}/README.md`); // 源路径不再出现
+	});
+
+	it('parentId 重映射指向新 header id', async () => {
+		const { cloneSession } = await import(resolve(EXT_LIB, 'session.ts'));
+		const srcFile = buildSourceSession();
+		const clonedFile = cloneSession(srcFile, targetCwd);
+		const entries = readClonedEntries(clonedFile);
+		const header = entries.find((e: any) => e.type === 'session');
+		const msg1 = entries.find((e: any) => e.id === 'msg1');
+		expect(msg1.parentId).toBe(header.id);
+	});
+
+	it('forkToNewSession（策略 B）改写源 cwd 路径且不误伤兄弟路径', async () => {
+		const { forkToNewSession } = await import(resolve(EXT_LIB, 'session.ts'));
+		// getEntries() 返回 pi 内部 entry 结构（type: user/assistant，非 JSONL message 格式）
+		const mockEntries = [
+			{
+				type: 'assistant',
+				role: 'assistant',
+				content: [
+					{
+						type: 'toolCall',
+						id: 'tc1',
+						name: 'bash',
+						arguments: { command: `cd ${sourceCwd} && ls` },
+					},
+				],
+				timestamp: 1700000000000,
+				id: 'msg-1',
+				parentId: 'src-sid',
+			},
+			{
+				type: 'user',
+				role: 'user',
+				content: [
+					{
+						type: 'text',
+						text: `兄弟 ${sourceCwd}-worktrees/other 保留，正常 ${sourceCwd}/README.md 改写`,
+					},
+				],
+				timestamp: 1700000000001,
+				id: 'msg-2',
+				parentId: 'msg-1',
+			},
+		];
+		const mockCtx = {
+			sessionManager: {
+				getEntries: () => mockEntries,
+				getHeader: () => ({ id: 'src-sid', cwd: sourceCwd }),
+			},
+		};
+
+		// repoRoot 传 sourceCwd：本场景模拟「从主仓库 fork 到 worktree」，
+		// 主仓库根 == 源会话 cwd（sourceCwd），forkToNewSession 用 repoRoot
+		// 定位 session 写入目录（resolveSessionDir + worktreeSessionFileName）。
+		const filePath = forkToNewSession(mockCtx as any, targetCwd, sourceCwd, 'fork-rewrite');
+		expect(existsSync(filePath)).toBe(true);
+
+		const entries = readClonedEntries(filePath);
+		const header = entries.find((e: any) => e.type === 'session');
+		expect(header.cwd).toBe(targetCwd);
+
+		// bash command 改写 + parentId 重映射到新 header id
+		const assistant = entries.find((e: any) => e.id === 'msg-1');
+		expect(assistant.content[0].arguments.command).toBe(`cd ${targetCwd} && ls`);
+		expect(assistant.parentId).toBe(header.id);
+
+		// 兄弟路径保留 + 正常路径改写
+		const user = entries.find((e: any) => e.id === 'msg-2');
+		const text = user.content[0].text;
+		expect(text).toContain(`${sourceCwd}-worktrees/other`); // 兄弟路径保留
+		expect(text).toContain(`${targetCwd}/README.md`); // 正常路径改写
+		expect(text).not.toContain(`${sourceCwd}/README.md`); // 源路径不再出现
+	});
+
+	it('嵌套 worktree（target 在 source 之下）时跳过改写，避免前缀双重改写', async () => {
+		const { cloneSession } = await import(resolve(EXT_LIB, 'session.ts'));
+		const nestedSource = join(baseDir, 'repo');
+		const nestedTarget = join(baseDir, 'repo', 'wt', 'foo'); // sourceCwd 是 targetCwd 前缀
+		const entries = [
+			{
+				type: 'session',
+				version: 3,
+				id: 'nested-src',
+				timestamp: '2026-01-01T00:00:00.000Z',
+				cwd: nestedSource,
+			},
+			{
+				type: 'message',
+				id: 'nm1',
+				parentId: 'nested-src',
+				timestamp: '2026-01-01T00:00:01.000Z',
+				message: {
+					role: 'assistant',
+					content: [
+						{
+							type: 'toolCall',
+							id: 'nt1',
+							name: 'bash',
+							arguments: { command: `cd ${nestedSource} && ls` },
+						},
+						// 历史中已有的 target 子路径：若被前缀改写会翻倍成 .../wt/foo/wt/foo
+						{
+							type: 'toolCall',
+							id: 'nt2',
+							name: 'read',
+							arguments: { path: `${nestedTarget}/src/a.ts` },
+						},
+					],
+				},
+			},
+		];
+		const srcFile = join(baseDir, 'nested-src-session.jsonl');
+		writeFileSync(srcFile, entries.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf-8');
+
+		const clonedFile = cloneSession(srcFile, nestedTarget);
+		const cloned = readClonedEntries(clonedFile);
+		const header = cloned.find((e: any) => e.type === 'session');
+		expect(header.cwd).toBe(nestedTarget);
+
+		const assistant = cloned.find((e: any) => e.id === 'nm1');
+		const bashCall = assistant.message.content.find((c: any) => c.name === 'bash');
+		const readCall = assistant.message.content.find((c: any) => c.name === 'read');
+		// 跳过改写：源路径保留原样（保守，避免嵌套场景双重改写）
+		expect(bashCall.arguments.command).toBe(`cd ${nestedSource} && ls`);
+		// 历史中已有的 target 路径不被前缀命中翻倍
+		expect(readCall.arguments.path).toBe(`${nestedTarget}/src/a.ts`);
 	});
 });

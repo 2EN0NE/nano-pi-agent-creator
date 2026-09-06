@@ -3,6 +3,10 @@
 	"version": "2.0.0",
 	"description": "Permission Gate — 危险命令拦截与动态策略自动放行控制面板",
 	"type": "module",
+	"dependencies": {
+		"tree-sitter-bash": "^0.25.1",
+		"web-tree-sitter": "^0.26.13"
+	},
 	"pi": {
 		"extensions": [
 			"./index.ts"

@@ -20,9 +20,8 @@ import {
 	type SessionBeforeCompactEvent,
 } from '@earendil-works/pi-coding-agent';
 import { createLogger } from '@zenone/pi-logger';
-import { getEffectiveProfile } from './config.js';
 import type { CompactionProfile } from './types.js';
-import { DEFAULT_COMPACTION_PROMPT, toModelSpec } from './types.js';
+import { DEFAULT_COMPACTION_PROMPT } from './types.js';
 import { getAdapter } from './mechanisms/index.js';
 
 const log = createLogger('custom-compaction:compactor');
@@ -41,6 +40,23 @@ export function getAndClearPendingSupplement(): string | undefined {
 	const s = _pendingSupplement;
 	_pendingSupplement = undefined;
 	return s;
+}
+
+// ── Pending profile ────────────────────────────────────────────
+// doCompact 在触发 compaction 前写入「触发决策选中的 profile」，
+// session_before_compact 读取它——保证拦截阶段与触发决策使用同一 profile
+// （ADR-0036：启用集 → 触发集 → 路由规则择一）。
+
+let _pendingProfile: CompactionProfile | undefined;
+
+export function setPendingProfile(p?: CompactionProfile): void {
+	_pendingProfile = p;
+}
+
+export function getAndClearPendingProfile(): CompactionProfile | undefined {
+	const p = _pendingProfile;
+	_pendingProfile = undefined;
+	return p;
 }
 
 // ── Pending compact result（过程指标：供 doCompact onComplete 上报实验） ──
@@ -140,12 +156,11 @@ export function buildCompactionHandler() {
 	} | void> => {
 		log.debug('session_before_compact fired');
 
-		// Compute current model spec for model-aware profile selection
-		const modelSpec = toModelSpec(ctx.model);
-		const profile = getEffectiveProfile(modelSpec);
+		// 使用 doCompact 选中的 profile（触发决策一致，ADR-0036）
+		const profile = getAndClearPendingProfile();
 
 		if (!profile) {
-			log.warn('No effective profile found — falling back to default compaction');
+			log.warn('No pending profile — falling back to default compaction');
 			return; // let Pi default handle it
 		}
 
@@ -159,15 +174,17 @@ export function buildCompactionHandler() {
 			case 'adapter': {
 				const adapterId = profile.mechanism.adapterId;
 				if (!adapterId) {
-					log.warn('Mechanism is "adapter" but no adapterId set — falling through');
-					break;
+					log.warn(
+						'Mechanism is "adapter" but no adapterId set — passing through to default',
+					);
+					return; // let Pi default / other session_before_compact handlers take over
 				}
 				const adp = getAdapter(adapterId);
 				if (!adp?.beforeCompact) {
 					log.warn(
-						`Adapter "${adapterId}" not found or has no beforeCompact — falling through`,
+						`Adapter "${adapterId}" not found or has no beforeCompact — passing through to default`,
 					);
-					break;
+					return; // let Pi default / other session_before_compact handlers take over
 				}
 				const handled = await adp.beforeCompact(ctx, profile);
 				if (handled) {
@@ -338,6 +355,21 @@ ${conversationText}
 						'warning',
 					);
 				}
+				return;
+			}
+
+			// stopReason === 'error' 时，即便 summary 非空（流式输出中断的残缺内容），
+			// 也应回退默认压缩而非沿用不可靠的摘要。
+			if (response.stopReason === 'error' && !signal.aborted) {
+				const errorDetail = response.errorMessage ? `: ${response.errorMessage}` : '';
+				log.error('Compaction model call errored', {
+					stopReason: response.stopReason,
+					errorMessage: response.errorMessage,
+				});
+				ctx.ui.notify(
+					`Compaction model call failed${errorDetail}, using default`,
+					'warning',
+				);
 				return;
 			}
 

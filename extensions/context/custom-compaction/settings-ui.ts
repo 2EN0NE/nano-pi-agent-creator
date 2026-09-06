@@ -38,7 +38,8 @@ export interface ProfileFieldView {
 export interface ProfileView {
 	id: string;
 	name: string;
-	active: boolean;
+	/** 是否在启用集内（Space 勾选启用） */
+	enabled: boolean;
 	description: string;
 	fields: ProfileFieldView[];
 }
@@ -55,6 +56,10 @@ export interface SettingsPanelData {
 	activePath: string;
 	saveScope: ScopeLabel;
 	modelLine: string;
+	/** 触发粒度中文标签（如「Agent 轮」） */
+	triggerGranularityLabel: string;
+	/** 路由规则的中文描述列表（有序） */
+	routingRules: string[];
 	profiles: ProfileView[];
 	lab: { active: boolean; experiments: LabExperimentView[] };
 }
@@ -63,7 +68,10 @@ export type SettingsUIAction =
 	| { type: 'close' }
 	| { type: 'edit-profile'; profileId: string }
 	| { type: 'edit-field'; profileId: string; fieldKey: string }
-	| { type: 'add-profile' };
+	| { type: 'add-profile' }
+	| { type: 'toggle-enable'; profileId: string }
+	| { type: 'toggle-granularity' }
+	| { type: 'manage-rules' };
 
 // ── ANSI 颜色辅助（answer 同款） ───────────────────────────────
 
@@ -130,6 +138,22 @@ export class SettingsComponent implements Component {
 			this.onDone({ type: 'add-profile' });
 			return;
 		}
+		if (this.mode === 'main' && input === ' ') {
+			// Space — 切换启用/停用（加入/移出启用集）
+			const p = this.data.profiles[this.selectedIndex];
+			if (p) this.onDone({ type: 'toggle-enable', profileId: p.id });
+			return;
+		}
+		if (this.mode === 'main' && input.toLowerCase() === 'g') {
+			// g — 循环切换触发粒度（user_turn / agent_turn / tool）
+			this.onDone({ type: 'toggle-granularity' });
+			return;
+		}
+		if (this.mode === 'main' && input.toLowerCase() === 'r') {
+			// r — 管理路由规则（模型/复杂度 → profile）
+			this.onDone({ type: 'manage-rules' });
+			return;
+		}
 		if (matchesKey(input, Key.enter)) {
 			// Enter
 			if (this.mode === 'main') {
@@ -162,7 +186,9 @@ export class SettingsComponent implements Component {
 		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
 
 		const lines: string[] = [];
-		const boxWidth = Math.min(width - 4, 100);
+		// 完全填满终端宽度（对齐 custom-session-tree 的「跟随渲染管线宽度」策略）：
+		// 去掉固定 100 列上限；width-4 保留 -4 边距约定，Math.max 仅防止极窄时出现负数。
+		const boxWidth = Math.max(0, width - 4);
 		const contentWidth = boxWidth - 4;
 
 		const boxLine = (content: string): string => {
@@ -217,6 +243,9 @@ export class SettingsComponent implements Component {
 		// 配置信息（动态内容 → 放标题下方，不影响第 0 行）
 		lines.push(boxLine(truncateToWidth(`  配置: ${data.configLabel}`, contentWidth)));
 		lines.push(boxLine(truncateToWidth(`  保存目标: ${data.saveScope} 层`, contentWidth)));
+		lines.push(
+			boxLine(truncateToWidth(`  触发粒度: ${data.triggerGranularityLabel}`, contentWidth)),
+		);
 		lines.push(boxLine(truncateToWidth(`  ${data.modelLine}`, contentWidth)));
 		lines.push(emptyBoxLine());
 
@@ -230,14 +259,25 @@ export class SettingsComponent implements Component {
 			const p = shown[i];
 			const isSel = i === this.selectedIndex;
 			const marker = isSel ? this.cyan('>') : ' ';
-			const activeMark = p.active ? this.green('*') : ' ';
+			const enabledMark = p.enabled ? this.green('[x]') : this.dim('[ ]');
 			const name = isSel ? this.bold(p.name) : p.name;
 			const desc = p.description ? this.dim(`  ${p.description}`) : '';
-			const row = `${marker} ${activeMark} ${name}${desc}`;
+			const row = `${marker} ${enabledMark} ${name}${desc}`;
 			lines.push(boxLine(truncateToWidth(row, contentWidth)));
 		}
 		if (data.profiles.length > MAX_PROFILES) {
 			lines.push(boxLine(this.dim(`  ... 共 ${data.profiles.length} 个 profile`)));
+		}
+		lines.push(emptyBoxLine());
+
+		// 路由规则
+		lines.push(boxLine(truncateToWidth(this.gray(' [路由规则]'), contentWidth)));
+		if (data.routingRules.length === 0) {
+			lines.push(boxLine(this.dim('   (无规则)')));
+		} else {
+			for (const r of data.routingRules) {
+				lines.push(boxLine(truncateToWidth(`   ${r}`, contentWidth)));
+			}
 		}
 		lines.push(emptyBoxLine());
 
@@ -264,7 +304,11 @@ export class SettingsComponent implements Component {
 		lines.push(emptyBoxLine());
 
 		// 操作提示
-		lines.push(boxLine(this.dim('   ↑↓ 选择  Enter 编辑  n 新增  Esc 关闭')));
+		lines.push(
+			boxLine(
+				this.dim('   ↑↓ 选择  Space 启用  Enter 编辑  n 新增  r 规则  g 粒度  Esc 关闭'),
+			),
+		);
 	}
 
 	// ── 字段面板 ──────────────────────────────────────────────
@@ -296,7 +340,7 @@ export class SettingsComponent implements Component {
 			const f = shown[i];
 			const isSel = i === this.selectedIndex;
 			const marker = isSel ? this.cyan('>') : ' ';
-			const label = f.label.padEnd(18);
+			const label = f.label + ' '.repeat(Math.max(0, 18 - visibleWidth(f.label)));
 			const value = f.value ? this.dim(f.value) : '';
 			const row = `${marker} ${label} ${value}`;
 			lines.push(boxLine(truncateToWidth(row, contentWidth)));

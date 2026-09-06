@@ -15,6 +15,10 @@ import {
 	type MechanismType,
 	TRIGGER_LABELS,
 	MECHANISM_LABELS,
+	TRIGGER_GRANULARITY_LABELS,
+	type TriggerGranularity,
+	type RoutingRule,
+	type ComplexityLevel,
 	describeTrigger,
 	describeMechanism,
 	validateTriggerThreshold,
@@ -27,10 +31,12 @@ import {
 	reloadConfig,
 	getActiveConfigPath,
 	getConfigLabel,
-	getActiveProfile,
-	getEffectiveProfile,
 	getActiveScope,
-	setActiveProfile,
+	setProfileEnabled,
+	getTriggerGranularity,
+	setTriggerGranularity,
+	addRoutingRule,
+	deleteRoutingRule,
 	upsertProfile,
 	updateProfileFields,
 	type SaveScope,
@@ -48,14 +54,14 @@ import { selectPanel } from '../../../src/tui/select-panel.js';
 
 // ── Profile 字段编辑器（原生对话框） ────────────────────────────
 
-interface ProfileField {
+export interface ProfileField {
 	key: string;
 	label: string;
 	readValue: (p: CompactionProfile) => string;
 	edit: (ctx: ExtensionCommandContext, p: CompactionProfile) => Promise<boolean>;
 }
 
-const PROFILE_FIELDS: ProfileField[] = [
+export const PROFILE_FIELDS: ProfileField[] = [
 	{
 		key: 'name',
 		label: '名称',
@@ -129,11 +135,16 @@ const PROFILE_FIELDS: ProfileField[] = [
 
 			// Mark current value
 			const currentVal = p.matchModel || '(任意)';
+			// 选项字符串 → pattern 精确映射（choice 反查用）。不能子串匹配：
+			// "openai/" 是 "openai/gpt-4o" 的前缀，子串匹配会把完整 spec 误判为 provider 前缀。
+			const labelToPattern = new Map<string, string>();
 			const suggestionOptions = suggestions.map((s) => {
 				const label = s === '(清除 - 匹配任意模型)' ? '任意模型（通用）' : s;
 				const isCurrent =
 					s === '(清除 - 匹配任意模型)' ? !p.matchModel : s === p.matchModel;
-				return `${isCurrent ? '[X] ' : '  '}${label}`;
+				const option = `${isCurrent ? '[X] ' : '  '}${label}`;
+				labelToPattern.set(option, s);
+				return option;
 			});
 			suggestionOptions.push('---', '自定义输入...');
 
@@ -160,17 +171,11 @@ const PROFILE_FIELDS: ProfileField[] = [
 				return true;
 			}
 
-			if (choice.includes('任意模型')) {
-				p.matchModel = undefined;
+			// 精确反查：choice 是完整选项字符串，用它直接查 pattern（杜绝子串误匹配）
+			const pattern = labelToPattern.get(choice);
+			if (pattern !== undefined) {
+				p.matchModel = pattern === '(清除 - 匹配任意模型)' ? undefined : pattern;
 				return true;
-			}
-
-			// Extract the pattern from the choice
-			for (const s of suggestions) {
-				if (choice.includes(s)) {
-					p.matchModel = s === '(清除 - 匹配任意模型)' ? undefined : s;
-					return true;
-				}
 			}
 			return false;
 		},
@@ -334,10 +339,30 @@ const PROFILE_FIELDS: ProfileField[] = [
 		},
 	},
 	{
+		key: 'injectContinueText',
+		label: '注入继续文本',
+		readValue: (p) =>
+			p.autoContinue ? (p.injectContinueText ? '是' : '否（隐形继续）') : '(未启用)',
+		edit: async (ctx, p) => {
+			if (!p.autoContinue) return false;
+			const val = await ctx.ui.confirm(
+				'压缩后注入可见的继续文本？\n否 = 隐形继续（LLM 不看到新文本）',
+				`当前: ${p.injectContinueText ? '是' : '否'}`,
+			);
+			if (val === undefined) return false;
+			p.injectContinueText = val;
+			return true;
+		},
+	},
+	{
 		key: 'autoContinueMessage',
 		label: '继续消息',
-		readValue: (p) => (p.autoContinue ? `"${p.autoContinueMessage}"` : '(未启用)'),
+		readValue: (p) =>
+			p.autoContinue && p.injectContinueText ? `"${p.autoContinueMessage}"` : '(未启用)',
 		edit: async (ctx, p) => {
+			// 隐形继续（injectContinueText=false）时不读 autoContinueMessage，
+			// 禁止编辑避免写入永不使用的死配置（与 injectContinueText 守卫一致）
+			if (!p.autoContinue || !p.injectContinueText) return false;
 			const val = await ctx.ui.input(
 				'自动继续消息',
 				p.autoContinueMessage || DEFAULT_AUTO_CONTINUE_MESSAGE,
@@ -359,13 +384,11 @@ async function buildPanelData(ctx: ExtensionCommandContext): Promise<SettingsPan
 	const scope: SaveScope = getActiveScope();
 
 	const modelSpec = toModelSpec(ctx.model);
-	const effectiveProfile = getEffectiveProfile(modelSpec);
-	const activeProfile = getActiveProfile();
 
 	const profiles: ProfileView[] = Object.entries(config.profiles).map(([id, p]) => ({
 		id,
 		name: p.name,
-		active: id === activeProfile?.id,
+		enabled: config.enabledProfileIds.includes(id),
 		description: safeDescribe(p),
 		fields: PROFILE_FIELDS.map((f): ProfileFieldView => ({
 			key: f.key,
@@ -380,8 +403,10 @@ async function buildPanelData(ctx: ExtensionCommandContext): Promise<SettingsPan
 		configLabel,
 		activePath,
 		saveScope: scope,
+		triggerGranularityLabel: TRIGGER_GRANULARITY_LABELS[getTriggerGranularity()],
+		routingRules: config.routingRules.map((r) => describeRoutingRule(r, config.profiles)),
 		modelLine: modelSpec
-			? `当前模型: ${modelSpec} > Profile: ${effectiveProfile?.name ?? '(无)'}`
+			? `当前模型: ${modelSpec} > 启用 ${config.enabledProfileIds.length} 个 profile`
 			: '当前模型: (未知)',
 		profiles,
 		lab: {
@@ -418,7 +443,7 @@ function safeDescribe(p: CompactionProfile): string {
 // ── 字段编辑（原生对话框） ──────────────────────────────────────
 
 /** UI 字段 key → CompactionProfile 顶层字段（triggerType/threshold 都映射到 trigger，mechanismType 映射到 mechanism） */
-const FIELD_TO_PROFILE_KEY: Record<string, keyof CompactionProfile> = {
+export const FIELD_TO_PROFILE_KEY: Record<string, keyof CompactionProfile> = {
 	name: 'name',
 	model: 'model',
 	matchModel: 'matchModel',
@@ -427,6 +452,7 @@ const FIELD_TO_PROFILE_KEY: Record<string, keyof CompactionProfile> = {
 	mechanismType: 'mechanism',
 	prompt: 'prompt',
 	autoContinue: 'autoContinue',
+	injectContinueText: 'injectContinueText',
 	autoContinueMessage: 'autoContinueMessage',
 };
 
@@ -504,11 +530,6 @@ async function editFieldViaDialog(
 	const ok = updateProfileFields(profileId, diff, scope);
 	if (ok) {
 		ctx.ui.notify(`"${field.label}" 已保存到 ${scope} 层`, 'info');
-		// 编辑成功 → 激活该 profile（仅当尚未激活）
-		const cur = getActiveProfile();
-		if (!cur || cur.id !== profileId) {
-			setActiveProfile(profileId, scope);
-		}
 	} else {
 		ctx.ui.notify(`"${field.label}" 保存失败`, 'error');
 	}
@@ -569,6 +590,7 @@ async function addProfile(ctx: ExtensionCommandContext, scope: SaveScope): Promi
 		mechanism: { type: 'summarize' },
 		prompt: '',
 		autoContinue: true,
+		injectContinueText: false,
 		autoContinueMessage: DEFAULT_AUTO_CONTINUE_MESSAGE,
 	};
 
@@ -576,10 +598,97 @@ async function addProfile(ctx: ExtensionCommandContext, scope: SaveScope): Promi
 		ctx.ui.notify(`新增 profile "${trimmed}" 失败`, 'error');
 		return false;
 	}
-	// 新增后激活（仅当尚未激活其它 profile 时不强改；此处直接激活便于用户继续编辑）
-	setActiveProfile(id, scope);
-	ctx.ui.notify(`已新增 profile "${trimmed}"（id: ${id}），保存到 ${scope} 层`, 'info');
+	// 新 profile 默认停用（ADR-0036：不加入启用集，需手动 Space 启用）
+	ctx.ui.notify(`已新增 profile "${trimmed}"（id: ${id}），默认停用，按 Space 启用`, 'info');
 	return true;
+}
+
+// ── 路由规则管理 ───────────────────────────────────────────────
+
+export function describeRoutingRule(
+	rule: RoutingRule,
+	profiles: Record<string, CompactionProfile>,
+): string {
+	const target = profiles[rule.targetProfileId]?.name ?? rule.targetProfileId;
+	const conds: string[] = [];
+	if (rule.model !== undefined) conds.push(`模型 ${rule.model}`);
+	if (rule.complexity !== undefined) conds.push(`复杂度 ${rule.complexity}`);
+	return `${conds.join(' + ')} → ${target}`;
+}
+
+async function pickProfile(
+	ctx: ExtensionCommandContext,
+	config: { profiles: Record<string, CompactionProfile> },
+	title: string,
+): Promise<string | undefined> {
+	const entries = Object.entries(config.profiles);
+	if (entries.length === 0) return undefined;
+	const options = entries.map(([id, p]) => `  ${p.name} (${id})`);
+	const choice = await selectPanel(ctx, title, options);
+	if (choice === undefined) return undefined;
+	const idx = options.indexOf(choice);
+	return entries[idx]?.[0];
+}
+
+async function addModelRule(
+	ctx: ExtensionCommandContext,
+	scope: SaveScope,
+	config: { profiles: Record<string, CompactionProfile> },
+): Promise<void> {
+	const pattern = await ctx.ui.input('模型匹配（如 openai/，大小写不敏感、前缀/子串）', '');
+	if (pattern === undefined || !pattern.trim()) return;
+	const profileId = await pickProfile(ctx, config, '选择目标 profile');
+	if (!profileId) return;
+	if (addRoutingRule({ model: pattern.trim(), targetProfileId: profileId }, scope)) {
+		ctx.ui.notify('已新增模型路由规则', 'info');
+	}
+}
+
+async function addComplexityRule(
+	ctx: ExtensionCommandContext,
+	scope: SaveScope,
+	config: { profiles: Record<string, CompactionProfile> },
+): Promise<void> {
+	const level = await selectPanel(ctx, '复杂度等级', ['low', 'medium', 'high']);
+	if (level === undefined) return;
+	const profileId = await pickProfile(ctx, config, '选择目标 profile');
+	if (!profileId) return;
+	if (
+		addRoutingRule({ complexity: level as ComplexityLevel, targetProfileId: profileId }, scope)
+	) {
+		ctx.ui.notify('已新增复杂度路由规则', 'info');
+	}
+}
+
+export async function manageRoutingRules(
+	ctx: ExtensionCommandContext,
+	scope: SaveScope,
+): Promise<void> {
+	while (true) {
+		const config = loadConfig();
+		const rules = config.routingRules;
+		const options: string[] = [
+			'+ 新增规则：模型匹配',
+			'+ 新增规则：复杂度匹配',
+			...rules.map((r) => `删除: ${describeRoutingRule(r, config.profiles)}`),
+			'完成',
+		];
+		const choice = await selectPanel(ctx, 'custom-compaction 路由规则', options);
+		if (choice === undefined || choice === '完成') return;
+		if (choice === '+ 新增规则：模型匹配') {
+			await addModelRule(ctx, scope, config);
+			continue;
+		}
+		if (choice === '+ 新增规则：复杂度匹配') {
+			await addComplexityRule(ctx, scope, config);
+			continue;
+		}
+		const idx = options.indexOf(choice) - 2; // 前两项是新增入口
+		if (idx >= 0 && idx < rules.length) {
+			deleteRoutingRule(idx, scope);
+			ctx.ui.notify('已删除路由规则', 'info');
+		}
+	}
 }
 
 // ── 主面板 ──────────────────────────────────────────────────────
@@ -598,6 +707,31 @@ export async function openSettingsPanel(ctx: ExtensionCommandContext): Promise<v
 			(_tui, theme, _kb, done) => new SettingsComponent(data, done, theme, 'main'),
 		);
 		if (!action || action.type === 'close') break;
+
+		if (action.type === 'toggle-enable') {
+			const p = data.profiles.find((x) => x.id === action.profileId);
+			if (p) {
+				const ok = setProfileEnabled(action.profileId, !p.enabled, data.saveScope);
+				if (!ok) {
+					ctx.ui.notify('至少启用一个 profile，不能全部停用', 'warning');
+				}
+			}
+			continue; // 刷新主面板（启用状态变化后回到列表）
+		}
+
+		if (action.type === 'toggle-granularity') {
+			const order: TriggerGranularity[] = ['user_turn', 'agent_turn', 'tool'];
+			const cur = getTriggerGranularity();
+			const next = order[(order.indexOf(cur) + 1) % order.length];
+			setTriggerGranularity(next, data.saveScope);
+			ctx.ui.notify(`触发粒度: ${TRIGGER_GRANULARITY_LABELS[next]}`, 'info');
+			continue; // 刷新主面板（粒度变化后回到列表）
+		}
+
+		if (action.type === 'manage-rules') {
+			await manageRoutingRules(ctx, data.saveScope);
+			continue; // 刷新主面板（规则变化后回到列表）
+		}
 
 		if (action.type === 'add-profile') {
 			await addProfile(ctx, data.saveScope);

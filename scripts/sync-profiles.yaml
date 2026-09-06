@@ -41,40 +41,53 @@ profiles:
             - selector # @zenone/pi-selector
             - pi-logger # @zenone/pi-logger  ⚠ flag: --log-level
             - pi-config # @zenone/pi-config 统一配置模块
+            - pi-shortcuts # leader-key 快捷键中枢（被多个全局扩展弱依赖）
+            - pi-session-tree # 会话树查询服务（custom-compaction 强依赖）
+            - pi-lab # 实验框架（custom-compaction 弱依赖，profile-satisfaction 实验搜集）
             # ── 安全 / 审计 ──
             - confirm-destructive # 破坏性操作二次确认
             - dirty-repo-guard # 脏仓库阻止切换
             - permission-gate # 危险命令拦截
+            - secret-firewall # 密钥泄露防火墙（npm 包）
+            - trust-github-repos # 自动信任受信 owner 的仓库
+            - protected-paths # 阻止写入受保护路径
             # ── 更精准的工具 ──
             # ❌ multi-edit 需要 npm 包 diff（仅本项目 node_modules 有），不放 global
             - structured-output # terminate 工具  ⚠ tool: structured_output
             - truncated-tool # rg 工具          ⚠ tool: rg
+            - todos # 文件式 todo 管理（TUI + widget + 工具）
+            - uv # Python 工具重定向到 uv
+            - bash-timeout # bash 工具默认超时（mac 无 GNU timeout 的兜底）
             # ── 自动化 ──
             - auto-stage-on-exit # 退出时自动 stage
             - pi-tmux-status # tmux 状态通知
+            - notify # agent 完成时桌面通知
+            - no-sleep # macOS 防睡眠（caffeinate）
+            - continue # /continue 续写快捷命令
+            - cloud-sessions # 云会话同步（npm 包）
             # ── 验证/评估 ──
-            - review # /review 代码审查
-            - test-analysis # /test-analysis 测试覆盖分析
+            - review # /review 代码审查 / 测试覆盖分析（profile 驱动）
+            # ── 可观测性 ──
+            - session-analytics # 会话分析面板（7/30/90 天用量日历）
             # ── TUI 交互 ──
             - _widget-wrangler # /wrangle 统一管理所有 widget/status 显示隐藏
             - questionnaire # 统一问答工具
             - files # 文件浏览器
-            - session-breakdown # 会话分析日历
+            - recap # 会话回顾（npm 包）
+            - btw # 深度集成 pi 内部会话
+            - answer # Q&A 提取 + 交互答题
             - quit # /quit 命令 + 会话总结卡片
             - whimsical # 工作提示词（sigma 维度）
+            - custom-rename # 新 session 首轮自动命名（/auto-rename 开关）
             # ── 上下文组装 ──
             - goal # 设立目标与时间、预算等限制
             - custom-compaction # 自定义压缩策略（配置在 ~/.pi/agent/extensions-data/）
             - resources-tree # 资源树面板（自适应当前项目上下文）
             # ── 元管理 ──
-            - preset # preset 管理      ⚠ flag: --preset
-            - skills # /skills 技能管理
-            - tools # /tools 工具管理
-            - commands # /commands 命令列表
-            - prompt-editor # prompt 组装检查与控制
-            - mode-switcher # 一键切换模型预设
+            - preset # preset 管理（聚合 tools/skills 等 4 子模块）⚠ flag: --preset
             - session-tree-label # 快捷键进行session-tree打标
             - ci-watch
+            - worktree # /worktree git worktree 隔离开发管理 ⚠ flag: --worktree
         # ── 全局通用技能（research/ 和分析类 analyze/） ──
         skills:
             # 基础
@@ -99,8 +112,8 @@ profiles:
     # 同步本项目特有的插件到 .pi/ 目录。
     # 排除已放 user-install 的全局插件（避免 flag/tool 重复注册），
     # 以及日常不用或本项目独有的插件。
-    # 剩余的是：未达全局成熟度的插件（protected-paths、input-transform-streaming 等）
-    #          和需要项目 node_modules 的插件（multi-edit）。
+    # 剩余的是：项目特定/低成熟度/实验阶段的插件（edit、git-checkpoint、
+    #           loop、claude-rules、smart-context 等）与演示插件（DEMO:*）。
     #
     # 技能按分类同步：
     #   - development/ + tooling/ → project profile（开发流程 + 工具链）
@@ -129,6 +142,7 @@ profiles:
             - uv
             # pi-logger 已迁为内嵌 skill（ADR-0022）
             - e2e-test
+            - bench-run
         themes: []
         prompts: ['*']
         exclude:
@@ -142,38 +156,52 @@ profiles:
                 - selector
                 - pi-logger
                 - pi-config
+                - pi-shortcuts
+                - pi-session-tree
+                - pi-lab
                 - confirm-destructive
                 - dirty-repo-guard
                 - permission-gate
+                - secret-firewall
+                - trust-github-repos
+                - protected-paths
                 - structured-output
                 - truncated-tool
+                - todos
+                - uv
+                - bash-timeout
                 - auto-stage-on-exit
                 - pi-tmux-status
+                - notify
+                - no-sleep
+                - continue
+                - cloud-sessions
                 - review
-                - test-analysis
                 - questionnaire
                 - files
-                - session-breakdown
+                - session-analytics
+                - recap
+                - btw
+                - answer
                 - whimsical
                 - custom-compaction
                 - resources-tree
                 - preset
-                - skills
-                - tools
-                - commands
-                - prompt-editor
-                - mode-switcher
                 - quit
                 - session-tree-label
                 - ci-watch
+                - worktree
                 - goal
+                - custom-rename # 已放 user-install（会话自动命名）
                 # 以下插件为不常用或待观察
                 - control # 适合多agent场景，平常不需要
-                - prompt-customizer # 演示性质
-                - project-trust # 演示性质
-                - catch-the-fox # 演示性质、趣味
+                - DEMO:prompt-customizer # 演示性质
+                - DEMO:catch-the-fox # 演示性质、趣味
                 - split-fork # 目前仅支持Ghostty，按需介入
-                - smart-context # 智能模型路由，单一模型时不需要
+                - git-merge-and-resolve # 默认关闭的按需工具，与 worktree merge/rebase 重叠
+                # smart-context 仍走 project '*' 同步
+                # （compression-aggression 压缩实验，pi-lab 接入）
 
             skills: []
             prompts: []
+# pi-lens-ignore: YAML:0

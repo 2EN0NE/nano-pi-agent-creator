@@ -8,7 +8,7 @@
  *   - getDefaultConfig
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
 	makeCommandKey,
 	makeToolKey,
@@ -34,8 +34,34 @@ import {
 	checkThreshold,
 	hasGraduatedStrategy,
 } from '../../../extensions/security/permission-gate/index';
-import { buildStrategyItems } from '../../../extensions/security/permission-gate/two-tab-panel';
+import {
+	buildStrategyGroups,
+	tierLabel,
+} from '../../../extensions/security/permission-gate/two-tab-panel';
 import { PermissionGateState } from '../../../extensions/security/permission-gate/state';
+import {
+	getRuleCounts,
+	resetRulesStore,
+} from '../../../extensions/security/permission-gate/approval-store';
+import { mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
+
+// ============================================================================
+// tierLabel（T9：UI 分级展示）
+// ============================================================================
+describe('tierLabel', () => {
+	it('映射危险等级到短标签', () => {
+		expect(tierLabel('critical')).toBe('[crit]');
+		expect(tierLabel('warning')).toBe('[warn]');
+		expect(tierLabel('info')).toBe('[info]');
+	});
+	it('空值返回空字符串', () => {
+		expect(tierLabel(null)).toBe('');
+		expect(tierLabel(undefined)).toBe('');
+	});
+});
 
 // ============================================================================
 // makeCommandKey
@@ -227,10 +253,10 @@ describe('deepMerge', () => {
 	it('overrides patterns (not concat)', () => {
 		const base = getDefaultConfig();
 		const overrides: Partial<PermissionGateConfig> = {
-			patterns: ['\\brm\\s'],
+			patterns: [{ pattern: '\\brm\\s', tier: 'warning' }],
 		};
 		const merged = deepMerge(base, overrides);
-		expect(merged.patterns).toEqual(['\\brm\\s']);
+		expect(merged.patterns).toEqual([{ pattern: '\\brm\\s', tier: 'warning' }]);
 	});
 
 	it('keeps enabled when not overridden', () => {
@@ -279,7 +305,7 @@ describe('getDefaultConfig', () => {
 	it('returns a valid config', () => {
 		const config = getDefaultConfig();
 		expect(config.enabled).toBe(true);
-		expect(config.dynamicPolicyEnabled).toBe(false);
+		expect(config.dynamicPolicyEnabled).toBe(true);
 		expect(config.patterns.length).toBeGreaterThan(0);
 		expect(config.dynamicPolicy.thresholds.sameCommand).toBe(2);
 		expect(config.dynamicPolicy.thresholds.sameTool).toBe(3);
@@ -292,10 +318,10 @@ describe('getDefaultConfig', () => {
 		const checkMatch = (pattern: string, cmd: string): boolean => {
 			return new RegExp(pattern, 'i').test(cmd);
 		};
-		expect(config.patterns.some((p) => checkMatch(p, 'rm -rf /tmp/x'))).toBe(true);
-		expect(config.patterns.some((p) => checkMatch(p, 'sudo rm -rf /'))).toBe(true);
-		expect(config.patterns.some((p) => checkMatch(p, 'eval ls'))).toBe(true);
-		expect(config.patterns.some((p) => checkMatch(p, 'chmod +x file'))).toBe(true);
+		expect(config.patterns.some((p) => checkMatch(p.pattern, 'rm -rf /tmp/x'))).toBe(true);
+		expect(config.patterns.some((p) => checkMatch(p.pattern, 'sudo rm -rf /'))).toBe(true);
+		expect(config.patterns.some((p) => checkMatch(p.pattern, 'eval ls'))).toBe(true);
+		expect(config.patterns.some((p) => checkMatch(p.pattern, 'docker rm -f c'))).toBe(true);
 	});
 });
 
@@ -375,63 +401,56 @@ describe('getStrategySummary', () => {
 });
 
 // ============================================================================
-// buildStrategyItems
+// buildStrategyGroups
 // ============================================================================
-describe('buildStrategyItems', () => {
+describe('buildStrategyGroups', () => {
 	const thresholds = { sameCommand: 2, sameTool: 3, sameFolder: 4 };
 
-	it('returns empty array for empty counts', () => {
-		const items = buildStrategyItems({}, thresholds);
-		expect(items).toEqual([]);
+	it('returns empty groups for empty counts', () => {
+		const groups = buildStrategyGroups({}, thresholds);
+		expect(groups).toEqual({ cmd: [], tool: [], dir: [] });
 	});
 
-	it('builds items with correct dimension labels', () => {
+	it('groups items by dimension', () => {
 		const counts = {
 			'cmd:abc123': 1,
 			'tool:rm': 2,
 			'dir:/tmp': 3,
 		};
-		const items = buildStrategyItems(counts, thresholds);
-		expect(items).toHaveLength(3);
+		const groups = buildStrategyGroups(counts, thresholds);
+		expect(groups.cmd).toHaveLength(1);
+		expect(groups.tool).toHaveLength(1);
+		expect(groups.dir).toHaveLength(1);
 
-		expect(items[0]).toMatchObject({
+		expect(groups.cmd[0]).toMatchObject({
 			dimension: 'cmd',
 			key: 'cmd:abc123',
 			displayKey: 'abc123',
 			count: 1,
 			threshold: 2,
 			isActive: true,
-			createdAt: expect.any(String),
-			subCommand: expect.any(String),
 		});
-		expect(items[1]).toMatchObject({
+		expect(groups.tool[0]).toMatchObject({
 			dimension: 'tool',
 			key: 'tool:rm',
 			displayKey: 'rm',
 			count: 2,
 			threshold: 3,
 			isActive: true,
-			createdAt: expect.any(String),
-			subCommand: expect.any(String),
 		});
-		expect(items[2]).toMatchObject({
+		expect(groups.dir[0]).toMatchObject({
 			dimension: 'dir',
 			key: 'dir:/tmp',
 			displayKey: '/tmp',
 			count: 3,
 			threshold: 4,
 			isActive: true,
-			createdAt: expect.any(String),
-			subCommand: expect.any(String),
 		});
 	});
 
 	it('marks items at threshold as inactive', () => {
-		const counts = {
-			'cmd:full': 2,
-		};
-		const items = buildStrategyItems(counts, thresholds);
-		expect(items[0]).toMatchObject({
+		const groups = buildStrategyGroups({ 'cmd:full': 2 }, thresholds);
+		expect(groups.cmd[0]).toMatchObject({
 			isActive: false,
 			count: 2,
 			threshold: 2,
@@ -590,61 +609,61 @@ describe('checkThreshold', () => {
 		},
 	} as unknown as PermissionGateConfig;
 
-	it('all three dimensions pass when counts are under thresholds', () => {
+	it('no dimension reached threshold — pass=false, needs confirm', () => {
 		const result = checkThreshold('rm -rf /tmp', 'rm', '/tmp', baseConfig, {});
-		expect(result.pass).toBe(true);
-		expect(result.dimensions).toEqual(['sameCommand', 'sameTool', 'sameFolder']);
+		expect(result.pass).toBe(false);
+		expect(result.dimensions).toEqual([]);
 	});
 
-	it('only sameCommand passes when tool and folder exceed thresholds', () => {
+	it('only sameCommand graduated when tool and folder under thresholds', () => {
 		const config = {
 			dynamicPolicy: {
-				thresholds: { sameCommand: 5, sameTool: 1, sameFolder: 1 },
+				thresholds: { sameCommand: 1, sameTool: 5, sameFolder: 5 },
 			},
 		} as unknown as PermissionGateConfig;
 		const toolName = 'rm';
 		const counts: Record<string, number> = {};
-		counts[makeCommandKey('rm -rf /tmp')] = 1; // 1 < 5 => pass
-		counts[makeToolKey(toolName)] = 2; // 2 >= 1 => fail
-		counts[makeFolderKey('/tmp')] = 2; // 2 >= 1 => fail
+		counts[makeCommandKey('rm -rf /tmp')] = 1; // 1 >= 1 => graduated
+		counts[makeToolKey(toolName)] = 2; // 2 < 5 => not yet
+		counts[makeFolderKey('/tmp')] = 2; // 2 < 5 => not yet
 		const result = checkThreshold('rm -rf /tmp', toolName, '/tmp', config, counts);
 		expect(result.pass).toBe(true);
 		expect(result.dimensions).toEqual(['sameCommand']);
 	});
 
-	it('only sameTool passes when command and folder exceed thresholds', () => {
+	it('only sameTool graduated when command and folder under thresholds', () => {
 		const config = {
 			dynamicPolicy: {
-				thresholds: { sameCommand: 1, sameTool: 5, sameFolder: 1 },
+				thresholds: { sameCommand: 5, sameTool: 1, sameFolder: 5 },
 			},
 		} as unknown as PermissionGateConfig;
 		const toolName = 'rm';
 		const counts: Record<string, number> = {};
-		counts[makeCommandKey('rm -rf /tmp')] = 2; // 2 >= 1 => fail
-		counts[makeToolKey(toolName)] = 1; // 1 < 5 => pass
-		counts[makeFolderKey('/tmp')] = 3; // 3 >= 1 => fail
+		counts[makeCommandKey('rm -rf /tmp')] = 2; // 2 < 5 => not yet
+		counts[makeToolKey(toolName)] = 1; // 1 >= 1 => graduated
+		counts[makeFolderKey('/tmp')] = 3; // 3 < 5 => not yet
 		const result = checkThreshold('rm -rf /tmp', toolName, '/tmp', config, counts);
 		expect(result.pass).toBe(true);
 		expect(result.dimensions).toEqual(['sameTool']);
 	});
 
-	it('only sameFolder passes when command and tool exceed thresholds', () => {
+	it('only sameFolder graduated when command and tool under thresholds', () => {
 		const config = {
 			dynamicPolicy: {
-				thresholds: { sameCommand: 1, sameTool: 1, sameFolder: 5 },
+				thresholds: { sameCommand: 5, sameTool: 5, sameFolder: 1 },
 			},
 		} as unknown as PermissionGateConfig;
 		const toolName = 'rm';
 		const counts: Record<string, number> = {};
-		counts[makeCommandKey('rm -rf /tmp')] = 3; // 3 >= 1 => fail
-		counts[makeToolKey(toolName)] = 2; // 2 >= 1 => fail
-		counts[makeFolderKey('/tmp')] = 1; // 1 < 5 => pass
+		counts[makeCommandKey('rm -rf /tmp')] = 3; // 3 < 5 => not yet
+		counts[makeToolKey(toolName)] = 2; // 2 < 5 => not yet
+		counts[makeFolderKey('/tmp')] = 1; // 1 >= 1 => graduated
 		const result = checkThreshold('rm -rf /tmp', toolName, '/tmp', config, counts);
 		expect(result.pass).toBe(true);
 		expect(result.dimensions).toEqual(['sameFolder']);
 	});
 
-	it('all dimensions exceed thresholds — pass=false, empty dimensions', () => {
+	it('all dimensions graduated — pass=true with all dimensions', () => {
 		const config = {
 			dynamicPolicy: {
 				thresholds: { sameCommand: 1, sameTool: 1, sameFolder: 1 },
@@ -652,9 +671,25 @@ describe('checkThreshold', () => {
 		} as unknown as PermissionGateConfig;
 		const toolName = 'rm';
 		const counts: Record<string, number> = {};
-		counts[makeCommandKey('rm -rf /tmp')] = 5; // 5 >= 1 => fail
-		counts[makeToolKey(toolName)] = 5; // 5 >= 1 => fail
-		counts[makeFolderKey('/tmp')] = 5; // 5 >= 1 => fail
+		counts[makeCommandKey('rm -rf /tmp')] = 1; // 1 >= 1 => graduated
+		counts[makeToolKey(toolName)] = 1; // 1 >= 1 => graduated
+		counts[makeFolderKey('/tmp')] = 1; // 1 >= 1 => graduated
+		const result = checkThreshold('rm -rf /tmp', toolName, '/tmp', config, counts);
+		expect(result.pass).toBe(true);
+		expect(result.dimensions).toEqual(['sameCommand', 'sameTool', 'sameFolder']);
+	});
+
+	it('threshold 0 means never auto-approve (dimension disabled)', () => {
+		const config = {
+			dynamicPolicy: {
+				thresholds: { sameCommand: 0, sameTool: 0, sameFolder: 0 },
+			},
+		} as unknown as PermissionGateConfig;
+		const toolName = 'rm';
+		const counts: Record<string, number> = {};
+		counts[makeCommandKey('rm -rf /tmp')] = 5;
+		counts[makeToolKey(toolName)] = 5;
+		counts[makeFolderKey('/tmp')] = 5;
 		const result = checkThreshold('rm -rf /tmp', toolName, '/tmp', config, counts);
 		expect(result.pass).toBe(false);
 		expect(result.dimensions).toEqual([]);
@@ -880,118 +915,41 @@ describe('countNonBlockedEntries', () => {
 // ============================================================================
 describe('PermissionGateState', () => {
 	const baseConfig = getDefaultConfig();
-	const mkEntry = (overrides?: Partial<ApprovalEntry>): ApprovalEntry => ({
-		ts: new Date().toISOString(),
-		cmd: 'rm -rf /tmp/test',
-		tool: 'rm',
-		dir: '/tmp',
-		dim: null,
-		action: 'auto',
-		...overrides,
+	let tmpDir: string;
+	let tmpHome: string;
+	let tmpCwd: string;
+
+	beforeEach(() => {
+		tmpDir = join(tmpdir(), `pg-state-test-${randomBytes(4).toString('hex')}`);
+		tmpHome = join(tmpDir, 'home');
+		tmpCwd = join(tmpDir, 'cwd');
+		mkdirSync(tmpHome, { recursive: true });
+		mkdirSync(tmpCwd, { recursive: true });
+		resetRulesStore({ homeDir: tmpHome, cwd: tmpCwd });
 	});
 
-	it('constructor sets initial values', () => {
-		const state = new PermissionGateState({
-			config: baseConfig,
-			counts: { 'cmd:abc': 3, 'tool:rm': 5 },
-			totalRecords: 2,
-		});
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it('constructor sets config', () => {
+		const state = new PermissionGateState(baseConfig);
 		expect(state.config.enabled).toBe(true);
-		expect(state.counts['cmd:abc']).toBe(3);
-		expect(state.counts['tool:rm']).toBe(5);
-		expect(state.totalRecords).toBe(2);
 	});
 
-	it('recordEntry updates counts and totalRecords', () => {
-		const state = new PermissionGateState({
-			config: baseConfig,
-			counts: {},
-			totalRecords: 0,
-		});
-
-		const entry = mkEntry();
-		state.recordEntry('', entry);
-
-		// cmd key should exist
-		const cmdKey = Object.keys(state.counts).find((k) => k.startsWith('cmd:'));
-		expect(cmdKey).toBeTruthy();
-		expect(state.counts[cmdKey!]).toBe(1);
-		// tool key
-		expect(state.counts['tool:rm']).toBe(1);
-		// dir key
-		expect(state.counts['dir:/tmp']).toBe(1);
-		// totalRecords incremented
-		expect(state.totalRecords).toBe(1);
+	it('recordApprovalFor 累加 pi-state 计数（cmd/tool/dir）', () => {
+		const state = new PermissionGateState(baseConfig);
+		state.recordApprovalFor({ cmd: 'rm -rf /tmp/test', tool: 'rm', dir: '/tmp' }, 'warning');
+		const counts = getRuleCounts();
+		expect(counts['tool:rm']).toBe(1);
+		expect(counts['dir:/tmp']).toBe(1);
+		expect(Object.keys(counts).some((k) => k.startsWith('cmd:'))).toBe(true);
 	});
 
-	it('recordEntry increments existing counts', () => {
-		const state = new PermissionGateState({
-			config: baseConfig,
-			counts: {},
-			totalRecords: 0,
-		});
-
-		state.recordEntry('', mkEntry());
-		state.recordEntry('', mkEntry());
-
-		const cmdKey = Object.keys(state.counts).find((k) => k.startsWith('cmd:'));
-		expect(state.counts[cmdKey!]).toBe(2);
-		expect(state.counts['tool:rm']).toBe(2);
-		expect(state.totalRecords).toBe(2);
-	});
-
-	it('recordBlocked does not update counts or totalRecords', () => {
-		const state = new PermissionGateState({
-			config: baseConfig,
-			counts: {},
-			totalRecords: 0,
-		});
-
-		state.recordBlocked('', mkEntry({ action: 'blocked' }));
-
-		expect(Object.keys(state.counts).length).toBe(0);
-		expect(state.totalRecords).toBe(0);
-	});
-
-	it('replaceCounts replaces counts and totalRecords', () => {
-		const state = new PermissionGateState({
-			config: baseConfig,
-			counts: { 'cmd:old': 5 },
-			totalRecords: 3,
-		});
-
-		state.replaceCounts({ 'cmd:new': 1 }, 1);
-
-		expect(state.counts).toEqual({ 'cmd:new': 1 });
-		expect(state.counts['cmd:old']).toBeUndefined();
-		expect(state.totalRecords).toBe(1);
-	});
-
-	it('recordEntry with different commands creates separate cmd keys', () => {
-		const state = new PermissionGateState({
-			config: baseConfig,
-			counts: {},
-			totalRecords: 0,
-		});
-
-		state.recordEntry('', mkEntry({ cmd: 'rm -rf /tmp/a' }));
-		state.recordEntry('', mkEntry({ cmd: 'rm -rf /tmp/b' }));
-
-		const cmdKeys = Object.keys(state.counts).filter((k) => k.startsWith('cmd:'));
-		expect(cmdKeys).toHaveLength(2);
-		expect(state.totalRecords).toBe(2);
-	});
-
-	it('recordEntry with dim captures dimension info', () => {
-		const state = new PermissionGateState({
-			config: baseConfig,
-			counts: {},
-			totalRecords: 0,
-		});
-
-		state.recordEntry('', mkEntry({ dim: ['sameCommand', 'sameTool'] }));
-
-		expect(state.totalRecords).toBe(1);
-		expect(state.counts['tool:rm']).toBe(1);
+	it('recordApprovalFor 多次累加', () => {
+		const state = new PermissionGateState(baseConfig);
+		state.recordApprovalFor({ cmd: 'rm -rf /tmp/test', tool: 'rm', dir: '/tmp' }, 'warning');
+		state.recordApprovalFor({ cmd: 'rm -rf /tmp/test', tool: 'rm', dir: '/tmp' }, 'warning');
+		expect(getRuleCounts()['tool:rm']).toBe(2);
 	});
 });

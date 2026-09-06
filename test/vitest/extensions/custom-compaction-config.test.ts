@@ -18,15 +18,21 @@ import {
 	__setStoreForTest,
 	getActiveScope,
 	upsertProfile,
-	setActiveProfile,
 	deleteProfile,
 	updateProfileFields,
 	loadConfig,
+	setProfileEnabled,
+	getEnabledProfiles,
+	getTriggerGranularity,
+	setTriggerGranularity,
+	addRoutingRule,
+	deleteRoutingRule,
 } from '../../../extensions/context/custom-compaction/config.js';
 import {
 	createDefaultProfile,
 	type CompactionProfile,
 } from '../../../extensions/context/custom-compaction/types.js';
+import { resolveContinueDecision } from '../../../extensions/context/custom-compaction/continue.js';
 
 // ── Test utilities ──────────────────────────────────────────────
 
@@ -188,38 +194,6 @@ describe('upsertProfile (layer-scoped minimal write)', () => {
 		const userRaw = readLayerFile(userFile)!;
 		const userProfiles = userRaw.profiles as Record<string, { name: string }>;
 		expect(userProfiles.default.name).toBe('SessionOnly');
-	});
-});
-
-// ── setActiveProfile: 只改目标层的 activeProfileId ─────────────
-
-describe('setActiveProfile (layer-scoped)', () => {
-	it('only rewrites activeProfileId in the target layer', () => {
-		writeLayerFile(userFile, {
-			activeProfileId: 'default',
-			profiles: {
-				default: profileWithThreshold(30),
-				other: { ...profileWithThreshold(40), id: 'other', name: 'Other' },
-			},
-		});
-
-		expect(setActiveProfile('other')).toBe(true);
-
-		const userRaw = readLayerFile(userFile)!;
-		expect(userRaw.activeProfileId).toBe('other');
-		// profiles 结构未被破坏
-		expect(Object.keys(userRaw.profiles as Record<string, unknown>)).toEqual([
-			'default',
-			'other',
-		]);
-	});
-
-	it('rejects unknown profile ids', () => {
-		writeLayerFile(userFile, {
-			activeProfileId: 'default',
-			profiles: { default: profileWithThreshold(30) },
-		});
-		expect(setActiveProfile('nope')).toBe(false);
 	});
 });
 
@@ -441,13 +415,6 @@ describe('updateProfileFields (field-level minimal write)', () => {
 		expect(projectProfile.trigger).toBeUndefined();
 	});
 
-	it('sets activeProfileId in the target layer when missing', () => {
-		writeLayerFile(projectFile, { profiles: {} });
-		expect(updateProfileFields('default', { name: 'X' }, 'project')).toBe(true);
-		const projectRaw = readLayerFile(projectFile)!;
-		expect(projectRaw.activeProfileId).toBe('default');
-	});
-
 	it('P3: clearing an inherited field writes explicit null override (not silent no-op)', () => {
 		// 低层（user）定义 matchModel；目标层（project）只有该 profile 的 name
 		writeLayerFile(userFile, {
@@ -502,5 +469,375 @@ describe('updateProfileFields (field-level minimal write)', () => {
 		expect(
 			(loadConfig().profiles.default.mechanism as { adapterId?: unknown }).adapterId,
 		).toBeNull();
+	});
+});
+
+// ── injectContinueText 向后兼容（旧配置无该字段） ───────────────
+
+describe('injectContinueText backward compatibility', () => {
+	it('loads a v3 config without injectContinueText as invisible (false default)', () => {
+		// 旧配置：autoContinue=true + autoContinueMessage，但无 injectContinueText 字段
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: {
+				default: {
+					id: 'default',
+					name: 'Default',
+					model: 'current',
+					trigger: { type: 'context_percent', threshold: 20 },
+					mechanism: { type: 'summarize' },
+					prompt: '',
+					autoContinue: true,
+					autoContinueMessage: '继续按目标完成任务，全部验证',
+				},
+			},
+		});
+
+		const profile = loadConfig().profiles.default;
+		// deepMerge(defaults, user) 补默认 injectContinueText=false
+		expect(profile.injectContinueText).toBe(false);
+		// 因此 continue 决策为 invisible（不再注入可见文本）
+		expect(resolveContinueDecision(profile)).toEqual({ kind: 'invisible' });
+	});
+
+	it('opts back into visible message when injectContinueText is explicitly true', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: {
+				default: {
+					id: 'default',
+					name: 'Default',
+					model: 'current',
+					trigger: { type: 'context_percent', threshold: 20 },
+					mechanism: { type: 'summarize' },
+					prompt: '',
+					autoContinue: true,
+					injectContinueText: true,
+					autoContinueMessage: '继续按目标完成任务，全部验证',
+				},
+			},
+		});
+
+		const profile = loadConfig().profiles.default;
+		expect(profile.injectContinueText).toBe(true);
+		expect(resolveContinueDecision(profile)).toEqual({
+			kind: 'message',
+			text: '继续按目标完成任务，全部验证',
+		});
+	});
+});
+
+// ── Ticket 01: 范式升级 schema 迁移 ─────────────────────────────
+
+describe('schema expansion migration (enabledProfileIds / triggerGranularity / routingRules)', () => {
+	const altProfile = () => ({ ...createDefaultProfile(), id: 'alt', name: 'Alt' });
+
+	it('旧配置（无新字段）读取后继承 defaults：enabledProfileIds=[default]、granularity=agent_turn、routingRules=[]', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+		});
+		const cfg = loadConfig();
+		expect(cfg.enabledProfileIds).toEqual(['default']);
+		expect(cfg.triggerGranularity).toBe('agent_turn');
+		expect(cfg.routingRules).toEqual([]);
+	});
+
+	it('迁移幂等：多次读取不改变 enabledProfileIds，也不写盘', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+		});
+		loadConfig();
+		loadConfig();
+		expect(loadConfig().enabledProfileIds).toEqual(['default']);
+		// 未写盘：user 层文件仍无新字段
+		expect(readLayerFile(userFile)?.enabledProfileIds).toBeUndefined();
+	});
+
+	it('层间覆盖：project 层显式 enabledProfileIds 覆盖继承值', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+		});
+		writeLayerFile(projectFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile(), alt: altProfile() },
+			enabledProfileIds: ['default', 'alt'],
+		});
+		expect(loadConfig().enabledProfileIds).toEqual(['default', 'alt']);
+	});
+
+	it('非法值兜底：enabledProfileIds 非数组 → 继承 defaults', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+			enabledProfileIds: 'not-an-array',
+		});
+		expect(loadConfig().enabledProfileIds).toEqual(['default']);
+	});
+
+	it('非法 triggerGranularity → 继承 defaults agent_turn', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+			triggerGranularity: 'bogus',
+		});
+		expect(loadConfig().triggerGranularity).toBe('agent_turn');
+	});
+
+	it('enabledProfileIds 保留幽灵 id，由 getEnabledProfiles 消费侧过滤', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+			enabledProfileIds: ['default', 'ghost'],
+		});
+		// validate 不再按层做存在性过滤（跨层引用合法），幽灵 id 保留在配置里
+		expect(loadConfig().enabledProfileIds).toEqual(['default', 'ghost']);
+		// 消费侧 getEnabledProfiles 过滤幽灵 id，不返回 undefined profile
+		expect(getEnabledProfiles().map((p) => p.id)).toEqual(['default']);
+	});
+
+	it('enabledProfileIds 空数组 → 继承 defaults（启用集非空不变量）', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+			enabledProfileIds: [],
+		});
+		expect(loadConfig().enabledProfileIds).toEqual(['default']);
+	});
+
+	it('enabledProfileIds 全非法元素（过滤后为空）→ 继承 defaults', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+			enabledProfileIds: [123, null, {}],
+		});
+		expect(loadConfig().enabledProfileIds).toEqual(['default']);
+	});
+
+	it('routingRules 畸形元素被丢弃，合法元素保留', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+			routingRules: [
+				{ model: 'openai/', targetProfileId: 'default' },
+				{ model: 123, targetProfileId: 'default' }, // model 非字符串
+				{ complexity: 'bogus', targetProfileId: 'default' }, // complexity 非法枚举
+				{ complexity: 'high' }, // 缺 targetProfileId
+				{ targetProfileId: '' }, // targetProfileId 空
+				null,
+				'scrap',
+				{ model: 'anthropic/', complexity: 'high', targetProfileId: 'alt' },
+			],
+		});
+		expect(loadConfig().routingRules).toEqual([
+			{ model: 'openai/', targetProfileId: 'default' },
+			{ model: 'anthropic/', complexity: 'high', targetProfileId: 'alt' },
+		]);
+	});
+});
+
+// ── Ticket 02: 启用集读写 ──────────────────────────────────────
+
+describe('setProfileEnabled / getEnabledProfiles (启用集 Space 勾选)', () => {
+	const alt = () => ({ ...createDefaultProfile(), id: 'alt', name: 'Alt' });
+
+	it('启用：加入启用集', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile(), alt: alt() },
+		});
+		expect(setProfileEnabled('alt', true, 'user')).toBe(true);
+		expect(loadConfig().enabledProfileIds).toEqual(['default', 'alt']);
+	});
+
+	it('停用：移出启用集', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile(), alt: alt() },
+			enabledProfileIds: ['default', 'alt'],
+		});
+		expect(setProfileEnabled('alt', false, 'user')).toBe(true);
+		expect(loadConfig().enabledProfileIds).toEqual(['default']);
+	});
+
+	it('全关保护：拒绝停用最后一个启用项', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile(), alt: alt() },
+			enabledProfileIds: ['default'],
+		});
+		expect(setProfileEnabled('default', false, 'user')).toBe(false);
+		expect(loadConfig().enabledProfileIds).toEqual(['default']);
+	});
+
+	it('幂等：重复启用不产生重复 id', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile(), alt: alt() },
+		});
+		setProfileEnabled('alt', true, 'user');
+		setProfileEnabled('alt', true, 'user');
+		expect(loadConfig().enabledProfileIds).toEqual(['default', 'alt']);
+	});
+
+	it('已停用 profile 再次停用：幂等返回 true，不写盘', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile(), alt: alt() },
+			enabledProfileIds: ['default'],
+		});
+		expect(setProfileEnabled('alt', false, 'user')).toBe(true);
+		expect(loadConfig().enabledProfileIds).toEqual(['default']);
+	});
+
+	it('profile 不存在：返回 false', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+		});
+		expect(setProfileEnabled('ghost', true, 'user')).toBe(false);
+	});
+
+	it('getEnabledProfiles 返回启用集内 profile（按定义顺序）', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile(), alt: alt() },
+			enabledProfileIds: ['alt'],
+		});
+		expect(getEnabledProfiles().map((p) => p.id)).toEqual(['alt']);
+	});
+});
+
+// ── Ticket 03: 触发粒度读写 ────────────────────────────────────
+
+describe('getTriggerGranularity / setTriggerGranularity', () => {
+	it('默认 agent_turn（无配置时继承 defaults）', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+		});
+		expect(getTriggerGranularity()).toBe('agent_turn');
+	});
+
+	it('setTriggerGranularity 写目标层并生效', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+		});
+		expect(setTriggerGranularity('tool', 'user')).toBe(true);
+		expect(getTriggerGranularity()).toBe('tool');
+		expect(loadConfig().triggerGranularity).toBe('tool');
+	});
+
+	it('非法粒度在 validate 时被置 undefined → 继承 defaults', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+			triggerGranularity: 'bogus',
+		});
+		expect(getTriggerGranularity()).toBe('agent_turn');
+	});
+});
+
+// ── Ticket 04: 路由规则读写 ────────────────────────────────────
+
+describe('addRoutingRule / deleteRoutingRule', () => {
+	it('addRoutingRule 追加到尾部', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+		});
+		expect(addRoutingRule({ model: 'openai/', targetProfileId: 'default' }, 'user')).toBe(true);
+		expect(loadConfig().routingRules).toEqual([
+			{ model: 'openai/', targetProfileId: 'default' },
+		]);
+	});
+
+	it('deleteRoutingRule 按索引删除', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+			routingRules: [
+				{ model: 'openai/', targetProfileId: 'default' },
+				{ complexity: 'high', targetProfileId: 'default' },
+			],
+		});
+		expect(deleteRoutingRule(0, 'user')).toBe(true);
+		expect(loadConfig().routingRules).toEqual([
+			{ complexity: 'high', targetProfileId: 'default' },
+		]);
+	});
+
+	it('deleteRoutingRule 越界 → false', () => {
+		writeLayerFile(userFile, {
+			activeProfileId: 'default',
+			profiles: { default: createDefaultProfile() },
+		});
+		expect(deleteRoutingRule(5, 'user')).toBe(false);
+	});
+});
+
+// ── 修复验证：跨层启用集覆盖（分层最小写入 + 启用集组合）───────
+
+describe('跨层 enabledProfileIds（分层最小写入，修复验证）', () => {
+	const alt = () => ({ ...createDefaultProfile(), id: 'alt', name: 'Alt' });
+
+	it('project 层仅声明 enabledProfileIds（profile 定义在 user 层）不被整层丢弃', () => {
+		writeLayerFile(userFile, {
+			profiles: { default: createDefaultProfile(), alt: alt() },
+		});
+		writeLayerFile(projectFile, {
+			enabledProfileIds: ['alt'],
+		});
+		expect(loadConfig().enabledProfileIds).toEqual(['alt']);
+	});
+
+	it('project 层 enabledProfileIds 引用 user 层 profile 不被当幽灵 id 过滤', () => {
+		writeLayerFile(userFile, {
+			profiles: { default: createDefaultProfile(), alt: alt() },
+		});
+		writeLayerFile(projectFile, {
+			profiles: { default: createDefaultProfile() },
+			enabledProfileIds: ['default', 'alt'],
+		});
+		expect(loadConfig().enabledProfileIds).toEqual(['default', 'alt']);
+	});
+
+	it('getEnabledProfiles 在合并后过滤幽灵 id（消费侧兜底）', () => {
+		writeLayerFile(userFile, {
+			profiles: { default: createDefaultProfile() },
+			enabledProfileIds: ['default', 'ghost'],
+		});
+		expect(getEnabledProfiles().map((p) => p.id)).toEqual(['default']);
+	});
+});
+
+// ── 修复验证：deleteProfile 启用集非空不变量（ADR-0036 决策 2）──
+
+describe('deleteProfile 启用集非空不变量', () => {
+	const alt = () => ({ ...createDefaultProfile(), id: 'alt', name: 'Alt' });
+
+	it('删除唯一启用项（总数 ≥2）→ 回填剩余第一个，不产生空启用集', () => {
+		writeLayerFile(userFile, {
+			profiles: { default: createDefaultProfile(), alt: alt() },
+			enabledProfileIds: ['alt'],
+		});
+		expect(deleteProfile('alt')).toBe(true);
+		const cfg = loadConfig();
+		// alt 被删（default 由 defaults 内置始终存在，故删 alt 而非 default）
+		expect(cfg.profiles.alt).toBeUndefined();
+		// 唯一启用项被删后回填剩余第一个（default），启用集非空
+		expect(cfg.enabledProfileIds).toEqual(['default']);
+	});
+
+	it('删除非唯一启用项 → 仅移除该 id，不误回填', () => {
+		writeLayerFile(userFile, {
+			profiles: { default: createDefaultProfile(), alt: alt() },
+			enabledProfileIds: ['default', 'alt'],
+		});
+		expect(deleteProfile('alt')).toBe(true);
+		expect(loadConfig().enabledProfileIds).toEqual(['default']);
 	});
 });

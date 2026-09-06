@@ -167,7 +167,7 @@
 
 ### control
 
-路径: `extensions/meta/control/index.ts`
+路径: `extensions/auto/control/index.ts`
 
 **命令**
 
@@ -219,20 +219,6 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 
 - `list_sessions` — 列出暴露控制 socket 的活跃会话（可附带会话名称）。仅用于发现；在 shell/bash 中获取当前会话 ID 请使用 $PI_SESSION_ID。
 
-### mode-switcher
-
-路径: `extensions/meta/mode-switcher.ts`
-
-**快捷键**
-
-- `m` （子键） — Select prompt mode
-- `ctrl+shift+m` （降级键） — Select prompt mode
-- `ctrl+space` （降级键） — Cycle prompt mode
-
-**命令**
-
-- `/mode` — Select prompt mode
-
 ### pi-config
 
 路径: `extensions/meta/pi-config/index.ts`
@@ -263,7 +249,7 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 
 ### pi-rate-limiter
 
-路径: `extensions/meta/pi-rate-limiter/index.ts`
+路径: `extensions/auto/pi-rate-limiter/index.ts`
 
 **命令**
 
@@ -298,8 +284,8 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 
 **快捷键**
 
-- `p` （子键） — Cycle presets
-- `ctrl+shift+u` （降级键） — Cycle presets
+- `p` （子键） — Open preset selector panel
+- `ctrl+shift+p` （降级键） — Open preset selector panel
 
 **命令**
 
@@ -316,7 +302,6 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 **快捷键**
 
 - `e` （子键） — Open prompt assembly panel
-- `ctrl+shift+p` （降级键） — Open prompt assembly panel
 
 **命令**
 
@@ -407,7 +392,7 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 
 ### catch-the-fox
 
-路径: `extensions/tui/catch-the-fox/src/index.ts`
+路径: `extensions/tui/DEMO:catch-the-fox/src/index.ts`
 
 **命令**
 
@@ -437,14 +422,6 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 - `/diff` — 打开文件选择器，选中 tracked 文件后直接打开 diff 视图
 - `/changes` — 列出本次会话所有被记录的文件变更。/changes cls 清空记录。
 
-### qna
-
-路径: `extensions/tui/qna.ts`
-
-**命令**
-
-- `/qna` — Extract questions from last assistant message into editor
-
 ### questionnaire
 
 路径: `extensions/tui/questionnaire.ts`
@@ -461,13 +438,13 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 
 - `/recap` — Summarize where you left off in this session
 
-### session-breakdown
+### session-analytics
 
-路径: `extensions/tui/session-breakdown.ts`
+路径: `extensions/observability/session-analytics.ts`
 
 **命令**
 
-- `/session-breakdown` — Interactive breakdown of last 7/30/90 days of ~/.pi session usage (sessions/messages/tokens + cost by model)
+- `/session-analytics` — Interactive analytics of last 7/30/90 days of ~/.pi session usage (sessions/messages/tokens + cost by model)
 
 ### session-tree-label
 
@@ -505,18 +482,11 @@ CLI 桥接（用于 shell 脚本/后台任务）：
 
 ### review
 
-路径: `extensions/verification/review.ts`
+路径: `extensions/verification/review/`（folder 插件，profile 驱动）
 
 **命令**
 
-- `/review` — Review code changes (PR, uncommitted, branch, commit, or folder)
-- `/end-review` — Complete review and return to original position
+- `/review` — 先选审查方案（代码审查 / 测试覆盖分析），再选目标（PR、未提交、分支、提交或文件夹）
+- `/end-review` — 完成审查并返回原位置
 
-### test-analysis
-
-路径: `extensions/verification/test-analysis.ts`
-
-**命令**
-
-- `/test-analysis` — Analyze test coverage and quality (staged, uncommitted, branch, commit, or folder)
-- `/end-analysis` — Complete test analysis and return to original position
+**审查方案（profile）**：`code-review` / `test-analysis`，各绑定 `prompt.md`（提示词）+ `verdict.json`（判定结束条件），`config.json` 为注册表。

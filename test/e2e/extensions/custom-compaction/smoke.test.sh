@@ -6,9 +6,12 @@
 # 2. Config read/write cycle with new trigger+mechanism format
 # 3. Session config takes priority over base config
 # 4. Compaction trigger with 1% threshold + long prompt
-# 5. (migration removed — schema at final shape)
+# 5. Config persistence (simulated reload)
 # 6. Adapter registration works
 # 7. Trigger + mechanism dispatch variants
+# 8. pass_through mechanism skips handler
+# 9. 启用集门控：未启用 profile 不参与触发评估
+# 10. 路由规则命中：routingRules 覆盖 tiebreak
 
 set -euo pipefail
 # 注意：本文件被 test/e2e/scripts/run-e2e.sh source，BASH_SOURCE 是
@@ -98,7 +101,7 @@ test_it "config v3 read/write with trigger + mechanism" <<'TEST'
   cleanup_config
   mkdir -p "$CONFIG_DIR"
   cat > "$CONFIG_DIR/config.json" <<'JSONEOF'
-{"activeProfileId":"default","profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":1},"mechanism":{"type":"summarize"},"prompt":"","autoContinue":true,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
+{"enabledProfileIds":["default"],"profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":1},"mechanism":{"type":"summarize"},"prompt":"","autoContinue":true,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
 JSONEOF
   TRIGGER=$(python3 -c "import json; print(json.load(open('$CONFIG_DIR/config.json'))['profiles']['default']['trigger']['threshold'])")
   MECHANISM=$(python3 -c "import json; print(json.load(open('$CONFIG_DIR/config.json'))['profiles']['default']['mechanism']['type'])")
@@ -111,10 +114,10 @@ test_it "session config priority" <<'TEST'
   cleanup_config
   mkdir -p "$CONFIG_DIR"
   cat > "$CONFIG_DIR/config.json" <<'JSONEOF'
-{"activeProfileId":"default","profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":80},"mechanism":{"type":"summarize"},"prompt":"","autoContinue":true,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
+{"enabledProfileIds":["default"],"profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":80},"mechanism":{"type":"summarize"},"prompt":"","autoContinue":true,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
 JSONEOF
   cat > "$CONFIG_DIR/e2e-session-test.json" <<'JSONEOF'
-{"activeProfileId":"default","profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":5},"mechanism":{"type":"pass_through"},"prompt":"","autoContinue":true,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
+{"enabledProfileIds":["default"],"profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":5},"mechanism":{"type":"pass_through"},"prompt":"","autoContinue":true,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
 JSONEOF
   S_T=$(python3 -c "import json; print(json.load(open('$CONFIG_DIR/e2e-session-test.json'))['profiles']['default']['trigger']['threshold'])")
   S_M=$(python3 -c "import json; print(json.load(open('$CONFIG_DIR/e2e-session-test.json'))['profiles']['default']['mechanism']['type'])")
@@ -128,7 +131,7 @@ TEST
 test_it "compaction trigger with summarize mechanism" <<'TEST'
   cleanup_config && mkdir -p "$CONFIG_DIR"
   cat > "$CONFIG_DIR/config.json" <<'JSONEOF'
-{"activeProfileId":"default","profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":1},"mechanism":{"type":"summarize"},"prompt":"","autoContinue":false,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
+{"enabledProfileIds":["default"],"profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":1},"mechanism":{"type":"summarize"},"prompt":"","autoContinue":false,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
 JSONEOF
 
   LONG=""; for i in $(seq 1 300); do LONG="${LONG}Line $i: The quick brown fox jumps over the lazy dog. "; done
@@ -156,10 +159,10 @@ TEST
 test_it "config survives reload (simulated)" <<'TEST'
   cleanup_config && mkdir -p "$CONFIG_DIR"
   cat > "$CONFIG_DIR/config.json" <<'JSONEOF'
-{"activeProfileId":"default","profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":80},"mechanism":{"type":"summarize"},"prompt":"","autoContinue":true,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
+{"enabledProfileIds":["default"],"profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":80},"mechanism":{"type":"summarize"},"prompt":"","autoContinue":true,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
 JSONEOF
   cat > "$CONFIG_DIR/e2e-persist.json" <<'JSONEOF'
-{"activeProfileId":"default","profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":10},"mechanism":{"type":"pass_through"},"prompt":"Be concise.","autoContinue":true,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
+{"enabledProfileIds":["default"],"profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":10},"mechanism":{"type":"pass_through"},"prompt":"Be concise.","autoContinue":true,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
 JSONEOF
 
   cd "$TEST_HOME"
@@ -202,7 +205,7 @@ TEST
 test_it "pass_through mechanism skips handler" <<'TEST'
   cleanup_config && mkdir -p "$CONFIG_DIR"
   cat > "$CONFIG_DIR/config.json" <<'JSONEOF'
-{"activeProfileId":"default","profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":1},"mechanism":{"type":"pass_through"},"prompt":"","autoContinue":false,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
+{"enabledProfileIds":["default"],"profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":1},"mechanism":{"type":"pass_through"},"prompt":"","autoContinue":false,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
 JSONEOF
 
   # 300 行长 prompt 确保 context > 1% 阈值（100 行不足以稳定触发）
@@ -221,3 +224,52 @@ JSONEOF
   [ -n "$EXT_LOG" ] && grep -q "Mechanism is \"pass_through\"" "$EXT_LOG" 2>/dev/null && { P=$((P+1)); echo "[PASS] pass_through dispatch detected"; } || echo "[REVIEW] pass_through not detected (may not have triggered)"
   exit $F
 TEST
+
+# ── Test 9: 启用集门控（未启用 profile 不参与触发评估）───────────
+test_it "enabled-set gating: disabled profile never triggers" <<'TEST'
+  cleanup_config && mkdir -p "$CONFIG_DIR"
+  cat > "$CONFIG_DIR/config.json" <<'JSONEOF'
+{"enabledProfileIds":["default"],"profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":80},"mechanism":{"type":"summarize"},"prompt":"","autoContinue":false,"autoContinueMessage":"继续按目标完成任务，全部验证"},"alt":{"id":"alt","name":"Alt","model":"current","trigger":{"type":"context_percent","threshold":1},"mechanism":{"type":"pass_through"},"prompt":"","autoContinue":false,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
+JSONEOF
+
+  LONG=""; for i in $(seq 1 300); do LONG="${LONG}Line $i: Test data for compaction. "; done
+  cd "$TEST_HOME"
+  set +e
+  timed_run 30 env HOME="$ISOLATED_HOME" "$(which pi)" -a --no-session -e "$ROOT_DIR/extensions/context/custom-compaction" -e "$ROOT_DIR/extensions/meta/pi-logger" -e "$ROOT_DIR/test/e2e/helpers/mock-llm.ts" -p "$LONG" >"$TEST_HOME/gate.log" 2>&1 || true
+  set -e; cd "$ROOT_DIR"
+
+  EXT_LOG=$(find_cc_log)
+  echo "=== Log: $EXT_LOG ==="
+  P=0; F=0
+  grep -qE "SyntaxError|TypeError" "$TEST_HOME/gate.log" 2>/dev/null && { F=$((F+1)); echo "[FAIL] JS errors"; } || { P=$((P+1)); echo "[PASS] No JS errors"; }
+  # alt 未启用（threshold 1 + pass_through）→ 即使 context 超 1% 也不应 dispatch pass_through
+  [ -n "$EXT_LOG" ] && grep -q "Mechanism is \"pass_through\"" "$EXT_LOG" 2>/dev/null && { F=$((F+1)); echo "[FAIL] disabled profile alt dispatched (enabled-set gating broken)"; } || { P=$((P+1)); echo "[PASS] disabled profile alt not dispatched"; }
+  exit $F
+TEST
+
+# ── Test 10: 路由规则命中（routingRules 覆盖 tiebreak）──────────
+test_it "routing rule routes to alt (pass_through) over tiebreak default" <<'TEST'
+  cleanup_config && mkdir -p "$CONFIG_DIR"
+  cat > "$CONFIG_DIR/config.json" <<'JSONEOF'
+{"enabledProfileIds":["default","alt"],"routingRules":[{"model":"mock-llm/","targetProfileId":"alt"}],"profiles":{"default":{"id":"default","name":"Default","model":"current","trigger":{"type":"context_percent","threshold":1},"mechanism":{"type":"summarize"},"prompt":"","autoContinue":false,"autoContinueMessage":"继续按目标完成任务，全部验证"},"alt":{"id":"alt","name":"Alt","model":"current","trigger":{"type":"context_percent","threshold":1},"mechanism":{"type":"pass_through"},"prompt":"","autoContinue":false,"autoContinueMessage":"继续按目标完成任务，全部验证"}}}
+JSONEOF
+
+  LONG=""; for i in $(seq 1 300); do LONG="${LONG}Line $i: Test data for compaction. "; done
+  cd "$TEST_HOME"
+  set +e
+  timed_run 30 env HOME="$ISOLATED_HOME" "$(which pi)" -a --no-session -e "$ROOT_DIR/extensions/context/custom-compaction" -e "$ROOT_DIR/extensions/meta/pi-logger" -e "$ROOT_DIR/test/e2e/helpers/mock-llm.ts" -p "$LONG" >"$TEST_HOME/route.log" 2>&1 || true
+  set -e; cd "$ROOT_DIR"
+
+  EXT_LOG=$(find_cc_log)
+  echo "=== Log: $EXT_LOG ==="
+  P=0; F=0
+  grep -qE "SyntaxError|TypeError" "$TEST_HOME/route.log" 2>/dev/null && { F=$((F+1)); echo "[FAIL] JS errors"; } || { P=$((P+1)); echo "[PASS] No JS errors"; }
+  # routingRules 命中 alt（pass_through），覆盖 tiebreak 的 default（summarize）
+  [ -n "$EXT_LOG" ] && grep -q "Mechanism is \"pass_through\"" "$EXT_LOG" 2>/dev/null && { P=$((P+1)); echo "[PASS] routing rule routed to alt (pass_through)"; } || echo "[REVIEW] pass_through not detected (routing rule may not have hit)"
+  exit $F
+TEST
+
+# 注：隐形 continue 集成链路（压缩成功 → marker 发送 → context 过滤 → LLM 零文本
+# → 新 turn 恢复）已迁移到 tui-expect.smoke.test.sh 的 TUI 用例——--no-session 下
+# ctx.compact() 是 fire-and-forget，pi 处理完 prompt 即退出，摘要→onComplete 异步链
+# 无法完成，只能验证「触发信号」而无法确定性验证完整链路。

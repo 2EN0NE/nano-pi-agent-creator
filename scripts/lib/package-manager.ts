@@ -234,9 +234,14 @@ export class PackageManager {
 	/**
 	 * 为指定扩展列表执行 per-extension npm install。
 	 *
+	 * 仅当扩展 dependencies 里存在「非 @zenone/*」的第三方 npm 包时才安装。
+	 * @zenone/* 本地包由 root node_modules 统一解析（scanLocalPackages 注册 +
+	 * installRoot 递归安装），devDependencies 是源码开发工具（运行时不需要），
+	 * 两者均不触发本地 install。
+	 *
 	 * 自动跳过：
-	 *   - npm 风格扩展（其依赖由 root node_modules 解析）
-	 *   - 没有依赖的目录
+	 *   - npm 风格扩展（有 pi.extensions，其依赖由 root node_modules 解析）
+	 *   - dependencies 里没有第三方包的目录
 	 *   - node_modules 已是最新的目录
 	 */
 	async installExtensions(resources: ResolvedResource[]): Promise<ExtensionInstallSummary> {
@@ -252,7 +257,7 @@ export class PackageManager {
 				continue;
 			}
 
-			if (this._hasDependencies(checkPath)) {
+			if (this._hasThirdPartyDependencies(checkPath)) {
 				if (this._shouldSkipNpmInstall(checkPath)) {
 					continue;
 				}
@@ -368,18 +373,21 @@ export class PackageManager {
 	}
 
 	/**
-	 * 检查目录是否有 npm 依赖需要安装。
+	 * 检查目录 dependencies 里是否有「非 @zenone/*」的第三方 npm 包需要本地 install。
+	 *
+	 * @zenone/* 本地包由 root node_modules 统一解析（scanLocalPackages 注册到
+	 * root package.json，installRoot 递归安装），devDependencies 是源码开发工具
+	 * （运行时不需要），两者都不触发 per-extension install。
 	 */
-	private _hasDependencies(dir: string): boolean {
+	private _hasThirdPartyDependencies(dir: string): boolean {
 		const pkgPath = join(dir, 'package.json');
 		if (!existsSync(pkgPath)) return false;
 
 		try {
 			const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-			if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) return true;
-			if (pkg.devDependencies && Object.keys(pkg.devDependencies).length > 0) return true;
-			if (pkg.peerDependencies && Object.keys(pkg.peerDependencies).length > 0) return true;
-			return false;
+			const deps = pkg.dependencies as Record<string, string> | undefined;
+			if (!deps) return false;
+			return Object.keys(deps).some((name) => !name.startsWith('@zenone/'));
 		} catch {
 			return false;
 		}

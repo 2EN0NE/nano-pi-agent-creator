@@ -8,6 +8,7 @@
 #   3. review prompt 被正确构建发送
 #   4. 模式选择"新分支"应创建新会话分支 (上下文从接近0%开始)
 #   5. /end-review 正确识别活跃审查并完成
+#   6. /review 后先选审查方案（代码审查 / 测试覆盖分析），再选目标
 # ──────────────────────────────────────────────────────────────────────────────
 
 test_describe "review extension"
@@ -38,13 +39,13 @@ test_it "review prompt is built and sent [REVIEW]" <<'TEST'
   mark_for_review "验证 review 扩展是否成功构建 review prompt 并触发 agent 回复"
 TEST
 
-# ── 用例 4：/review 模式选择器可交互 ──
-test_it "/review selector shows mode options [REVIEW]" <<'TEST'
+# ── 用例 4：/review 先显示审查方案选择器 ──
+test_it "/review shows profile selector first [REVIEW]" <<'TEST'
   run_pi_and_check \
     --extensions "pi-logger,review" \
     --prompt "/review" \
     --save-output
-  mark_for_review "验证输出中包含'新分支'和'当前会话'选项"
+  mark_for_review "验证输出中先出现审查方案选择（代码审查 / 测试覆盖分析），而非直接进入目标选择"
 TEST
 
 # ── 用例 5：同步后扩展不报错 ──

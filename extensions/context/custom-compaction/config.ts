@@ -25,8 +25,9 @@ import {
 	type CompactionMechanism,
 	type CompactionProfile,
 	type TriggerCondition,
+	type TriggerGranularity,
+	type RoutingRule,
 	createDefaultConfig,
-	selectBestProfile,
 } from './types.js';
 
 const log = createLogger('custom-compaction:config');
@@ -47,16 +48,73 @@ export type ProfileFieldPartial = Partial<Omit<CompactionProfile, 'trigger' | 'm
 
 // ── ConfigStore ──────────────────────────────────────────────────
 // sessionScoped: 启用 session 级覆盖（<sessionId>.json 优先于 config.json）
-// validate: 校验 profiles 并兜底 activeProfileId
+// validate: 校验 profiles + 新字段兜底
 
 function validateConfig(raw: unknown): Partial<CompactionConfig> | null {
-	const parsed = raw as CompactionConfig;
-	if (!parsed.profiles || typeof parsed.profiles !== 'object') {
-		log.warn('Invalid config: missing or invalid profiles field, skipping layer');
+	if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
 		return null;
 	}
-	if (!parsed.activeProfileId || !parsed.profiles[parsed.activeProfileId]) {
-		parsed.activeProfileId = Object.keys(parsed.profiles)[0] ?? 'default';
+	const parsed = raw as Partial<CompactionConfig>;
+	// profiles：字段级校验。缺失时置 undefined 继承低层（分层最小写入下，
+	// 高层可只声明 enabledProfileIds / routingRules / triggerGranularity 而
+	// 不重定义 profiles）。不再因「无 profiles」丢弃整层——否则 project/session
+	// 层仅覆盖 enabledProfileIds（profile 定义在低层）会被整体跳过。
+	if (
+		parsed.profiles !== undefined &&
+		(parsed.profiles === null ||
+			typeof parsed.profiles !== 'object' ||
+			Array.isArray(parsed.profiles))
+	) {
+		parsed.profiles = undefined;
+	}
+	// 新增字段校验：非法值置 undefined（deepMerge 跳过 → 继承 defaults 的默认值）。
+	// 迁移靠 defaults 默认值 + merge 继承实现，validate 只读不写盘，天然幂等。
+	if (parsed.enabledProfileIds !== undefined) {
+		if (!Array.isArray(parsed.enabledProfileIds)) {
+			parsed.enabledProfileIds = undefined;
+		} else {
+			// 仅做元素类型过滤（string），不做存在性过滤——跨层引用合法（高层可
+			// 引用低层定义的 profile），幽灵 id 由 getEnabledProfiles 在合并后按
+			// config.profiles 过滤，消费侧天然安全。
+			parsed.enabledProfileIds = parsed.enabledProfileIds.filter(
+				(id) => typeof id === 'string',
+			);
+			// 启用集非空不变量（ADR-0036 决策 2）：手编空数组（或全非法元素）
+			// 过滤后为空 → 置 undefined 继承 defaults，避免自动压缩被静默禁用。
+			if (parsed.enabledProfileIds.length === 0) parsed.enabledProfileIds = undefined;
+		}
+	}
+	if (
+		parsed.triggerGranularity !== undefined &&
+		parsed.triggerGranularity !== 'user_turn' &&
+		parsed.triggerGranularity !== 'agent_turn' &&
+		parsed.triggerGranularity !== 'tool'
+	) {
+		parsed.triggerGranularity = undefined;
+	}
+	if (parsed.routingRules !== undefined) {
+		if (!Array.isArray(parsed.routingRules)) {
+			parsed.routingRules = undefined;
+		} else {
+			// 元素级形状校验：丢弃非对象元素、targetProfileId 缺失/非字符串、
+			// model 非字符串、complexity 非法枚举值的规则，防止畸形规则在触发
+			// 评估（selectProfileFromTriggered → modelMatchScore）时抛 TypeError。
+			const rules = parsed.routingRules as unknown[];
+			parsed.routingRules = rules.filter((rule): rule is RoutingRule => {
+				if (rule === null || typeof rule !== 'object' || Array.isArray(rule)) return false;
+				const r = rule as Record<string, unknown>;
+				if (typeof r.targetProfileId !== 'string' || r.targetProfileId === '') return false;
+				if (r.model !== undefined && typeof r.model !== 'string') return false;
+				if (
+					r.complexity !== undefined &&
+					r.complexity !== 'low' &&
+					r.complexity !== 'medium' &&
+					r.complexity !== 'high'
+				)
+					return false;
+				return true;
+			});
+		}
 	}
 	return parsed;
 }
@@ -97,8 +155,8 @@ export function isSessionConfig(): boolean {
  */
 export function getConfigLabel(): string {
 	const source = store.getActiveSource();
-	const profile = getActiveProfile();
-	const profileName = profile?.name ?? 'Default';
+	const enabled = getEnabledProfiles();
+	const profileName = enabled[0]?.name ?? 'Default';
 
 	switch (source) {
 		case 'session':
@@ -134,7 +192,7 @@ export function loadConfig(): CompactionConfig {
  * Save config to disk.
  *
  * ⚠️ 底层能力：写入的是「传入的完整对象」到指定层文件。
- * 业务代码应使用 upsertProfile / setActiveProfile / deleteProfile
+ * 业务代码应使用 upsertProfile / setProfileEnabled / deleteProfile
  * （它们只更新目标层的差异，不会把合并后的全量快照污染到单层文件）。
  *
  * @param config  The config object to save.
@@ -214,45 +272,89 @@ export function getActiveConfigPath(): string {
 // ── Profile helpers ─────────────────────────────────────────────
 
 /**
- * Get the stored "active" profile from config.activeProfileId.
- * Pure read — returns undefined if no profile is found.
- *
- * The ConfigStore defaults (createDefaultConfig) ensure at least
- * one 'default' profile always exists, so undefined is an edge case
- * when all profiles were explicitly deleted.
+ * Get the profiles in the enabled set (启用集) — profiles the user has toggled
+ * on via Space in the settings panel. These are the candidates evaluated by
+ * the proactive trigger (第一道闸). Order follows config.profiles definition
+ * order.
  */
-export function getActiveProfile(): CompactionProfile | undefined {
+export function getEnabledProfiles(): CompactionProfile[] {
 	const config = store.get();
-	const profile = config.profiles[config.activeProfileId];
-	if (profile) return profile;
-
-	const firstKey = Object.keys(config.profiles)[0];
-	if (firstKey) return config.profiles[firstKey];
-
-	return undefined;
+	return config.enabledProfileIds
+		.map((id) => config.profiles[id])
+		.filter((p): p is CompactionProfile => p !== undefined);
 }
 
 /**
- * Get the effective profile for the given model spec.
- *
- * Uses model-aware matching: picks the profile whose matchModel best matches
- * the given model spec. Falls back to getActiveProfile() if no match.
- *
- * @param modelSpec  Provider/model string (e.g. "openai/gpt-4o")
+ * Toggle a profile's membership in the enabled set (Space in settings panel).
+ * Returns false when the profile doesn't exist, or when disabling the last
+ * enabled profile (启用集不得为空 — caller should notify the user).
  */
-export function getEffectiveProfile(modelSpec?: string): CompactionProfile | undefined {
-	const config = store.get();
-	const best = selectBestProfile(config, modelSpec);
-	return best ?? getActiveProfile();
-}
-
-export function setActiveProfile(profileId: string, scope: SaveScope = getActiveScope()): boolean {
+export function setProfileEnabled(
+	profileId: string,
+	enabled: boolean,
+	scope: SaveScope = getActiveScope(),
+): boolean {
 	const config = store.get();
 	if (!config.profiles[profileId]) return false;
-	// 只更新目标层文件的 activeProfileId，保留该层其它内容
+
+	const current = config.enabledProfileIds;
+	let next: string[];
+	if (enabled) {
+		next = current.includes(profileId) ? current : [...current, profileId];
+	} else {
+		if (!current.includes(profileId)) return true; // 已停用，幂等
+		if (current.length <= 1) return false; // 至少保留一个启用项
+		next = current.filter((id) => id !== profileId);
+	}
+
 	const raw = readLayerRaw(scope) ?? {};
-	raw.activeProfileId = profileId;
+	raw.enabledProfileIds = next;
 	return writeLayer(scope, raw);
+}
+
+/**
+ * Read the trigger granularity (触发粒度，ADR-0036). Defaults to 'agent_turn'
+ * via createDefaultConfig when not overridden.
+ */
+export function getTriggerGranularity(): TriggerGranularity {
+	return store.get().triggerGranularity;
+}
+
+/**
+ * Set the trigger granularity (settings 面板 g 键循环切换).
+ */
+export function setTriggerGranularity(
+	granularity: TriggerGranularity,
+	scope: SaveScope = getActiveScope(),
+): boolean {
+	const raw = readLayerRaw(scope) ?? {};
+	raw.triggerGranularity = granularity;
+	return writeLayer(scope, raw);
+}
+
+/** 整表写入路由规则（有序，首条命中生效） */
+export function setRoutingRules(
+	rules: RoutingRule[],
+	scope: SaveScope = getActiveScope(),
+): boolean {
+	const raw = readLayerRaw(scope) ?? {};
+	raw.routingRules = rules;
+	return writeLayer(scope, raw);
+}
+
+/** 追加一条路由规则（尾部） */
+export function addRoutingRule(rule: RoutingRule, scope: SaveScope = getActiveScope()): boolean {
+	return setRoutingRules([...store.get().routingRules, rule], scope);
+}
+
+/** 按索引删除一条路由规则 */
+export function deleteRoutingRule(index: number, scope: SaveScope = getActiveScope()): boolean {
+	const rules = store.get().routingRules;
+	if (index < 0 || index >= rules.length) return false;
+	return setRoutingRules(
+		rules.filter((_, i) => i !== index),
+		scope,
+	);
 }
 
 export function upsertProfile(
@@ -266,9 +368,6 @@ export function upsertProfile(
 	) as Record<string, unknown>;
 	profiles[profile.id] = profile;
 	raw.profiles = profiles;
-	if (typeof raw.activeProfileId !== 'string' || !(raw.activeProfileId in profiles)) {
-		raw.activeProfileId = profile.id;
-	}
 	return writeLayer(scope, raw);
 }
 
@@ -313,15 +412,12 @@ export function updateProfileFields(
 			merged[k] = mergedSub;
 		} else {
 			// 顶层字段清除（undefined）→ null：同上，null 在 deepMerge 中覆盖低层值，
-			// 消费侧（modelMatchScore/selectBestProfile/面板显示）均按 falsy 处理，语义等价于 undefined。
+			// 消费侧（modelMatchScore/面板显示）均按 falsy 处理，语义等价于 undefined。
 			merged[k] = v === undefined ? null : v;
 		}
 	}
 	profiles[profileId] = merged;
 	raw.profiles = profiles;
-	if (typeof raw.activeProfileId !== 'string' || !(raw.activeProfileId in profiles)) {
-		raw.activeProfileId = profileId;
-	}
 	return writeLayer(scope, raw);
 }
 
@@ -330,6 +426,7 @@ export function deleteProfile(profileId: string): boolean {
 	const keys = Object.keys(config.profiles);
 	if (keys.length <= 1) return false;
 	if (!config.profiles[profileId]) return false;
+	const remainingIds = keys.filter((id) => id !== profileId);
 
 	// 从所有层删除该 profile 的定义（无论它定义在哪层都能删掉）。
 	// 跨层删除是「多文件事务」：先收集全部待写层 + 原始内容备份，
@@ -346,8 +443,12 @@ export function deleteProfile(profileId: string): boolean {
 		if (!(profileId in profiles)) continue;
 		const backup = structuredClone(raw) as Record<string, unknown>;
 		delete profiles[profileId];
-		if (raw.activeProfileId === profileId) {
-			raw.activeProfileId = Object.keys(profiles)[0] ?? 'default';
+		if (Array.isArray(raw.enabledProfileIds)) {
+			const filtered = raw.enabledProfileIds.filter((id) => id !== profileId);
+			// 启用集非空不变量（ADR-0036 决策 2）：该层过滤后为空时回填剩余第一个
+			// profile，避免删除唯一启用项后自动压缩被静默禁用。
+			raw.enabledProfileIds =
+				filtered.length === 0 && remainingIds.length > 0 ? [remainingIds[0]] : filtered;
 		}
 		pending.push({ scope, raw, backup });
 	}

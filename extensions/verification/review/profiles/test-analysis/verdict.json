@@ -1,0 +1,50 @@
+{
+	"verdict": {
+		"safeValues": ["protected", "correct"],
+		"blockingValues": ["gaps found", "unprotected", "needs attention"],
+		"headings": ["verdict", "overall verdict", "总体结论", "结论"],
+		"stopHeadings": [
+			"review scope",
+			"findings",
+			"fix queue",
+			"constraints",
+			"分析范围",
+			"发现列表",
+			"改进队列",
+			"人工审查者标注项",
+			"基础设施评估",
+			"CI 门禁评估",
+			"覆盖度盘点"
+		]
+	},
+	"findings": {
+		"headings": ["findings", "发现列表"],
+		"boundaryHeadings": [
+			"review scope",
+			"verdict",
+			"overall verdict",
+			"fix queue",
+			"constraints",
+			"分析范围",
+			"总体结论",
+			"结论",
+			"改进队列",
+			"人工审查者标注项"
+		]
+	},
+	"findingLine": {
+		"priorityTag": "\\[P[0-3]\\]",
+		"excludeDefinitionPatterns": [
+			"drop everything",
+			"urgent",
+			"normal",
+			"low",
+			"nice to have",
+			"立即处理",
+			"下一个迭代",
+			"应最终处理",
+			"锦上添花"
+		],
+		"excludePlaceholderPatterns": ["类别:标题", "path/to/file"]
+	}
+}

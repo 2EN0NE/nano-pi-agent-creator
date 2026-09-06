@@ -15,14 +15,26 @@ test_describe "ci-watch extension"
 # ====================================================================
 setup_sandbox() {
   local test_home="$1"
+  # mock-llm 源：默认共享版；传参可指定专用版（如 ci-watch 自动监控场景）
+  local mock_llm_src="${2:-$ROOT_DIR/test/helpers/mock-llm.ts}"
 
   local home_dir="$test_home/home"
   mkdir -p "$home_dir/.pi/agent/extensions" \
     "$test_home/.pi/extensions" \
     "$test_home/.pi/logs"
 
-  # ci-watch：带 dist 的目录扩展
+  # ci-watch：带 dist 的目录扩展（pi 靠 package.json 的 pi.extensions 发现入口）
+  # CI 中 dist 不提交（gitignore），缺失时自动构建
+  if [[ ! -d "$ROOT_DIR/extensions/verification/ci-watch/dist" ]]; then
+    echo "Building ci-watch dist (missing in source)..."
+    (cd "$ROOT_DIR/extensions/verification/ci-watch" && npx tsc) || {
+      echo "FAIL: ci-watch build failed"
+      exit 1
+    }
+  fi
   mkdir -p "$test_home/.pi/extensions/ci-watch"
+  cp "$ROOT_DIR/extensions/verification/ci-watch/package.json" \
+    "$test_home/.pi/extensions/ci-watch/package.json"
   cp -r "$ROOT_DIR/extensions/verification/ci-watch/dist" \
     "$test_home/.pi/extensions/ci-watch/dist"
 
@@ -36,9 +48,9 @@ setup_sandbox() {
     cp -r "$ROOT_DIR/src/tui" "$test_home/src/tui"
   fi
 
-  # mock-llm：引用共享版本（test/helpers/mock-llm.ts）
+  # mock-llm：默认共享版本，可传参替换为专用版本
   mkdir -p "$test_home/.pi/extensions/mock-llm"
-  cp "$ROOT_DIR/test/helpers/mock-llm.ts" \
+  cp "$mock_llm_src" \
     "$test_home/.pi/extensions/mock-llm/index.ts"
 
   # pi-logger 配置
@@ -91,6 +103,65 @@ dump_logs() {
 }
 
 # ====================================================================
+# Helper：安装假 gh（确定性控制 gh 行为，避免依赖宿主机 gh / 真实 GitHub）
+# 参数：$1 = test_home  $2 = run conclusion（failure/success/pending）
+# 用法：install_mock_gh "$test_home" failure
+# ====================================================================
+install_mock_gh() {
+  local test_home="$1"
+  local conclusion="${2:-failure}"
+  mkdir -p "$test_home/bin"
+  cat >"$test_home/bin/gh" <<GH
+#!/bin/bash
+# mock gh：headSha 取沙箱 git HEAD，使 evaluateBranchRuns 的 expectedSha 匹配
+case "\$1" in
+  "pr")
+    # pr list --head <branch> ... → 无 PR（走分支模式）
+    echo ""
+    exit 0
+    ;;
+  "run")
+    if [[ "\$2" == "view" ]]; then
+      # run view <id> --log-failed → 假失败日志
+      echo "mock failed log line 1 (compile error)"
+      echo "mock failed log line 2 (test failed)"
+      exit 0
+    fi
+    # run list --branch <b> -L <n> --json ... → 单个 run（conclusion 由环境变量决定）
+    head_sha=\$(git rev-parse HEAD 2>/dev/null || echo "0000000000000000000000000000000000000000")
+    cat <<JSON
+[{"name":"CI","status":"completed","conclusion":"$conclusion","databaseId":999,"headSha":"\$head_sha","headBranch":"main"}]
+JSON
+    exit 0
+    ;;
+  *)
+    echo "mock-gh: unhandled: \$*" >&2
+    exit 1
+    ;;
+esac
+GH
+  chmod +x "$test_home/bin/gh"
+}
+
+# ====================================================================
+# Helper：定位 ci-watch 日志文件
+# 可能位置：项目级 $test_home/.pi/logs 或用户级 $test_home/home/.pi/logs
+# 参数：$1 = test_home
+# 输出：日志文件路径（存在则输出，否则空）
+# ====================================================================
+ci_watch_log() {
+  local test_home="$1"
+  # 注意：run-e2e.sh 以 set -o pipefail 运行，ls 多个 glob 时任一无匹配会
+  # 使管道整体返回非零（赋值为非零 → 触发外层 set -e）——分开查找 + echo 兜底
+  local f=""
+  f=$(ls "$test_home/.pi/logs/ci-watch_"*.log 2>/dev/null | head -1) || true
+  if [[ -z "$f" ]]; then
+    f=$(ls "$test_home/home/.pi/logs/ci-watch_"*.log 2>/dev/null | head -1) || true
+  fi
+  echo "$f"
+}
+
+# ====================================================================
 # 场景 1：基本加载 —— mock-llm + ci-watch
 # ====================================================================
 test_it "loads with mock LLM and responds" <<'TEST'
@@ -131,7 +202,7 @@ TEST
 # ====================================================================
 # 场景 2：ci-watch 的 session_start 事件正常触发
 # ====================================================================
-test_it "ci-watch session_start handler fires [REVIEW]" <<'TEST'
+test_it "ci-watch session_start handler fires" <<'TEST'
   slug="ciw-s2-$$"
   test_home="$ROOT_DIR/.pi/tmp/$slug"
   setup_sandbox "$test_home"
@@ -144,11 +215,17 @@ test_it "ci-watch session_start handler fires [REVIEW]" <<'TEST'
     exit 1
   fi
 
-  dump_logs "$test_home"
+  # 断言：session_start 的 gh 检测 handler 实际触发（ci-watch 日志写入检测结果）
+  log_file=$(ci_watch_log "$test_home")
+  if [[ -n "$log_file" ]] && grep -q "gh CLI 检测" "$log_file"; then
+    echo "PASS: session_start gh detection logged"
+  else
+    echo "FAIL: no gh detection log in ci-watch log"
+    cat "$log_file" 2>/dev/null || echo "(no ci-watch log)"
+    exit 1
+  fi
 
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
-
-  mark_for_review "检查 ci-watch 是否正确加载："$'\n'"1. Exit code 0（或 124 timeout）"$'\n'"2. 日志中有 ci-watch 相关输出（gh CLI 检测结果）"$'\n'"3. Lifecycle log 显示完整的 session 生命周期"
   exit 0
 TEST
 
@@ -210,7 +287,9 @@ test_it "/ci-watch without args shows usage hint (no crash)" <<'TEST'
 TEST
 
 # ====================================================================
-# 场景 5：/ci-watch 带无效参数时不崩溃
+# 场景 5：/ci-watch 带无效参数时不崩溃（print 模式启动冒烟）
+# 注意：print 模式下 slash 命令不解析执行（命令逻辑在 TUI 场景覆盖：
+# "expect: /ci-watch with invalid ref"），本场景仅验证启动不崩溃。
 # ====================================================================
 test_it "/ci-watch with invalid ref shows error (no crash)" <<'TEST'
   slug="ciw-s5-$$"
@@ -234,14 +313,16 @@ test_it "/ci-watch with invalid ref shows error (no crash)" <<'TEST'
 TEST
 
 # ====================================================================
-# 场景 6：扩展日志对 gh CLI 的检测结果
+# 场景 6：gh CLI 检测日志（注入假 gh → 确定性断言检测成功）
 # ====================================================================
-test_it "gh CLI detection logged [REVIEW]" <<'TEST'
+test_it "gh CLI detection logged" <<'TEST'
   slug="ciw-s6-$$"
   test_home="$ROOT_DIR/.pi/tmp/$slug"
   setup_sandbox "$test_home"
+  install_mock_gh "$test_home" failure
 
-  run_pi "$test_home" "hi"
+  # 假 gh 使 command -v gh 成功 → ghAvailable=true → 记录"检测成功"
+  run_pi "$test_home" "hi" "$test_home/bin"
   ec=$?
 
   if [[ "$ec" -ne 0 && "$ec" -ne 124 ]]; then
@@ -249,10 +330,234 @@ test_it "gh CLI detection logged [REVIEW]" <<'TEST'
     exit 1
   fi
 
-  dump_logs "$test_home"
+  log_file=$(ci_watch_log "$test_home")
+  if [[ -n "$log_file" ]] && grep -q "gh CLI 检测成功" "$log_file"; then
+    echo "PASS: gh CLI detection success logged"
+  else
+    echo "FAIL: no 'gh CLI 检测成功' in ci-watch log"
+    cat "$log_file" 2>/dev/null || echo "(no ci-watch log)"
+    exit 1
+  fi
 
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
 
-  mark_for_review "验证 gh CLI 检测日志：隔离沙箱中预计无 gh 命令，ci-watch 应输出 'gh CLI not found' 通知。确认日志中有此记录且扩展未崩溃"
+# ====================================================================
+# 场景 7：自动监控 — bash 工具输出 push 文本 → 触发 CI 自动监控
+# ====================================================================
+test_it "auto-monitor triggers on git push output in bash tool result" <<'TEST'
+  slug="ciw-s7-$$"
+  test_home="$ROOT_DIR/.pi/tmp/$slug"
+  # 使用专用 mock-llm（支持 MOCK_LLM_BASH_OUTPUT 触发真实 bash tool call）
+  setup_sandbox "$test_home" "$ROOT_DIR/test/e2e/extensions/ci-watch/helpers/mock-llm.ts"
+
+  # 让沙箱 git 仓库有 main 分支 commit（自动监控需解析 refs/heads/main 的完整 SHA）
+  git -C "$test_home" config user.email test@example.com
+  git -C "$test_home" config user.name test
+  git -C "$test_home" commit --allow-empty -m init &>/dev/null || true
+
+  # 缩短轮询间隔 + 自动监控超时，避免 poll 拖慢测试
+  mkdir -p "$test_home/home/.pi/agent/extensions-data/ci-watch"
+  cat >"$test_home/home/.pi/agent/extensions-data/ci-watch/config.json" <<'JSON'
+{ "pollConfig": { "minMs": 1000, "maxMs": 2000, "stepMs": 1000 }, "autoMaxWaitMs": 5000 }
+JSON
+
+  # 假 gh：沙箱无 GitHub 认证，真实 gh 命令会交互式提示挂起（每次 30s）——
+  # 用立即失败的 mock 替代（gh 属于外部 CLI，mock 不损害对 ci-watch 逻辑的验证）
+  mkdir -p "$test_home/bin"
+  cat >"$test_home/bin/gh" <<'GH'
+#!/bin/bash
+echo "mock-gh: gh not authenticated in test sandbox" >&2
+exit 1
+GH
+  chmod +x "$test_home/bin/gh"
+
+  cd "$test_home"
+  set +e
+  HOME="$test_home/home" \
+    PATH="$test_home/bin:$PATH" \
+    MOCK_LLM_BASH_OUTPUT='To github.com:2EN0NE/nano-pi-agent-creator.git   0ed3326b..040c8427  main -> main' \
+    pi -a --no-session -p "hi" >"$test_home/pi-stdout.log" 2>&1
+  ec=$?
+  set -e
+  cd "$ROOT_DIR"
+
+  echo "=== pi exit code: $ec ==="
+  if [[ "$ec" -ne 0 && "$ec" -ne 124 ]]; then
+    echo "FAIL: unexpected exit code $ec"
+    exit 1
+  fi
+
+  # 断言：push 检测 + SHA 解析成功 → 进入自动监控
+  if grep -q "触发 CI 自动监控" "$test_home/.pi/logs/ci-watch_"*.log 2>/dev/null; then
+    echo "PASS: auto-monitor triggered (push detected)"
+  else
+    echo "FAIL: no auto-monitor trigger in ci-watch log"
+    cat "$test_home/.pi/logs/ci-watch_"*.log 2>/dev/null || echo "(no ci-watch log)"
+    echo "=== stdout ==="
+    cat "$test_home/pi-stdout.log"
+    exit 1
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ====================================================================
+# 场景 8：自动监控 — tag push 明确跳过（不再误兜底成当前分支）
+# ====================================================================
+test_it "auto-monitor skips tag push" <<'TEST'
+  slug="ciw-s8-$$"
+  test_home="$ROOT_DIR/.pi/tmp/$slug"
+  setup_sandbox "$test_home" "$ROOT_DIR/test/e2e/extensions/ci-watch/helpers/mock-llm.ts"
+
+  git -C "$test_home" config user.email test@example.com
+  git -C "$test_home" config user.name test
+  git -C "$test_home" commit --allow-empty -m init &>/dev/null || true
+
+  # 假 gh：避免真实 gh 未认证交互挂起
+  mkdir -p "$test_home/bin"
+  cat >"$test_home/bin/gh" <<'GH'
+#!/bin/bash
+echo "mock-gh: gh not authenticated in test sandbox" >&2
+exit 1
+GH
+  chmod +x "$test_home/bin/gh"
+
+  cd "$test_home"
+  set +e
+  HOME="$test_home/home" \
+    PATH="$test_home/bin:$PATH" \
+    MOCK_LLM_BASH_OUTPUT='To github.com:2EN0NE/nano-pi-agent-creator.git   * [new tag]  v0.1.0 -> v0.1.0' \
+    pi -a --no-session -p "hi" >"$test_home/pi-stdout.log" 2>&1
+  ec=$?
+  set -e
+  cd "$ROOT_DIR"
+
+  echo "=== pi exit code: $ec ==="
+  if [[ "$ec" -ne 0 && "$ec" -ne 124 ]]; then
+    echo "FAIL: unexpected exit code $ec"
+    exit 1
+  fi
+
+  # 断言：tag push 被明确跳过（不进入分支监控）
+  if grep -q "检测到 tag push，跳过自动监控" "$test_home/.pi/logs/ci-watch_"*.log 2>/dev/null; then
+    echo "PASS: tag push skipped"
+  else
+    echo "FAIL: no tag-push skip log"
+    cat "$test_home/.pi/logs/ci-watch_"*.log 2>/dev/null || echo "(no ci-watch log)"
+    echo "=== stdout ==="
+    cat "$test_home/pi-stdout.log"
+    exit 1
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ====================================================================
+# 场景 9：自动监控 → 分支 run 失败 → 通知链路（notifyResult fail 分支）
+# mock gh 输出 headSha 匹配沙箱 HEAD 的 failure run，验证：
+#   - expectedSha 匹配后评估出 fail
+#   - notifyResult 写 "CI 失败" 日志（含 failedRuns）
+# ====================================================================
+test_it "auto-monitor detects failed run and notifies" <<'TEST'
+  slug="ciw-s9-$$"
+  test_home="$ROOT_DIR/.pi/tmp/$slug"
+  setup_sandbox "$test_home" "$ROOT_DIR/test/e2e/extensions/ci-watch/helpers/mock-llm.ts"
+  install_mock_gh "$test_home" failure
+
+  # 沙箱 git 仓库：mock gh 用 rev-parse HEAD 输出 headSha（需匹配 expectedSha）
+  git -C "$test_home" config user.email test@example.com
+  git -C "$test_home" config user.name test
+  git -C "$test_home" commit --allow-empty -m init &>/dev/null || true
+
+  # 缩短轮询间隔，避免拖慢测试
+  mkdir -p "$test_home/home/.pi/agent/extensions-data/ci-watch"
+  cat >"$test_home/home/.pi/agent/extensions-data/ci-watch/config.json" <<'JSON'
+{ "pollConfig": { "minMs": 1000, "maxMs": 2000, "stepMs": 1000 }, "autoMaxWaitMs": 8000 }
+JSON
+
+  cd "$test_home"
+  set +e
+  HOME="$test_home/home" \
+    PATH="$test_home/bin:$PATH" \
+    MOCK_LLM_EXTRA_RESPONSES=3 \
+    MOCK_LLM_BASH_OUTPUT='To github.com:2EN0NE/nano-pi-agent-creator.git   0ed3326b..040c8427  main -> main' \
+    pi -a --no-session -p "hi" >"$test_home/pi-stdout.log" 2>&1
+  ec=$?
+  set -e
+  cd "$ROOT_DIR"
+
+  echo "=== pi exit code: $ec ==="
+  if [[ "$ec" -ne 0 && "$ec" -ne 124 ]]; then
+    echo "FAIL: unexpected exit code $ec"
+    exit 1
+  fi
+
+  # 断言：轮询走到 fail → notifyResult 记录 "CI 失败"（含 run 名 CI）
+  log_file=$(ci_watch_log "$test_home")
+  if [[ -n "$log_file" ]] && grep -q "CI 失败" "$log_file"; then
+    echo "PASS: failed-run notification logged"
+  else
+    echo "FAIL: no 'CI 失败' in ci-watch log"
+    cat "$log_file" 2>/dev/null || echo "(no ci-watch log)"
+    echo "=== stdout ==="
+    cat "$test_home/pi-stdout.log"
+    exit 1
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ====================================================================
+# 场景 10：自动监控 → 分支 run 通过 → 通知链路（notifyResult pass 分支）
+# ====================================================================
+test_it "auto-monitor detects successful run and notifies" <<'TEST'
+  slug="ciw-s10-$$"
+  test_home="$ROOT_DIR/.pi/tmp/$slug"
+  setup_sandbox "$test_home" "$ROOT_DIR/test/e2e/extensions/ci-watch/helpers/mock-llm.ts"
+  install_mock_gh "$test_home" success
+
+  git -C "$test_home" config user.email test@example.com
+  git -C "$test_home" config user.name test
+  git -C "$test_home" commit --allow-empty -m init &>/dev/null || true
+
+  mkdir -p "$test_home/home/.pi/agent/extensions-data/ci-watch"
+  cat >"$test_home/home/.pi/agent/extensions-data/ci-watch/config.json" <<'JSON'
+{ "pollConfig": { "minMs": 1000, "maxMs": 2000, "stepMs": 1000 }, "autoMaxWaitMs": 8000 }
+JSON
+
+  cd "$test_home"
+  set +e
+  HOME="$test_home/home" \
+    PATH="$test_home/bin:$PATH" \
+    MOCK_LLM_BASH_OUTPUT='To github.com:2EN0NE/nano-pi-agent-creator.git   0ed3326b..040c8427  main -> main' \
+    pi -a --no-session -p "hi" >"$test_home/pi-stdout.log" 2>&1
+  ec=$?
+  set -e
+  cd "$ROOT_DIR"
+
+  echo "=== pi exit code: $ec ==="
+  if [[ "$ec" -ne 0 && "$ec" -ne 124 ]]; then
+    echo "FAIL: unexpected exit code $ec"
+    exit 1
+  fi
+
+  # 断言：轮询走到 pass → notifyResult 记录 "CI 通过"
+  log_file=$(ci_watch_log "$test_home")
+  if [[ -n "$log_file" ]] && grep -q "CI 通过" "$log_file"; then
+    echo "PASS: success notification logged"
+  else
+    echo "FAIL: no 'CI 通过' in ci-watch log"
+    cat "$log_file" 2>/dev/null || echo "(no ci-watch log)"
+    echo "=== stdout ==="
+    cat "$test_home/pi-stdout.log"
+    exit 1
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
   exit 0
 TEST

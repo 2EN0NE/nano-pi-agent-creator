@@ -1,0 +1,6 @@
+{
+	"MD013": false,
+	"MD024": { "siblings_only": true },
+	"MD010": { "code_blocks": false },
+	"MD007": { "indent": 4 }
+}

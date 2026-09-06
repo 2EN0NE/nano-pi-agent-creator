@@ -39,7 +39,7 @@ setup_test_home() {
   for name in "$@"; do
     case "$name" in
     tools)
-      cp "$ROOT_DIR/extensions/meta/tools.ts" "$test_home/.pi/extensions/tools.ts"
+      cp -r "$ROOT_DIR/extensions/meta/preset" "$test_home/.pi/extensions/preset"
       ;;
     ctx-simulator)
       cp "$ROOT_DIR/test/e2e/extensions/tools/helpers/z-ctx-simulator.ts" \
@@ -271,4 +271,85 @@ with open(f'$test_home/.pi/sessions/current.json', 'w') as f: json.dump({'sessio
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
 
   mark_for_review "Verify execution-level blocking:"$'\n'"1. call-observer log: 'tool_call attempt' with ctx_search (LLM tried to use it)"$'\n'"2. tools log: 'blocked tool call' with ctx_search (tool_call handler blocked)"$'\n'"3. ctx-simulator log: NO 'ctx_search executed' (execution was prevented)"$'\n'"4. ctx_execute should NOT be blocked (it's still in enabledTools)"
+TEST
+
+# ====================================================================
+# SCENARIO 7: tool-range 实验（select 型）— pi-lab 注册 + 分流
+# ====================================================================
+# 手动沙箱：tools 依赖 pi-lab（experiment 注册）+ mock-llm（无真实 API）
+# 验证：tool-range 实验注册 + session_start 分流（无用户显式配置时）
+setup_tool_range_sandbox() {
+  local test_home="$1"
+  setup_lab_sandbox "$test_home"
+  cp -r "$ROOT_DIR/extensions/meta/preset" "$test_home/.pi/extensions/preset"
+}
+
+test_it "tool-range experiment registers and assigns arm (pi-lab + mock-llm)" <<'TEST'
+  local slug="e2e-tools-s7-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  setup_tool_range_sandbox "$test_home"
+
+  cd "$test_home"
+  set +e
+  HOME="$test_home/home" pi -a --no-session -p "hi" >"$test_home/pi-stdout.log" 2>&1
+  local ec=$?
+  set -e
+  cd "$ROOT_DIR"
+
+  if [[ "$ec" -ne 0 && "$ec" -ne 124 ]]; then
+    echo "FAIL: unexpected exit code $ec"
+    cat "$test_home/pi-stdout.log"
+    exit 1
+  fi
+
+  local tools_log="$test_home/.pi/logs/tools_"*.log
+  if grep -q "Experiment registered: tools/tool-range" $tools_log 2>/dev/null; then
+    echo "PASS: tool-range experiment registered"
+  else
+    echo "FAIL: tool-range experiment not registered"
+    cat $tools_log 2>/dev/null || echo "(no tools log)"
+    exit 1
+  fi
+
+  # 分流结果与臂一致：core 臂 → 启用核心 7 工具且禁用其余；full 臂 → 全启用零禁用。
+  # 防止「core 臂形同虚设」（非 core 工具既不 enabled 也不 disabled 会被 auto-enable）
+  # 与「分流没应用到工具集」两类回归。
+  local assigned_line
+  assigned_line=$(grep -h "tool-range assigned" $tools_log 2>/dev/null | tail -1)
+  if [[ -z "$assigned_line" ]]; then
+    echo "FAIL: tool-range arm not assigned"
+    cat $tools_log 2>/dev/null || echo "(no tools log)"
+    exit 1
+  fi
+  echo "PASS: tool-range arm assigned (no user config)"
+
+  local arm enabled disabled
+  arm=$(sed -n 's/.*arm=\([a-z]*\).*/\1/p' <<<"$assigned_line")
+  enabled=$(sed -n 's/.*enabled=\([0-9]*\).*/\1/p' <<<"$assigned_line")
+  disabled=$(sed -n 's/.*disabled=\([0-9]*\).*/\1/p' <<<"$assigned_line")
+  echo "INFO: assigned line: $assigned_line"
+
+  if [[ "$arm" == "core" ]]; then
+    # core 臂：7 个核心工具全部启用（基础 4 + 搜索 3，增强缺失时回退内置 grep/find/ls），其余被 block
+    if [[ "$enabled" -eq 7 ]] && [[ "$disabled" -gt 0 ]]; then
+      echo "PASS: core arm applied (enabled=7, disabled=$disabled)"
+    else
+      echo "FAIL: core arm not applied correctly (enabled=$enabled, disabled=$disabled)"
+      exit 1
+    fi
+  elif [[ "$arm" == "full" ]]; then
+    # full 臂：全部工具启用，零禁用
+    if [[ "$enabled" -gt 7 ]] && [[ "$disabled" -eq 0 ]]; then
+      echo "PASS: full arm applied (enabled=$enabled, disabled=0)"
+    else
+      echo "FAIL: full arm not applied correctly (enabled=$enabled, disabled=$disabled)"
+      exit 1
+    fi
+  else
+    echo "FAIL: unexpected arm '$arm' in: $assigned_line"
+    exit 1
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
 TEST

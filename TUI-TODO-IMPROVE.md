@@ -21,8 +21,8 @@
 - [ ] **`tui/quit.ts`** — `ansiFg`（256 色 `\x1b[38;5;..m`）+ `ansiBold`（L319-320）。
 - [ ] **`tui/session-breakdown.ts`** — RGB ANSI `\x1b[48;2/38;2` + dim/bold（L278-290）。
 - [ ] **`context/custom-compaction/settings-ui.ts`** — 6 种硬编码色（cyan/green/yellow/red/bright-black，L67-73）。
-- [ ] **`meta/pi-rate-limiter/index.ts`** — `green/yellow/red` 硬编码 ANSI（L182-185，需确认是否 TUI render）。
-- [ ] **`meta/control/index.ts`** — `theme.fg()` 内嵌 `\x1b[1m...\x1b[22m` bold（L598），应拆为 `theme.bold()`。
+- [ ] **`auto/pi-rate-limiter/index.ts`** — `green/yellow/red` 硬编码 ANSI（L182-185，需确认是否 TUI render）。
+- [ ] **`auto/control/index.ts`** — `theme.fg()` 内嵌 `\x1b[1m...\x1b[22m` bold（L598），应拆为 `theme.bold()`。
 
 ## P0 — Emoji/图标（违反「无 Emoji/图标」铁律）
 
@@ -32,7 +32,7 @@
 - [ ] **`tui/btw.ts`** — `⚙✗✓❌`（L409, L467）。
 - [ ] **`tui/files/ui.ts`** — 复选框 `☑☐`（L33），改用 `[x]`/`[ ]`。
 - [ ] **`tui/questionnaire.ts`** — `✓✎`（L206-814）+ `■□`（L642）。
-- [ ] **`meta/control/index.ts`** — `✗✓`（L1563-1653）。
+- [ ] **`auto/control/index.ts`** — `✗✓`（L1563-1653）。
 - [ ] **`meta/selector/index.ts`** — `✎`（L32, L210）。
 - [ ] **`meta/skills.ts`** — `⚙⚠` + `●○`（L150-295）。
 - [ ] **`security/permission-gate/index.ts`** — `⚠✓`（L400-472）。
@@ -62,14 +62,13 @@
 
 > 手绘 `render()` 每行须 `truncateToWidth` 兜底；对齐只用 `visibleWidth`。以下为「手绘 render 但 truncateToWidth 为 0」的疑似缺口，需逐文件复核：
 
-- [ ] **`meta/control/index.ts`**（1929L，trunc=0，需复核 render 各行）
-- [ ] **`meta/mode-switcher.ts`**（1298L，trunc=0）
+- [ ] **`auto/control/index.ts`**（1929L，trunc=0，需复核 render 各行）
 - [ ] **`meta/preset.ts`**（502L，trunc=0）
 - [ ] **`meta/skills.ts`**（404L，trunc=2，偏低）
 - [ ] **`meta/tools.ts`**（481L，trunc=0）
 - [ ] **`auto/notify.ts`**（107L，trunc=0）
 - [ ] **`context/resources-tree/header.ts`**（59L，trunc=0）
-- [ ] **`tui/catch-the-fox/src/fox-widget.ts`** — `.length` 参与对齐计算（LENALIGN，需改 `visibleWidth`）
+- [ ] **`tui/DEMO:catch-the-fox/src/fox-widget.ts`** — `.length` 参与对齐计算（LENALIGN，需改 `visibleWidth`）
 
 ## P2 — 非 TUI 文本建议统一（低优先）
 
