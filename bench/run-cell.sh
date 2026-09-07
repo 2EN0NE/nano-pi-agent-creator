@@ -142,6 +142,12 @@ git -C "$WORKDIR" checkout --quiet "$BASE_REF" || {
 # （"全量环境+目标插件 vs 纯净 pi"），且目标插件若同时存在于全局副本（如 sync 过的 truncated-tool）
 # 与 -e 仓库副本，会触发重复注册冲突导致该臂失效。
 COMMON_FLAGS=(--print --approve --thinking "$THINKING" --model "$MODEL" --session-dir "$CELL/session-store" --name "$SESSION_NAME" --no-extensions --no-skills --no-prompt-templates --no-context-files --no-themes)
+# 公共基座：bash-timeout 作为评测环境安全网（防 agent 慢命令如 find / 卡死），
+# 两臂统一加载，非被测变量——配对唯一差异仍是被测插件本身。
+BASELINE_PATH=$(find_extension "bash-timeout")
+if [[ -n "$BASELINE_PATH" ]]; then
+	COMMON_FLAGS+=(-e "$BASELINE_PATH")
+fi
 case "$CONFIG" in
 none)
 	CFG_FLAGS=()
