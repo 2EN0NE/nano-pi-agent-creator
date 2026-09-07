@@ -32,4 +32,22 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
+# ── 4. TODO 提醒（warning，不阻断）──
+# 本地开发记录 .pi/todos/TODO.md（gitignore 内，不随代码分发）。
+# 文件不存在（如其他机器 clone 后未生成）则静默跳过，不打扰。
+if [ -f .pi/todos/TODO.md ]; then
+  echo "📋 pre-commit: TODO 提醒..."
+  TODO_OPEN=$(grep -cE '^### \[ \]' .pi/todos/TODO.md 2>/dev/null)
+  TODO_OPEN=${TODO_OPEN:-0}
+  if [ "$TODO_OPEN" -gt 0 ] 2>/dev/null; then
+    echo "⚠️  .pi/todos/TODO.md 有 ${TODO_OPEN} 条未完成 TODO："
+    grep -E '^### \[ \]' .pi/todos/TODO.md | sed 's/^### \[ \] //' | head -5 | sed 's/^/    · /'
+    if [ "$TODO_OPEN" -gt 5 ] 2>/dev/null; then
+      echo "    · ... 及另外 $((TODO_OPEN - 5)) 条（完整清单见 .pi/todos/TODO.md）"
+    fi
+  else
+    echo "✅ .pi/todos/TODO.md 无未完成 TODO"
+  fi
+fi
+
 exit 0
