@@ -165,14 +165,38 @@ JSON
 run_pi() {
   local test_home="$1"
   local prompt="${2:-hi}"
+  local timeout_seconds="${RUN_PI_TIMEOUT:-120}"
 
   local stdout_file="$test_home/pi-stdout.log"
 
   cd "$test_home"
   set +e
-  HOME="$test_home/home" pi -a --no-session -p "$prompt" \
-    >"$stdout_file" 2>&1
-  local ec=$?
+  if command -v timeout >/dev/null 2>&1; then
+    # Linux（CI）有 GNU timeout
+    HOME="$test_home/home" timeout "$timeout_seconds" \
+      pi -a --no-session -p "$prompt" >"$stdout_file" 2>&1
+    local ec=$?
+  else
+    # macOS 无 GNU timeout：background + wait + kill 兜底
+    HOME="$test_home/home" pi -a --no-session -p "$prompt" \
+      >"$stdout_file" 2>&1 &
+    local pid=$!
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && ((waited < timeout_seconds)); do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "  [run_pi TIMEOUT] pi 超过 ${timeout_seconds}s，强制终止"
+      kill -TERM -- -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      sleep 2
+      kill -KILL -- -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      local ec=124
+    else
+      wait "$pid"
+      local ec=$?
+    fi
+  fi
   set -e
   cd "$ROOT_DIR"
 
