@@ -184,7 +184,8 @@ jobs:
 
     # ── E2E Tests（bash 集成测试，阻塞）──
     # 全量 e2e 模块多、耗时长（单 job 曾超 70 分钟并触发 runner 异常），
-    # 拆成 8 个并行 shard：每个 shard 跑约 1/8 模块，降低单 job 资源压力与挂起风险。
+    # 拆成并行 shard 降低单 job 资源压力。shard 4（原 8-shard 下 cancelled 的
+    # 重扩展组）进一步显式拆为 shard 4/8/9，定位挂起模块。
     e2e:
         name: E2E Tests
         runs-on: ubuntu-latest
@@ -192,7 +193,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                shard: [0, 1, 2, 3, 4, 5, 6, 7]
+                shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
@@ -203,12 +204,26 @@ jobs:
               run: npm ci
             - name: Setup CI environment
               run: bash scripts/setup-ci.sh
-            - name: Run bash e2e tests (shard ${{ matrix.shard }}/8)
+            - name: Run bash e2e tests (shard ${{ matrix.shard }})
               env:
                   E2E_POOL_SIZE: 4
               run: |
-                  bash test/e2e/scripts/run-e2e.sh \
-                    --shard "${{ matrix.shard }}/8"
+                  case "${{ matrix.shard }}" in
+                    4)
+                      bash test/e2e/scripts/run-e2e.sh --ext permission-gate
+                      ;;
+                    8)
+                      EXT_LIST="files,go-to-bed,pi-rate-limiter,pi-session-tree,pi-shortcuts,questionnaire,sync-tool"
+                      bash test/e2e/scripts/run-e2e.sh --ext "$EXT_LIST"
+                      ;;
+                    9)
+                      bash test/e2e/scripts/run-e2e.sh --skill e2e-test
+                      ;;
+                    *)
+                      bash test/e2e/scripts/run-e2e.sh \
+                        --shard "${{ matrix.shard }}/8"
+                      ;;
+                  esac
             - name: Upload test results
               if: always()
               uses: actions/upload-artifact@v4

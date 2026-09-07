@@ -879,9 +879,9 @@ FOUND_ANY=false
 TASK_QUEUE=()
 
 # 对单目标（--ext/--skill）直接串行执行
-# 对全量运行使用池化并行
+# 对全量运行或 --ext 逗号多值使用池化并行
 USE_POOL=false
-if [[ -z "$TARGET_EXT" && -z "$TARGET_SKILL" && $POOL_SIZE -gt 1 ]]; then
+if [[ $POOL_SIZE -gt 1 ]] && { [[ -z "$TARGET_EXT" && -z "$TARGET_SKILL" ]] || [[ "$TARGET_EXT" == *,* ]]; }; then
 	USE_POOL=true
 fi
 
@@ -1131,7 +1131,14 @@ sys.stdout.write('{p}|{f}|{r}|{t}'.format(p=d.get('pass',0),f=d.get('fail',0),r=
 }
 
 if [[ -n "$TARGET_EXT" ]]; then
-	run_target "extensions" "$TARGET_EXT"
+	if [[ "$TARGET_EXT" == *,* ]]; then
+		IFS=',' read -r -a _ext_list <<<"$TARGET_EXT"
+		for ext in "${_ext_list[@]}"; do
+			run_target "extensions" "$ext"
+		done
+	else
+		run_target "extensions" "$TARGET_EXT"
+	fi
 elif [[ -n "$TARGET_SKILL" ]]; then
 	run_target "skills" "$TARGET_SKILL"
 else
