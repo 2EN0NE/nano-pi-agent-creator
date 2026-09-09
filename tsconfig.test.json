@@ -16,6 +16,8 @@
 		"test/vitest/extensions/uv.test.ts",
 		"test/vitest/extensions/prompt-editor.extension.test.ts",
 		"test/vitest/extensions/pi-session-tree-package.test.ts",
+		"test/vitest/extensions/org.test.ts",
+		"test/vitest/extensions/org.board.test.ts",
 		"test/vitest/extensions/smart-context*.test.ts",
 		"test/vitest/extensions/tool-range*.test.ts",
 		"test/vitest/extensions/widget-wrangler.test.ts",
