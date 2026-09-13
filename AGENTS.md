@@ -257,7 +257,11 @@ store.reload();
 扩展可以自带 agent 技能（skill），使"技能跟着插件走"（ADR-0022）。约定：
 
 - **位置**：技能放在扩展目录的 `skills/<skillName>/SKILL.md` 子目录下。
-- **声明**：扩展根 `package.json` 必须有 `pi` manifest，用 `pi.skills` 声明内嵌技能目录、`pi.extensions` 声明扩展入口（为将来 npm 包化分发做准备）：
+- **声明**：扩展根 `package.json` 必须有 `pi` manifest，声明 `pi.extensions`（扩展入口）与内嵌技能目录（为将来 npm 包化分发做准备）。技能有**两种分发方式**：
+    - **默认（安装式）**：用 `pi.skills` 声明内嵌技能目录，由 sync 工具装进目标 `skills/`，所有 pi 会话可见（适合“基础能力/普遍适用”的技能，如 `pi-logger`）。
+    - **运行期贡献式（例外）**：**不声明 `pi.skills`**，技能随扩展目录一起分发，由扩展在 `resources_discover` 事件里按条件贡献路径（`skillPaths`），仅特定进程可见。适用场景：技能**不应全局可见**、且需按上下文/角色门控（如 `org` 的在岗技能，见 ADR-0042 D4）。此方式下技能目录必须与扩展入口同目录下的 `skills/`，扩展用 `import.meta.url` 定位。
+
+默认（安装式，大多数扩展适用）：
 
 ```json
 {
@@ -270,7 +274,9 @@ store.reload();
 }
 ```
 
-- **发现**：sync 工具同步扩展时，自动读取 `pi.skills`，把声明目录下每个含 `SKILL.md` 的子目录作为内嵌技能同步到目标 `skills/` 目录——**无需在 sync-profiles.yaml 的 skills 列表中再列一遍**（内嵌技能随扩展走：扩展属于哪个 profile，技能就同步到哪个 profile）。
+运行期贡献式（例外；省略 `skills` 字段，技能仅在 `resources_discover` 被贡献时可见，如 `extensions/auto/org`）。
+
+- **发现**：sync 工具同步扩展时，自动读取 `pi.skills`，把声明目录下每个含 `SKILL.md` 的子目录作为内嵌技能同步到目标 `skills/` 目录——**无需在 sync-profiles.yaml 的 skills 列表中再列一遍**（内嵌技能随扩展走：扩展属于哪个 profile，技能就同步到哪个 profile）。未声明 `pi.skills`（运行期贡献式）的扩展，其 `skills/` 不装进目标 `skills/`，但依旧随扩展目录整体拷贝，由扩展运行期 `resources_discover` 自行贡献。
 - **命名**：内嵌技能名 = 目录名（与官方 package 语义一致）。若与 `skills/` 顶层的同名技能冲突，sync 工具 fail-fast 报错，不静默覆盖。
 - **受众**：内嵌技能面向 agent（模型），教 agent 何时/如何使用该扩展，而非面向终端用户的安装/配置说明。
 
@@ -279,6 +285,19 @@ store.reload();
 ### 扩展的快捷键设计
 
 建议以alt（option)+插件英文首字母或关联字母为插件相关快捷键，一个插件不应占用太多快捷键，建议一个插件有众多功能都需要分配快捷键时，采用二级组合按键的形式进行设计。
+
+### preset 策略源与子工具锁定（ADR-0049）【强制】
+
+`preset` 是 tools / skills / instructions 三个维度的**唯一策略声明者**；`/tools`、`/skills`、`/prompt` 是它的**子工具**（执行臂），三者均由 preset 插件注册（`extensions/meta/preset/`）。硬约束：
+
+- **preset 激活 = 硬约束 + 子工具锁死**。激活期间 `/tools`、`/skills`、`/prompt` 的写操作一律**拒绝并告警**（读视图仍可用）；要改配置只能通过 `/preset` 编辑/切换，或先清除预设。ADR-0035 的「默认不锁定、偏离仅提示」语义被取代（**激活即锁定**）。
+- **无 preset（none）= 不施加任何限制**。三轴回到「无策略」默认：工具全量启用、技能不限制、无 preset instructions。清除预设与任何恢复路径（`/reload`、`session_tree`、分支恢复）**不得复活**上一次的约束。
+- **tools 白名单是封闭集**。preset 激活且声明了 `tools` 时，运行时新注册的工具（org / MCP 等）一律视为禁用，`/tools` 视图同样显示为**不可用**；要启用须写进该 preset 的 `tools`。
+- **约束是叠加层（overlay），不得污染基础层**。preset 不得把自身约束写进 `/tools` 的基础状态（`tools-config` 快照）；清除预设即撤回 overlay。任何扩展**不得**用自有快照整体覆盖 `pi.setActiveTools()`（当前 `tools.ts` 的 `applyTools()` / `replaceTools()` 违反此条，属待修）。
+- **限制权只有两个来源：preset 与三个子工具**。其它扩展 / 实验**不得**用 `pi.setActiveTools()` 或写 `disabledTools` 去缩减活动工具集，只能观测/记录；`registerTool` 的动态注册不算限制（属 pi 的基础启用行为，在封闭集 preset 下由 overlay 遮罩）。`tool-range` 实验按 B2：默认只记录，用户显式报名后才把臂结果写基础层，preset 激活时退避（ADR-0050）。
+- **必须有语义级 e2e 保护**（仅"无报错 / 退出码"不算）：① 激活带 `tools` 的 preset 后 `/tools` 视图 == preset 白名单；② 清除 preset 后工具/技能恢复无限制；③ `/reload` 后不复活已清除的 preset；④ 动态注册工具在激活的封闭集 preset 下不可用。
+
+> 术语见 `CONTEXT.md`「preset 预设」节；决策、现状差距与实现契约见 `docs/adr/0049-preset-hard-policy-source-and-subtool-lock.md` 与 `docs/adr/0050-active-toolset-ownership-and-restriction-authority.md`。
 
 ### 测试辅助扩展（跨扩展交互测试）
 
@@ -792,11 +811,11 @@ pi-lab（`extensions/meta/pi-lab/`）是实验框架，不自带实验。消费�
 `doRender()` 的 diff：`firstChanged` 从渲染树行 0 逐行对比 previousLines/newLines；**`firstChanged < prevViewportTop` → fullRender(true)**（`\x1b[2J\x1b[H\x1b[3J` 清屏+清 scrollback + 整树重绘，依赖 `\x1b[?2026h` 同步输出原子性）。
 
 - **铁律**：任何替换 editorContainer 的自定义组件，**总高必须 ≤ 终端视口高度（rows）**。否则组件顶部（树行/光标行）落在视口上方，滚动时 `firstChanged < viewportTop` 恒触发 fullRender → 同步输出失效链路（tmux/SSH/Windows Terminal）上表现为**重影/错位**。
-- **铁律 2（header 动态内容）**：渲染树**第 0 行（header）不得放随光标/滚动变化的动态内容**（当前节点 ID、计数等）——第 0 行一变，`firstChanged=0 < viewportTop`（总高略超视口即触发）就 fullRender 重影。动态状态信息应放**底部 footer**（最后一行的 firstChanged 被树内更靠前的光标行变化「掩盖」，不触发 fullRender）。
+- **铁律 2（header 动态内容）**：渲染树**第 0 行（header）不得放随光标/滚动变化的动态内容**（当前节点 ID、计数等）——第 0 行一变，`firstChanged=0 < viewportTop`（总高略超视口即触发）就 fullRender 重影。动态状态信息应放**底部 footer**（最后一行的 firstChanged 被树内更靠前的光标行变化「掩盖」，不触发 fullRender）。**例外**：显式上下文切换（如公司/数据源切换，org 看板标题 `── org:<公司名> ──` 随 Tab 切公司更新）允许第 0 行变更——切换时内容区整体换数据本就接近全量重绘，不引入滚动重影；同一上下文内仍须恒定。
 - **参考原生 `/tree`**（pi-mono tree-selector.js）：`maxVisibleLines = floor(terminalHeight/2)` 自适应 + 选中行居中（`startIndex = selected - floor(maxVisibleLines/2)`），组件总高 ≤ 视口 → 滚动纯 diff。
 - **观测工具**：`PI_TUI_DEBUG=1` → diff 渲染日志 `/tmp/tui/render-*.log`（含完整 newLines JSON）；`PI_DEBUG_REDRAW=1` → fullRender 原因 `~/.pi/agent/pi-debug.log`。
 - **e2e 盲区**：固定 80 列 + 短树（< pageSize 行）时滚动路径零覆盖——滚动类 bug 必须用长树用例（mock-llm 的 `MOCK_LLM_REPEAT` 发多条消息造 50+ 稳定节点树）。
-- 附带：扩展运行时 `setInterval`/`setTimeout` 回调不执行——需要定时器的逻辑改用事件驱动（与 #8 的 /reload 定时器失效不同，这里是运行时根本不触发）。
+- 附带：扩展运行时 `setInterval`/`setTimeout` 回调**正常触发**（2026-09-10 实测，见 ADR-0040 F1；旧结论「运行时根本不触发」已作废）。定时器可直接用于后台轮询；但 `/reload` 会令旧实例的定时器失效、必须重建（见 #8）。
 
 ### 14. 内置 bash 工具 timeout 无默认值 + 两条干预路径
 

@@ -1,12 +1,22 @@
 // org — 派发（dispatch）：任务投递 + 握手 + 取消 / 改派 + inbox 兜底
-// 投递判定：目标在岗（runtime socket 可连）→ 在线送达；否则落 inbox（任务不丢）
+// 投递判定：目标在岗（runtime socket 可连）→ 在岗送达；否则落 inbox（任务不丢）
 import * as path from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
 import type { AgentRole, SubTask, Task } from './types.js';
 import { ensureDir, isSocketAlive, nowIso, readJson, writeJsonAtomic } from './util.js';
-import { inboxDir, readOrg, runtimeFile } from './orgstore.js';
-import { createTaskWithId, readTask, saveTask } from './task.js';
+import { autoWakeEnabled, inboxDir, readOrg, runtimeFile, withOrgLock } from './orgstore.js';
+import { ensureAwakeForDispatch } from './lifecycle.js';
+import {
+	createTaskWithId,
+	listTasks,
+	queueLengthFor,
+	readTask,
+	refreshStatus,
+	saveTask,
+} from './task.js';
+import { orgConfigStore, resolveMemberQueueCap } from './config.js';
 import { classifyRpcError, rpcCall } from './util.js';
+import { withSenderHeader } from './sender.js';
 
 const log = createLogger('org');
 
@@ -100,7 +110,7 @@ export interface DispatchResult {
 	/** 每个目标的投递情况 */
 	deliveries: {
 		agent: string;
-		mode: 'online' | 'inbox' | 'unreachable';
+		mode: 'online' | 'uncertain' | 'inbox' | 'unreachable';
 		requesting: boolean;
 	}[];
 }
@@ -124,6 +134,8 @@ export async function dispatchTask(opts: DispatchOptions): Promise<DispatchResul
 		}
 	}
 
+	const queueCap = resolveMemberQueueCap(orgConfigStore.get().memberQueueCap);
+
 	const subTasks: SubTask[] = opts.targets.map((t) => ({
 		id: `S-${Math.random().toString(36).slice(2, 6)}`,
 		description: t.description,
@@ -139,28 +151,72 @@ export async function dispatchTask(opts: DispatchOptions): Promise<DispatchResul
 		],
 	}));
 
-	const task = await createTaskWithId(opts.org, {
-		org: opts.org,
-		title: opts.title,
-		background: opts.background,
-		items: opts.items,
-		dispatcher: opts.dispatcher,
-		dispatcherRole: opts.dispatcherRole,
-		dueAt: opts.dueAt ?? null,
-		createdAt: nowIso(),
-		status: 'todo',
-		subTasks,
-		history: [{ at: nowIso(), event: 'dispatched', by: opts.dispatcher, note: opts.title }],
+	// ⚠ 上限判定与建任务必须在**同一次 org 写锁**内：若两个进程各自在锁外
+	// 「读账本 → 判上限 → 建任务」，会双双通过检查、写出超过 `memberQueueCap` 的队列
+	// （TOCTOU，与 ADR-0055 `D4`「满则明确拒绝，不静默堆积」相悖）。`withOrgLock` 经
+	// AsyncLocalStorage 可重入，`createTaskWithId` 内部再取锁不会死锁。
+	const task = await withOrgLock(opts.org, async () => {
+		// 排队上限（ADR-0055 `D4`）：**建任务之前**判定——拒绝时账本零改动（验收要求）。
+		// 口径 = 只数“还没接手”（invited）的待办；0 / 非法配置 = 不限制。
+		if (queueCap !== undefined) {
+			const tasks = await listTasks(opts.org);
+			const full = opts.targets
+				.map((t) => ({ agent: t.agent, used: queueLengthFor(tasks, t.agent) }))
+				.filter((x) => x.used >= queueCap);
+			if (full.length > 0) {
+				const detail = full.map((f) => `${f.agent}（${f.used}/${queueCap}）`).join('、');
+				throw new Error(
+					`派发被拒：${detail} 的待办队列已达上限。可改派他人、等其消化后再派，或调高 memberQueueCap 配置。`,
+				);
+			}
+		}
+		return createTaskWithId(opts.org, {
+			org: opts.org,
+			title: opts.title,
+			background: opts.background,
+			items: opts.items,
+			dispatcher: opts.dispatcher,
+			dispatcherRole: opts.dispatcherRole,
+			dueAt: opts.dueAt ?? null,
+			createdAt: nowIso(),
+			status: 'todo',
+			subTasks,
+			history: [{ at: nowIso(), event: 'dispatched', by: opts.dispatcher, note: opts.title }],
+		});
 	});
 
 	// 负责人单方派发 → 直接投递任务消息；非负责人 → 握手请求（处理人 accept/reject 后才生效）
 	const chiefMode = org.chiefName === opts.dispatcher;
 	const deliveries: DispatchResult['deliveries'] = [];
 	for (const t of opts.targets) {
+		// 负责人派活 + 本组织开启自动唤醒（ADR-0040 D3/D8）：先拉起睡眠目标再投递。
+		// 唤醒是尽力而为的**边界**：失败/超时绝不阻塞投递（仍走 inbox 兜底，任务不丢）。
+		if (chiefMode && autoWakeEnabled(org)) {
+			await ensureAwakeForDispatch(opts.org, t.agent, { selfDir: process.cwd() }).catch(
+				(e: unknown) =>
+					log.warn('派活自动唤醒异常，改用 inbox 兜底', {
+						org: opts.org,
+						agent: t.agent,
+						err: e instanceof Error ? e.message : String(e),
+					}),
+			);
+			log.info('派活已自动唤醒目标', { org: opts.org, agent: t.agent });
+		} else {
+			// ADR-0048 D7：不唤醒也要留痕——否则排障只能靠"日志缺失"反推（UAT 教训）
+			log.info('派活未自动唤醒（目标落 inbox 兜底）', {
+				org: opts.org,
+				agent: t.agent,
+				reason: chiefMode
+					? '本组织 autoWake 关（自主唤醒门禁）'
+					: '派活人非负责人（唤醒权限限负责人）',
+			});
+		}
 		const message = chiefMode
 			? buildTaskMessage(task, t.agent)
 			: buildHandshakeMessage(task, t.agent);
-		const outcome = await deliverMessage(opts.org, t.agent, message);
+		const outcome = await deliverMessage(opts.org, t.agent, message, {
+			sender: opts.dispatcher,
+		});
 		deliveries.push({
 			agent: t.agent,
 			mode: outcome,
@@ -179,7 +235,7 @@ export async function dispatchTask(opts: DispatchOptions): Promise<DispatchResul
 
 // ── 消息投递（在线 / inbox）──────────────────────────────────────────────────
 
-/** inbox 已有同内容消息（防在线送达但回报超时 → 又落 inbox 造成重复投递） */
+/** inbox 已有同内容消息（防在岗送达但回报超时 → 又落 inbox 造成重复投递） */
 async function inboxHasMessage(dir: string, message: string): Promise<boolean> {
 	const { readdir } = await import('node:fs/promises');
 	let names: string[];
@@ -200,7 +256,16 @@ export async function deliverMessage(
 	org: string,
 	agent: string,
 	message: string,
-): Promise<'online' | 'inbox' | 'unreachable'> {
+	/**
+	 * `sender` = 发送者（org 成员名）；人类操作者发起时省略 → 不注入发送者头（ADR-0044 D2）
+	 * `mode` = 投递模式（ADR-0055 `D6`）：默认 `follow_up`（等它把当前轮跑完），
+	 * 仅**显式抢占（L1 插话）** 才用 `steer`（插到下一次 LLM 调用前）。不改变既有默认行为。
+	 */
+	opts?: { sender?: string; mode?: 'steer' | 'follow_up' },
+): Promise<'online' | 'uncertain' | 'inbox' | 'unreachable'> {
+	// ADR-0044 D2：在此层**统一**注入发送者头 —— 在岗送达与 inbox 兜底内容一致，
+	// 且"谁在说话"对模型可见（control 侧再渲染成 `[成员名]:`）。
+	const payload = withSenderHeader(message, opts?.sender);
 	const rt = await readJson<{ pid: number; socketPath: string; dir: string }>(
 		runtimeFile(org, agent),
 	);
@@ -212,59 +277,36 @@ export async function deliverMessage(
 		try {
 			const { response } = await rpcCall(rt.socketPath, {
 				type: 'send',
-				message,
-				mode: 'follow_up',
+				message: payload,
+				mode: opts?.mode ?? 'follow_up',
 			});
 			if (response.success) return 'online';
 			log.warn('socket send 失败，转 inbox', { org, agent, error: response.error });
 		} catch (error) {
-			log.warn('socket send 异常，转 inbox', { org, agent, err: classifyRpcError(error) });
+			// 分类决策（F/ADR-0039）：connect（从未连上）→ 落 inbox 兜底；
+			// timeout（连上并已发出，但超时未收到 control 回报）→ 无法确认送达：
+			// 不落 inbox（避免与"其实已入队送达"重复投递），但也**不谎报 online**——
+			// 返回 uncertain，由上层如实展示，人工可据此决定是否重派。
+			const kind = classifyRpcError(error);
+			if (kind === 'timeout') {
+				log.warn('socket send 回报超时，送达不确定（不落 inbox）', { org, agent });
+				return 'uncertain';
+			}
+			log.warn('socket send 连接失败，转 inbox', { org, agent, err: String(error) });
 		}
 	}
-	// 落 inbox（离线兜底，任务不丢）。去重：与已落盘的相同消息不重复投递——
-	// rpcCall 的 timeout 表示「连上并发出后等待回报超时」，消息可能已在线送达，
+	// 落 inbox（未在岗兜底，任务不丢）。去重：与已落盘的相同消息不重复投递——
+	// rpcCall 的 timeout 表示「连上并发出后等待回报超时」，消息可能已在岗送达，
 	// 若再落 inbox，目标下次 session_start 会重复收到同一任务的指令。
 	const dir = inboxDir(org, agent);
 	await ensureDir(dir);
-	if (await inboxHasMessage(dir, message)) {
+	if (await inboxHasMessage(dir, payload)) {
 		log.debug('inbox 去重：同内容消息已存在，跳过重复落盘', { org, agent });
 		return rt ? 'unreachable' : 'inbox';
 	}
 	const file = path.join(dir, `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`);
-	await writeJsonAtomic(file, { at: nowIso(), message });
+	await writeJsonAtomic(file, { at: nowIso(), message: payload });
 	return rt ? 'unreachable' : 'inbox';
-}
-
-/** 处理人离岗期间积累的 inbox 消息（session_start 提醒用） */
-export async function drainInbox(org: string, agent: string): Promise<string[]> {
-	const dir = inboxDir(org, agent);
-	let entries: string[] = [];
-	try {
-		const { readdir } = await import('node:fs/promises');
-		entries = await readdir(dir);
-	} catch {
-		return [];
-	}
-	const messages: string[] = [];
-	for (const e of entries.sort((a, b) => a.localeCompare(b))) {
-		if (!e.endsWith('.json')) continue;
-		const rec = await readJson<{ at: string; message: string }>(path.join(dir, e));
-		if (rec?.message) messages.push(rec.message);
-	}
-	return messages;
-}
-
-/** 处理后从 inbox 清掉（读取并删除文件） */
-export async function takeInbox(org: string, agent: string): Promise<string[]> {
-	const dir = inboxDir(org, agent);
-	const messages = await drainInbox(org, agent);
-	if (messages.length === 0) return messages;
-	const { readdir, unlink } = await import('node:fs/promises');
-	const entries = await readdir(dir).catch(() => [] as string[]);
-	for (const e of entries) {
-		if (e.endsWith('.json')) await unlink(path.join(dir, e)).catch(() => {});
-	}
-	return messages;
 }
 
 // ── 取消 / 改派 / 添加参与人 ─────────────────────────────────────────────────
@@ -378,6 +420,91 @@ export async function reassignSubTask(
 		round: 0,
 		deliveries: [],
 	});
+	// 改派会改变参与集合 → 聚合状态必须重算（replace 罢免旧人 / 新增未决者都可能变状态）
+	refreshStatus(task);
 	await saveTask(task);
 	return { ok: true, message: `已为子任务 ${subTaskId} 添加参与者 ${newAgent}。` };
+}
+
+/** 投递结果的面向人措辞（重试回执用） */
+const DELIVERY_WORD: Record<'online' | 'uncertain' | 'inbox' | 'unreachable', string> = {
+	online: '已在岗送达',
+	uncertain: '送达不确定（失败不落 inbox，避免重复投递）',
+	inbox: '已落 inbox（成员不在岗，其下次在岗时取）',
+	unreachable: '通道不可达（已落 inbox 兜底）',
+};
+
+/**
+ * 重试：把任务**重新投递**给同一个参与者（ADR-0053 `D5`）。
+ *
+ * 为什么**不动参与者状态**：参与者状态机受保护（`invited/claimed/delivered/returned/rejected/cancelled`），
+ * 且**没有**"退回已派发"这一迁移（用词曾是误解）。中断只停当前轮——参与者与任务的归属都没变，
+ * 所以重试就是"再把指令说一遍"：附一行说明，走**既有投递通道**（在岗直达 / 失败落 inbox，任务不丢）。
+ *
+ * 不该用它、改走别的路的情形（据实拒绝并给出路）：
+ * - 任务已 `closed`（铁终态）→ 新开任务并引用；
+ * - 参与者已 `delivered` → 那是"返工"，请走**打回**（轮次 +1）；
+ * - 参与者已 `stopped` / `rejected` / `cancelled` → 改派或新开任务。
+ */
+export async function retrySubTask(
+	org: string,
+	taskId: string,
+	subTaskId: string,
+	agent: string,
+	opts: { by: string; note?: string },
+): Promise<TaskOpResult> {
+	const task = await readTask(org, taskId);
+	if (!task) return { ok: false, message: `任务 ${taskId} 不存在。` };
+	if (task.status === 'closed') {
+		return {
+			ok: false,
+			message: `任务 ${taskId} 已关闭（铁终态），不可重试——请新开任务并引用它。`,
+		};
+	}
+	const sub = task.subTasks.find((s) => s.id === subTaskId);
+	if (!sub) return { ok: false, message: `子任务 ${subTaskId} 不存在。` };
+	const assignee = sub.assignees.find((a) => a.agent === agent);
+	if (!assignee) return { ok: false, message: `子任务 ${subTaskId} 上没有参与者 ${agent}。` };
+	if (assignee.stopped) {
+		return { ok: false, message: `${agent} 在该子任务上已被叫停，请改派或新开任务。` };
+	}
+	if (assignee.status === 'delivered') {
+		return {
+			ok: false,
+			message: `${agent} 已交付该项：要返工请走「打回」（轮次 +1），要收尾请走「验收」。`,
+		};
+	}
+	if (assignee.status === 'rejected' || assignee.status === 'cancelled') {
+		return {
+			ok: false,
+			message: `${agent} 在该子任务上已 ${assignee.status}，请改派或新开任务。`,
+		};
+	}
+	task.history.push({
+		at: nowIso(),
+		event: 'retried',
+		by: opts.by,
+		note: `${subTaskId} → ${agent}${opts.note ? `：${opts.note}` : ''}`,
+	});
+	await saveTask(task);
+	const extra = opts.note
+		? `\n\n（重试说明：${opts.note}）`
+		: '\n\n（重试：请按上面的任务清单继续/重新处理。）';
+	const delivered = await deliverMessage(org, agent, buildTaskMessage(task, agent) + extra, {
+		sender: opts.by,
+	});
+	// ADR-0053 `D4`：重试必须落日志（谁 / 对谁 / 动作 / 结果）——命令面与看板共用这一处留痕
+	log.info('任务重试', {
+		org,
+		task: taskId,
+		sub: subTaskId,
+		by: opts.by,
+		agent,
+		delivery: delivered,
+		result: 'ok',
+	});
+	return {
+		ok: true,
+		message: `已重试：${subTaskId} → ${agent}（${DELIVERY_WORD[delivered] ?? delivered}）。`,
+	};
 }

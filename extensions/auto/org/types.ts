@@ -39,6 +39,13 @@ export interface OrgMember {
 	manifest: { label?: string; description?: string; tools?: string[] };
 	/** 登记时间 */
 	joinedAt: string;
+	/**
+	 * 唤醒时追加到固定启动项之后的参数（ADR-0051 D1/D2）。
+	 * join 时写入插件配置里的初值；**字段缺失 ⇒ 不带任何额外参数**（不做兜底、不回填）。
+	 */
+	launchArgs?: string;
+	/** 启动参数最后修改时间（人类操作台留下的留痕；ADR-0051 D4） */
+	launchArgsUpdatedAt?: string;
 }
 
 /** org 静态登记文件 ~/.pi/org/<org>/org.json */
@@ -53,6 +60,16 @@ export interface OrgFile {
 	createdAt: string;
 	updatedAt: string;
 	members: OrgMember[];
+	/** org 级设置（按组织存储，见 ADR-0040 D8） */
+	settings?: OrgSettings;
+	/** org 背景（使命/业务与协作约定）；在岗简报的静态块会带上它 — 见 ADR-0042 D5 */
+	background?: string;
+}
+
+/** org 级设置（作用域 = 该组织；区别于插件配置里的界面偏好）— 见 ADR-0040 D8 */
+export interface OrgSettings {
+	/** 负责人派活时是否允许唤醒睡眠成员（缺省 = 关，即维持现状：落 inbox 兜底） */
+	autoWake?: boolean;
 }
 
 /** 离开档案 ~/.pi/org/<org>/history/<name>.json：离开的成员记录不删除（可指认 + 回归继承依据） */
@@ -190,13 +207,18 @@ export interface Task {
 	dueAt?: string | null;
 	createdAt: string;
 	updatedAt: string;
+	/**
+	 * 乐观写保护的单调修订号（saveTask 每次写入 +1）。缺省视为 0（兼容旧账本）。
+	 * 相比毫秒精度的 `updatedAt`，能发现「同一毫秒内的先后写」这一盲区。
+	 */
+	revision?: number;
 	/** 任务聚合状态 */
 	status: TaskStatus;
 	/** 子任务数组 */
 	subTasks: SubTask[];
 	/** 验收记录（closed 时必有 accepted） */
 	acceptance?: Acceptance;
-	/** 是否曾离线投递（inbox） */
+	/** 是否曾未在岗投递（inbox） */
 	inboxed?: boolean;
 	/** 状态机历史（可指认） */
 	history: TaskHistoryEntry[];
@@ -223,10 +245,19 @@ export interface TodoMapEntry {
 // ── socket RPC（control 协议子集）───────────────────────────────────────
 
 export interface RpcCommand {
-	type: 'send' | 'ping' | 'get_message';
+	/**
+	 * 我们**会发出**的命令子集（control 协议）：
+	 * - `send` / `ping`：既有；
+	 * - `get_message`：取最后一条 assistant 文本；
+	 * - `get_history`：取最近若干条事件（只读观测，ADR-0052）；
+	 * - `abort`：中断当前轮次（ADR-0053）。
+	 */
+	type: 'send' | 'ping' | 'get_message' | 'get_history' | 'abort';
 	id?: string;
 	message?: string;
 	mode?: 'steer' | 'follow_up';
+	/** `get_history` 专用：要几条（control 侧会夹到 1..50） */
+	limit?: number;
 }
 
 export interface RpcResponse {

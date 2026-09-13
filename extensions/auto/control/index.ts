@@ -63,6 +63,16 @@ import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
+import {
+	type ControlOverride,
+	CONTROL_SOCKET_CHANNEL,
+	type ControlSocketEvent,
+	parseControlToggle,
+	resolveControlEnabled,
+	socketOrigin,
+} from './switch.js';
+import { parseSenderInfo, senderLabel, stripSenderInfo } from './sender-info.js';
+import { clampHistoryLimit, compactHistory } from './history.js';
 
 const log = createLogger('control');
 
@@ -75,7 +85,6 @@ const CONTROL_SEND_INCLUDE_SENDER_FLAG = 'send-session-include-sender-info';
 const CONTROL_DIR = path.join(os.homedir(), '.pi', 'session-control');
 const SOCKET_SUFFIX = '.sock';
 const SESSION_MESSAGE_TYPE = 'session-message';
-const SENDER_INFO_PATTERN = /<sender_info>[\s\S]*?<\/sender_info>/g;
 
 // ============================================================================
 // RPC Types
@@ -115,6 +124,13 @@ interface RpcGetSummaryCommand {
 	id?: string;
 }
 
+interface RpcGetHistoryCommand {
+	type: 'get_history';
+	/** 要几条（会被夹到 1..50；省略时用默认条数） */
+	limit?: number;
+	id?: string;
+}
+
 interface RpcClearCommand {
 	type: 'clear';
 	summarize?: boolean;
@@ -136,6 +152,7 @@ type RpcCommand =
 	| RpcSendCommand
 	| RpcGetMessageCommand
 	| RpcGetSummaryCommand
+	| RpcGetHistoryCommand
 	| RpcClearCommand
 	| RpcAbortCommand
 	| RpcSubscribeCommand;
@@ -474,6 +491,15 @@ function getLastAssistantMessage(ctx: ExtensionContext): ExtractedMessage | unde
 	return undefined;
 }
 
+/** 会话分支里的消息序列（供历史压缩；只取 message 条目，跳过其余会话记录） */
+function branchMessages(ctx: ExtensionContext): unknown[] {
+	const messages: unknown[] = [];
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type === 'message') messages.push(entry.message);
+	}
+	return messages;
+}
+
 function getMessagesSinceLastPrompt(ctx: ExtensionContext): ExtractedMessage[] {
 	const branch = ctx.sessionManager.getBranch();
 	const messages: ExtractedMessage[] = [];
@@ -529,58 +555,6 @@ function extractTextContent(content: string | Array<TextContent | { type: string
 		.join('\n');
 }
 
-function stripSenderInfo(text: string): string {
-	return text.replace(SENDER_INFO_PATTERN, '').trim();
-}
-
-interface SenderInfo {
-	sessionId?: string;
-	sessionName?: string;
-}
-
-function parseSenderInfo(text: string): SenderInfo | null {
-	const match = text.match(/<sender_info>([\s\S]*?)<\/sender_info>/);
-	if (!match) return null;
-	const raw = match[1].trim();
-	if (!raw) return null;
-
-	if (raw.startsWith('{')) {
-		try {
-			const parsed = JSON.parse(raw) as {
-				sessionId?: unknown;
-				sessionName?: unknown;
-			};
-			const sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId.trim() : '';
-			const sessionName =
-				typeof parsed.sessionName === 'string' ? parsed.sessionName.trim() : '';
-			if (sessionId || sessionName) {
-				return {
-					sessionId: sessionId || undefined,
-					sessionName: sessionName || undefined,
-				};
-			}
-		} catch {
-			// Ignore JSON parse errors, fall back to legacy parsing.
-		}
-	}
-
-	const legacyIdMatch = raw.match(/session\s+([a-f0-9-]{6,})/i);
-	if (legacyIdMatch) {
-		return { sessionId: legacyIdMatch[1] };
-	}
-
-	return null;
-}
-
-function formatSenderInfo(info: SenderInfo | null): string | null {
-	if (!info) return null;
-	const { sessionName, sessionId } = info;
-	if (sessionName && sessionId) return `${sessionName} (${sessionId})`;
-	if (sessionName) return sessionName;
-	if (sessionId) return sessionId;
-	return null;
-}
-
 const renderSessionMessage: MessageRenderer = (message, { expanded }, theme) => {
 	const rawContent = extractTextContent(message.content);
 	const senderInfo = parseSenderInfo(rawContent);
@@ -596,8 +570,9 @@ const renderSessionMessage: MessageRenderer = (message, { expanded }, theme) => 
 
 	const box = new Box(1, 1, (t) => theme.bg('customMessageBg', t));
 	const labelBase = theme.bold(theme.fg('customMessageLabel', `[${message.customType}]`));
-	const senderText = formatSenderInfo(senderInfo);
-	const label = senderText ? `${labelBase} ${theme.fg('dim', `from ${senderText}`)}` : labelBase;
+	// ADR-0044 D3：成员消息渲染成 `[成员名]:`；只有 session 信息时回落 `from <session>`
+	const senderText = senderLabel(senderInfo);
+	const label = senderText ? `${labelBase} ${theme.fg('dim', senderText)}` : labelBase;
 	box.addChild(new Text(label, 0, 0));
 	box.addChild(new Spacer(1));
 	box.addChild(
@@ -679,6 +654,15 @@ async function handleCommand(
 			return;
 		}
 		respond(true, 'get_message', { message });
+		return;
+	}
+
+	// Get recent history（只读观测面：ADR-0052 D1/D5；绝不外传完整会话）
+	if (command.type === 'get_history') {
+		const entries = compactHistory(branchMessages(ctx), {
+			maxEntries: clampHistoryLimit(command.limit),
+		});
+		respond(true, 'get_history', { entries });
 		return;
 	}
 
@@ -1104,10 +1088,18 @@ export default function (pi: ExtensionAPI) {
 		registerSessionTool(pi, state);
 		registerListSessionsTool(pi);
 	}
-	registerControlSessionsCommand(pi);
+	// 运行时开关（ADR-0043 D1）：pi 没有 setFlag，只有 getFlag，故用进程内 override
+	// 让已开着的 pi 能热切换 socket；优先级高于启动 flag。
+	let runtimeOverride: ControlOverride = null;
+	const isEnabled = (): boolean =>
+		resolveControlEnabled({ flagValue: pi.getFlag(CONTROL_FLAG), override: runtimeOverride });
+
+	registerControlSessionsCommand(pi, isEnabled);
 
 	const refreshServer = async (ctx: ExtensionContext) => {
-		const enabled = pi.getFlag(CONTROL_FLAG) === true;
+		const enabled = isEnabled();
+		// 来源如实上报（ADR-0046 D4/B5）：null = 跟随启动 flag；否则为运行中人工切换
+		const origin = socketOrigin(runtimeOverride);
 		if (!enabled) {
 			if (state.aliasTimer) {
 				clearInterval(state.aliasTimer);
@@ -1116,6 +1108,12 @@ export default function (pi: ExtensionAPI) {
 			await stopControlServer(state);
 			updateStatus(ctx, false);
 			updateSessionEnv(ctx, false);
+			// 通知同进程的扩展（org）能力可收放（ADR-0043 D4 → ADR-0046 D1/D4：只报事实，不驱动）
+			pi.events.emit(CONTROL_SOCKET_CHANNEL, {
+				enabled: false,
+				socketPath: null,
+				origin,
+			} satisfies ControlSocketEvent);
 			return;
 		}
 		await startControlServer(pi, state, ctx);
@@ -1127,7 +1125,39 @@ export default function (pi: ExtensionAPI) {
 		}
 		updateStatus(ctx, true);
 		updateSessionEnv(ctx, true);
+		pi.events.emit(CONTROL_SOCKET_CHANNEL, {
+			enabled: true,
+			socketPath: state.socketPath,
+			origin,
+		} satisfies ControlSocketEvent);
 	};
+
+	pi.registerCommand('control', {
+		description:
+			'会话控制 socket 开关：热切换本进程是否建 socket（/control [on|off]）。注意：它只管 socket（「可上岗」的必要条件），是否作为 org 成员上岗由 /org on 决定（ADR-0046）',
+		handler: async (args, ctx) => {
+			const parsed = parseControlToggle(args ?? '');
+			if (parsed.action === 'error') {
+				if (ctx.hasUI) ctx.ui.notify(parsed.message, 'warning');
+				return;
+			}
+			if (parsed.action !== 'status') {
+				runtimeOverride = parsed.action;
+				await refreshServer(ctx);
+				// 措辞只讲 socket 真相，不提"上岗"——是否上岗由 org 自决（ADR-0046 D1）
+				log.info(
+					parsed.action === 'on'
+						? '会话控制已启用（/control on）'
+						: '会话控制已停用（/control off）',
+				);
+			}
+			if (ctx.hasUI) {
+				const on = isEnabled();
+				const where = !on || !state.socketPath ? '' : `：${state.socketPath}`;
+				ctx.ui.notify(on ? `会话控制已启用${where}` : '会话控制已停用', 'info');
+			}
+		},
+	});
 
 	pi.on('session_start', async (_event, ctx) => {
 		log.debug('event: session_start');
@@ -1893,13 +1923,16 @@ async function maybeHandleStartupControlSend(
 	}
 }
 
-function registerControlSessionsCommand(pi: ExtensionAPI): void {
+function registerControlSessionsCommand(pi: ExtensionAPI, isEnabled: () => boolean): void {
 	pi.registerCommand('control-sessions', {
 		description: '列出可控制的会话（通过 session-control socket）',
 		handler: async (_args, ctx) => {
-			if (pi.getFlag(CONTROL_FLAG) !== true) {
+			if (!isEnabled()) {
 				if (ctx.hasUI) {
-					ctx.ui.notify('会话控制未启用（请使用 --session-control）', 'warning');
+					ctx.ui.notify(
+						'会话控制未启用（启动时加 --session-control，或在本会话执行 /control on）',
+						'warning',
+					);
 				}
 				return;
 			}

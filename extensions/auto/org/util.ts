@@ -1,5 +1,5 @@
 // org — 通用工具（原子 JSON 读写 / 路径 / id / 校验）
-import { promises as fs, realpathSync } from 'node:fs';
+import { promises as fs, realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
@@ -48,7 +48,10 @@ export function readJson<T = unknown>(file: string): Promise<T | null> {
 /** 原子写（tmp + rename），避免并发/半写损坏 */
 export async function writeJsonAtomic(file: string, data: unknown): Promise<void> {
 	await ensureDir(path.dirname(file));
-	const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+	// tmp 名必须**唯一**：仅用 pid+Date.now() 会让同一毫秒内的并发写撞名，
+	// 先完成者 rename 走掉 tmp 后，后者的 rename 直接 ENOENT —— 该异常冒泡
+	// 到 setBusyAll 会以 uncaughtException 杀掉 pi（实测复现）。
+	const tmp = `${file}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 	await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
 	await fs.rename(tmp, file);
 }
@@ -59,6 +62,21 @@ export function realDir(dir: string): string {
 		return realpathSync(dir);
 	} catch {
 		return path.resolve(dir);
+	}
+}
+
+/**
+ * 成员注册目录是否**仍然存在**（同步、只读）。
+ *
+ * 用途：把「睡眠（可唤醒）」与「注册目录已失效（唤醒必失败）」在**展示层**区分开——
+ * 后者常见于历史测试残留（`/var/folders/.../T/org-board-*`）或目录被人工删除，
+ * 若只显示「睡眠」，调用方会白试一次唤醒，且人无法一眼看出该成员已不可达。
+ */
+export function dirExists(dir: string): boolean {
+	try {
+		return statSync(dir).isDirectory();
+	} catch {
+		return false;
 	}
 }
 
@@ -91,6 +109,12 @@ export function assertSafeName(name: string): string {
 
 // ── control socket RPC 客户端（control 协议子集）────────────────────────────
 
+/**
+ * rpcCall 超时的**稳定错误码**。分类只认码不认文案（见 classifyRpcError）：
+ * 依赖 message 文案的分类会在改文案时静默失效。
+ */
+export const RPC_TIMEOUT_CODE = 'RPC_TIMEOUT';
+
 /** 向某 control socket 发一个 RPC 命令。
  * waitForEvent='turn_end' 时对齐 control 客户端协议：send 后补发 subscribe，等 turn_end 事件才算完成。
  * 其它情况收到与 command.type 匹配的 response 即返回。 */
@@ -111,11 +135,12 @@ export async function rpcCall(
 			if (!settled) {
 				settled = true;
 				socket.destroy();
-				reject(
-					new Error(
-						`RPC 超时（${timeoutMs}ms）：${socketPath}${waitForEvent ? `，等事件 ${waitForEvent}` : ''}`,
-					),
-				);
+				// 超时错误打**稳定错误码**：分类只认码、不认文案（classifyRpcError）。
+				const timeoutError = new Error(
+					`RPC 超时（${timeoutMs}ms）：${socketPath}${waitForEvent ? `，等事件 ${waitForEvent}` : ''}`,
+				) as NodeJS.ErrnoException;
+				timeoutError.code = RPC_TIMEOUT_CODE;
+				reject(timeoutError);
 			}
 		}, timeoutMs);
 		const cleanup = () => {
@@ -195,20 +220,19 @@ export async function isSocketAlive(socketPath: string, timeoutMs = 1500): Promi
 	}
 }
 
-const CONNECT_ERROR_CODES = ['ECONNREFUSED', 'ENOENT', 'ECONNRESET', 'EPIPE', 'EACCES'] as const;
-
 /**
  * RPC 错误分类（dispatch 兜底决策依据）：
- * - 'connect'：socket 从未连上（control 未启/已退/中途断）——消息从未送达，应转 inbox，不能让任务悬空；
- * - 'timeout'：连上并发出后等待回报超时——消息可能已送达、对方仍在执行，保持 in_progress。
+ * - `'connect'`：**未能确认送达**——消息应转 inbox 兜底（任务不丢），
+ *   包括 socket 从未连上（ECONNREFUSED/ENOENT/…）与**一切未知错误**；
+ * - `'timeout'`：**确定连上并已发出**、仅等待回报超时（由 rpcCall 打 `RPC_TIMEOUT_CODE`）
+ *   ——消息可能已入队送达，此时不再落 inbox（避免重复投递），由上层如实展示"送达存疑"。
+ *
+ * 默认值取 `'connect'` 是**有意的保守**：inbox 的存在意义是"任务不丢"，
+ * 把未知错误当作"可能已送达"会让消息既不送达也不排队（只能靠人看文案）。
  */
 export function classifyRpcError(error: unknown): 'connect' | 'timeout' {
-	const e = error as { code?: string; message?: string } | null;
-	if (e && typeof e.code === 'string') {
-		// CONNECT_ERROR_CODES 只读数组；includes 收窄为 string 比对
-		if ((CONNECT_ERROR_CODES as readonly string[]).includes(e.code)) return 'connect';
-	}
-	return 'timeout';
+	const e = error as { code?: string } | null;
+	return e?.code === RPC_TIMEOUT_CODE ? 'timeout' : 'connect';
 }
 
 function cryptoId(): string {

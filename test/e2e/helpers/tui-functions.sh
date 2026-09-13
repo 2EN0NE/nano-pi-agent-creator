@@ -301,7 +301,7 @@ tui_run_pi_test() {
 	local PI_CI_MODE=${CI:-false}
 
 	local slug="tui-test-$$-$RANDOM"
-	local test_home="$ROOT_DIR/.pi/tmp/$slug"
+	local test_home="${TUI_SANDBOX_ROOT:-$ROOT_DIR/.pi/tmp}/$slug"
 	mkdir -p "$test_home"
 	local output_file="$test_home/output.log"
 
@@ -539,7 +539,7 @@ tui_expect_test() {
 
 	local PI_CI_MODE=${CI:-false}
 	local slug="tui-exp-$$-$RANDOM"
-	local test_home="$ROOT_DIR/.pi/tmp/$slug"
+	local test_home="${TUI_SANDBOX_ROOT:-$ROOT_DIR/.pi/tmp}/$slug"
 	mkdir -p "$test_home"
 	local output_file="$test_home/output.log"
 
@@ -595,6 +595,15 @@ tui_expect_test() {
 
 		# 额外等待确保 TUI 完全渲染
 		sleep 1
+
+		# 条件等待（替代固定 sleep，对齐 ADR-0045 D4「多进程一律轮询到条件」）：
+		# 用法 $(wait_for {标记}) 等屏幕出现标记；超时即判失败（125 ≠ 124，不会被当成"预期未退出"）
+		proc wait_for {pattern} {
+			expect {
+				-re \$pattern { }
+				timeout { send_error "TIMEOUT: wait_for \$pattern\n"; exit 125 }
+			}
+		}
 
 		# ── 用户提供的交互命令 ──
 		$expect_commands

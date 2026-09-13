@@ -41,6 +41,7 @@ PI_CI_MODE=${CI:-false}
 # 全局聚合
 TOTAL_PASS=0
 TOTAL_FAIL=0
+TOTAL_SKIP=0
 TOTAL_REVIEW=0
 TOTAL_CASES=0
 MODULE_RESULTS=() # "type|name|pass|fail|review|total"
@@ -179,6 +180,48 @@ test_it() {
 	local body
 	body=$(cat)
 	TEST_CASES+=("$name|$body")
+}
+
+# ── 环境哨兵（ADR-0045 D6）────────────────────────────────────────────────────
+# e2e 绝不允许改动**真实**环境：历史 vitest 曾把测试成员写进真实 ~/.pi/org/dev-team，
+# 使人工 UAT 跑在不可信数据上（ADR-0045 背景）。这里对真实目录做指纹比对。
+#
+# 三个刻意的口径（都是为消除**宿主 pi 会话 / 测试基建自身**造成的误报）：
+#   ① ~/.pi/org 比内容，排除 runtime/<成员>.json：它由真实在岗成员每轮重写
+#      （turn_start/end 的 setBusyAll），属运行痕迹而非泄漏。
+#   ② ~/.pi/agent/extensions-data 只比**路径集合**：宿主 pi 会话（whimsical/live、
+#      pi-lab/*.jsonl、各插件 config）与 run-e2e 自身的 config 备份/恢复都在持续写它，
+#      比内容必然误报；测试泄漏的形态是**新增插件目录/配置**，路径集足以捕获。
+#   ③ 哈希工具可移植：Linux 可能只有 sha256sum（macOS 是 shasum）；对齐 scripts/offline.sh 双路兜底。
+hash_stream() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | awk '{print $1}'
+	else
+		shasum -a 256 | awk '{print $1}'
+	fi
+}
+hash_file() { hash_stream <"$1"; }
+hash_org_tree() { # org 数据：全部文件内容（排除 runtime/）
+	local d="$HOME/.pi/org"
+	[[ -d "$d" ]] || {
+		printf 'absent'
+		return
+	}
+	find "$d" -type f ! -path '*/runtime/*' 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+		printf '%s ' "$f"
+		hash_file "$f" 2>/dev/null
+	done | hash_stream
+}
+hash_path_set() { # 扩展配置：仅路径集合（不含内容）
+	local d="$HOME/.pi/agent/extensions-data"
+	[[ -d "$d" ]] || {
+		printf 'absent'
+		return
+	}
+	find "$d" -mindepth 1 2>/dev/null | LC_ALL=C sort | hash_stream
+}
+real_env_hash() {
+	printf '%s|%s' "$(hash_org_tree)" "$(hash_path_set)" | hash_stream
 }
 
 # 构建隔离环境并执行 pi 测试
@@ -597,7 +640,7 @@ run_exp_file() {
 	TOTAL_CASES=$((TOTAL_CASES + 1))
 	TOTAL_PASS=$((TOTAL_PASS + mpass))
 	TOTAL_FAIL=$((TOTAL_FAIL + mfail))
-	MODULE_RESULTS+=("$module_type|$module_name|$mpass|$mfail|0|1")
+	MODULE_RESULTS+=("$module_type|$module_name|$mpass|$mfail|0|0|1")
 
 	# 清理沙箱
 	rm -rf "$test_home" 2>/dev/null || true
@@ -652,8 +695,11 @@ run_test_file() {
 	fi
 	echo "  Cases: $count"
 
-	local mpass=0 mfail=0 mreview=0
+	local mpass=0 mfail=0 mreview=0 mskip=0
 	local module_results=()
+
+	local real_env_before
+	real_env_before="$(real_env_hash)"
 
 	for case_entry in "${TEST_CASES[@]}"; do
 		CASE_INDEX=$((CASE_INDEX + 1))
@@ -690,7 +736,9 @@ run_test_file() {
 
 		local result="PASS"
 		set +e
-		(
+		# 捕获用例体 stdout：既写 case_log（SKIP 判定与取证），也回显到控制台
+		local case_out
+		case_out=$(
 			CASE_INDEX=$CASE_INDEX
 			MODULE_DIR="$MODULE_DIR"
 			CASE_DIR="$CASE_DIR"
@@ -698,6 +746,17 @@ run_test_file() {
 		)
 		local exec_exit=$?
 		set -e
+		printf '%s\n' "$case_out" >>"$case_log"
+		[[ -n "$case_out" ]] && printf '%s\n' "$case_out"
+
+		# 防「假通过」（实战踩到）：用例体用 `trap cleanup EXIT` 时，若因 `set -u`
+		# 未绑定变量中止，bash 会以 **trap 的退出码**（通常 0）收尾 → 明明中途挂掉却判 PASS。
+		# 典型诱因是 `$VAR` 紧跟全角括号被吞进变量名（AGENTS.md 记录过的高频坑）。
+		# 这里把 shell 级致命错误显式升级为失败。
+		if [[ $exec_exit -eq 0 ]] && grep -qE 'unbound variable' "$case_log" 2>/dev/null; then
+			echo "  ⚠️ 用例体出现 'unbound variable' 但退出码为 0（EXIT trap 掩盖）→ 判 FAIL" >&2
+			exec_exit=1
+		fi
 
 		local is_review=false
 		local review_reason=""
@@ -709,9 +768,18 @@ run_test_file() {
 			review_reason="${review_reason%|*}"
 		fi
 
+		# 用例自报 SKIP（如环境缺 tmux）→ 独立状态：**不计 PASS**，避免"静默失去覆盖"
+		local is_skip=false
+		if [[ $exec_exit -eq 0 ]] && grep -qE '(^|[[:space:]])SKIP:' <<<"$case_out"; then
+			is_skip=true
+		fi
+
 		if $is_review; then
 			result="[REVIEW]"
 			mreview=$((mreview + 1))
+		elif $is_skip; then
+			result="SKIP"
+			mskip=$((mskip + 1))
 		elif [[ $exec_exit -eq 0 ]]; then
 			result="PASS"
 			mpass=$((mpass + 1))
@@ -733,6 +801,15 @@ run_test_file() {
 		echo "    → $result"
 	done
 
+	# 环境哨兵：本次 e2e 不得改动真实环境（隔离失效 → 本模块判 FAIL）
+	local real_env_after
+	real_env_after="$(real_env_hash)"
+	if [[ "$real_env_before" != "$real_env_after" ]]; then
+		echo "  ❌ 环境哨兵：真实 \$HOME/.pi（org 或 extensions-data）在本次 e2e 中被改动——隔离失效" >&2
+		echo "     before=$real_env_before after=$real_env_after" >&2
+		mfail=$((mfail + 1))
+	fi
+
 	# ── 模块级 summary.md ──
 	{
 		echo "# $module_type/$module_name"
@@ -747,7 +824,7 @@ run_test_file() {
 			echo "| $n | $nm | $st | [$lg](cases/${lg#*/cases/}) |"
 		done
 		echo ""
-		echo "**Summary:** $mpass PASS, $mreview NEEDS_REVIEW, $mfail FAIL"
+		echo "**Summary:** $mpass PASS, $mreview NEEDS_REVIEW, $mfail FAIL, $mskip SKIP"
 		echo ""
 
 		if [[ $mreview -gt 0 ]]; then
@@ -791,6 +868,7 @@ run_test_file() {
 		echo "  \"pass\": $mpass,"
 		echo "  \"fail\": $mfail,"
 		echo "  \"review\": $mreview,"
+		echo "  \"skip\": $mskip,"
 		echo "  \"cases\": ["
 		local first=true
 		for r in "${module_results[@]}"; do
@@ -811,7 +889,8 @@ run_test_file() {
 	TOTAL_PASS=$((TOTAL_PASS + mpass))
 	TOTAL_FAIL=$((TOTAL_FAIL + mfail))
 	TOTAL_REVIEW=$((TOTAL_REVIEW + mreview))
-	MODULE_RESULTS+=("$module_type|$module_name|$mpass|$mfail|$mreview|$count")
+	TOTAL_SKIP=$((TOTAL_SKIP + mskip))
+	MODULE_RESULTS+=("$module_type|$module_name|$mpass|$mfail|$mreview|$mskip|$count")
 
 	# ── 模块耗时 ──
 	local module_elapsed
@@ -1095,6 +1174,7 @@ run_pool() {
 	TOTAL_PASS=0
 	TOTAL_FAIL=0
 	TOTAL_REVIEW=0
+	TOTAL_SKIP=0
 	MODULE_RESULTS=()
 
 	local base_dir
@@ -1113,21 +1193,22 @@ run_pool() {
 import json,sys
 with open('$sf') as f:
     d=json.load(f)
-sys.stdout.write('{p}|{f}|{r}|{t}'.format(p=d.get('pass',0),f=d.get('fail',0),r=d.get('review',0),t=d.get('total',0)))
+sys.stdout.write('{p}|{f}|{r}|{s}|{t}'.format(p=d.get('pass',0),f=d.get('fail',0),r=d.get('review',0),s=d.get('skip',0),t=d.get('total',0)))
 " 2>/dev/null) || continue
 
-			IFS='|' read -r mp mf mr mt <<<"$json_data"
-			: "${mp:=0}" "${mf:=0}" "${mr:=0}" "${mt:=0}"
+			IFS='|' read -r mp mf mr ms mt <<<"$json_data"
+			: "${mp:=0}" "${mf:=0}" "${mr:=0}" "${ms:=0}" "${mt:=0}"
 			TOTAL_PASS=$((TOTAL_PASS + mp))
 			TOTAL_FAIL=$((TOTAL_FAIL + mf))
 			TOTAL_REVIEW=$((TOTAL_REVIEW + mr))
+			TOTAL_SKIP=$((TOTAL_SKIP + ms))
 			TOTAL_CASES=$((TOTAL_CASES + mt))
-			MODULE_RESULTS+=("$module_type|$module_name|$mp|$mf|$mr|$mt")
-			echo "  $module_type/$module_name: $mp pass, $mf fail, $mr review"
+			MODULE_RESULTS+=("$module_type|$module_name|$mp|$mf|$mr|$ms|$mt")
+			echo "  $module_type/$module_name: $mp pass, $mf fail, $mr review, $ms skip"
 		done
 	done
 
-	echo "  Total: $TOTAL_CASES cases ($TOTAL_PASS pass, $TOTAL_FAIL fail, $TOTAL_REVIEW review)"
+	echo "  Total: $TOTAL_CASES cases ($TOTAL_PASS pass, $TOTAL_FAIL fail, $TOTAL_REVIEW review, $TOTAL_SKIP skip)"
 }
 
 if [[ -n "$TARGET_EXT" ]]; then
@@ -1186,20 +1267,20 @@ GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 	echo ""
 	echo "## Modules"
 	echo ""
-	echo "| Module | PASS | FAIL | REVIEW | Total | Report |"
-	echo "|--------|------|------|--------|-------|--------|"
+	echo "| Module | PASS | FAIL | REVIEW | SKIP | Total | Report |"
+	echo "|--------|------|------|--------|------|-------|--------|"
 
 	# 按类型分组显示
 	for type_dir in "extensions" "skills"; do
 		for mr in "${MODULE_RESULTS[@]+"${MODULE_RESULTS[@]}"}"; do
-			IFS='|' read -r mt mn mp mf mr_count mtot <<<"$mr"
+			IFS='|' read -r mt mn mp mf mr_count ms_count mtot <<<"$mr"
 			[[ "$mt" != "$type_dir" ]] && continue
-			echo "| $type_dir/$mn | $mp | $mf | $mr_count | $mtot | [summary]($type_dir/$mn/summary.md) |"
+			echo "| $type_dir/$mn | $mp | $mf | $mr_count | $ms_count | $mtot | [summary]($type_dir/$mn/summary.md) |"
 		done
 	done
 
 	echo ""
-	echo "**Grand Total:** $TOTAL_PASS PASS, $TOTAL_REVIEW NEEDS_REVIEW, $TOTAL_FAIL FAIL / $TOTAL_CASES cases"
+	echo "**Grand Total:** $TOTAL_PASS PASS, $TOTAL_REVIEW NEEDS_REVIEW, $TOTAL_FAIL FAIL, $TOTAL_SKIP SKIP / $TOTAL_CASES cases"
 	echo ""
 
 	if [[ $TOTAL_REVIEW -gt 0 ]]; then
@@ -1208,7 +1289,7 @@ GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 		echo "## Modules with Review-Required Cases"
 		echo ""
 		for mr in "${MODULE_RESULTS[@]+"${MODULE_RESULTS[@]}"}"; do
-			IFS='|' read -r mt mn mp mf mr_count mtot <<<"$mr"
+			IFS='|' read -r mt mn mp mf mr_count ms_count mtot <<<"$mr"
 			[[ $mr_count -eq 0 ]] && continue
 			type_display="$mt"
 			echo "- **$type_display/$mn**: $mr_count case(s) — see [$type_display/$mn/summary.md]($type_display/$mn/summary.md)"
@@ -1233,14 +1314,15 @@ GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 	echo "  \"pass\": $TOTAL_PASS,"
 	echo "  \"fail\": $TOTAL_FAIL,"
 	echo "  \"review\": $TOTAL_REVIEW,"
+	echo "  \"skip\": $TOTAL_SKIP,"
 	echo "  \"warning\": $([[ $TOTAL_REVIEW -gt 20 ]] && echo true || echo false),"
 	echo "  \"modules\": ["
 	first=true
 	for mr in "${MODULE_RESULTS[@]+"${MODULE_RESULTS[@]}"}"; do
 		$first || echo ","
 		first=false
-		IFS='|' read -r mt mn mp mf mr_count mtot <<<"$mr"
-		echo -n "    { \"name\": \"$mt/$mn\", \"total\": $mtot, \"pass\": $mp, \"fail\": $mf, \"review\": $mr_count }"
+		IFS='|' read -r mt mn mp mf mr_count ms_count mtot <<<"$mr"
+		echo -n "    { \"name\": \"$mt/$mn\", \"total\": $mtot, \"pass\": $mp, \"fail\": $mf, \"review\": $mr_count, \"skip\": $ms_count }"
 	done
 	echo ""
 	echo "  ]"
@@ -1254,7 +1336,7 @@ GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 echo ""
 echo "═══════════════════════════════════════════════"
 echo "  Results (${GLOBAL_ELAPSED}s total)"
-echo "  Total: $TOTAL_CASES | PASS: $TOTAL_PASS | FAIL: $TOTAL_FAIL | REVIEW: $TOTAL_REVIEW"
+echo "  Total: $TOTAL_CASES | PASS: $TOTAL_PASS | FAIL: $TOTAL_FAIL | REVIEW: $TOTAL_REVIEW | SKIP: $TOTAL_SKIP"
 if [[ $TOTAL_REVIEW -gt 20 ]]; then
 	echo "  ⚠️  WARNING: $TOTAL_REVIEW cases need manual review (threshold: 20)"
 elif [[ $TOTAL_REVIEW -gt 0 ]]; then
@@ -1265,7 +1347,7 @@ echo ""
 echo "Global summary: $RUN_DIR/summary.md"
 echo "Module reports:"
 for mr in "${MODULE_RESULTS[@]+"${MODULE_RESULTS[@]}"}"; do
-	IFS='|' read -r mt mn mp mf mr_count mtot <<<"$mr"
+	IFS='|' read -r mt mn mp mf mr_count ms_count mtot <<<"$mr"
 	echo "  - $RUN_DIR/$mt/$mn/summary.md"
 done
 echo ""

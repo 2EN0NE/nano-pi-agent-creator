@@ -33,8 +33,29 @@ export async function readTask(org: string, id: string): Promise<Task | null> {
 }
 
 export async function saveTask(task: Task): Promise<void> {
+	// 乐观写保护（G/ADR-0039）：写入前比对磁盘 revision 与 updatedAt——磁盘更新说明他方
+	// 已先写（多进程并发 read-modify-write），拒绝静默覆写（防 closed 终态/交付被回滚）。
+	// ① revision 单调递增：覆盖「同一毫秒内先后写」时时间戳相等、`updatedAt` 比不出来的盲区；
+	// ② 兼容旧账本（无 revision）与外部直改：磁盘 updatedAt 晚于本快照时仍判冲突。
+	// 边界：读-比较-写之间仍非原子 CAS，本守卫为「尽力检测」，非强一致保证。
+	const file = taskFile(task.org, task.id);
+	const disk = await readJson<Task>(file);
+	if (disk) {
+		const diskRev = disk.revision ?? 0;
+		const snapRev = task.revision ?? 0;
+		const timeConflict =
+			typeof disk.updatedAt === 'string' &&
+			typeof task.updatedAt === 'string' &&
+			disk.updatedAt > task.updatedAt;
+		if (diskRev !== snapRev || timeConflict) {
+			throw new Error(
+				`任务 ${task.id} 刚被他方更新（磁盘 rev ${diskRev}/${disk.updatedAt} ≠ 快照 rev ${snapRev}/${task.updatedAt}），本次操作未落账，请重试。`,
+			);
+		}
+	}
+	task.revision = (task.revision ?? 0) + 1;
 	task.updatedAt = nowIso();
-	await writeJsonAtomic(taskFile(task.org, task.id), task);
+	await writeJsonAtomic(file, task);
 }
 
 export async function listTasks(org: string): Promise<Task[]> {
@@ -171,14 +192,22 @@ export function addDelivery(assignee: Assignee, delivery: Delivery, by: string, 
  * - accept：任务在 waiting_accept（或 todo 空任务）→ closed（终态）
  * - reject：打回指定参与人（缺省 = 所有 delivered 的）→ returned + round+1 → 聚合回 in_progress
  */
+export interface HumanOp {
+	/** 人类强制标记：提供时越过派发人校验、by 记 human@<目录>、事件记 human_forced_*（TUI 人操作台专用） */
+	humanBy?: string;
+}
+
 export function attestTask(
 	task: Task,
 	by: string,
 	result: 'accepted' | 'rejected',
 	note?: string,
 	whichAgents?: string[],
+	opts?: HumanOp,
 ): { accepted: boolean } {
-	if (task.dispatcher !== by) {
+	const humanBy = opts?.humanBy;
+	const effBy = humanBy ?? by;
+	if (!humanBy && task.dispatcher !== by) {
 		throw new Error(`只有派发人 ${task.dispatcher} 能验收/打回任务 ${task.id}。`);
 	}
 	if (task.status === 'closed') {
@@ -189,14 +218,21 @@ export function attestTask(
 		if (computeTaskStatus(task) !== 'waiting_accept') {
 			throw new Error(`任务 ${task.id} 尚未全部交付齐，不能验收通过。`);
 		}
-		task.acceptance = { by, result: 'accepted', at: nowIso(), note, round: round + 1 };
+		task.acceptance = { by: effBy, result: 'accepted', at: nowIso(), note, round: round + 1 };
 		task.status = 'closed';
-		pushHistory(task, 'accepted_closed', by, note);
+		pushHistory(task, humanBy ? 'human_forced_approve' : 'accepted_closed', effBy, note);
 		return { accepted: true };
 	}
 	// rejected：打回
-	task.acceptance = { by, result: 'rejected', at: nowIso(), note, round: round + 1 };
+	// 守卫须在打回循环之前：没有已交付参与者可打回时（缺省目标）直接抛，不落账
+	const hasDeliveredBefore = task.subTasks.some((s) =>
+		s.assignees.some((a) => a.status === 'delivered'),
+	);
 	const targets: string[] = whichAgents ?? [];
+	if (targets.length === 0 && !hasDeliveredBefore) {
+		throw new Error('打回失败：没有已交付的参与者可打回。');
+	}
+	task.acceptance = { by: effBy, result: 'rejected', at: nowIso(), note, round: round + 1 };
 	for (const sub of task.subTasks) {
 		for (const a of sub.assignees) {
 			if (a.status !== 'delivered') continue;
@@ -205,17 +241,8 @@ export function attestTask(
 			a.round += 1;
 		}
 	}
-	if (computeTaskStatus(task) !== 'in_progress') {
-		// 没有可打回的（无人 delivered）也允许打回为「整体不合格」：无目标则任务回到 todo 前端？保守抛错
-		if (
-			targets.length === 0 &&
-			!task.subTasks.some((s) => s.assignees.some((a) => a.status === 'delivered'))
-		) {
-			throw new Error('打回失败：没有已交付的参与者可打回。');
-		}
-	}
 	task.status = 'in_progress';
-	pushHistory(task, 'rejected_returned', by, note);
+	pushHistory(task, humanBy ? 'human_forced_return' : 'rejected_returned', effBy, note);
 	return { accepted: false };
 }
 
@@ -251,6 +278,8 @@ export function adoptAssignee(task: Task, by: string, agentName: string, note?: 
 		}
 	}
 	task.history.push({ at: nowIso(), event: 'adopted', by, note: note ?? agentName });
+	// 叫停他人后未决集合变了 → 聚合状态重算（例如"一人已交付 + 其余被叫停"应转为待验收）
+	refreshStatus(task);
 }
 
 /**
@@ -260,8 +289,14 @@ export function adoptAssignee(task: Task, by: string, agentName: string, note?: 
  * 否则「a 已交付、b 在做」时 approve 永远被拒，叫停逻辑成为死代码）。
  * 返回被叫停的参与者列表（供通知，去重）。
  */
-export function approveWithAdoption(task: Task, by: string, note?: string): { stopped: string[] } {
-	if (task.dispatcher !== by) {
+export function approveWithAdoption(
+	task: Task,
+	by: string,
+	note?: string,
+	opts?: HumanOp,
+): { stopped: string[] } {
+	const humanBy = opts?.humanBy;
+	if (!humanBy && task.dispatcher !== by) {
 		throw new Error(`只有派发人 ${task.dispatcher} 能验收/打回任务 ${task.id}。`);
 	}
 	if (task.status === 'closed') {
@@ -283,12 +318,14 @@ export function approveWithAdoption(task: Task, by: string, note?: string): { st
 	if (!anyDelivered) {
 		throw new Error(`任务 ${task.id} 尚无任何交付，不能验收通过。`);
 	}
-	attestTask(task, by, 'accepted', note);
+	attestTask(task, humanBy ?? by, 'accepted', note, undefined, opts);
 	return { stopped: [...stopped] };
 }
 
 /** 任务被取消（派发人撤 / 取消请求同意 / 人类强制关闭）：进 closed 终态但不算验收通过 */
-export function cancelTask(task: Task, by: string, note?: string): void {
+export function cancelTask(task: Task, by: string, note?: string, opts?: HumanOp): void {
+	const humanBy = opts?.humanBy;
+	const effBy = humanBy ?? by;
 	if (task.status === 'closed') {
 		throw new Error(`任务 ${task.id} 已关闭（铁终态）。`);
 	}
@@ -301,7 +338,44 @@ export function cancelTask(task: Task, by: string, note?: string): void {
 			}
 		}
 	}
-	pushHistory(task, 'cancelled_closed', by, note ?? '');
+	pushHistory(task, humanBy ? 'human_forced_cancel' : 'cancelled_closed', effBy, note ?? '');
+}
+
+/**
+ * 人类改派（TUI 人操作台 G2）：把指定子任务里的某参与者（僵死/离线）移除
+ * （cancelled，留痕），再让目标成员以 invited 加入该子任务。若 removeAgent
+ * 为空 → 该子任务已无活跃处理人，直接加人。delivered 参与者不可被移除（应走验收/打回）。
+ */
+export function humanReassign(
+	task: Task,
+	byHuman: string,
+	subTaskId: string,
+	removeAgent: string | null,
+	newAgent: string,
+): void {
+	if (task.status === 'closed') {
+		throw new Error(`任务 ${task.id} 已关闭（铁终态）。`);
+	}
+	const sub = task.subTasks.find((s) => s.id === subTaskId);
+	if (!sub) throw new Error(`子任务 ${subTaskId} 不存在。`);
+	if (sub.assignees.some((a) => a.agent === newAgent)) {
+		throw new Error(`${newAgent} 已在该子任务中。`);
+	}
+	if (removeAgent) {
+		const old = sub.assignees.find((a) => a.agent === removeAgent);
+		if (!old) throw new Error(`参与者 ${removeAgent} 不在该子任务中。`);
+		if (old.status === 'delivered') {
+			throw new Error(`参与者 ${removeAgent} 已交付，不能改派移除（应先验收或打回）。`);
+		}
+		old.status = 'cancelled';
+	}
+	sub.assignees.push({ agent: newAgent, status: 'invited', round: 0, deliveries: [] });
+	pushHistory(
+		task,
+		'human_forced_reassign',
+		byHuman,
+		`${removeAgent ? `${removeAgent} → ${newAgent}` : `(无活跃处理人) → ${newAgent}`}`,
+	);
 }
 
 /** 派发人视角：该 agent 名下未结子任务（leave 盘点 / 视图用） */
@@ -314,4 +388,124 @@ export function findMemberOpenWork(task: Task, agent: string): boolean {
 		}
 	}
 	return false;
+}
+
+/**
+ * 该成员在指定子任务（缺省 = 整个任务）上是否仍有**在手**工作。
+ *
+ * 「在手」= 状态非终态（invited/claimed/returned）**且未被叫停**（`stopped`）。
+ * 与 `findMemberOpenWork` 的区别：本函数认 `stopped`（情形 B 叫停后无需继续）且可按子任务过滤——
+ * 执行槽对账需要它：槽指向的子任务一旦取消/叫停/改派移出，占用必须释放（ADR-0055 `D2`）。
+ */
+export function hasOpenAssignment(task: Task, agent: string, subTaskId?: string): boolean {
+	for (const sub of task.subTasks) {
+		if (subTaskId && sub.id !== subTaskId) continue;
+		for (const a of sub.assignees) {
+			if (a.agent !== agent || a.stopped) continue;
+			if (a.status === 'invited' || a.status === 'claimed' || a.status === 'returned')
+				return true;
+		}
+	}
+	return false;
+}
+
+// ── 排队（ADR-0055 `D4`）与逾期（ADR-0055 `D3`）的领域口径 ─────────────────────
+
+/**
+ * 该成员**排队中**的待办数（队列上限的口径）。
+ *
+ * 只数 `invited`（还没接手）：`claimed`/`returned` 表示"已经在手上"，不该再计入队列，
+ * 否则同一个任务会被"在跑"和"排队"重复计算，上限形同虚设。
+ */
+export function queueLengthFor(tasks: Task[], agent: string): number {
+	let n = 0;
+	for (const task of tasks) {
+		if (task.status === 'closed') continue;
+		for (const sub of task.subTasks) {
+			for (const a of sub.assignees) {
+				if (a.agent !== agent) continue;
+				if (!a.stopped && a.status === 'invited') n += 1;
+			}
+		}
+	}
+	return n;
+}
+
+/** 逾期标记的历史事件名（查重与展示共用同一常量，避免两处写串） */
+export const OVERDUE_EVENT = 'overdue';
+
+export interface OverdueEntry {
+	task: Task;
+	sub: SubTask;
+	assignee: Assignee;
+	dueAt: string;
+}
+
+/** 该参与者是否已被标记过逾期（同一参与者只标一次，避免巡检反复写历史） */
+export function isOverdueMarked(task: Task, sub: SubTask, agent: string): boolean {
+	return task.history.some(
+		(h) => h.event === OVERDUE_EVENT && h.note?.startsWith(`${sub.id}/${agent} `),
+	);
+}
+
+/**
+ * 找出**已逾期且尚未标记**的参与者（纯函数：只读账本，便于单测）。
+ *
+ * 口径（ADR-0055 `D3`）：任务未结 + 参与者未终态（invited/claimed/returned，且未被叫停）
+ * + 有效期望完成时间（子任务级优先，继承任务级）已过 + 尚未标记过。
+ */
+export function findOverdue(tasks: Task[], now: number = Date.now()): OverdueEntry[] {
+	const out: OverdueEntry[] = [];
+	for (const task of tasks) {
+		if (task.status === 'closed') continue;
+		for (const sub of task.subTasks) {
+			const dueAt = effectiveDueAt(task, sub);
+			if (!dueAt) continue;
+			const due = Date.parse(dueAt);
+			if (!Number.isFinite(due) || due > now) continue;
+			for (const a of sub.assignees) {
+				if (a.stopped) continue;
+				if (a.status !== 'invited' && a.status !== 'claimed' && a.status !== 'returned')
+					continue;
+				if (isOverdueMarked(task, sub, a.agent)) continue;
+				out.push({ task, sub, assignee: a, dueAt });
+			}
+		}
+	}
+	return out;
+}
+
+/**
+ * 写入逾期标记（**只标记、不回落**：去向由派发人或人类决定，ADR-0055 `D3`）。
+ * 返回 false 表示此前已标记过（调用方据此避免重复通知）。
+ */
+export function markOverdue(entry: OverdueEntry, now: number = Date.now()): boolean {
+	if (isOverdueMarked(entry.task, entry.sub, entry.assignee.agent)) return false;
+	entry.task.history.push({
+		at: new Date(now).toISOString(),
+		event: OVERDUE_EVENT,
+		by: 'system',
+		note: `${entry.sub.id}/${entry.assignee.agent} 逾期（期望完成时间 ${entry.dueAt}）`,
+	});
+	return true;
+}
+
+/** 抢占/打断的历史事件名（ADR-0055 `D7`） */
+export const INTERRUPTED_EVENT = 'interrupted';
+
+/** 记录一次抢占（谁、何时、打断时它在做什么） */
+export function markInterrupted(
+	task: Task,
+	by: string,
+	info: { subTaskId?: string; context?: string },
+	now: number = Date.now(),
+): void {
+	task.history.push({
+		at: new Date(now).toISOString(),
+		event: INTERRUPTED_EVENT,
+		by,
+		note: [info.subTaskId ? `${info.subTaskId}` : '', info.context ?? '']
+			.filter(Boolean)
+			.join(' '),
+	});
 }

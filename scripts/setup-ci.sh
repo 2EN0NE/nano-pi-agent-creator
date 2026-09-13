@@ -55,6 +55,27 @@ else
 	echo "  WARNING: expect not found and apt-get unavailable; TUI expect tests will fail"
 fi
 
+# ── 3.5. 安装系统依赖（tmux，用于 org 多进程 e2e） ──
+# org 的唤醒/自主闭环用例依赖 tmux 承载成员终端；缺 tmux 时用例会 SKIP（
+# 不再计 PASS，但会以 SKIP 形式丢失覆盖），故此处必须安装并断言。
+echo ""
+echo "--- Installing system dependency: tmux ---"
+if command -v tmux >/dev/null 2>&1; then
+	echo "  tmux: already present at $(command -v tmux)"
+elif command -v apt-get >/dev/null 2>&1; then
+	if command -v sudo >/dev/null 2>&1; then
+		sudo apt-get update -qq && sudo apt-get install -y -qq tmux
+	else
+		apt-get update -qq && apt-get install -y -qq tmux
+	fi
+	echo "  tmux: installed via apt-get"
+fi
+if ! command -v tmux >/dev/null 2>&1; then
+	echo "  ERROR: tmux unavailable —— org 唤醒/自主闭环 e2e 将 SKIP（覆盖丢失）" >&2
+	exit 1
+fi
+tmux -V
+
 # ── 4. 重建原生模块（node-pty） ──
 echo ""
 echo "--- Rebuilding native modules ---"

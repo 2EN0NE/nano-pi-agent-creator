@@ -1,3 +1,4 @@
+// re-check marker 2026-09-09 (org board 视觉重构后)
 /**
  * org 扩展 — 逻辑层 Vitest 测试
  * 覆盖：01 org 实体化（create/join/leave/回归三选一/多 org/删除归档）、
@@ -18,17 +19,21 @@ import {
 	orgExists,
 	readOrg,
 	removeOrg,
+	renameOrg,
+	transferChief,
 } from '../../../extensions/auto/org/orgstore.js';
 import {
 	adoptAssignee,
 	approveWithAdoption,
 	attestTask,
 	cancelTask,
+	humanReassign,
 	computeTaskStatus,
 	createTaskWithId,
 	effectiveDueAt,
 	findMemberOpenWork,
 	generateTaskId,
+	listTasks,
 	readTask,
 	saveTask,
 	transitionAssignee,
@@ -38,11 +43,24 @@ import {
 	consentCancel,
 	deliverMessage,
 	dispatchTask,
-	drainInbox,
 	reassignSubTask,
-	takeInbox,
 } from '../../../extensions/auto/org/dispatch.js';
+import { ackInbox, peekInbox } from '../../../extensions/auto/org/inbox.js';
 import type { AgentManifest, Task } from '../../../extensions/auto/org/types.js';
+
+// inbox 读取/消费的测试探针：生产路径走 peekInbox/planInboxFlush/commitInboxFlush，
+// 这里保留"取消息"与"取并清空"两个薄封装，供断言 inbox 内容用。
+const drainInbox = async (org: string, agent: string): Promise<string[]> =>
+	(await peekInbox(org, agent)).map((r) => r.message);
+const takeInbox = async (org: string, agent: string): Promise<string[]> => {
+	const records = await peekInbox(org, agent);
+	await ackInbox(
+		org,
+		agent,
+		records.map((r) => r.id),
+	);
+	return records.map((r) => r.message);
+};
 
 let tmpRoot: string;
 let chiefDir: string;
@@ -682,5 +700,453 @@ describe('待办投影与对账（07）', () => {
 		expect(after).toContain('"status": "done"');
 		// 员工已认领状态不被 org 重写清掉（parseTodoFile/serializeTodo 保留同源字段）
 		expect(after).toContain('"assigned_to_session": "sess-worker-a"');
+	});
+});
+
+// ── 人类强制通道（01 · ADR-0039）────────────────────────────────────────────
+
+describe('人类强制（human@）', () => {
+	it('非派发人经 humanBy 可验收 → closed + by=human@ + human_forced_approve；agent 路径仍限派发人', async () => {
+		const org = await setupOrg();
+		const t = await newTask(org, {
+			title: '等验收',
+			status: 'waiting_accept' as const,
+			subTasks: [
+				{
+					id: 'S1',
+					description: 'd',
+					dueAt: null,
+					assignees: [
+						{
+							agent: 'worker-a',
+							dir: workerDir,
+							status: 'delivered',
+							round: 0,
+							deliveries: [],
+						},
+					],
+				},
+			],
+		});
+		// agent 路径：非派发人（worker-b 非 dispatcher）尝试验收 → 抛
+		expect(() => attestTask(t, 'worker-a', 'accepted', 'x')).toThrow('只有派发人');
+		// 人类路径：任意身份 + humanBy → 成功
+		const r = approveWithAdoption(t, 'worker-a', '人类验收', { humanBy: 'human@jojo' });
+		expect(r.stopped).toEqual([]);
+		expect(t.status).toBe('closed');
+		expect(t.acceptance?.by).toBe('human@jojo');
+		expect(t.history.some((h) => h.event === 'human_forced_approve')).toBe(true);
+	});
+
+	it('验收未全部交付：人类 approve → 未交付参与者 stopped 后关闭', async () => {
+		const org = await setupOrg();
+		const t = await newTask(org, {
+			title: '部分交付',
+			status: 'in_progress' as const,
+			subTasks: [
+				{
+					id: 'S1',
+					description: 'd',
+					dueAt: null,
+					assignees: [
+						{
+							agent: 'worker-a',
+							dir: workerDir,
+							status: 'delivered',
+							round: 0,
+							deliveries: [
+								{ at: '2026-01-01', by: 'worker-a', summary: 'done', files: [] },
+							],
+						},
+						{
+							agent: 'worker-b',
+							dir: workerB,
+							status: 'claimed',
+							round: 0,
+							deliveries: [],
+						},
+					],
+				},
+			],
+		});
+		const r = approveWithAdoption(t, 'nobody', '收尾', { humanBy: 'human@jojo' });
+		expect(r.stopped).toContain('worker-b');
+		expect(t.status).toBe('closed');
+		const b = t.subTasks[0].assignees.find((a) => a.agent === 'worker-b')!;
+		expect(b.stopped).toBe(true);
+	});
+
+	it('人类打回：已交付者 returned + 轮次 +1 + human_forced_return；无人可打回抛错', async () => {
+		const org = await setupOrg();
+		const t = await newTask(org, {
+			title: '打回',
+			status: 'waiting_accept' as const,
+			subTasks: [
+				{
+					id: 'S1',
+					description: 'd',
+					dueAt: null,
+					assignees: [
+						{
+							agent: 'worker-a',
+							dir: workerDir,
+							status: 'delivered',
+							round: 0,
+							deliveries: [
+								{ at: '2026-01-01', by: 'worker-a', summary: 'v1', files: [] },
+							],
+						},
+					],
+				},
+			],
+		});
+		attestTask(t, 'x', 'rejected', '人类要求返工', undefined, { humanBy: 'human@jojo' });
+		expect(t.status).toBe('in_progress');
+		const a = t.subTasks[0].assignees[0];
+		expect(a.status).toBe('returned');
+		expect(a.round).toBe(1);
+		expect(t.history.some((h) => h.event === 'human_forced_return')).toBe(true);
+		// 无交付任务的打回 → 抛错不落账
+		const t2 = await newTask(org, { title: '无人交付', status: 'todo' as const });
+		expect(() =>
+			attestTask(t2, 'x', 'rejected', 'no', undefined, { humanBy: 'human@jojo' }),
+		).toThrow('没有已交付的参与者可打回');
+	});
+
+	it('人类取消：closed 无 acceptance + human_forced_cancel', async () => {
+		const org = await setupOrg();
+		const t = await newTask(org, { title: '撤掉' });
+		cancelTask(t, 'anyone', '人类取消', { humanBy: 'human@jojo' });
+		expect(t.status).toBe('closed');
+		expect(t.acceptance).toBeUndefined();
+		expect(t.history.some((h) => h.event === 'human_forced_cancel')).toBe(true);
+	});
+
+	it('铁终态对人也生效：closed 后再人类操作 → 抛', async () => {
+		const org = await setupOrg();
+		const t = await newTask(org, { title: '终态' });
+		cancelTask(t, 'x', '取消', { humanBy: 'human@jojo' });
+		expect(() => cancelTask(t, 'x', 'again', { humanBy: 'human@jojo' })).toThrow('铁终态');
+		expect(() =>
+			attestTask(t, 'x', 'accepted', 'again', undefined, { humanBy: 'human@jojo' }),
+		).toThrow('铁终态');
+	});
+
+	it('人类改派：移除僵死处理人（claimed）→ cancelled + 新成员 invited + human_forced_reassign；delivered 不可移除', async () => {
+		const org = await setupOrg();
+		const t = await newTask(org, {
+			title: '改派',
+			status: 'in_progress' as const,
+			subTasks: [
+				{
+					id: 'S1',
+					description: 'd',
+					dueAt: null,
+					assignees: [
+						{
+							agent: 'worker-a',
+							dir: workerDir,
+							status: 'claimed',
+							round: 0,
+							deliveries: [],
+						},
+					],
+				},
+			],
+		});
+		humanReassign(t, 'human@jojo', 'S1', 'worker-a', 'worker-b');
+		const sub = t.subTasks[0];
+		expect(sub.assignees.find((a) => a.agent === 'worker-a')?.status).toBe('cancelled');
+		expect(sub.assignees.find((a) => a.agent === 'worker-b')?.status).toBe('invited');
+		expect(t.history.some((h) => h.event === 'human_forced_reassign')).toBe(true);
+		// delivered 焦点不可移除
+		const t2 = await newTask(org, {
+			title: '改派2',
+			status: 'waiting_accept' as const,
+			subTasks: [
+				{
+					id: 'S1',
+					description: 'd',
+					dueAt: null,
+					assignees: [
+						{
+							agent: 'worker-a',
+							dir: workerDir,
+							status: 'delivered',
+							round: 0,
+							deliveries: [
+								{ at: '2026-01-01', by: 'worker-a', summary: 'done', files: [] },
+							],
+						},
+					],
+				},
+			],
+		});
+		expect(() => humanReassign(t2, 'human@jojo', 'S1', 'worker-a', 'worker-b')).toThrow(
+			'已交付',
+		);
+	});
+});
+
+// ── 在线投递失败分类（02 · ADR-0039）───────────────────────────────────────
+
+describe('投递失败分类（connect vs timeout）', () => {
+	it('classifyRpcError：只把「已连上并发出后超时」判 timeout；未知错误保守判 connect（落 inbox 不丢）', async () => {
+		const { classifyRpcError, rpcCall } = await import('../../../extensions/auto/org/util.js');
+		// timeout 的唯一情形用**真实 rpcCall** 制造：接受连接但永不回应 → 等待回报超时。
+		// 断言的是「打码 ↔ 分类」的契约，测试里不必再抄一份错误码字面量（防两处漂移）。
+		const net = await import('node:net');
+		// 服务端持有的连接必须显式销毁：否则 server.close() 的回调永不触发（测试挂死）
+		const conns: { destroy: () => void }[] = [];
+		const silent = net.createServer((s) => conns.push(s));
+		const sockPath = join(tmpRoot, 'silent.sock');
+		await new Promise<void>((resolve) => silent.listen(sockPath, () => resolve()));
+		let timeoutError: unknown;
+		try {
+			await rpcCall(sockPath, { type: 'ping', id: 'probe' }, { timeoutMs: 150 });
+		} catch (e) {
+			timeoutError = e;
+		}
+		for (const c of conns) c.destroy();
+		await new Promise<void>((resolve) => silent.close(() => resolve()));
+		expect(timeoutError).toBeDefined();
+		expect(classifyRpcError(timeoutError)).toBe('timeout');
+		// 未连上 / 其它错误码 / 无码错误 → 一律保守落 inbox 兜底（宁重复，不静默丢消息）
+		expect(classifyRpcError({ code: 'ECONNREFUSED' })).toBe('connect');
+		expect(classifyRpcError({ code: 'ENOENT' })).toBe('connect');
+		expect(classifyRpcError({ code: 'ETIMEDOUT' })).toBe('connect');
+		expect(classifyRpcError(new Error('socket hang up after send'))).toBe('connect');
+		expect(classifyRpcError(null)).toBe('connect');
+	});
+
+	it('deliverMessage：成员 runtime 指向不可达 socket（connect 类）→ 落 inbox 兜底不丢', async () => {
+		const org = await setupOrg();
+		// 给 worker-a 写一个假 runtime：socket 不存在 → isSocketAlive false → connect 兜底 inbox
+		const { runtimeFile, inboxDir } = await import('../../../extensions/auto/org/orgstore.js');
+		const { writeJsonAtomic } = await import('../../../extensions/auto/org/util.js');
+		const { promises: fs } = await import('node:fs');
+		await writeJsonAtomic(runtimeFile(org, 'worker-a'), {
+			pid: 999999,
+			socketPath: join(workerDir, 'no-such.sock'),
+			sessionId: 's1',
+			startedAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+		});
+		const mode = await deliverMessage(org, 'worker-a', '[org:task] 离线任务指令');
+		// 有 runtime 登记但不可达 → unreachable；从未登记 → inbox；两者都落 inbox 兜底
+		expect(['inbox', 'unreachable']).toContain(mode);
+		const inboxFiles = await fs.readdir(inboxDir(org, 'worker-a'));
+		expect(inboxFiles.length).toBe(1);
+		const { readJson } = await import('../../../extensions/auto/org/util.js');
+		const rec = await readJson<{ message: string }>(
+			join(inboxDir(org, 'worker-a'), inboxFiles[0]),
+		);
+		expect(rec?.message).toContain('离线任务指令');
+	});
+});
+
+// ── 任务账本乐观写保护（03 · ADR-0039）──────────────────────────────────────
+
+describe('saveTask 乐观写保护', () => {
+	it('磁盘 updatedAt 更新（他方先写）→ 保存抛冲突且不覆写；快照同步后可存', async () => {
+		const org = await setupOrg();
+		const t = await newTask(org, { title: '并发任务' });
+		// 模拟他方并发：直接改盘（title 变化 + updatedAt 后移）
+		const { writeJsonAtomic, readJson } = await import('../../../extensions/auto/org/util.js');
+		const { taskFile } = await import('../../../extensions/auto/org/orgstore.js');
+		const later = new Date(Date.now() + 5000).toISOString();
+		const diskNow = (await readJson<Task>(taskFile(org, t.id)))!;
+		diskNow.title = '他方改的标题';
+		diskNow.updatedAt = later;
+		await writeJsonAtomic(taskFile(org, t.id), diskNow);
+		// 本快照（旧 updatedAt）保存 → 冲突
+		await expect(saveTask(t)).rejects.toThrow(/他方更新.*请重试/);
+		// 磁盘未被旧快照覆写
+		const after = (await readJson<Task>(taskFile(org, t.id)))!;
+		expect(after.title).toBe('他方改的标题');
+		expect(after.updatedAt).toBe(later);
+		// 重新读取（快照同步）后可正常保存
+		const fresh = (await readTask(org, t.id))!;
+		fresh.title = '我改的标题';
+		await saveTask(fresh);
+		expect((await readTask(org, t.id))!.title).toBe('我改的标题');
+	});
+
+	it('串行读写（磁盘未变）→ 正常保存（回归）', async () => {
+		const org = await setupOrg();
+		const t = await newTask(org, { title: '串行任务' });
+		t.background = '更新背景';
+		await saveTask(t);
+		expect((await readTask(org, t.id))!.background).toBe('更新背景');
+	});
+
+	it('同一毫秒内的他方写（updatedAt 相等、revision 前进）→ 仍判冲突（时间戳盲区）', async () => {
+		const org = await setupOrg();
+		const t = await newTask(org, { title: '同刻并发' });
+		const { writeJsonAtomic, readJson } = await import('../../../extensions/auto/org/util.js');
+		const { taskFile } = await import('../../../extensions/auto/org/orgstore.js');
+		// 他方先写：updatedAt 与本快照**完全相同**（模拟同一毫秒），仅 revision 前进
+		const diskNow = (await readJson<Task>(taskFile(org, t.id)))!;
+		diskNow.title = '他方同刻改的';
+		diskNow.revision = (diskNow.revision ?? 0) + 1;
+		await writeJsonAtomic(taskFile(org, t.id), diskNow);
+		await expect(saveTask(t)).rejects.toThrow(/他方更新.*请重试/);
+		expect((await readJson<Task>(taskFile(org, t.id)))!.title).toBe('他方同刻改的');
+	});
+});
+
+// ── 会话启动骨架（07 · ADR-0039）────────────────────────────────────────────
+
+describe('会话启动对账与握手催办（07）', () => {
+	it('collectStartupNotes：非负责人派发的 invited 握手 → 给处理人的 note 含任务编号与 accept 指引', async () => {
+		const org = await setupOrg();
+		const res = await dispatchTask({
+			org,
+			dispatcher: 'worker-a', // member 派发 → 握手
+			dispatcherRole: 'member',
+			title: '握手任务',
+			background: 'bg',
+			items: ['x'],
+			targets: [{ agent: 'worker-b', description: '帮做' }],
+		});
+		const { collectStartupNotes } = await import('../../../extensions/auto/org/startup.js');
+		const notes = await collectStartupNotes(org, 'worker-b');
+		expect(notes.some((n) => n.includes('待确认握手请求') && n.includes(res.task.id))).toBe(
+			true,
+		);
+		expect(notes.some((n) => n.includes('/org accept'))).toBe(true);
+	});
+
+	it('pendingHandshakeNote：有未决握手返回文案、无则 null（惰性催办复用点）', async () => {
+		const org = await setupOrg();
+		const { pendingHandshakeNote } = await import('../../../extensions/auto/org/startup.js');
+		expect(await pendingHandshakeNote(org, 'worker-b')).toBeNull();
+		const res = await dispatchTask({
+			org,
+			dispatcher: 'worker-a', // member 派发 → 握手
+			dispatcherRole: 'member',
+			title: '握手任务',
+			background: 'bg',
+			items: ['x'],
+			targets: [{ agent: 'worker-b', description: '帮做' }],
+		});
+		const note = await pendingHandshakeNote(org, 'worker-b');
+		expect(note).toContain('待确认握手请求');
+		expect(note).toContain(res.task.id);
+		// 派发人自己无未决握手 → null
+		expect(await pendingHandshakeNote(org, 'worker-a')).toBeNull();
+	});
+
+	it('负责人单方派发（chief）不需握手确认 → 无握手催办；他人无关 issue 不过滤进来', async () => {
+		const org = await setupOrg();
+		await dispatchTask({
+			org,
+			dispatcher: 'chief',
+			dispatcherRole: 'chief',
+			title: '单方任务',
+			background: '',
+			items: [],
+			targets: [{ agent: 'worker-a', description: 'x' }],
+		});
+		const { collectStartupNotes } = await import('../../../extensions/auto/org/startup.js');
+		const notesA = await collectStartupNotes(org, 'worker-a');
+		expect(notesA.some((n) => n.includes('待确认握手请求'))).toBe(false);
+		// worker-b 无任何相关 → 空
+		const notesB = await collectStartupNotes(org, 'worker-b');
+		expect(notesB).toEqual([]);
+	});
+
+	it('对账 done 未交付 issue 只发给涉事成员（过滤他人）', async () => {
+		const org = await setupOrg();
+		const res = await dispatchTask({
+			org,
+			dispatcher: 'chief',
+			dispatcherRole: 'chief',
+			title: 'T',
+			background: '',
+			items: [],
+			targets: [{ agent: 'worker-a', description: 'x' }],
+		});
+		const { projectTask, readTodoMap } =
+			await import('../../../extensions/auto/org/todoproj.js');
+		await projectTask(org, res.task.id);
+		const map = await readTodoMap(org);
+		const entry = map.find((m) => m.taskId === res.task.id && m.direction === 'in')!;
+		const { writeFile, readFile } = await import('node:fs/promises');
+		const fp = join(workerDir, '.pi', 'todos', `${entry.todoId}.md`);
+		const raw = await readFile(fp, 'utf8');
+		await writeFile(fp, raw.replace('"status": "open"', '"status": "done"'), 'utf8');
+		const { collectStartupNotes } = await import('../../../extensions/auto/org/startup.js');
+		const notesA = await collectStartupNotes(org, 'worker-a');
+		expect(notesA.some((n) => n.includes('补交付'))).toBe(true);
+		const notesB = await collectStartupNotes(org, 'worker-b');
+		expect(notesB.some((n) => n.includes('补交付'))).toBe(false);
+	});
+});
+
+// ── 公司改名迁移 / 负责人转移（人类管控）────────────────────────────────────
+
+describe('公司改名与负责人转移（CRUD-U）', () => {
+	it('renameOrg：目录 + org.json.name + 任务 .org + todo-map entry.org 全量迁移', async () => {
+		const org = await setupOrg();
+		await newTask(org, { title: '迁移任务' });
+		const { projectTask, readTodoMap } =
+			await import('../../../extensions/auto/org/todoproj.js');
+		await projectTask(org, (await listTasks(org))[0].id);
+
+		await renameOrg('dev-team', 'renamed-co');
+
+		// 旧目录不存在、新目录就绪
+		expect(await orgExists('dev-team')).toBe(false);
+		expect(await orgExists('renamed-co')).toBe(true);
+		expect((await readOrg('renamed-co')).name).toBe('renamed-co');
+		// 任务 .org 字段迁移（listTasks 走新目录读取）
+		const tasks = await listTasks('renamed-co');
+		expect(tasks.length).toBe(1);
+		expect(tasks[0].org).toBe('renamed-co');
+		// todo-map entry.org 迁移
+		const map = await readTodoMap('renamed-co');
+		expect(map.length).toBeGreaterThan(0);
+		expect(map.every((e) => e.org === 'renamed-co')).toBe(true);
+	});
+
+	it('renameOrg 校验：重名/不存在/同名拒绝', async () => {
+		await setupOrg();
+		await createOrg('other-co', { name: 'boss', dir: workerB });
+		await expect(renameOrg('dev-team', 'other-co')).rejects.toThrow('已存在');
+		await expect(renameOrg('nope', 'x')).rejects.toThrow('不存在');
+		await expect(renameOrg('dev-team', 'dev-team')).rejects.toThrow('相同');
+	});
+
+	it('renameOrg：无 tasks 目录时正常完成（只吞 ENOENT）', async () => {
+		await setupOrg(); // 未调 newTask → 无 tasks 目录
+		await expect(renameOrg('dev-team', 'no-tasks-co')).resolves.toMatchObject({
+			renamed: true,
+		});
+		expect((await readOrg('no-tasks-co')).name).toBe('no-tasks-co');
+	});
+
+	it('renameOrg：tasks 路径非目录（ENOTDIR）时必须冒泡，不得静默中止迁移', async () => {
+		// 把 tasks/ 换成一个同名文件 → readdir 抛 ENOTDIR（非 ENOENT）
+		const { taskDir } = await import('../../../extensions/auto/org/orgstore.js');
+		await setupOrg();
+		const { rm, writeFile } = await import('node:fs/promises');
+		await rm(taskDir('dev-team'), { recursive: true, force: true });
+		await writeFile(taskDir('dev-team'), 'not-a-directory');
+		await expect(renameOrg('dev-team', 'renamed-co')).rejects.toThrow();
+	});
+
+	it('transferChief：新 chief 上任、原 chief 降普通成员、chiefName/Dir 同步', async () => {
+		await setupOrg();
+		await transferChief('dev-team', 'worker-a');
+		const org = await readOrg('dev-team');
+		expect(org.chiefName).toBe('worker-a');
+		const { realpath } = await import('node:fs/promises');
+		expect(org.chiefDir).toBe(await realpath(workerDir));
+		expect(org.members.find((m) => m.name === 'worker-a')?.role).toBe('chief');
+		expect(org.members.find((m) => m.name === 'chief')?.role).toBe('member');
+		// 已是负责人 / 不存在成员 → 拒绝
+		await expect(transferChief('dev-team', 'worker-a')).rejects.toThrow('已经是负责人');
+		await expect(transferChief('dev-team', 'ghost')).rejects.toThrow('不在公司');
 	});
 });
