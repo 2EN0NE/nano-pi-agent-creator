@@ -1,19 +1,48 @@
 /**
- * tools.ts — tool-range 实验分流（assignToolRangeArm）skip 路径测试
+ * tools.ts — tool-range 实验分流（assignToolRangeArm）测试
  *
- * 覆盖报告缺口：hasUserToolConfig（已有 tools-config entry）/ --preset flag /
- * select 抛异常 三类「跳过实验分流」分支，以及无用户配置时的 core/full 分流。
- * 通过 fake pi 驱动 session_start 事件（不 mock pi-lab 之外的任何 Pi API），
- * 断言 setActiveTools 被调用的工具集与 labSelect 是否被调用。
- *
- * 已知限制：用户在 /tools 面板启用实验禁用工具 → 退出实验注入的 override 路径
- * 深藏在 ctx.ui.custom 的 SettingsList onChange 回调中，单元测试无法无 TUI 驱动，
- * 由 e2e（test/e2e/extensions/tools/smoke.test.sh 场景 7）覆盖。
+ * ADR-0050 决策 3 / B2：实验**默认只观测、不限制**；仅当用户显式报名
+ * （extensions-data/tools/config.json `enableToolRange: true`）后，臂结果才写基础层。
+ * 覆盖：未报名（不 select、不限制）/ 已报名 core、full / hasUserToolConfig /
+ * --preset flag / select 抛异常 等分支。
+ * 通过 fake pi 驱动 session_start 事件（不 mock pi-lab 之外的任何 Pi API）。
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import toolsExtension from '../../../extensions/meta/preset/tools.js';
 
 const ALL_TOOLS = ['read', 'bash', 'edit', 'write', 'rg', 'ffgrep', 'fffind', 'grep', 'find', 'ls'];
+const ORIGINAL_HOME = process.env.HOME;
+let tmpHome: string;
+let tmpCwd: string;
+
+beforeEach(() => {
+	tmpHome = resolve(tmpdir(), `tool-range-${randomUUID()}`);
+	tmpCwd = resolve(tmpHome, 'cwd');
+	mkdirSync(tmpCwd, { recursive: true });
+	process.env.HOME = tmpHome;
+});
+
+afterEach(() => {
+	process.env.HOME = ORIGINAL_HOME;
+	try {
+		rmSync(tmpHome, { recursive: true, force: true });
+	} catch {
+		/* ignore */
+	}
+	delete (globalThis as Record<string, unknown>).__labApi;
+	delete (globalThis as Record<string, unknown>).__toolsApi;
+});
+
+/** 写入项目级 tools 配置（显式报名实验）。 */
+function enroll(): void {
+	const dir = resolve(tmpCwd, '.pi', 'extensions-data', 'tools');
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(resolve(dir, 'config.json'), JSON.stringify({ enableToolRange: true }), 'utf8');
+}
 
 interface FakePi {
 	on(event: string, handler: (event: unknown, ctx: unknown) => unknown): void;
@@ -25,7 +54,7 @@ interface FakePi {
 	getFlag(name: string): string | undefined;
 	_handlers: Record<string, Array<(event: unknown, ctx: unknown) => unknown>>;
 	_setActiveCalls: string[][];
-	_selectCalls: number;
+	_selectCalls: () => number;
 }
 
 function makeFakePi(opts: {
@@ -59,7 +88,7 @@ function makeFakePi(opts: {
 		},
 		registerCommand: () => {},
 		getAllTools: () => ALL_TOOLS.map((name) => ({ name })),
-		getActiveTools: () => opts.activeTools ?? [],
+		getActiveTools: () => opts.activeTools ?? [...ALL_TOOLS],
 		setActiveTools: (names: string[]) => {
 			_setActiveCalls.push(names);
 		},
@@ -73,13 +102,16 @@ function makeFakePi(opts: {
 	return pi;
 }
 
-const BASE_CTX = {
-	mode: 'print',
-	hasUI: false,
-	model: { provider: 'deepseek', id: 'deepseek-v4-pro' },
-	ui: { notify: () => {} },
-	sessionManager: { getSessionId: () => 'sess-1', getEntries: () => [] as Array<unknown> },
-};
+function makeCtx(entries: Array<unknown> = []) {
+	return {
+		cwd: tmpCwd,
+		mode: 'print',
+		hasUI: false,
+		model: { provider: 'deepseek', id: 'deepseek-v4-pro' },
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => 'sess-1', getEntries: () => entries },
+	};
+}
 
 async function fireSessionStart(pi: FakePi, ctx: unknown): Promise<void> {
 	for (const handler of pi._handlers['session_start'] ?? []) {
@@ -87,81 +119,71 @@ async function fireSessionStart(pi: FakePi, ctx: unknown): Promise<void> {
 	}
 }
 
-afterEach(() => {
-	delete (globalThis as Record<string, unknown>).__labApi;
-	delete (globalThis as Record<string, unknown>).__toolsApi;
-});
-
-describe('tool-range 实验分流', () => {
-	it('无用户配置 + select=core → 分流到 7 个 core 工具（其余禁用）', async () => {
+describe('tool-range 实验分流（ADR-0050 B2）', () => {
+	it('未报名（默认）→ 不 select、不施加限制，活动集 = 基础层', async () => {
 		const pi = makeFakePi({ selectArm: 'core' });
 		toolsExtension(pi as never);
-		await fireSessionStart(pi, BASE_CTX);
+		await fireSessionStart(pi, makeCtx());
 
-		// select 被调用一次；实验分流 applyTools 是最后一次 setActiveTools
-		expect((pi as unknown as { _selectCalls: () => number })._selectCalls()).toBe(1);
+		expect(pi._selectCalls()).toBe(0);
+		const last = pi._setActiveCalls[pi._setActiveCalls.length - 1];
+		expect(last).toEqual(ALL_TOOLS);
+	});
+
+	it('已报名 + select=core → 分流到 7 个 core 工具（其余禁用）', async () => {
+		enroll();
+		const pi = makeFakePi({ selectArm: 'core' });
+		toolsExtension(pi as never);
+		await fireSessionStart(pi, makeCtx());
+
+		expect(pi._selectCalls()).toBe(1);
 		const last = pi._setActiveCalls[pi._setActiveCalls.length - 1];
 		expect(last).toEqual(['read', 'bash', 'edit', 'write', 'rg', 'ffgrep', 'fffind']);
 	});
 
-	it('无用户配置 + select=full → 全工具启用零禁用', async () => {
+	it('已报名 + select=full → 全工具启用零禁用', async () => {
+		enroll();
 		const pi = makeFakePi({ selectArm: 'full' });
 		toolsExtension(pi as never);
-		await fireSessionStart(pi, BASE_CTX);
+		await fireSessionStart(pi, makeCtx());
 
 		const last = pi._setActiveCalls[pi._setActiveCalls.length - 1];
 		expect(last).toEqual(ALL_TOOLS);
 	});
 
-	it('已有 tools-config entry → 跳过实验分流（select 不被调用）', async () => {
-		const pi = makeFakePi({
-			selectArm: 'core',
-			entries: [
-				{
-					type: 'custom',
-					customType: 'tools-config',
-					data: { enabledTools: ['read', 'bash'] },
-				},
-			],
-		});
+	it('已报名 + 已有 tools-config entry → 跳过实验分流（select 不被调用）', async () => {
+		enroll();
+		const entries = [
+			{ type: 'custom', customType: 'tools-config', data: { disabledTools: ['edit'] } },
+		];
+		const pi = makeFakePi({ selectArm: 'core' });
 		toolsExtension(pi as never);
-		const ctx = {
-			...BASE_CTX,
-			sessionManager: {
-				getSessionId: () => 'sess-1',
-				getEntries: () => [
-					{
-						type: 'custom',
-						customType: 'tools-config',
-						data: { enabledTools: ['read', 'bash'] },
-					},
-				],
-			},
-		};
-		await fireSessionStart(pi, ctx);
+		await fireSessionStart(pi, makeCtx(entries));
 
-		expect((pi as unknown as { _selectCalls: () => number })._selectCalls()).toBe(0);
-		// restoreFromBranch 会恢复 savedEnabled（唯一一次 setActiveTools），实验不追加
-		expect(pi._setActiveCalls).toHaveLength(1);
-		expect(pi._setActiveCalls[0]).toEqual(['read', 'bash']);
+		expect(pi._selectCalls()).toBe(0);
+		// restoreFromBranch 应用基础层（= 全集 - edit），实验不追加
+		const last = pi._setActiveCalls[pi._setActiveCalls.length - 1];
+		expect(last).not.toContain('edit');
+		expect(last).toContain('read');
 	});
 
-	it('--preset flag 存在 → 跳过实验分流（select 不被调用，不 applyTools）', async () => {
+	it('已报名 + --preset flag 存在 → 跳过实验分流（select 不被调用）', async () => {
+		enroll();
 		const pi = makeFakePi({ selectArm: 'core', presetFlag: 'test' });
 		toolsExtension(pi as never);
-		await fireSessionStart(pi, BASE_CTX);
+		await fireSessionStart(pi, makeCtx());
 
-		expect((pi as unknown as { _selectCalls: () => number })._selectCalls()).toBe(0);
-		// 无 savedEnabled 且 getActiveTools 为空 → restore/reapply 均不 applyTools
-		expect(pi._setActiveCalls).toHaveLength(0);
+		expect(pi._selectCalls()).toBe(0);
 	});
 
-	it('select 抛异常 → 跳过实验分流且不崩溃', async () => {
+	it('已报名 + select 抛异常 → 跳过实验注入且不崩溃', async () => {
+		enroll();
 		const pi = makeFakePi({ selectThrows: true });
 		toolsExtension(pi as never);
-		await fireSessionStart(pi, BASE_CTX);
+		await fireSessionStart(pi, makeCtx());
 
-		expect((pi as unknown as { _selectCalls: () => number })._selectCalls()).toBe(1);
-		expect(pi._setActiveCalls).toHaveLength(0);
+		expect(pi._selectCalls()).toBe(1);
+		const last = pi._setActiveCalls[pi._setActiveCalls.length - 1];
+		expect(last).toEqual(ALL_TOOLS);
 	});
 });

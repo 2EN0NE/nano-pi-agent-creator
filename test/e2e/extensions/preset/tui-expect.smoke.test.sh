@@ -207,3 +207,211 @@ test_it "expect: /mode opens model selector without adapter contract error [REVI
   tui_cleanup
   exit $F
 TEST
+
+test_it "expect: 激活带 tools 的 preset → /tools 视图 == 白名单（ADR-0049 语义）" <<'TEST'
+  # 预置 user 级 plan preset（tools 白名单 = ['read']），激活后 /tools 应显示 1/N 且锁定
+  local preset_home="$ROOT_DIR/.pi/tmp/preset-e2e-home-$$"
+  mkdir -p "$preset_home/.pi/agent/extensions-data/preset"
+  cat > "$preset_home/.pi/agent/extensions-data/preset/config.json" <<'JSON'
+{ "plan": { "tools": ["read"] } }
+JSON
+
+  tui_expect_test "pi-logger,preset" '
+    proc drain {secs max} {
+      set acc ""
+      set n 0
+      expect {
+        -re {.+} {
+          append acc $expect_out(0,string)
+          if {[incr n] >= $max} { return $acc }
+          exp_continue
+        }
+        -timeout $secs timeout { }
+      }
+      return $acc
+    }
+    send "/preset plan\r"
+    drain 2 30
+    send "/tools\r"
+    drain 3 40
+    send "\033\[B"
+    drain 2 30
+  ' 30 110 "" "$preset_home"
+
+  local F=0
+  tui_assert_contains "Enabled tools: 1/" "激活后 /tools 视图应等于白名单（1/N）" || F=$((F + 1))
+  tui_assert_contains "预设锁定" "/tools 应显示 [预设锁定]" || F=$((F + 1))
+  # 封闭集：非白名单工具的详情应标注来源（下移一项展示 bash 的描述）
+  tui_assert_contains "被预设限制（封闭集），不可启用" "受限工具应标注预设来源" || F=$((F + 1))
+
+  rm -rf "$preset_home"
+  tui_cleanup
+  exit $F
+TEST
+
+test_it "expect: 激活后 /tools 写操作被拒绝并告警（ADR-0049 契约4）" <<'TEST'
+  # 激活带 tools 白名单的 preset → 在 /tools 面板 toggle（写操作）应被拒绝 + error 告警
+  local preset_home="$ROOT_DIR/.pi/tmp/preset-e2e-home-$$"
+  mkdir -p "$preset_home/.pi/agent/extensions-data/preset"
+  cat > "$preset_home/.pi/agent/extensions-data/preset/config.json" <<'JSON'
+{ "plan": { "tools": ["read"] } }
+JSON
+
+  tui_expect_test "pi-logger,preset" '
+    proc drain {secs max} {
+      set acc ""
+      set n 0
+      expect {
+        -re {.+} {
+          append acc $expect_out(0,string)
+          if {[incr n] >= $max} { return $acc }
+          exp_continue
+        }
+        -timeout $secs timeout { }
+      }
+      return $acc
+    }
+    send "/preset plan\r"
+    drain 2 30
+    send "/tools\r"
+    drain 3 40
+    send " "
+    drain 2 30
+  ' 30 110 "" "$preset_home"
+
+  local F=0
+  tui_assert_contains "修改不被允许" "写操作应被拒绝并告警" || F=$((F + 1))
+  tui_assert_contains "Enabled tools: 1/" "拒绝后活动集不应变化（仍为白名单 1/N）" || F=$((F + 1))
+
+  rm -rf "$preset_home"
+  tui_cleanup
+  exit $F
+TEST
+
+test_it "expect: 清除 preset → /tools 回到无限制（ADR-0049 契约2）" <<'TEST'
+  local preset_home="$ROOT_DIR/.pi/tmp/preset-e2e-home-$$"
+  mkdir -p "$preset_home/.pi/agent/extensions-data/preset"
+  cat > "$preset_home/.pi/agent/extensions-data/preset/config.json" <<'JSON'
+{ "plan": { "tools": ["read"] } }
+JSON
+
+  tui_expect_test "pi-logger,preset" '
+    proc drain {secs max} {
+      set acc ""
+      set n 0
+      expect {
+        -re {.+} {
+          append acc $expect_out(0,string)
+          if {[incr n] >= $max} { return $acc }
+          exp_continue
+        }
+        -timeout $secs timeout { }
+      }
+      return $acc
+    }
+    send "/preset plan\r"
+    drain 2 30
+    send "/preset\r"
+    drain 2 30
+    send "\033\[B"
+    sleep 0.5
+    send " "
+    drain 2 30
+    send "/tools\r"
+    drain 3 40
+  ' 30 110 "" "$preset_home"
+
+  local F=0
+  tui_assert_not_contains "预设锁定" "清除后 /tools 不应再显示锁定" || F=$((F + 1))
+  # 基础层原本启用的 bash 应恢复启用（白名单态下为禁用），证明 overlay 已撤回
+  tui_assert_contains "• bash" "清除后基础层工具应恢复启用" || F=$((F + 1))
+  tui_assert_not_contains "Enabled tools: 1/" "清除后活动集不应仍为白名单 1/N" || F=$((F + 1))
+
+  rm -rf "$preset_home"
+  tui_cleanup
+  exit $F
+TEST
+
+test_it "expect: /reload 后已清除的 preset 不复活（ADR-0049 契约3）" <<'TEST'
+  local preset_home="$ROOT_DIR/.pi/tmp/preset-e2e-home-$$"
+  mkdir -p "$preset_home/.pi/agent/extensions-data/preset"
+  cat > "$preset_home/.pi/agent/extensions-data/preset/config.json" <<'JSON'
+{ "plan": { "tools": ["read"], "instructions": "你是规划专家" } }
+JSON
+
+  tui_expect_test "pi-logger,preset" '
+    proc drain {secs max} {
+      set acc ""
+      set n 0
+      expect {
+        -re {.+} {
+          append acc $expect_out(0,string)
+          if {[incr n] >= $max} { return $acc }
+          exp_continue
+        }
+        -timeout $secs timeout { }
+      }
+      return $acc
+    }
+    send "/preset plan\r"
+    drain 2 30
+    send "/preset\r"
+    drain 2 30
+    send "\033\[B"
+    sleep 0.5
+    send " "
+    drain 2 30
+    send "/reload\r"
+    drain 4 50
+    send "/tools\r"
+    drain 3 40
+  ' 40 110 "" "$preset_home"
+
+  local F=0
+  tui_assert_not_contains "预设锁定" "/reload 后已清除的 preset 不应复活（无锁定）" || F=$((F + 1))
+  tui_assert_contains "• bash" "/reload 后基础层工具应仍启用（overlay 未复活）" || F=$((F + 1))
+
+  rm -rf "$preset_home"
+  tui_cleanup
+  exit $F
+TEST
+
+test_it "expect: preset 封闭集遮罩动态注册工具（ADR-0050 契约2）" <<'TEST'
+  # dynamic-tool 助手在加载期注册 mock_search；preset tools=['read'] 激活后
+  # /tools 面板中该动态工具应被标注为「被预设限制（封闭集）」
+  local preset_home="$ROOT_DIR/.pi/tmp/preset-e2e-home-$$"
+  mkdir -p "$preset_home/.pi/agent/extensions-data/preset"
+  cat > "$preset_home/.pi/agent/extensions-data/preset/config.json" <<'JSON'
+{ "plan": { "tools": ["read"] } }
+JSON
+
+  tui_expect_test "pi-logger,preset,dynamic-tool" '
+    proc drain {secs max} {
+      set acc ""
+      set n 0
+      expect {
+        -re {.+} {
+          append acc $expect_out(0,string)
+          if {[incr n] >= $max} { return $acc }
+          exp_continue
+        }
+        -timeout $secs timeout { }
+      }
+      return $acc
+    }
+    send "/preset plan\r"
+    drain 2 30
+    send "/tools\r"
+    drain 3 40
+    send "mock"
+    drain 2 30
+  ' 30 110 "" "$preset_home"
+
+  local F=0
+  tui_assert_contains "mock_search" "动态注册工具应出现在 /tools 列表" || F=$((F + 1))
+  tui_assert_contains "被预设限制（封闭集），不可启用" "动态工具应被 overlay 遮罩" || F=$((F + 1))
+
+  rm -rf "$preset_home"
+  tui_cleanup
+  exit $F
+TEST

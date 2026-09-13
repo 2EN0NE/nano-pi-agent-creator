@@ -100,6 +100,8 @@ function makeFakePi(cfg: FakePiConfig = {}) {
 		getActiveTools: () => cfg.activeToolsRef?.current ?? cfg.activeTools ?? ['read', 'bash'],
 		setActiveTools: (tools: string[]) => {
 			rec.setActiveToolsCalls.push(tools);
+			// 模拟 pi runtime：活动集随 setActiveTools 变化（供真实 overlay 路径断言）
+			if (cfg.activeToolsRef) cfg.activeToolsRef.current = [...tools];
 		},
 		getAllTools: () =>
 			(cfg.allTools ?? ['read', 'bash', 'edit', 'write']).map((t) => ({ name: t })),
@@ -329,6 +331,7 @@ describe('preset 真实 closure — applyPreset 失败路径', () => {
 		setupDirs({ plan: { tools: [] } });
 		const { pi, rec, commands, handlers } = makeFakePi({
 			allTools: ['read', 'bash', 'edit', 'write', 'web_search'],
+			activeTools: ['read', 'bash', 'edit', 'write', 'web_search'],
 		});
 		presetExtension(pi as never);
 		const { ctx } = makeCtx();
@@ -346,7 +349,7 @@ describe('preset 真实 closure — applyPreset 失败路径', () => {
 		cleanupDirs();
 	});
 
-	it('skills 字段 → __skillsApi.replaceSkills 调用（[] 全部禁止）', async () => {
+	it('skills 字段 → __skillsApi.setOverlay 调用（[] 全部禁止）', async () => {
 		setupDirs({ plan: { skills: [] } });
 		const { pi, commands, handlers } = makeFakePi();
 		presetExtension(pi as never);
@@ -356,10 +359,10 @@ describe('preset 真实 closure — applyPreset 失败路径', () => {
 		// presetExtension 加载 skillsExtension 后挂载真实 __skillsApi，spy 它
 		const skillsApi = (
 			globalThis as unknown as {
-				__skillsApi: { replaceSkills: (s: string[] | null) => void };
+				__skillsApi: { setOverlay: (s: string[] | null) => void };
 			}
 		).__skillsApi;
-		const spy = vi.spyOn(skillsApi, 'replaceSkills');
+		const spy = vi.spyOn(skillsApi, 'setOverlay');
 
 		await commands['preset']('plan', ctx);
 
@@ -433,9 +436,9 @@ describe('preset /mode 命令（ADR-0034）', () => {
 	});
 });
 
-describe('preset 锁定守卫（ADR-0035）', () => {
-	it('锁定 + tools 已配置 + 无偏离时，引入偏离的修改被拒绝', async () => {
-		setupDirs({ plan: { tools: ['read'], locked: true } });
+describe('preset 子工具锁死（ADR-0049 决策 4）', () => {
+	it('preset 激活后：tools 写操作被拒绝', async () => {
+		setupDirs({ plan: { tools: ['read'] } });
 		const { pi, commands, handlers } = makeFakePi({ activeTools: ['read'] });
 		presetExtension(pi as never);
 		const { ctx } = makeCtx({ model: { provider: 'mock', id: 'm1' } });
@@ -447,12 +450,12 @@ describe('preset 锁定守卫（ADR-0035）', () => {
 		};
 		const r = guard.canModify('tools', ['read', 'grep']);
 		expect(r.allowed).toBe(false);
-		expect(r.reason).toContain('preset 已锁定');
+		expect(r.reason).toContain('已激活');
 		cleanupDirs();
 	});
 
-	it('锁定 + tools 已配置 + 已偏离时，改回设定值放行', async () => {
-		setupDirs({ plan: { tools: ['read'], locked: true } });
+	it('preset 激活后：即便改回设定值也拒绝（激活即锁死）', async () => {
+		setupDirs({ plan: { tools: ['read'] } });
 		const { pi, commands, handlers } = makeFakePi({ activeTools: ['grep'] });
 		presetExtension(pi as never);
 		const { ctx } = makeCtx({ model: { provider: 'mock', id: 'm1' } });
@@ -463,12 +466,12 @@ describe('preset 锁定守卫（ADR-0035）', () => {
 			canModify: (d: string, nextValue?: unknown) => { allowed: boolean; reason?: string };
 		};
 		const r = guard.canModify('tools', ['read']);
-		expect(r.allowed).toBe(true);
+		expect(r.allowed).toBe(false);
 		cleanupDirs();
 	});
 
-	it('锁定 + 维度未配置时放行（只锁 tools 的 preset 不拒绝 model 修改）', async () => {
-		setupDirs({ plan: { tools: ['read'], locked: true } });
+	it('preset 激活后：未配置维度也拒绝（写入口一律锁死）', async () => {
+		setupDirs({ plan: { tools: ['read'] } });
 		const { pi, commands, handlers } = makeFakePi({ activeTools: ['read'] });
 		presetExtension(pi as never);
 		const { ctx } = makeCtx({ model: { provider: 'mock', id: 'm1' } });
@@ -478,9 +481,23 @@ describe('preset 锁定守卫（ADR-0035）', () => {
 		const guard = (globalThis as Record<string, unknown>).__presetGuard as {
 			canModify: (d: string, nextValue?: unknown) => { allowed: boolean; reason?: string };
 		};
-		// model 维度未在 plan 配置 → 即使锁定也放行
+		// model 维度未在 plan 配置，但 preset 激活期间子工具写操作一律拒绝
 		const r = guard.canModify('model', { provider: 'mock', id: 'm2' });
-		expect(r.allowed).toBe(true);
+		expect(r.allowed).toBe(false);
+		cleanupDirs();
+	});
+
+	it('未激活 preset：写操作放行（用户自由维护基础层）', async () => {
+		setupDirs({ plan: { tools: ['read'] } });
+		const { pi, handlers } = makeFakePi({ activeTools: ['read'] });
+		presetExtension(pi as never);
+		const { ctx } = makeCtx({ model: { provider: 'mock', id: 'm1' } });
+		await fireEvent(handlers, 'session_start', null, ctx);
+
+		const guard = (globalThis as Record<string, unknown>).__presetGuard as {
+			canModify: (d: string, nextValue?: unknown) => { allowed: boolean; reason?: string };
+		};
+		expect(guard.canModify('tools', ['grep']).allowed).toBe(true);
 		cleanupDirs();
 	});
 
@@ -542,31 +559,31 @@ describe('preset turn_start 兜底回滚（ADR-0035 扩展）', () => {
 		const { pi, commands, handlers } = makeFakePi({ activeToolsRef: toolsRef });
 		presetExtension(pi as never);
 		const { ctx, notifyCalls } = makeCtx({ model: { provider: 'mock', id: 'm1' } });
-		const replaceToolsCalls: string[][] = [];
+		const setOverlayCalls: string[][] = [];
 		(globalThis as Record<string, unknown>).__toolsApi = {
-			replaceTools: (t: string[]) => {
-				replaceToolsCalls.push(t);
+			setOverlay: (t: string[]) => {
+				setOverlayCalls.push(t);
 				toolsRef.current = [...t]; // 模拟真实 replaceTools 更新启用集
 			},
 		};
 
 		await fireEvent(handlers, 'session_start', null, ctx);
 		await commands['preset']('plan', ctx);
-		replaceToolsCalls.length = 0; // 清空 activate 时的调用
+		setOverlayCalls.length = 0; // 清空 activate 时的调用
 
 		// 第三方改 tools → 偏离
 		toolsRef.current = ['grep'];
 		await fireEvent(handlers, 'turn_start', null, ctx);
 
-		expect(replaceToolsCalls).toContainEqual(['read']);
+		expect(setOverlayCalls).toContainEqual(['read']);
 		expect(notifyCalls.some((n) => n.type === 'warning' && n.message.includes('工具'))).toBe(
 			true,
 		);
 
 		// 回滚已收敛：下一次 turn_start 不再重复回滚
-		replaceToolsCalls.length = 0;
+		setOverlayCalls.length = 0;
 		await fireEvent(handlers, 'turn_start', null, ctx);
-		expect(replaceToolsCalls).toHaveLength(0);
+		expect(setOverlayCalls).toHaveLength(0);
 
 		delete (globalThis as Record<string, unknown>).__toolsApi;
 		cleanupDirs();
@@ -583,7 +600,7 @@ describe('preset turn_start 兜底回滚（ADR-0035 扩展）', () => {
 		(globalThis as Record<string, unknown>).__skillsApi = {
 			getSkillNames: () => allSkills,
 			getEnabledSkills: () => skillsRef.current,
-			replaceSkills: (s: string[] | null | undefined) => {
+			setOverlay: (s: string[] | null | undefined) => {
 				replaceSkillsCalls.push(s);
 				// 模拟真实 applySkills：null=全部启用，否则过滤无效名
 				skillsRef.current =
@@ -660,46 +677,87 @@ describe('preset turn_start 兜底回滚（ADR-0035 扩展）', () => {
 		});
 		presetExtension(pi as never);
 		const { ctx, notifyCalls } = makeCtx({ model: { provider: 'mock', id: 'm1' } });
-		const replaceToolsCalls: string[][] = [];
+		const setOverlayCalls: string[][] = [];
+		const registered = ['read', 'bash'];
 		(globalThis as Record<string, unknown>).__toolsApi = {
-			replaceTools: (t: string[]) => {
-				replaceToolsCalls.push(t);
-				toolsRef.current = [...t];
+			setOverlay: (t: string[]) => {
+				setOverlayCalls.push(t);
+				// 模拟真实 tools.ts：有效活动集 = overlay ∩ 已注册工具
+				toolsRef.current = t.filter((n) => registered.includes(n));
+			},
+			clearOverlay: () => {
+				toolsRef.current = [...registered];
 			},
 		};
 
 		await fireEvent(handlers, 'session_start', null, ctx);
 		await commands['preset']('plan', ctx);
-		replaceToolsCalls.length = 0; // 清空 activate 时的调用（仅含有效工具 read）
+		setOverlayCalls.length = 0; // 清空 activate 时的调用（overlay 保留声明名 read + ghost-tool）
 
-		// 无效名 ghost-tool 被过滤，锁定 preset 不应误判「工具偏离」或触发循环回滚
+		// 无效名 ghost-tool 保留在 overlay 但不在有效活动集，不应误判「工具偏离」或触发循环回滚
 		await fireEvent(handlers, 'turn_start', null, ctx);
-		expect(replaceToolsCalls).toHaveLength(0);
+		expect(setOverlayCalls).toHaveLength(0);
 		expect(notifyCalls.filter((n) => n.message.includes('工具'))).toHaveLength(0);
 
 		delete (globalThis as Record<string, unknown>).__toolsApi;
 		cleanupDirs();
 	});
 
-	it('未锁定 preset 第三方改 tools → turn_start 不兜底回滚', async () => {
+	it('preset 激活（未声明 locked）第三方改 tools → turn_start 兜底回滚（激活即硬约束）', async () => {
 		setupDirs({ plan: { tools: ['read'] } });
 		const toolsRef = { current: ['read'] };
 		const { pi, commands, handlers } = makeFakePi({ activeToolsRef: toolsRef });
 		presetExtension(pi as never);
 		const { ctx } = makeCtx({ model: { provider: 'mock', id: 'm1' } });
-		const replaceToolsCalls: string[][] = [];
+		const setOverlayCalls: string[][] = [];
 		(globalThis as Record<string, unknown>).__toolsApi = {
-			replaceTools: (t: string[]) => replaceToolsCalls.push(t),
+			setOverlay: (t: string[]) => setOverlayCalls.push(t),
 		};
 
 		await fireEvent(handlers, 'session_start', null, ctx);
 		await commands['preset']('plan', ctx);
-		replaceToolsCalls.length = 0; // 清空 activate 时的调用
+		setOverlayCalls.length = 0; // 清空 activate 时的调用
 
 		toolsRef.current = ['grep'];
 		await fireEvent(handlers, 'turn_start', null, ctx);
 
-		expect(replaceToolsCalls).toHaveLength(0);
+		expect(setOverlayCalls).toContainEqual(['read']);
+
+		delete (globalThis as Record<string, unknown>).__toolsApi;
+		cleanupDirs();
+	});
+
+	it('preset 激活 + 真实 __toolsApi（不 stub）：第三方直接改活动集 → turn_start 真实回滚', async () => {
+		setupDirs({ plan: { tools: ['read'] } });
+		const toolsRef = { current: ['read'] };
+		const { pi, commands, handlers } = makeFakePi({
+			activeToolsRef: toolsRef,
+			allTools: ['read', 'bash', 'edit', 'write'],
+		});
+		// 不覆盖 __toolsApi：走 tools.ts 挂载的真实 overlay 状态机
+		presetExtension(pi as never);
+		const { ctx, notifyCalls } = makeCtx({ model: { provider: 'mock', id: 'm1' } });
+		await fireEvent(handlers, 'session_start', null, ctx);
+		await commands['preset']('plan', ctx);
+
+		const api = (globalThis as { __toolsApi?: { getEffective: () => string[] } }).__toolsApi;
+		expect(api?.getEffective()).toEqual(['read']);
+
+		// 第三方绕过入口直接改活动集（模拟注册方/其它扩展）
+		toolsRef.current = ['grep'];
+		await fireEvent(handlers, 'turn_start', null, ctx);
+
+		// 真实 setOverlay → 真实 applyTools → pi.setActiveTools，收敛回白名单
+		expect(api?.getEffective()).toEqual(['read']);
+		expect(toolsRef.current).toEqual(['read']);
+		expect(notifyCalls.some((n) => n.type === 'warning' && n.message.includes('工具'))).toBe(
+			true,
+		);
+
+		// 已收敛：下一轮 turn_start 不再回滚
+		toolsRef.current = ['read'];
+		await fireEvent(handlers, 'turn_start', null, ctx);
+		expect(toolsRef.current).toEqual(['read']);
 
 		delete (globalThis as Record<string, unknown>).__toolsApi;
 		cleanupDirs();

@@ -47,9 +47,14 @@ export default function skillsExtension(pi: ExtensionAPI) {
 	let allSkills: { name: string; description: string }[] = [];
 	let initialized = false;
 	let configFilePath: string | undefined;
-	// 待应用的技能覆盖（allSkills 尚未加载时暂存，initialize 后应用）：
-	//   null/undefined = 不限制（全部启用）；[] = 全部禁止；非空数组 = 白名单
-	let pendingSkillsApply: string[] | null | undefined;
+	/**
+	 * preset 叠加层（ADR-0049 决策 5）：undefined = 无 overlay（用基础层）；
+	 * [] = 全部禁止；非空 = 白名单。preset 不写基础层。
+	 */
+	let skillsOverlay: string[] | undefined;
+	/** allSkills 尚未加载时暂存的 overlay。 */
+	let pendingOverlay: string[] | undefined;
+	let hasPendingOverlay = false;
 
 	// ── File I/O (cross-session persistence) ────────────────────────
 
@@ -114,25 +119,48 @@ export default function skillsExtension(pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 应用技能覆盖集（供 __skillsApi.replaceSkills 与 initialize 延迟应用共用）。
-	 * - null/undefined：不限制（全部启用）
-	 * - []：全部禁止
-	 * - 非空数组：白名单（只启用列出的，无效名自动过滤）
-	 *
-	 * 仅写 session entry（跨 reload 保持），不写 config.json——preset 覆盖属会话级
-	 * 模型配置，不得污染 /skills 的跨会话持久化配置。
+	 * 有效技能集：overlay 存在时 = overlay ∩ allSkills（封闭集）；否则 = 基础层。
 	 */
-	function applySkills(skillNames: string[] | null | undefined) {
-		if (skillNames == null) {
-			enabledSkills = new Set(allSkills.map((s) => s.name));
-		} else {
-			enabledSkills = new Set(skillNames.filter((n) => allSkills.some((s) => s.name === n)));
+	function effectiveSkills(): Set<string> {
+		if (skillsOverlay !== undefined) {
+			return new Set(skillsOverlay.filter((n) => allSkills.some((s) => s.name === n)));
 		}
-		pi.appendEntry<SkillsState>('skills-config', {
-			enabledSkills: Array.from(enabledSkills),
-		});
-		// 通知 preset 即时刷新偏离状态（用户手动改 skills 后「已偏离 skills」立即出现）
+		return enabledSkills;
+	}
+
+	/**
+	 * 单个技能是否生效。所有「用户可感知」路径（system prompt 过滤、/skill: 拦截、
+	 * /skills 面板展示）必须走此函数，保证 preset overlay（ADR-0049 R1）真正生效，
+	 * 而不只是被 getEnabledSkills()（偏离检测）读取。
+	 */
+	function isSkillEnabled(name: string): boolean {
+		return effectiveSkills().has(name);
+	}
+
+	function refreshDrift() {
 		(globalThis as { __presetDriftRefresh?: () => void }).__presetDriftRefresh?.();
+	}
+
+	/** 设置 preset 叠加层（不写基础层、不写 session entry）。[] = 全部禁止。 */
+	function setOverlay(skillNames: string[]) {
+		if (allSkills.length === 0) {
+			pendingOverlay = skillNames;
+			hasPendingOverlay = true;
+			return;
+		}
+		skillsOverlay = skillNames;
+		refreshDrift();
+	}
+
+	/** 撤回 preset 叠加层（清除预设）。基础层原样保留。 */
+	function clearOverlay() {
+		if (allSkills.length === 0) {
+			pendingOverlay = undefined;
+			hasPendingOverlay = false;
+			return;
+		}
+		skillsOverlay = undefined;
+		refreshDrift();
 	}
 
 	function getBranchSkills(ctx: ExtensionContext): string[] | undefined {
@@ -160,13 +188,18 @@ export default function skillsExtension(pi: ExtensionAPI) {
 		const branchSkills = getBranchSkills(ctx);
 		mergeSavedSkills(fileSkills, branchSkills);
 
-		// 应用 preset 等扩展在 allSkills 加载前提交的覆盖（延迟应用）
-		if (pendingSkillsApply !== undefined) {
-			applySkills(pendingSkillsApply);
-			pendingSkillsApply = undefined;
+		// 应用 preset 等扩展在 allSkills 加载前提交的 overlay（延迟应用）
+		if (hasPendingOverlay) {
+			skillsOverlay = pendingOverlay;
+			pendingOverlay = undefined;
+			hasPendingOverlay = false;
 		}
 
-		log.info('Skills: initialized, %d skills enabled', enabledSkills.size);
+		log.info(
+			'Skills: initialized, %d skills enabled (overlay=%s)',
+			effectiveSkills().size,
+			skillsOverlay === undefined ? 'none' : String(skillsOverlay.length),
+		);
 	}
 
 	// ── Deduplicate skills by name (same skill may load from multiple sources) ──
@@ -186,11 +219,11 @@ export default function skillsExtension(pi: ExtensionAPI) {
 
 	function sendSummary(changedSkills: { name: string; description: string }[]) {
 		const total = allSkills.length;
-		const enabled = enabledSkills.size;
+		const enabled = effectiveSkills().size;
 		const lines: string[] = [];
 
 		for (const s of changedSkills) {
-			const glyph = enabledSkills.has(s.name) ? '• Enabled' : '· Disabled';
+			const glyph = isSkillEnabled(s.name) ? '• Enabled' : '· Disabled';
 			lines.push(`  ${glyph}: ${s.name}`);
 		}
 
@@ -290,7 +323,7 @@ export default function skillsExtension(pi: ExtensionAPI) {
 			await ctx.ui.custom((tui, theme, _kb, done) => {
 				const items: SettingItem[] = skills.map((skill) => ({
 					id: skill.name,
-					label: `${enabledSkills.has(skill.name) ? '• ' : '  '}${skill.name}`,
+					label: `${isSkillEnabled(skill.name) ? '• ' : '  '}${skill.name}`,
 					description: skill.description,
 					currentValue: '',
 					values: [''],
@@ -414,7 +447,7 @@ export default function skillsExtension(pi: ExtensionAPI) {
 		const skillName = m[1];
 
 		const known = allSkills.some((s) => s.name === skillName);
-		if (known && !enabledSkills.has(skillName)) {
+		if (known && !isSkillEnabled(skillName)) {
 			ctx.ui.notify(`Skill "${skillName}" is disabled per /skills settings.`, 'warning');
 			return { action: 'handled' };
 		}
@@ -434,9 +467,11 @@ export default function skillsExtension(pi: ExtensionAPI) {
 			initialize(ctx);
 		}
 
-		if (enabledSkills.size === allSkills.length) return;
+		// 有效可见集 = 基础层 ∩ preset overlay（ADR-0049 R1/R3）；overlay 存在时
+		// preset 是唯一策略源，必须真正作用于 system prompt，而非只影响偏离检测。
+		const visibleSkills = systemSkills.filter((s) => isSkillEnabled(s.name));
+		if (visibleSkills.length === systemSkills.length) return;
 
-		const visibleSkills = systemSkills.filter((s) => enabledSkills.has(s.name));
 		const fullXml = formatSkillsForPrompt(systemSkills);
 		const filteredXml = formatSkillsForPrompt(visibleSkills);
 
@@ -456,6 +491,12 @@ export default function skillsExtension(pi: ExtensionAPI) {
 					newPrompt = event.systemPrompt.replace(
 						/<available_skills>[\s\S]*?<\/available_skills>/,
 						filteredBlock[0],
+					);
+				} else if (visibleSkills.length === 0) {
+					// 全部禁止（skills: []）：filteredXml 为空，整块移除
+					newPrompt = event.systemPrompt.replace(
+						/\n*<available_skills>[\s\S]*?<\/available_skills>/,
+						'',
 					);
 				}
 			}
@@ -485,26 +526,35 @@ export default function skillsExtension(pi: ExtensionAPI) {
 	// 供 preset.ts 等扩展通过 `(globalThis as any).__skillsApi` 调用，控制技能启用集。
 	// 与 tools.ts 的 __toolsApi 对齐：挂 globalThis 而非 pi 对象（避免 Proxy/freeze）。
 	(globalThis as any).__skillsApi = {
-		/**
-		 * 完全替换技能启用集。
-		 * - 非空数组：白名单（只启用列出的）
-		 * - []：全部禁止
-		 * - null/undefined：不限制（全部启用）
-		 */
+		/** 设置 preset 叠加层（ADR-0049）：非空白名单；[] 全部禁止。不写基础层。 */
+		setOverlay(skillNames: string[]) {
+			setOverlay(skillNames);
+		},
+		/** 撤回 preset 叠加层（清除预设）。基础层原样保留。 */
+		clearOverlay() {
+			clearOverlay();
+		},
+		/** 兼容旧 API：完全替换基础层启用集。新代码请用 setOverlay/clearOverlay。 */
 		replaceSkills(skillNames: string[] | null | undefined) {
-			pendingSkillsApply = skillNames;
-			if (allSkills.length > 0) {
-				applySkills(skillNames);
-				pendingSkillsApply = undefined;
+			if (skillNames == null) {
+				enabledSkills = new Set(allSkills.map((s) => s.name));
+			} else {
+				enabledSkills = new Set(
+					skillNames.filter((n) => allSkills.some((s) => s.name === n)),
+				);
 			}
+			pi.appendEntry<SkillsState>('skills-config', {
+				enabledSkills: Array.from(enabledSkills),
+			});
+			refreshDrift();
 		},
 		/** 当前已加载的技能名列表（allSkills 未加载时为空数组）。 */
 		getSkillNames(): string[] {
 			return allSkills.map((s) => s.name);
 		},
-		/** 当前启用的技能名列表（preset 偏离检测用）。 */
+		/** 当前有效技能名列表（preset 偏离检测用）。 */
 		getEnabledSkills(): string[] {
-			return Array.from(enabledSkills);
+			return Array.from(effectiveSkills());
 		},
 	};
 }
