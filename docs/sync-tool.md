@@ -233,6 +233,9 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 - **受管资产**：目标中名字能在本仓库源清单（`extensions/`、`skills/`、`themes/`、`prompts/`）按名匹配到的资产。
 - **有效集合** = include（`*` 或显式清单）减去 exclude。
 - **第三方资产**（名字不在源清单，如 herdr 安装的集成）默认**永不删除**，仅 `--purge` 清。
+- **墓碑清单**（`retired`，`sync-profiles.yaml` 顶层字段）：本仓库曾管理、现已下架/内嵌的扩展名。
+  它们并入源清单，目标残留被当作受管资产删除——否则被误判为第三方永久保留，与内嵌后重新注册的
+  同名扩展重名（`tools:1` / `tools:2`）。见 ADR-0037 修订 1。
 - **保护名单**（`PROTECTED_EXTERNAL`）中的第三方集成，`--purge` 也跳过。
 - **形态冲突残留**：目标里名字在源清单、但形态与源不一致的残留（源是目录扩展、目标残留同名单文件
   `.ts`，或反向）也会被删除，且**所有模式**（profile / inline，含无 `--purge`）都修正——这属于形态
@@ -287,11 +290,13 @@ npx tsx scripts/sync-to-local-pi.ts --profile user-install --purge
 
 ## 配置重置（pi-config profile）
 
-被**删除**或**更新**、且目标下存在 `extensions-data/<plugin>/config.json`
-（即该插件保存过 pi-config profile）的插件，sync 结束后会弹出一个聚合多选列表：
+被**删除**、且目标下存在 `extensions-data/<plugin>/config.json`
+（即该插件保存过 pi-config profile）的插件，sync 结束后会弹出一个聚合多选列表
+（「被更新」的插件不再进列表——更新不重置用户配置，见 ADR-0037 修订 2）：
 
 - `↑/↓` 移动、`空格` 勾选、`a` 全选/全不选、`回车` 确认、`Ctrl+C` 中止（=全保留）
-- 勾选 = 重置：删除 `config.json`，插件下次启动回落内嵌默认 profile
+- 勾选 = 重置：先备份 `config.json` 到 `config.json.bak-<YYYYMMDD-HHMMSS>`，再删除，
+  插件下次启动回落内嵌默认 profile（同目录仅保留最新 3 份备份，更早的自动清理）
 - 未勾选 = 保留现有配置
 
 非交互环境（CI / husky / e2e / 管道）自动降级为**全保留**并打印 `WARN`；

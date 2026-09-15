@@ -210,4 +210,18 @@ profiles:
 
             skills: []
             prompts: []
+
+# ── 墓碑清单（ADR-0037 修订） ──────────────────────────────────
+# 本仓库曾管理、现已下架/内嵌进其它扩展（名字从源清单消失）的扩展名。
+# 目标目录里残留的同名旧副本会被当作「受管资产」纳入严格剪枝删除，
+# 否则被误判为「第三方资产」永久保留 → 与内嵌后重新注册的同名扩展
+# 重复，导致 `tools:1` / `tools:2` 重名。
+retired:
+    - tools # 内嵌进 preset（preset/tools.ts 注册 /tools）
+    - skills # 内嵌进 preset（preset/skills.ts 注册 /skills）
+    - commands # 内嵌进 preset（preset/commands.ts 注册 /commands）
+    - prompt-editor # 内嵌进 preset（preset/prompt-editor.ts 注册 /prompt）
+    - mode-switcher # ADR-0031：preset 吸收，/mode 已并入 /preset
+    - test-analysis # 并入 review（目录插件）
+    - session-breakdown # 并入 session-analytics
 # pi-lens-ignore: YAML:0

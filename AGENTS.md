@@ -960,8 +960,8 @@ npx tsx scripts/sync-to-local-pi.ts --dry-run
 > npx tsx scripts/sync-to-local-pi.ts --ext permission-gate --target ~/.pi/agent     # inline 单插件
 > ```
 >
+> - **删除语义（ADR-0037）**：profile 模式默认「严格剪枝」——删除目标中「受管但不在当前 profile 有效集合」的资产（含 `retired` 墓碑清单登记的已下架/内嵌扩展）；第三方资产默认保留，仅 `--purge` 才清。inline 模式（给了 `--target`）**默认不删**目标中任何文件。
 > - **单插件白名单**（`--profile X --ext Y`）是**排他过滤**：只同步点名的资产，其他资源类型本次不参与，且**禁用 stale 剪枝**（绝不删除未点名的资产）；点名项不在该 profile 清单内时快速失败。
-> - inline 模式（给了 `--target`）**默认不删**目标中任何文件。
 > - ⚠️ 唯一仍硬阻断的是 **`--purge` 指向 `~/.pi` / `~/.pi/agent`**：`--purge` 递归删除目标中不属于本次同步的一切，指向真实用户目录等于全毁（代码级护栏保留）。
 > - 每次运行都会在控制台与日志输出 `WARN`，说明本次是否发生删除。
 > - **坑**：其他 worktree 跑一次 sync 会把用户级覆盖成本 worktree 的版本；本 worktree 未提交的改动只有在**本 worktree 跑 sync** 后才生效（曾出现“新特性在用户级看不到”）。

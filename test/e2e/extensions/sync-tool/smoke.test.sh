@@ -265,17 +265,18 @@ YAML
   rm -rf "$tmp_root"
 TEST
 
-# ── 用例 22：非 TTY 配置重置降级为全保留（ADR-0037） ──
-test_it "non-TTY config reset falls back to keep-all" <<'TEST'
+# ── 用例 22：非 TTY 配置重置降级为全保留（ADR-0037 修订：仅删除资产进候选） ──
+test_it "non-TTY config reset falls back to keep-all (deleted asset)" <<'TEST'
   tmp_root=$(mktemp -d)
   target="$tmp_root/target"
   cfg="$tmp_root/sync-profiles.yaml"
   mkdir -p "$target/extensions"
-  # 预置不同内容的 quit.ts 使 sync 判定为 UPDATE
-  echo 'old' > "$target/extensions/quit.ts"
-  # 预置 quit 的 pi-config profile
-  mkdir -p "$target/extensions-data/quit"
-  echo '{"k":"v"}' > "$target/extensions-data/quit/config.json"
+  # 预置受管资产 edit（在源清单但不在 profile 清单 → 默认剪枝删除 → 进 reset 候选）
+  mkdir -p "$target/extensions/edit"
+  echo 'managed' > "$target/extensions/edit/index.ts"
+  # 预置 edit 的 pi-config profile
+  mkdir -p "$target/extensions-data/edit"
+  echo '{"k":"v"}' > "$target/extensions-data/edit/config.json"
 
   cat > "$cfg" <<YAML
 profiles:
@@ -289,9 +290,9 @@ YAML
 
   # stdin 从 /dev/null → 非 TTY → interactiveMultiSelect 降级为全保留
   output=$("$ROOT_DIR/node_modules/.bin/tsx" "$SYNC_SCRIPT" --config "$cfg" --profile reset-test < /dev/null 2>&1)
-  [[ -f "$target/extensions-data/quit/config.json" ]] || { echo "config.json deleted in non-TTY"; exit 1; }
+  [[ -f "$target/extensions-data/edit/config.json" ]] || { echo "config.json deleted in non-TTY"; exit 1; }
   [[ "$output" == *"Non-interactive environment"* ]] || { echo "Missing non-interactive WARN"; exit 1; }
-  echo "Verified: non-TTY kept config.json"
+  echo "Verified: non-TTY kept config.json of deleted asset"
   rm -rf "$tmp_root"
 TEST
 
@@ -331,4 +332,62 @@ test_it "inline mode also removes form-conflict residue" <<'TEST'
   [[ -f "$ROOT_DIR/.pi/test/extensions/review/index.ts" ]] || { echo "review/ dir not synced (inline)"; exit 1; }
   echo "Verified: inline form-conflict cleanup"
   clean_test_dir
+TEST
+
+# ── 用例 25：更新资产不触发配置重置（ADR-0037 修订 2） ──
+test_it "updated asset does NOT trigger config reset" <<'TEST'
+  tmp_root=$(mktemp -d)
+  target="$tmp_root/target"
+  cfg="$tmp_root/sync-profiles.yaml"
+  mkdir -p "$target/extensions"
+  # 预置旧版 quit.ts（内容不同 → sync 判定 UPDATE）
+  echo 'old' > "$target/extensions/quit.ts"
+  # 预置 quit 的 pi-config profile
+  mkdir -p "$target/extensions-data/quit"
+  echo '{"k":"v"}' > "$target/extensions-data/quit/config.json"
+
+  cat > "$cfg" <<YAML
+profiles:
+  update-test:
+    target: '$target'
+    extensions: ['quit']
+    skills: []
+    themes: []
+    prompts: []
+YAML
+
+  output=$("$ROOT_DIR/node_modules/.bin/tsx" "$SYNC_SCRIPT" --config "$cfg" --profile update-test < /dev/null 2>&1)
+  # 更新不弹「配置重置」提示，config.json 保留
+  [[ -f "$target/extensions-data/quit/config.json" ]] || { echo "config.json deleted on update"; exit 1; }
+  [[ "$output" == *"配置重置"* ]] && { echo "config reset prompt shown on update"; exit 1; }
+  echo "Verified: update did not trigger config reset"
+  rm -rf "$tmp_root"
+TEST
+
+# ── 用例 26：墓碑清单资产默认剪枝（ADR-0037 修订 1） ──
+test_it "retired tombstone asset is pruned by default" <<'TEST'
+  tmp_root=$(mktemp -d)
+  target="$tmp_root/target"
+  cfg="$tmp_root/sync-profiles.yaml"
+  mkdir -p "$target/extensions"
+  # 预置已下架/内嵌的孤儿 tools.ts（在 retired 清单里）
+  echo 'old' > "$target/extensions/tools.ts"
+
+  cat > "$cfg" <<YAML
+retired:
+  - tools
+profiles:
+  retired-test:
+    target: '$target'
+    extensions: ['quit']
+    skills: []
+    themes: []
+    prompts: []
+YAML
+
+  "$ROOT_DIR/node_modules/.bin/tsx" "$SYNC_SCRIPT" --config "$cfg" --profile retired-test 2>&1
+  [[ ! -e "$target/extensions/tools.ts" ]] || { echo "retired tools.ts survived default prune"; exit 1; }
+  [[ -f "$target/extensions/quit.ts" ]] || { echo "quit.ts not synced"; exit 1; }
+  echo "Verified: retired tombstone asset pruned by default"
+  rm -rf "$tmp_root"
 TEST

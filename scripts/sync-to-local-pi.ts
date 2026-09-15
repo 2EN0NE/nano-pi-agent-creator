@@ -99,6 +99,13 @@ interface ProfileConfig {
 
 interface SyncProfilesConfig {
 	profiles: Record<string, ProfileConfig>;
+	/**
+	 * 墓碑清单：本仓库曾管理、现已下架/内嵌（名字从源清单消失）的扩展名。
+	 * 目标目录残留的同名旧副本会被当作「受管资产」纳入严格剪枝删除，
+	 * 否则被误判为「第三方资产」永久保留 → 与内嵌后重新注册的同名扩展
+	 * 重复，导致 `tools:1` / `tools:2` 重名（ADR-0037 修订）。
+	 */
+	retired?: string[];
 }
 
 interface ResolvedResource {
@@ -253,9 +260,13 @@ Resource selection:
   -h, --help              Show this help
 
 NOTE:
-  By default this tool NEVER deletes anything — it only copies/updates synced
-  resources. Use --purge to explicitly remove target files that are not part
-  of the current sync (with a WARN confirmation).
+  Deletion by mode (ADR-0037):
+    - profile mode    default prune: deletes "managed" assets (names known to this
+                      repo, incl. "retired" tombstone residue in sync-profiles.yaml)
+                      that are absent from the profile's effective set; third-party
+                      assets are kept.
+    - inline mode     never deletes (incremental copy only).
+    - --purge         full mirror: also deletes third-party assets (WARN).
 
   Syncing to the real user dir (~/.pi/agent) is allowed in all three forms:
     * whole profile:  --profile user-install
@@ -264,6 +275,9 @@ NOTE:
   --purge is still hard-blocked against ~/.pi and ~/.pi/agent: it recursively
   deletes everything not in the current sync, which would destroy the real
   user dir.
+
+  Prefer --profile over --target when syncing to ~/.pi/agent, and use an
+  isolated dir like ./.pi/test for inline tests.
 
 Examples:
   npx tsx scripts/sync-to-local-pi.ts                     # all profiles (default)
@@ -337,8 +351,10 @@ function loadConfig(configPath: string): SyncProfilesConfig {
 			const parsed = yaml.load(raw) as SyncProfilesConfig;
 			if (parsed?.profiles) {
 				// Merge: project-local profiles override global ones with the same name
+				// 墓碑清单 union（project 追加到 global，不覆盖）
 				merged = {
 					profiles: { ...merged.profiles, ...parsed.profiles },
+					retired: [...(merged.retired ?? []), ...(parsed.retired ?? [])],
 				};
 			}
 		} catch (err) {
@@ -1189,6 +1205,7 @@ async function processProfile(
 	name: string,
 	profile: ProfileConfig,
 	opts: CLIOptions,
+	retiredExtensions: string[],
 ): Promise<ProfileSummary> {
 	writeLog('INFO', `Profile "${name}" started`);
 
@@ -1267,9 +1284,14 @@ async function processProfile(
 		sourceNames[r.type].add(r.name);
 	}
 
-	// 完整源清单（本仓库所有可用资产名）——用于区分「受管资产」与「第三方资产」（ADR-0037）
+	// 完整源清单（本仓库所有可用资产名）——用于区分「受管资产」与「第三方资产」（ADR-0037）。
+	// 并入墓碑清单（retired）：已下架/内嵌的扩展名仍视为受管，目标残留会被严格剪枝
+	// 删除，否则被误判为第三方永久保留 → 与内嵌后重新注册的同名扩展重名（tools:1/tools:2）。
 	const sourceInventory: Record<ResourceType, Set<string>> = {
-		extensions: new Set(resolveSourceItems('extensions', '*', [], PROJECT_ROOT)),
+		extensions: new Set([
+			...resolveSourceItems('extensions', '*', [], PROJECT_ROOT),
+			...retiredExtensions,
+		]),
 		skills: new Set(resolveSourceItems('skills', '*', [], PROJECT_ROOT)),
 		themes: new Set(resolveSourceItems('themes', '*', [], PROJECT_ROOT)),
 		prompts: new Set(resolveSourceItems('prompts', '*', [], PROJECT_ROOT)),
@@ -1965,7 +1987,7 @@ async function main(): Promise<void> {
 			writeLog('WARN', `--purge enabled for inline sync to ${opts.inlineTarget}`);
 		}
 
-		await processProfile('(inline)', inlineProfile, opts);
+		await processProfile('(inline)', inlineProfile, opts, []);
 		writeLog('INFO', `Inline sync completed (target: ${inlineProfile.target})`);
 		console.log(`  ✨ Inline sync done!`);
 		console.log(`     Log: ${LOG_FILE}`);
@@ -1995,21 +2017,17 @@ async function main(): Promise<void> {
 
 	const summaries: ProfileSummary[] = [];
 	for (const { name, profile } of profiles) {
-		const s = await processProfile(name, profile, opts);
+		const s = await processProfile(name, profile, opts, config.retired ?? []);
 		summaries.push(s);
 	}
 
-	// ── 配置重置交互（ADR-0037） ──────────────────────────────
-	// 收集「被删除 / 被更新、且目标下已保存过 pi-config profile」的插件。
+	// ── 配置重置交互（ADR-0037 修订） ──────────────────────────
+	// 仅收集「被删除、且目标下已保存过 pi-config profile」的插件（更新不再提示重置）。
 	// dry-run 仅预览 [would reset]，不交互、不落盘；非 TTY 由 interactiveMultiSelect 自动降级为全保留。
 	const resetCandidates: ConfigResetCandidate[] = [];
 	for (const s of summaries) {
 		resetCandidates.push(
-			...collectConfigResetCandidates(
-				s.target,
-				s.staleRemovedItems.extensions,
-				s.updatedItems.extensions,
-			),
+			...collectConfigResetCandidates(s.target, s.staleRemovedItems.extensions),
 		);
 	}
 	if (resetCandidates.length > 0) {
@@ -2020,7 +2038,7 @@ async function main(): Promise<void> {
 		} else {
 			const items = resetCandidates.map((c) => `${c.plugin} [${c.reason}]`);
 			const selected = await interactiveMultiSelect(
-				'配置重置：以下插件已被删除/更新。勾选要重置为默认 profile 的项（未勾选 = 保留现有配置）',
+				'配置重置：以下插件已被删除。勾选要重置为默认 profile 的项（未勾选 = 保留现有配置；重置前自动备份）',
 				items,
 			);
 			const resetNames = resetConfigProfiles(resetCandidates, selected, writeLog);
