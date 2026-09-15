@@ -497,7 +497,7 @@ tui_cleanup() {
 #   - 中间状态可验证（如 "按 m 后标记是否出现"）
 #   - 退出码精确传递
 #
-# 用法：tui_expect_test <extension_list> <expect_commands> <timeout_seconds> [cols] [cwd] [preset_home_dir]
+# 用法：tui_expect_test <extension_list> <expect_commands> <timeout_seconds> [cols] [cwd] [preset_home_dir] [pi_args]
 #   extension_list    - 逗号分隔的依赖扩展列表
 #   expect_commands   - expect 交互命令（多行字符串）
 #   timeout_seconds   - 超时秒数（默认：15）
@@ -507,6 +507,8 @@ tui_cleanup() {
 #                       .pi/agent/extensions-data/<plugin>/config.json），
 #                       在沙箱 HOME 就绪后、pi 启动前复制到 $HOME/
 #                       （用于预置扩展配置，使面板交互可确定性落盘）
+#   pi_args           - 可选：追加到 `pi -a` 之后的参数（如 `--session /abs/x.jsonl`）
+#                       用于需要指定会话文件等场景；含空格请自行加引号
 #
 # expect_commands 中可以使用的上下文：
 #   - send "text\r"      发送文本（\r = Enter）
@@ -536,6 +538,7 @@ tui_expect_test() {
 	local cols="${4:-80}"
 	local cwd="${5:-}"
 	local preset_home_dir="${6:-}"
+	local pi_args="${7:-}"
 
 	local PI_CI_MODE=${CI:-false}
 	local slug="tui-exp-$$-$RANDOM"
@@ -587,7 +590,7 @@ tui_expect_test() {
 		set stty_init "cols $cols rows 24"
 
 		# 启动 pi
-		spawn pi -a
+		spawn pi -a $pi_args
 
 		# 等待 TUI 就绪（匹配状态栏中 (auto) 或 0.0%/0——连续出现，不会被 ANSI 打断）
 		# 注意：必须用单行 expect（多行 expect 对部分命令名如 sync 有补全时序干扰，命令不被提交）
