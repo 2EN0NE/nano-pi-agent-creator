@@ -45,6 +45,24 @@ import { readFileSync } from 'node:fs';
 
 const log = createLogger('review');
 
+/** 弱依赖桥：pi-rewind 未安装时返回 no-op，让 review 的树导航不触发 rewind 的文件回滚。 */
+function suppressRewindTreeRestore(ctx: {
+	sessionManager: { getSessionId(): string };
+}): () => void {
+	const bridge = (
+		globalThis as {
+			__piRewind?: {
+				suppressTreeRestore(sessionId: string): void;
+				clearSuppressTreeRestore(sessionId: string): void;
+			};
+		}
+	).__piRewind;
+	if (!bridge) return () => {};
+	const sessionId = ctx.sessionManager.getSessionId();
+	bridge.suppressTreeRestore(sessionId);
+	return () => bridge.clearSuppressTreeRestore(sessionId);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Profile 加载（资源文件随插件目录分发）
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1569,6 +1587,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			);
 
 			if (firstUserMessage) {
+				const clearSuppress = suppressRewindTreeRestore(ctx);
 				try {
 					const result = await ctx.navigateTree(firstUserMessage.id, {
 						summarize: false,
@@ -1585,6 +1604,8 @@ export default function reviewExtension(pi: ExtensionAPI) {
 						'error',
 					);
 					return false;
+				} finally {
+					clearSuppress();
 				}
 				ctx.ui.setEditorText('');
 			}
@@ -1993,6 +2014,10 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					);
 					loader.onAbort = () => done(null);
 
+					// 总结导航同样会触发 pi-rewind 的 session_before_tree/session_tree：
+					// 打开审查分支与返回原分支都不应触发 rewind 的文件回滚（与 ADR-0039
+					// 一致，不依赖 rewind 端对 summarize 事件的内部豁免）。
+					const clearSuppress = suppressRewindTreeRestore(ctx);
 					ctx.navigateTree(originId, {
 						summarize: true,
 						customInstructions: profile.prompts.get('summary')!,
@@ -2004,13 +2029,15 @@ export default function reviewExtension(pi: ExtensionAPI) {
 								cancelled: false,
 								error: err instanceof Error ? err.message : String(err),
 							}),
-						);
+						)
+						.finally(clearSuppress);
 
 					return loader;
 				},
 			);
 		}
 
+		const clearSuppress = suppressRewindTreeRestore(ctx);
 		try {
 			return await ctx.navigateTree(originId, {
 				summarize: true,
@@ -2022,6 +2049,8 @@ export default function reviewExtension(pi: ExtensionAPI) {
 				cancelled: false,
 				error: error instanceof Error ? error.message : String(error),
 			};
+		} finally {
+			clearSuppress();
 		}
 	}
 
@@ -2042,6 +2071,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		const notifySuccess = options.notifySuccess ?? true;
 
 		if (action === 'returnOnly') {
+			const clearSuppress = suppressRewindTreeRestore(ctx);
 			try {
 				const result = await ctx.navigateTree(originId, { summarize: false });
 				if (result.cancelled) {
@@ -2054,6 +2084,8 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					'error',
 				);
 				return 'error';
+			} finally {
+				clearSuppress();
 			}
 
 			clearReviewState(ctx);

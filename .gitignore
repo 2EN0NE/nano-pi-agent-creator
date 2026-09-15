@@ -30,6 +30,10 @@ wt/
 # 临时设计/规划产物
 .scratch/
 
+# 项目内临时目录（pi-rewind 快照与 git 均忽略；如需新建同类目录先在此登记）
+/tmp/
+/temp/
+
 # Spurious self-referencing symlinks from npm link in extension packages
 extensions/meta/pi-logger/pi-logger
 extensions/meta/pi-config/pi-config

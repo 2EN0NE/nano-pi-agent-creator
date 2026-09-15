@@ -125,6 +125,18 @@ bash test/scripts/run-e2e.sh --ext loop
 - 正例：用户在最后一次对话中指明“请帮我提交此次变更”，你从对话中识别到针对什么插件进行了哪些文件的改动，从git status中把相应改变的文件进行add，剔除了不相关的文件（其他之前staged的不相干的文件剔除，本次对话产生的一些临时性文件加入了.gitignore），然后按过去的commit规范以中文提交了（可使用项目中的commit技能）
 - 反例：用户在前一轮对话说过“帮我提交”，这一轮是要我修改错误，没有在话语中提到“帮我提交”，就默认为修改完的要提交，自动commit -a合并了。
 
+### 临时产物与 pi-rewind 可记录性（本项目）
+
+本仓库启用 project-profile 的 pi-rewind 扩展（`.pi/extensions/pi-rewind`），自动 checkpoint 覆盖的**只有会话 cwd（本项目根）内、未被排除的文件**；cwd 之外的改动（`/tmp`、`~`、其它 worktree 等）**不会被 checkpoint 记录，也无法 `/rewind` 回滚**（详见 ADR-0038「范围边界」）。
+
+因此，在本项目工作时遵循：
+
+1. **希望有记录 / 可回滚的产物，一律放在项目（cwd）内**。不要在 cwd 外（尤其系统 `/tmp`）留下「想找回」的中间产物——pi-rewind 管不到。
+2. 确需在项目内建临时目录时，用**已被 `.gitignore` 忽略的目录**（`tmp/`、`temp/`、`.scratch/` 等，见根 `.gitignore`）：真实 git 与 pi-rewind 的 untracked 快照都不会纳入，`git status` 保持干净、快照无噪声。
+3. 若临时物只是「跑完即弃」，放 cwd 外亦可（不在安全网承诺内）；但涉及要回滚验证/留痕的，回到规则 1。
+
+> 配套：根 `.gitignore` 含 `/tmp/` `/temp/`（项目内同名临时目录已被忽略）；如需新增同类目录，先在 `.gitignore` 登记再使用。
+
 ## 扩展开发
 
 Pi 扩展放在 [extensions](extensions) 目录中；修改时请在这里更新。若需要参考内部实现，可查看 `pi-mono`，但不要改动其源码。

@@ -306,7 +306,7 @@ Pi Coding Agent 的扩展在 [extensions](extensions) 目录中，按功能分�
 | ----------------------------------------------------------------- | ------------------------------------------------------------------ | ------ |
 | [`auto-stage-on-exit.ts`](extensions/auto/auto-stage-on-exit.ts)  | 退出时自动暂存变更文件                                             |        |
 | [`file-trigger.ts`](extensions/auto/file-trigger.ts)              | 文件触发器，外部系统可通过写入文件发消息                           |        |
-| [`git-checkpoint.ts`](extensions/auto/git-checkpoint.ts)          | 每轮对话创建 git stash checkpoint                                  |        |
+| [`pi-rewind/`](extensions/auto/pi-rewind/)                        | 自动 checkpoint + `/rewind`/`/checkpoint` 回滚与存储管理           |        |
 | [`git-merge-and-resolve`](extensions/auto/git-merge-and-resolve/) | 自动合并上游跟踪分支；`/git-merge-and-resolve` 控制面板            |        |
 | [`go-to-bed.ts`](extensions/auto/go-to-bed.ts)                    | 深夜安全保护，超过午夜后要求显式确认                               |        |
 | [`loop.ts`](extensions/auto/loop.ts)                              | 快速迭代编码的提示循环，支持可选自动继续                           |        |

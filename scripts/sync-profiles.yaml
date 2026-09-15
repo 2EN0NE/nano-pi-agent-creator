@@ -115,8 +115,8 @@ profiles:
     # 同步本项目特有的插件到 .pi/ 目录。
     # 排除已放 user-install 的全局插件（避免 flag/tool 重复注册），
     # 以及日常不用或本项目独有的插件。
-    # 剩余的是：项目特定/低成熟度/实验阶段的插件（edit、git-checkpoint、
-    #           loop、claude-rules、smart-context 等）与演示插件（DEMO:*）。
+    # 剩余的是：项目特定/低成熟度/实验阶段的插件（edit、loop、claude-rules、
+    # smart-context 等）与演示插件（DEMO:*）。
     #
     # 技能按分类同步：
     #   - development/ + tooling/ → project profile（开发流程 + 工具链）
