@@ -14,7 +14,7 @@
       "prompt": "",
       "autoContinue": true,
       "injectContinueText": false,
-      "autoContinueMessage": "continue"
+      "autoContinueMessage": "刚才因上下文压缩打断了工作，如果之前还有没有做完的内容请继续，如果都已经做完了总结下你的成果。注意我这里不是回答你最后的问题或请求，只是打断后的补充。"
     },
     "smart-compact": {
       "id": "smart-compact",
@@ -23,8 +23,7 @@
       "trigger": { "type": "context_percent", "threshold": 70 },
       "mechanism": { "type": "adapter", "adapterId": "smart_compact" },
       "prompt": "",
-      "autoContinue": false,
-      "autoContinueMessage": "continue"
+      "autoContinue": false
     }
   }
 }

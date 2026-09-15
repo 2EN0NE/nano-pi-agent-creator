@@ -15,7 +15,10 @@ import {
 	INVISIBLE_CONTINUE_CUSTOM_TYPE,
 	type ContinueDecision,
 } from '../../../extensions/context/custom-compaction/continue.js';
-import type { CompactionProfile } from '../../../extensions/context/custom-compaction/types.js';
+import {
+	DEFAULT_AUTO_CONTINUE_MESSAGE,
+	type CompactionProfile,
+} from '../../../extensions/context/custom-compaction/types.js';
 
 // ── Helper ──────────────────────────────────────────────────────
 
@@ -134,7 +137,7 @@ describe('resolveContinueDecision', () => {
 		).toEqual({ kind: 'message', text: '请继续完成剩余任务' } satisfies ContinueDecision);
 	});
 
-	it('falls back to "continue" when injectContinueText is true but message is empty', () => {
+	it('falls back to DEFAULT_AUTO_CONTINUE_MESSAGE when injectContinueText is true but message is empty', () => {
 		expect(
 			resolveContinueDecision(
 				makeProfile({
@@ -143,6 +146,9 @@ describe('resolveContinueDecision', () => {
 					autoContinueMessage: '',
 				}),
 			),
-		).toEqual({ kind: 'message', text: 'continue' } satisfies ContinueDecision);
+		).toEqual({
+			kind: 'message',
+			text: DEFAULT_AUTO_CONTINUE_MESSAGE,
+		} satisfies ContinueDecision);
 	});
 });
