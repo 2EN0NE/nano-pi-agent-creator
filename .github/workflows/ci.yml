@@ -210,9 +210,11 @@ jobs:
               run: |
                   case "${{ matrix.shard }}" in
                     4)
-                      # permission-gate 在 CI Linux 上崩溃（见 .pi/todos/TODO.md P0，
-                      # 本地 macOS 正常）。先跳过 CI 验证，等 Linux 复现修复后再恢复。
-                      echo "permission-gate e2e skipped in CI (crash on Linux)"
+                      # permission-gate 的 TUI expect 阶段在 CI Linux 崩溃
+                      # （TODO P0）；smoke 覆盖由独立 job 恢复（见下）。
+                      PG_SKIP="permission-gate TUI e2e skipped: Linux crash"
+                      echo "::warning::$PG_SKIP"
+                      echo "smoke covered by permission-gate-smoke job"
                       ;;
                     8)
                       EXT_LIST="files,go-to-bed,pi-rate-limiter,pi-session-tree,pi-shortcuts,questionnaire,sync-tool"
@@ -247,6 +249,35 @@ jobs:
                   else
                     echo "(no test results directory found)"
                   fi
+
+    # ── permission-gate smoke e2e（阻塞）──
+    # shard 4 因该模块的 TUI expect 在 Linux 崩溃而整模块跳过（TODO P0）。
+    # 这里用 `--smoke-only` 单跑它的 smoke.test.sh（print 模式，非崩溃路径），
+    # 把该模块的主要自动化断言恢复为**阻塞**门禁，避免整模块无人看管。
+    e2e-permission-gate-smoke:
+        name: E2E permission-gate (smoke)
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: npm
+            - name: Install project dependencies
+              run: npm ci
+            - name: Setup CI environment
+              run: bash scripts/setup-ci.sh
+            - name: Run permission-gate smoke e2e
+              run: |
+                  bash test/e2e/scripts/run-e2e.sh \
+                    --ext permission-gate --smoke-only
+            - name: Upload test results
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: e2e-permission-gate-smoke
+                  path: test/results/
 
     # ── Worktree E2E Tests (blocking) ──
     # 独立 job：worktree 扩展的测试作为 required status check 阻断合并

@@ -50,6 +50,7 @@ MODULE_RESULTS=() # "type|name|pass|fail|review|total"
 TARGET_EXT=""
 TARGET_SKILL=""
 TUI_ONLY=false
+SMOKE_ONLY=false
 TARGET_CASE=""
 SHARD_INDEX=""
 SHARD_TOTAL=""
@@ -62,6 +63,8 @@ Options:
   --ext <name>        Run tests for a specific extension (e.g., pi-logger)
   --skill <name>      Run tests for a specific skill (e.g., e2e-test)
   --tui               Run TUI tests (tui-expect.smoke.test.sh or .exp) for the target
+  --smoke-only        Run only smoke.test.sh (skip tui-expect / .exp). Use when the
+                      TUI phase is known-broken in an environment (see CI permission-gate).
   --case <substring>  Only run test_it cases whose name contains this substring
                        (case-insensitive). Requires --ext or --skill. Speeds up
                        iterating on a single case instead of the whole file.
@@ -111,6 +114,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--tui)
 		TUI_ONLY=true
+		shift
+		;;
+	--smoke-only)
+		SMOKE_ONLY=true
 		shift
 		;;
 	--case)
@@ -1023,13 +1030,13 @@ run_target() {
 			fi
 
 			local tf_tui="$TEST_DIR/$type_dir/$target_name/tui-expect.smoke.test.sh"
-			if [[ -f "$tf_tui" ]]; then
+			if [[ -f "$tf_tui" ]] && ! $SMOKE_ONLY; then
 				add_task "$type_dir" "$target_name" "$tf_tui"
 			fi
 
 			# .exp 交互测试
 			local tf_exp="$TEST_DIR/$type_dir/$target_name/tui-integration.test.exp"
-			if [[ -f "$tf_exp" ]]; then
+			if [[ -f "$tf_exp" ]] && ! $SMOKE_ONLY; then
 				add_task "$type_dir" "$target_name" "$tf_exp"
 			fi
 		fi
@@ -1046,7 +1053,7 @@ run_target() {
 
 		# In non-TUI mode, also run tui-expect.smoke.test.sh files if found
 		# (TUI tests supplement smoke tests)
-		if ! $TUI_ONLY; then
+		if ! $TUI_ONLY && ! $SMOKE_ONLY; then
 			for d in "$TEST_DIR/$type_dir"/*/; do
 				local bn
 				bn=$(basename "$d")
@@ -1064,6 +1071,7 @@ run_target() {
 			local bn
 			bn=$(basename "$d")
 			if ! _shard_match "$bn"; then continue; fi
+			if $SMOKE_ONLY; then continue; fi
 			local tf="$d/tui-integration.test.exp"
 			if [[ -f "$tf" ]]; then
 				add_task "$type_dir" "$bn" "$tf"
