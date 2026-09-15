@@ -84,6 +84,10 @@ test_it "expect: /permission-gate directly opens panel with 6 tabs (ADR-0030)" <
   tui_expect_test "pi-logger,permission-gate" '
     send "/permission-gate\r"
     sleep 2
+    # 落地页跟随 LAYER_TABS[0]（当前「设置」，见 two-tab-panel.ts:262），而二级 tab
+    # （命令/工具/目录）只在「会话/项目/用户」层级下渲染 → 先切一层再断言两级 tab。
+    send "\t"
+    sleep 1
   ' 20
 
   tui_assert_contains "[会话]" "一级 tab 会话 渲染"
@@ -348,16 +352,22 @@ JSON
     #
     # prompt 1：危险命令 → 阻断框
     send "clean the temp dir\r"
-    set timeout 45
-    expect { -re {DANGER} { } timeout { send_error "STUCK@prompt1: 45s 内未见阻断框（模型/prompt 层未响应）\n"; exit 3 } }
+    stage "prompt1-sent"
+    # 20s 上限（原 45s）：沙箱里「prompt → 阻断框」实测 0-45s 波动，45s 上限意味着
+    # 最坏情况白等 45s×2；收紧后超时仍带定位标记失败，不掩盖问题。
+    set timeout 20
+    expect { -re {DANGER} { } timeout { send_error "STUCK@prompt1: 20s 内未见阻断框（模型/prompt 层未响应）\n"; exit 3 } }
+    stage "prompt1-blocked"
     send "\r"
-    sleep 4
+    sleep 3
     # prompt 2：同形状命令 → 第二次人工批准（达阈值 → 触发提升建议）
     # 注：expect 会消耗已匹配文本，所以这里匹配到的是**新出现**的 DANGER，不会命中回滚缓冲
     send "clean it again\r"
-    expect { -re {DANGER} { } timeout { send_error "STUCK@prompt2: 45s 内未见第二个阻断框\n"; exit 3 } }
+    stage "prompt2-sent"
+    expect { -re {DANGER} { } timeout { send_error "STUCK@prompt2: 20s 内未见第二个阻断框\n"; exit 3 } }
+    stage "prompt2-blocked"
     send "\r"
-    sleep 4
+    sleep 3
     # 提升入口是**两级导航**（master-detail）：
     #   一级 = 选择器（提升建议 / 已提升条目）→ 选中候选
     #   二级 = 确认卡片（台阶 + 出处条件 + 证据）→ 采纳
@@ -365,6 +375,7 @@ JSON
     # 入口在面板「设置」里（ADR-0038：不再单独注册命令）：
     #   /permission-gate →（面板落在设置 tab）→ p 或 Enter 选中「提升建议」行
     send "/permission-gate\r"
+    stage "panel1-open"
     set timeout 25
     expect {
       -re {\[设置\]} { }
@@ -378,6 +389,7 @@ JSON
       -re {没有待处理} { send_error "SKIP@promote: 无待处理候选（提升触发未命中）\n"; exit 5 }
       timeout { send_error "STUCK@selector: 30s 内未见一级选择器\n"; exit 4 }
     }
+    stage "selector-visible"
     sleep 1
     send "\r"
     set timeout 25
@@ -385,29 +397,37 @@ JSON
       -re {Enter 采纳} { }
       timeout { send_error "STUCK@card: 25s 内未见二级确认卡片\n"; exit 6 }
     }
+    stage "card-visible"
     sleep 1
     send "\r"
-    sleep 4
+    sleep 3
+    stage "accepted"
     # 二次进入：列出 [已提升] 条目**并撤销**（票 09）
     # ⚠ 采纳后面板会被关掉：提升 UI（选择器/卡片）是另一个 custom 覆盖层，pi 同时只保留一个
     #   → 必须重新 /permission-gate 打开面板，再按 p。
     send "/permission-gate\r"
-    set timeout 25
-    expect { -re {\[设置\]} { } timeout { send_error "STUCK@panel2: 25s 内未重开面板设置 tab\n"; exit 4 } }
+    # ⚠ 这里**不能**用 `expect -re {\[设置\]}` 等面板重开：pi 是 diff 渲染，tab 行内容未变
+    #   → 不会重绘 → 永远匹配不到，白等到 timeout（实测 25s / 用例）。面板打开与否由
+    #   后续步骤自己的 STUCK 标记兜底，这里只给一个短的有界等待。
+    set timeout 4
+    expect { timeout { } }
+    stage "panel2-open"
     sleep 1
     send "p"
-    sleep 6
+    sleep 4
     # 采纳后 pending 已空 → 选择器首项即 [已提升]；选中它**立即执行撤销**（无二次确认）
     send "\r"
-    sleep 5
+    sleep 3
+    stage "revoked"
     # ⚠ **必须把覆盖层关干净再结束**：harness 收尾会固定 `send "/quit\r"` 然后
     # `expect { eof / timeout }`，而那个 expect 用的是 `timeout_seconds`（本参数）。
     # 若覆盖层还开着，/quit 会被它当输入吞掉 → pi 不退出 → 白等 timeout_seconds 秒。
     # 实测：第 3 参数 90→总耗时 132s、420→722s、180→~300s，差额就是这里的空等。
     send "\033"
-    sleep 1
+    sleep 0.6
     send "\033"
-    sleep 1
+    sleep 0.6
+    stage "overlays-closed"
   ' 90 80 "" "$preset"
   unset MOCK_LLM_DANGEROUS_COMMAND MOCK_LLM_DANGEROUS_REPEAT
 

@@ -589,18 +589,53 @@ tui_expect_test() {
 		# 设置终端宽度（对齐 tui_run_pi_test，case 依赖 cols 参数做宽度断言）
 		set stty_init "cols $cols rows 24"
 
+		# ── 阶段计时（过程日志）──────────────────────────────────────────────
+		# 每步输出一行 "tui-stage <name>: +Ns (cumulative Ns)" 到 expect stdout，
+		# 随 TUI 输出一并持久化到 cases/<NNN>-tui-output.log。超时 / 被 worker kill 时，
+		# 日志里最后一条 tui-stage 就是卡点所在阶段——据此区分「固定开销需优化」
+		# （沙箱/冷启动/收尾白等）与「用例挂起」（等待条件永不满足）。
+		set __stage_t0 [clock seconds]
+		set __stage_last \$__stage_t0
+		proc stage {name} {
+			global __stage_t0 __stage_last
+			set now [clock seconds]
+			puts "\[tui-stage\] \$name: +[expr {\$now - \$__stage_last}]s (cumulative [expr {\$now - \$__stage_t0}]s)"
+			set __stage_last \$now
+			flush stdout
+		}
+		stage "expect-start"
+
 		# 启动 pi
 		spawn pi -a $pi_args
 
-		# 等待 TUI 就绪（匹配状态栏中 (auto) 或 0.0%/0——连续出现，不会被 ANSI 打断）
-		# 注意：必须用单行 expect（多行 expect 对部分命令名如 sync 有补全时序干扰，命令不被提交）
-		expect { -re {\(auto\)|0\.0%/0} { } timeout { send_error "TIMEOUT: TUI did not become ready within ${timeout_seconds}s\n"; exit 124 } }
+		# TUI 就绪判定：读到「输出静默」为止（最多 20s）。
+		# 不依赖状态栏正则（历史实现白等到 timeout_seconds 才继续），也不用裸 sleep——
+		# 裸 sleep 会把启动输出留在 pty 缓冲里，随后用例发键时与输出交错，
+		# 实测导致首条命令的 Enter 丢失（如 /preset plan 与下一条 /tools 合并成 "plan/tools"）。
+		set __quiet 0
+		set __ready_deadline [expr {[clock seconds] + 20}]
+		while {!\$__quiet && [clock seconds] < \$__ready_deadline} {
+			set timeout 1
+			expect {
+				-re {.+} { exp_continue }
+				timeout { set __quiet 1 }
+			}
+		}
+		set timeout $timeout_seconds
+		# 崩溃保险：静默后若 pi 已退出（启动失败），立即判失败而非让后续断言莫名超时
+		expect -timeout 0 {
+			eof { send_error "FAIL: pi 在启动阶段退出（TUI 未起来）\n"; exit 126 }
+			default { }
+		}
+		stage "pi-ready-raw"
 
 		# 额外等待确保 TUI 完全渲染
 		sleep 1
 
 		# 条件等待（替代固定 sleep，对齐 ADR-0045 D4「多进程一律轮询到条件」）：
-		# 用法 $(wait_for {标记}) 等屏幕出现标记；超时即判失败（125 ≠ 124，不会被当成"预期未退出"）
+		# 用法 \$(wait_for {marker}) 等屏幕出现标记；超时即判失败（125 != 124，不会被当成"预期未退出"）
+		# （注：此处必须写成 \$(，未转义的 \$( 会被 bash 在生成脚本时当命令替换执行 →
+		#   日志里出现 "wait_for: command not found" 噪声，误导排查）
 		proc wait_for {pattern} {
 			expect {
 				-re \$pattern { }
@@ -609,19 +644,20 @@ tui_expect_test() {
 		}
 
 		# ── 用户提供的交互命令 ──
+
 		$expect_commands
 
-		# ── 收尾：如果 pi 仍然活着，发送 /quit ──
+		stage "commands-done"
+		# ── 收尾：两段式退出 ──
+		# ① 直接 /quit：无覆盖层时最快（pi 正常退出约 3s）。
+		# ② 若 8s 内没退（多半是覆盖层吞了 /quit）：关覆盖层后再试一次。
+		#    注意 ESC 与后续按键之间要留间隔——ESC 紧贴 "/" 会被转义序列吞掉，
+		#    导致 "/quit" 退化成普通文本 "quit" 提交（实测踩坑）。
 		send "/quit\r"
-		sleep 1
-
-		# 捕获退出码
+		set timeout 8
 		expect {
 			eof {
 				catch { wait result }
-				# wait 可能失败（如 PTY 关闭时进程状态已不可得），此时无 result 变量；
-				# eof 匹配本身说明 pi 已退出，默认退出码 0 而非崩溃（崩溃会让 ec_file
-				# 缺失 → bash 层误用 expect 退出码 → 假 FAIL）。
 				if {[info exists result]} {
 					set exit_code [lindex \$result 3]
 				} else {
@@ -630,8 +666,29 @@ tui_expect_test() {
 				exec echo "\$exit_code" > "$ec_file"
 			}
 			timeout {
-				exec echo "124" > "$ec_file"
-				exit 124
+				send "\033"
+				sleep 0.6
+				send "\033"
+				sleep 0.6
+				send "\033"
+				sleep 0.6
+				send "/quit\r"
+				set timeout 10
+				expect {
+					eof {
+						catch { wait result }
+						if {[info exists result]} {
+							set exit_code [lindex \$result 3]
+						} else {
+							set exit_code 0
+						}
+						exec echo "\$exit_code" > "$ec_file"
+					}
+					timeout {
+						exec echo "124" > "$ec_file"
+						exit 124
+					}
+				}
 			}
 		}
 	EXPECT

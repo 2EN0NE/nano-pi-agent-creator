@@ -69,6 +69,9 @@ Options:
                        (case-insensitive). Requires --ext or --skill. Speeds up
                        iterating on a single case instead of the whole file.
   --pool <N>          Parallel worker count (default: CPU×2, auto-detected)
+  --ext-budget <sec>  Per-plugin e2e time budget in seconds (default: 300, 0 = disable).
+                      超预算即判失败：要么用例挂起/等待异常（Bug），要么用例冗余需精简。
+                      也可用环境变量 E2E_EXT_BUDGET_SEC 设置。
   --shard <N/M>       Run only the N-th shard (0-based) of M total shards.
                        Deterministically partitions the full module set so CI
                        can split the long full e2e run into parallel jobs.
@@ -102,6 +105,12 @@ _AUTO_POOL_CPU_CAP=$((_AUTO_POOL_CPU * 4))
 
 POOL_SIZE=${E2E_POOL_SIZE:-$_AUTO_POOL}
 
+# ── 插件级耗时预算（秒）──
+# 单个插件（extensions/<name> / skills/<name>）的 e2e **总耗时**（该插件所有测试
+# 文件耗时之和）上限。超预算 = 测试失败：要么存在挂起/异常等待（Bug），要么用例
+# 冗余需精简（见 test/README.md「耗时预算」）。0 = 禁用。
+EXT_BUDGET_SEC=${E2E_EXT_BUDGET_SEC:-300}
+
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--ext)
@@ -126,6 +135,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--pool)
 		POOL_SIZE="$2"
+		shift 2
+		;;
+	--ext-budget)
+		EXT_BUDGET_SEC="$2"
 		shift 2
 		;;
 	--shard)
@@ -441,6 +454,100 @@ fi
 # 测试执行引擎
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── 插件耗时记录（供预算结算，见 settle_budget）──
+# 每个测试文件结束时 append 一行耗时；求和即为该插件 e2e 总耗时。
+# append 单行是原子操作 → 池化并行下多个 worker 写同一插件文件也安全。
+# 刻意不用关联数组（declare -A）——macOS 自带 bash 3.2 不支持，需兼容。
+record_module_duration() {
+	local module_type="$1" module_name="$2" secs="$3"
+	mkdir -p "$RUN_DIR/.budget"
+	echo "$secs" >>"$RUN_DIR/.budget/${module_type}__${module_name}.sec"
+}
+
+# 记录 worker 超时（被 kill 的插件必须留痕，否则聚合阶段会静默跳过 → 假绿）
+record_module_timeout() {
+	local module_type="$1" module_name="$2" secs="$3"
+	mkdir -p "$RUN_DIR/.budget-timeouts"
+	echo "$secs" >"$RUN_DIR/.budget-timeouts/${module_type}__${module_name}.timeout"
+}
+
+# 合并同一插件多个测试文件的用例行 → 模块级累积文件（按文件名去重后 append + 排序）。
+# 背景：一个插件常含多个测试文件（smoke.test.sh + tui-expect.smoke.test.sh + *.exp），
+# 若各文件都覆盖写 summary.md/json，模块报告只剩**最后一个文件**的用例——
+# 实测 org 跑了 31 个用例，模块 summary 只记 7 个（日志不健全，无法据此精简）。
+# 输出 TSV：file<TAB>num<TAB>name<TAB>status<TAB>duration<TAB>log
+merge_module_cases() {
+	local mtype="$1" mname="$2" mfile="$3"
+	shift 3
+	# 注意：目录必须与聚合器扫描的 `.results/*.tsv` 隔开，否则会被当成模块结果行误读
+	# （实测导致全局 summary total=0）。
+	local acc="$RUN_DIR/.cases/${mtype}__${mname}.cases.tsv"
+	mkdir -p "$RUN_DIR/.cases"
+	local fbase r n nm st lg dsec
+	fbase="$(basename "$mfile")"
+	if [[ -f "$acc" ]]; then
+		grep -v "^${fbase}	" "$acc" >"$acc.tmp" 2>/dev/null || true
+		mv "$acc.tmp" "$acc"
+	fi
+	for r in "$@"; do
+		IFS='|' read -r n nm st lg dsec <<<"$r"
+		printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$fbase" "$n" "$nm" "$st" "$dsec" "$lg" >>"$acc"
+	done
+	sort -t'	' -k1,1 -k2,2 "$acc"
+}
+
+# 递归终止进程及其全部后代（TERM/KILL）。
+# 不依赖 `kill -TERM -- -$pid`：非交互 bash 的后台任务不建新进程组 → `-$pid` 组不存在，
+# 只会杀掉 bash worker，而它派生的 expect/pi 变成孤儿继续持有 stdout/PTY，把整个 job 的
+# 墙钟拖到远超预算（实测 300s 预算 → 实际 362s）。故这里显式递归杀后代并等其退出。
+kill_tree() {
+	local pid="$1" sig="${2:-TERM}"
+	local kids k
+	kids=$(pgrep -P "$pid" 2>/dev/null || true)
+	for k in $kids; do
+		kill_tree "$k" "$sig"
+	done
+	kill -"$sig" "$pid" 2>/dev/null || true
+}
+
+# 等进程真正退出（避免孤儿继续持有 fd / 占用沙箱）
+wait_gone() {
+	local pid="$1" max_secs="$2" waited=0
+	while kill -0 "$pid" 2>/dev/null && ((waited < max_secs)); do
+		sleep 1
+		waited=$((waited + 1))
+	done
+}
+
+# 串行路径的超时保护。
+# 单目标（--ext/--skill）不走 run_pool，因此没有 worker 超时保护——挂起的用例会把整个
+# job 拖到 CI 的 40min / 本地无限等。这里复用同样的语义：超时 → kill 进程组 +
+# record_module_timeout 留痕（聚合阶段据此判 FAIL [TIMEOUT]，不会静默假绿）。
+# 用法：run_with_timeout <secs> <label> <module_type> <module_name> <cmd...>
+run_with_timeout() {
+	local timeout_secs="$1" label="$2" module_type="$3" module_name="$4"
+	shift 4
+	"$@" &
+	local wpid=$!
+	local waited=0
+	while kill -0 "$wpid" 2>/dev/null; do
+		if ((waited >= timeout_secs)); then
+			echo "  [TIMEOUT] ${label} 超过 ${timeout_secs}s，强制终止（挂起或用例冗余，需定位/精简）"
+			record_module_timeout "$module_type" "$module_name" "$timeout_secs"
+			kill_tree "$wpid" TERM
+			sleep 1
+			kill_tree "$wpid" KILL
+			wait_gone "$wpid" 10
+			wait "$wpid" 2>/dev/null || true
+			return 124
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	wait "$wpid" 2>/dev/null
+	return $?
+}
+
 # 执行 .exp 交互测试文件
 # .exp 文件是独立的 expect 脚本，每个文件 = 1 个测试用例
 run_exp_file() {
@@ -588,6 +695,8 @@ run_exp_file() {
 	fi
 
 	# ── 运行 expect 脚本 ──
+	local exp_start_sec
+	exp_start_sec=$(date +%s)
 	local output_file="$test_home/output.log"
 	local ec_file="$test_home/exitcode"
 
@@ -595,6 +704,7 @@ run_exp_file() {
 	HOME="$test_home/home" expect "$exp_file" >"$output_file" 2>&1
 	local pi_exit=$?
 	set -e
+	local exp_elapsed=$(($(date +%s) - exp_start_sec))
 
 	# 如果 expect 没有写入 exitcode（脚本本身未处理），用 expect 退出码
 	if [[ -f "$ec_file" ]]; then
@@ -624,30 +734,66 @@ run_exp_file() {
 		echo "========================================"
 	} >>"$case_log"
 
-	echo "  → $result"
+	echo "  → $result (${exp_elapsed}s)"
+	record_module_duration "$module_type" "$module_name" "$exp_elapsed"
 
 	# ── 模块 summary ──
-	local mpass=0 mfail=0 mreview=0
-	[[ "$result" == "PASS" ]] && mpass=1 || mfail=1
+	# 文件级计数先冻结（供全局聚合 tsv）；再从跨文件合并结果生成模块报告。
+	local fpass=0 ffail=0
+	[[ "$result" == "PASS" ]] && fpass=1 || ffail=1
+	local merged_rows
+	merged_rows=$(merge_module_cases "$module_type" "$module_name" "$exp_file" "001|$name|$result|cases/001-${name}.log|$exp_elapsed")
+	local count=0 mpass=0 mfail=0
+	while IFS=$'\t' read -r _mf _n nm st _dsec _lg; do
+		[[ -z "$nm" ]] && continue
+		count=$((count + 1))
+		[[ "$st" == "PASS" ]] && mpass=$((mpass + 1)) || mfail=$((mfail + 1))
+	done <<<"$merged_rows"
 
 	{
 		echo "# $module_type/$module_name"
 		echo ""
 		echo "Run: $TIMESTAMP"
-		echo "Cases: 1"
+		echo "Cases: $count"
 		echo ""
-		echo "| # | Case Name | Status | Evidence |"
-		echo "|---|-----------|--------|----------|"
-		echo "| 1 | $name | $result | [cases/001-${name}.log](cases/001-${name}.log) |"
+		echo "| # | Case Name | Status | Duration | Evidence |"
+		echo "|---|-----------|--------|----------|----------|"
+		while IFS=$'\t' read -r _mf n nm st lg dsec; do
+			[[ -z "$n" ]] && continue
+			echo "| $n | $nm | $st | ${dsec}s | [$lg](cases/${lg#*/cases/}) |"
+		done <<<"$merged_rows"
 		echo ""
 		echo "**Summary:** $mpass PASS, 0 NEEDS_REVIEW, $mfail FAIL"
 	} >"$MODULE_DIR/summary.md"
 
-	# ── 全局聚合 ──
-	TOTAL_CASES=$((TOTAL_CASES + 1))
-	TOTAL_PASS=$((TOTAL_PASS + mpass))
-	TOTAL_FAIL=$((TOTAL_FAIL + mfail))
-	MODULE_RESULTS+=("$module_type|$module_name|$mpass|$mfail|0|0|1")
+	# 模块级 summary.json（与 md 同源）：.exp 可能是模块内最后一个执行者，
+	# 若此处不写 json，模块 md 与 json 的用例集合会不一致。
+	{
+		echo "{"
+		echo "  \"module\": \"$module_type/$module_name\","
+		echo "  \"timestamp\": \"$TIMESTAMP\","
+		echo "  \"total\": $count,"
+		echo "  \"pass\": $mpass,"
+		echo "  \"fail\": $mfail,"
+		echo "  \"review\": 0,"
+		echo "  \"skip\": 0,"
+		echo "  \"cases\": ["
+		local first=true
+		while IFS=$'\t' read -r _mf n nm st dsec lg; do
+			[[ -z "$n" ]] && continue
+			$first || echo ","
+			first=false
+			echo -n "    { \"num\": $((10#$n)), \"name\": \"$nm\", \"status\": \"$st\", \"duration_seconds\": $dsec, \"log\": \"${lg#*/cases/}\" }"
+		done <<<"$merged_rows"
+		echo ""
+		echo "  ]"
+		echo "}"
+	} >"$MODULE_DIR/summary.json"
+
+	# 结果回传：与 run_test_file 一致走文件（串行路径在子 shell 中执行，内存变量不回传）
+	mkdir -p "$RUN_DIR/.results"
+	echo "$fpass|$ffail|0|0|1|$exp_elapsed|$(basename "$exp_file")" \
+		>>"$RUN_DIR/.results/${module_type}__${module_name}.tsv"
 
 	# 清理沙箱
 	rm -rf "$test_home" 2>/dev/null || true
@@ -742,6 +888,9 @@ run_test_file() {
 		rm -f "$review_marker"
 
 		local result="PASS"
+		# 用例级计时（预算超标时用来定位耗时大户）
+		local case_start_sec
+		case_start_sec=$(date +%s)
 		set +e
 		# 捕获用例体 stdout：既写 case_log（SKIP 判定与取证），也回显到控制台
 		local case_out
@@ -753,6 +902,7 @@ run_test_file() {
 		)
 		local exec_exit=$?
 		set -e
+		local case_elapsed=$(($(date +%s) - case_start_sec))
 		printf '%s\n' "$case_out" >>"$case_log"
 		[[ -n "$case_out" ]] && printf '%s\n' "$case_out"
 
@@ -804,8 +954,8 @@ run_test_file() {
 		} >>"$case_log"
 
 		local rel_path="${MODULE_DIR#$RUN_DIR/}"
-		module_results+=("$padded|$name|$result|$rel_path/cases/${padded}-${safe_name}.log")
-		echo "    → $result"
+		module_results+=("$padded|$name|$result|$rel_path/cases/${padded}-${safe_name}.log|$case_elapsed")
+		echo "    → $result (${case_elapsed}s)"
 	done
 
 	# 环境哨兵：本次 e2e 不得改动真实环境（隔离失效 → 本模块判 FAIL）
@@ -817,6 +967,26 @@ run_test_file() {
 		mfail=$((mfail + 1))
 	fi
 
+	# ── 跨测试文件用例合并 ──
+	# 先冻结「本文件口径」：全局聚合 tsv 必须用文件级计数，否则全局总数会重复累加。
+	local fcount=$count fpass=$mpass ffail=$mfail freview=$mreview fskip=$mskip
+	# 再合并模块内所有文件（含本文件）的用例，供模块 summary.md/json 使用。
+	local merged_rows
+	merged_rows=$(merge_module_cases "$module_type" "$module_name" "$test_file" "${module_results[@]}")
+	module_results=()
+	count=0 mpass=0 mfail=0 mreview=0 mskip=0
+	while IFS=$'\t' read -r _mf n nm st dsec lg; do
+		[[ -z "$n" ]] && continue
+		module_results+=("$n|$nm|$st|$lg|$dsec")
+		count=$((count + 1))
+		case "$st" in
+		PASS) mpass=$((mpass + 1)) ;;
+		FAIL) mfail=$((mfail + 1)) ;;
+		"[REVIEW]") mreview=$((mreview + 1)) ;;
+		SKIP) mskip=$((mskip + 1)) ;;
+		esac
+	done <<<"$merged_rows"
+
 	# ── 模块级 summary.md ──
 	{
 		echo "# $module_type/$module_name"
@@ -824,11 +994,11 @@ run_test_file() {
 		echo "Run: $TIMESTAMP"
 		echo "Cases: $count"
 		echo ""
-		echo "| # | Case Name | Status | Evidence |"
-		echo "|---|-----------|--------|----------|"
+		echo "| # | Case Name | Status | Duration | Evidence |"
+		echo "|---|-----------|--------|--------|----------|"
 		for r in "${module_results[@]}"; do
-			IFS='|' read -r n nm st lg <<<"$r"
-			echo "| $n | $nm | $st | [$lg](cases/${lg#*/cases/}) |"
+			IFS='|' read -r n nm st lg dsec <<<"$r"
+			echo "| $n | $nm | $st | ${dsec}s | [$lg](cases/${lg#*/cases/}) |"
 		done
 		echo ""
 		echo "**Summary:** $mpass PASS, $mreview NEEDS_REVIEW, $mfail FAIL, $mskip SKIP"
@@ -850,7 +1020,7 @@ run_test_file() {
 				echo "Review question: $reason"
 				echo ""
 				for r in "${module_results[@]}"; do
-					IFS='|' read -r n nm st lg <<<"$r"
+					IFS='|' read -r n nm st lg dsec <<<"$r"
 					[[ "$n" == "$idx" ]] && {
 						echo "Case: $nm"
 						echo "Log: [$lg](cases/${lg#*/cases/})"
@@ -881,27 +1051,27 @@ run_test_file() {
 		for r in "${module_results[@]}"; do
 			$first || echo ","
 			first=false
-			IFS='|' read -r n nm st lg <<<"$r"
+			IFS='|' read -r n nm st lg dsec <<<"$r"
 			# Strip leading zeros from padded case number for valid JSON
 			local json_num=$((10#$n))
-			echo -n "    { \"num\": $json_num, \"name\": \"$nm\", \"status\": \"$st\", \"log\": \"cases/${lg#*/cases/}\" }"
+			echo -n "    { \"num\": $json_num, \"name\": \"$nm\", \"status\": \"$st\", \"duration_seconds\": $dsec, \"log\": \"cases/${lg#*/cases/}\" }"
 		done
 		echo ""
 		echo "  ]"
 		echo "}"
 	} >"$MODULE_DIR/summary.json"
 
-	# 累加到全局
-	TOTAL_CASES=$((TOTAL_CASES + count))
-	TOTAL_PASS=$((TOTAL_PASS + mpass))
-	TOTAL_FAIL=$((TOTAL_FAIL + mfail))
-	TOTAL_REVIEW=$((TOTAL_REVIEW + mreview))
-	TOTAL_SKIP=$((TOTAL_SKIP + mskip))
-	MODULE_RESULTS+=("$module_type|$module_name|$mpass|$mfail|$mreview|$mskip|$count")
+	# 结果回传：写入 .results（append 一行/测试文件）。
+	# 串行路径经 run_with_timeout 在**子 shell** 中执行本函数，内存变量无法回传；
+	# 池化路径下同模块多文件由不同 worker 并行执行，也不能靠内存累加。统一走文件。
+	mkdir -p "$RUN_DIR/.results"
+	echo "$fpass|$ffail|$freview|$fskip|$fcount|${module_elapsed:-0}|$(basename "$test_file")" \
+		>>"$RUN_DIR/.results/${module_type}__${module_name}.tsv"
 
 	# ── 模块耗时 ──
 	local module_elapsed
 	module_elapsed=$(($(date +%s) - module_start_sec))
+	record_module_duration "$module_type" "$module_name" "$module_elapsed"
 	# 模块级 summary.json 注入 duration
 	# 使用简单的 jq 风格替换，不依赖外部工具修正 JSON 格式问题
 	# 如果 python3 可用则注入
@@ -975,17 +1145,20 @@ run_target() {
 	local type_dir="$1" # "extensions" 或 "skills"
 	local target_name="$2"
 
-	# 路由函数：根据文件扩展名选择执行器
+	# 路由函数：根据文件扩展名选择执行器。
+	# 串行路径同样套超时保护（run_with_timeout），与池化路径的 worker 超时语义一致。
 	_dispatch() {
 		local task_type="$1"
 		local task_name="$2"
 		local task_file="$3"
-		if [[ "$task_file" == *.exp ]]; then
-			run_exp_file "$task_file" "$task_type" "$task_name"
-		else
-			run_test_file "$task_file" "$task_type" "$task_name"
-		fi
+		local limit="${E2E_WORKER_TIMEOUT:-${EXT_BUDGET_SEC:-300}}"
+		((limit > 0)) || limit=900
 		FOUND_ANY=true
+		if [[ "$task_file" == *.exp ]]; then
+			run_with_timeout "$limit" "$task_name $(basename "$task_file")" "$task_type" "$task_name" run_exp_file "$task_file" "$task_type" "$task_name"
+		else
+			run_with_timeout "$limit" "$task_name $(basename "$task_file")" "$task_type" "$task_name" run_test_file "$task_file" "$task_type" "$task_name"
+		fi
 	}
 
 	if $USE_POOL; then
@@ -1146,7 +1319,14 @@ run_pool() {
 	# 等待所有 worker 完成，带 per-worker 超时保护：
 	# 单个测试挂起不再拖垮整个 job（CI 上 40min timeout 的根因），
 	# 超时 worker 被 kill 并留名，worker 日志保留挂起前的输出便于定位。
-	local worker_timeout="${E2E_WORKER_TIMEOUT:-900}"
+	# 默认与插件预算同值：卡死的用例必须在预算内被杀，否则预算形同虚设。
+	# 禁用预算（EXT_BUDGET_SEC=0）时退回 900s 兜底；CI 慢机可用 E2E_WORKER_TIMEOUT 覆盖。
+	local worker_timeout="${E2E_WORKER_TIMEOUT:-}"
+	if [[ -z "$worker_timeout" ]]; then
+		worker_timeout=$([[ "${EXT_BUDGET_SEC:-0}" -gt 0 ]] && echo "$EXT_BUDGET_SEC" || echo 900)
+	fi
+	: "${WORKER_TIMEOUT_SEC:=$worker_timeout}"
+	WORKER_TIMEOUT_SEC="$worker_timeout"
 	local remaining=${#worker_pids[@]}
 	while ((remaining > 0)); do
 		local now
@@ -1159,10 +1339,14 @@ run_pool() {
 				local elapsed=$((now - worker_times[$i]))
 				if ((elapsed > worker_timeout)); then
 					echo "  [TIMEOUT] worker pid=$wpid (${worker_names[$i]}) 超过 ${worker_timeout}s，强制终止"
-					# 先杀进程组（覆盖 pi/expect 子进程），失败则杀单进程
-					kill -TERM -- -"$wpid" 2>/dev/null || kill -TERM "$wpid" 2>/dev/null || true
-					sleep 2
-					kill -KILL -- -"$wpid" 2>/dev/null || kill -KILL "$wpid" 2>/dev/null || true
+					# 留痕：被 kill 的插件不能静默消失（聚合阶段只认 summary.json）
+					local _wn="${worker_names[$i]}"
+					record_module_timeout "${_wn%%/*}" "${_wn#*/}" "$worker_timeout"
+					# 递归杀 worker 及其全部后代（expect/pi），并等其退出
+					kill_tree "$wpid" TERM
+					sleep 1
+					kill_tree "$wpid" KILL
+					wait_gone "$wpid" 10
 					worker_pids[$i]=""
 					remaining=$((remaining - 1))
 				fi
@@ -1175,48 +1359,7 @@ run_pool() {
 		sleep 3
 	done
 
-	# ── 汇总结果：从每个模块的 summary.json 读取 ──
-	echo ""
-	echo "─── Aggregating results ───"
-	TOTAL_CASES=0
-	TOTAL_PASS=0
-	TOTAL_FAIL=0
-	TOTAL_REVIEW=0
-	TOTAL_SKIP=0
-	MODULE_RESULTS=()
-
-	local base_dir
-	for base_dir in "$RUN_DIR/extensions" "$RUN_DIR/skills"; do
-		[[ -d "$base_dir" ]] || continue
-		local module_name
-		for module_dir in "$base_dir"/*/; do
-			[[ -d "$module_dir" ]] || continue
-			module_name=$(basename "$module_dir")
-			local sf="$module_dir/summary.json"
-			[[ -f "$sf" ]] || continue
-
-			local json_data module_type
-			module_type=$(basename "$base_dir")
-			json_data=$(python3 -c "
-import json,sys
-with open('$sf') as f:
-    d=json.load(f)
-sys.stdout.write('{p}|{f}|{r}|{s}|{t}'.format(p=d.get('pass',0),f=d.get('fail',0),r=d.get('review',0),s=d.get('skip',0),t=d.get('total',0)))
-" 2>/dev/null) || continue
-
-			IFS='|' read -r mp mf mr ms mt <<<"$json_data"
-			: "${mp:=0}" "${mf:=0}" "${mr:=0}" "${ms:=0}" "${mt:=0}"
-			TOTAL_PASS=$((TOTAL_PASS + mp))
-			TOTAL_FAIL=$((TOTAL_FAIL + mf))
-			TOTAL_REVIEW=$((TOTAL_REVIEW + mr))
-			TOTAL_SKIP=$((TOTAL_SKIP + ms))
-			TOTAL_CASES=$((TOTAL_CASES + mt))
-			MODULE_RESULTS+=("$module_type|$module_name|$mp|$mf|$mr|$ms|$mt")
-			echo "  $module_type/$module_name: $mp pass, $mf fail, $mr review, $ms skip"
-		done
-	done
-
-	echo "  Total: $TOTAL_CASES cases ($TOTAL_PASS pass, $TOTAL_FAIL fail, $TOTAL_REVIEW review, $TOTAL_SKIP skip)"
+	# 结果汇总由主流程的 aggregate_results 统一完成（串行/池化同一路径）
 }
 
 if [[ -n "$TARGET_EXT" ]]; then
@@ -1257,8 +1400,123 @@ if $USE_POOL && [[ ${#TASK_QUEUE[@]} -gt 0 ]]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 全局汇总报告
+# 结果聚合（串行 / 池化 同一路径）
 # ══════════════════════════════════════════════════════════════════════════════
+# 每个测试文件把计数 append 到 .results/<type>__<name>.tsv（子 shell / 并行安全），
+# 这里在主 shell 汇总——避免"子 shell 丢变量"导致的假绿（total=0 / modules 空）。
+aggregate_results() {
+	TOTAL_CASES=0
+	TOTAL_PASS=0
+	TOTAL_FAIL=0
+	TOTAL_REVIEW=0
+	TOTAL_SKIP=0
+	MODULE_RESULTS=()
+
+	echo ""
+	echo "─── Aggregating results ───"
+
+	local rf
+	for rf in "$RUN_DIR/.results"/*.tsv; do
+		[[ -f "$rf" ]] || continue
+		local base module_type module_name
+		base=$(basename "$rf" .tsv)
+		module_type="${base%%__*}"
+		module_name="${base#*__}"
+
+		local mp=0 mf=0 mr=0 ms=0 mt=0 d
+		while IFS='|' read -r a b c e f _g; do
+			mp=$((mp + ${a:-0}))
+			mf=$((mf + ${b:-0}))
+			mr=$((mr + ${c:-0}))
+			ms=$((ms + ${e:-0}))
+			mt=$((mt + ${f:-0}))
+		done <"$rf"
+
+		TOTAL_PASS=$((TOTAL_PASS + mp))
+		TOTAL_FAIL=$((TOTAL_FAIL + mf))
+		TOTAL_REVIEW=$((TOTAL_REVIEW + mr))
+		TOTAL_SKIP=$((TOTAL_SKIP + ms))
+		TOTAL_CASES=$((TOTAL_CASES + mt))
+		MODULE_RESULTS+=("$module_type|$module_name|$mp|$mf|$mr|$ms|$mt")
+		echo "  $module_type/$module_name: $mp pass, $mf fail, $mr review, $ms skip"
+	done
+
+	echo "  Total: $TOTAL_CASES cases ($TOTAL_PASS pass, $TOTAL_FAIL fail, $TOTAL_REVIEW review, $TOTAL_SKIP skip)"
+}
+
+aggregate_results
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 耗时预算结算（插件级）
+# ══════════════════════════════════════════════════════════════════════════════
+# 插件 e2e 总耗时 = 该插件所有测试文件耗时之和（.budget/<type>__<name>.sec 的累计）。
+# 超预算（默认 300s）即判失败 —— 要么用例挂起/异常等待（Bug），要么用例冗余需精简。
+# 详见 test/README.md「耗时预算与超标处置」。
+BUDGET_FAIL=0
+BUDGET_LINES=()
+TIMEOUT_LINES=()
+
+settle_budget() {
+	echo ""
+	echo "─── Time budget (${EXT_BUDGET_SEC}s/plugin) ───"
+
+	# ① worker 被超时终止的插件：判失败（若无此留痕会因缺 summary.json 被静默跳过）
+	local tf
+	for tf in "$RUN_DIR/.budget-timeouts"/*.timeout; do
+		[[ -f "$tf" ]] || continue
+		local base secs tname ttype
+		base=$(basename "$tf" .timeout)
+		ttype="${base%%__*}"
+		tname="${base#*__}"
+		secs=$(cat "$tf" 2>/dev/null || echo "?")
+		TIMEOUT_LINES+=("$ttype|$tname|$secs")
+		BUDGET_FAIL=$((BUDGET_FAIL + 1))
+		echo "  FAIL [TIMEOUT] $ttype/$tname: worker 超过 ${secs}s 被强制终止（测试未完成）"
+	done
+
+	# ② 逐个插件比对预算
+	local sf
+	for sf in "$RUN_DIR/.budget"/*.sec; do
+		[[ -f "$sf" ]] || continue
+		local base ttype tname total exceeded=0
+		base=$(basename "$sf" .sec)
+		ttype="${base%%__*}"
+		tname="${base#*__}"
+		total=$(awk '{s+=$1} END {printf "%d", s+0}' "$sf")
+
+		if [[ "${EXT_BUDGET_SEC:-0}" -gt 0 ]] && ((total > EXT_BUDGET_SEC)); then
+			exceeded=1
+			BUDGET_FAIL=$((BUDGET_FAIL + 1))
+			echo "  FAIL [BUDGET] $ttype/$tname: ${total}s > ${EXT_BUDGET_SEC}s（挂起或用例冗余，需精简）"
+		else
+			echo "  OK   [BUDGET] $ttype/$tname: ${total}s"
+		fi
+		BUDGET_LINES+=("$ttype|$tname|$total|$exceeded")
+
+		# 注入模块 summary.json（duration_seconds 语义修正为「插件总耗时」）
+		local mj="$RUN_DIR/$ttype/$tname/summary.json"
+		if command -v python3 &>/dev/null && [[ -f "$mj" ]]; then
+			python3 -c "
+import json,sys
+p='$mj'
+try:
+    with open(p) as f: d=json.load(f)
+    d['duration_seconds']=$total
+    d['budget_seconds']=${EXT_BUDGET_SEC:-0}
+    d['budget_exceeded']=bool($exceeded)
+    with open(p,'w') as f: json.dump(d,f,indent=2)
+except Exception as e:
+    sys.stderr.write('  (warning: budget inject failed: %s)\n' % e)
+" 2>&1 || true
+		fi
+	done
+
+	if [[ $BUDGET_FAIL -gt 0 ]]; then
+		echo "  → $BUDGET_FAIL budget/timeout failure(s): 见 summary.md 的 Time Budget 节"
+	fi
+}
+
+settle_budget
 
 GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 
@@ -1293,6 +1551,35 @@ GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 	echo "**Grand Total:** $TOTAL_PASS PASS, $TOTAL_REVIEW NEEDS_REVIEW, $TOTAL_FAIL FAIL, $TOTAL_SKIP SKIP / $TOTAL_CASES cases"
 	echo ""
 
+	echo "## Time Budget"
+	echo ""
+	echo "Per-plugin e2e total time budget: ${EXT_BUDGET_SEC}s (0 = disabled)."
+	echo "预算超标即判失败：要么用例挂起/异常等待（Bug），要么用例冗余需精简。"
+	echo ""
+	if [[ ${#BUDGET_LINES[@]} -eq 0 && ${#TIMEOUT_LINES[@]} -eq 0 ]]; then
+		echo "(no module durations recorded)"
+		echo ""
+	else
+		echo "| Module | Total | Budget | Verdict |"
+		echo "|--------|-------|--------|---------|"
+		for bl in "${BUDGET_LINES[@]+"${BUDGET_LINES[@]}"}"; do
+			IFS='|' read -r bt bn btot bex <<<"$bl"
+			local_budget="${EXT_BUDGET_SEC}s"
+			[[ "$bex" == "1" ]] && verdict="**EXCEEDED**" || verdict="OK"
+			echo "| $bt/$bn | ${btot}s | $local_budget | $verdict |"
+		done
+		for tl in "${TIMEOUT_LINES[@]+"${TIMEOUT_LINES[@]}"}"; do
+			IFS='|' read -r tt tn tsec <<<"$tl"
+			echo "| $tt/$tn | >${tsec}s | ${EXT_BUDGET_SEC}s | **TIMEOUT (killed)** |"
+		done
+		echo ""
+		if [[ $BUDGET_FAIL -gt 0 ]]; then
+			echo "> $BUDGET_FAIL budget/timeout failure(s). 处置方式：定位挂起或用例冗余后精简，"
+			echo "> 目标是把该插件 e2e 总耗时压到 ${EXT_BUDGET_SEC}s 以内（见 test/README.md）。"
+			echo ""
+		fi
+	fi
+
 	if [[ $TOTAL_REVIEW -gt 0 ]]; then
 		echo "---"
 		echo ""
@@ -1326,6 +1613,8 @@ GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 	echo "  \"review\": $TOTAL_REVIEW,"
 	echo "  \"skip\": $TOTAL_SKIP,"
 	echo "  \"warning\": $([[ $TOTAL_REVIEW -gt 20 ]] && echo true || echo false),"
+	echo "  \"budget_seconds\": ${EXT_BUDGET_SEC:-0},"
+	echo "  \"budget_failures\": ${BUDGET_FAIL:-0},"
 	echo "  \"modules\": ["
 	first=true
 	for mr in "${MODULE_RESULTS[@]+"${MODULE_RESULTS[@]}"}"; do
@@ -1351,6 +1640,9 @@ if [[ $TOTAL_REVIEW -gt 20 ]]; then
 	echo "  ⚠️  WARNING: $TOTAL_REVIEW cases need manual review (threshold: 20)"
 elif [[ $TOTAL_REVIEW -gt 0 ]]; then
 	echo "  → $TOTAL_REVIEW case(s) need AI evaluation (under threshold: 20)"
+fi
+if [[ ${BUDGET_FAIL:-0} -gt 0 ]]; then
+	echo "  ❌ BUDGET/TIMEOUT: ${BUDGET_FAIL} plugin(s) exceeded ${EXT_BUDGET_SEC}s budget (or were killed)"
 fi
 echo "═══════════════════════════════════════════════"
 echo ""
@@ -1380,8 +1672,8 @@ done
 [[ $RESTORE_COUNT -gt 0 ]] && echo "  Restored $RESTORE_COUNT config backup(s)"
 echo ""
 
-# REVIEW 用例是 advisory（待 AI 衡量），只有 FAIL 才表示真的失败
-if [[ $TOTAL_FAIL -gt 0 ]]; then
+# REVIEW 用例是 advisory（待 AI 衡量）；FAIL 与预算/超时失败都阻塞
+if [[ $TOTAL_FAIL -gt 0 || ${BUDGET_FAIL:-0} -gt 0 ]]; then
 	exit 1
 else
 	exit 0
