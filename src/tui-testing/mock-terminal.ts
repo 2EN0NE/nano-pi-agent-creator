@@ -73,7 +73,7 @@ export class MockTerminal implements Terminal {
  * ```typescript
  * const term = new InteractiveMockTerminal(80, 24);
  * const tui = new TuiMainScreen(term);
- * tui.start();                 // 建立 terminal → handleInput 链路
+ * tui.start();                 // 建立 terminal → 输入入口链路
  * term.sendInput('\t');        // 模拟 Tab 键
  * term.sendInput('\x1b');      // 模拟 Escape
  * ```
@@ -83,8 +83,8 @@ export class InteractiveMockTerminal extends MockTerminal {
 
 	/**
 	 * 保存 TUI.start() 传入的 onInput 回调。
-	 * 这是截获 handleInput 的合法入口
-	 * （TUI 内部将 this.handleInput 通过此回调注册）。
+	 * 这是截获输入的合法入口
+	 * （TUI 内部将运行时输入入口 handleTerminalInput 通过此回调注册）。
 	 */
 	start(onInput: (data: string) => void, _onResize: () => void): void {
 		this._onInput = onInput;
@@ -93,9 +93,9 @@ export class InteractiveMockTerminal extends MockTerminal {
 	/**
 	 * 模拟终端发送原始终端序列。
 	 *
-	 * 链路：sendInput → onInput → TUI.handleInput → focusedComponent.handleInput → 状态改变
+	 * 链路：sendInput → onInput → TUI.handleTerminalInput → focusedComponent.handleInput → 状态改变
 	 *
-	 * 注：handleInput 内部会同步修改组件状态 + 调用异步的 requestRender()。
+	 * 注：输入入口会同步修改组件状态 + 调用异步的 requestRender()。
 	 * 由于组件状态是同步改变的，调用后无需等待即可通过 renderToSnapshot() 获取最新渲染。
 	 *
 	 * @throws 如果 TUI.start() 还未调用

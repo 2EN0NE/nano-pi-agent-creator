@@ -21,6 +21,7 @@ import {
 	resetAuditStore,
 	listAuditFiles,
 	readAuditFile,
+	classifyDeny,
 } from '../../../extensions/security/permission-gate/audit-log';
 import {
 	resetRulesStore,
@@ -128,7 +129,12 @@ describe('migrateApprovalsToAudit', () => {
 		const entries = readAuditFile(files[0]);
 		expect(entries).toHaveLength(2);
 		expect(entries[0].projectKey).toBe(key);
-		expect(entries.map((e) => e.decision).sort()).toEqual(['auto', 'deny']);
+		// 旧 action=blocked 的成因不可判定（可能是用户拒绝，也可能是无界面拦截），
+		// 迁移后标为 deny-legacy，刻意不计入「用户拒绝」（Ticket 01）
+		expect(entries.map((e) => e.decision).sort()).toEqual(['auto', 'deny-legacy']);
+		// 成因不可判定，且**不得**被当作「用户拒绝」（Ticket 01）
+		expect(entries.filter((e) => classifyDeny(e) === 'unknown')).toHaveLength(1);
+		expect(entries.filter((e) => classifyDeny(e) === 'user')).toHaveLength(0);
 
 		// pi-state counts：blocked 不计数，auto 的 rm 累加 cmd/tool/dir
 		const counts = getRuleCounts();

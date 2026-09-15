@@ -576,7 +576,8 @@ describe('MyPanel TUI', () => {
 		const panel = new MyPanel(/* ... */);
 		tui.addChild(panel);
 		tui.setFocus(panel);
-		// dispatchInput 通过 any 桥接直达 handleInput
+		// dispatchInput 通过 any 桥接直达运行时输入入口
+		// （pi-tui ≥0.85 为 handleTerminalInput，旧版回退 handleInput）
 		// 无需 tui.start()、无需特殊 Terminal 类
 
 		const before = renderToSnapshot(tui).map(stripAnsi);
@@ -743,14 +744,25 @@ pi.on('session_start', async (_event, ctx) => {
 
 从多个扩展的 e2e 测试中总结：
 
-| 陷阱                          | 原因                          | 修复                                                 |
-| ----------------------------- | ----------------------------- | ---------------------------------------------------- |
-| **日志检查用 stdout**         | pi-logger 写文件，非 stdout   | 检查 `.pi/logs/<name>_*.log`                         |
-| **`npx pi` vs `$(which pi)`** | `npx pi` 的参数集可能不同     | 测试脚本用 `$(which pi)`                             |
-| **print 模式下扩展不加载**    | `pi -p` 不触发全部 life cycle | 用 `pi -a --no-session`                              |
-| **测试数据残留**              | 会话文件持久化                | 每次测试前 `rm -rf ~/.pi/agent/sessions/--tmp-*--`   |
-| **无意义会话残留**            | 忘记加 `--no-session`         | 启动 pi 默认加 `--no-session`（见"Pi 启动参数约定"） |
-| **assert stdout 文本**        | TUI/ANSI escape 序列干扰      | grep 模式匹配而非全文比对                            |
+| 陷阱                                                                          | 原因                                                                                                                                                                                                                              | 修复                                                                                                                                            |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| **日志检查用 stdout**                                                         | pi-logger 写文件，非 stdout                                                                                                                                                                                                       | 检查 `.pi/logs/<name>_*.log`                                                                                                                    |
+| **`npx pi` vs `$(which pi)`**                                                 | `npx pi` 的参数集可能不同                                                                                                                                                                                                         | 测试脚本用 `$(which pi)`                                                                                                                        |
+| **print 模式下扩展不加载**                                                    | `pi -p` 不触发全部 life cycle                                                                                                                                                                                                     | 用 `pi -a --no-session`                                                                                                                         |
+| **测试数据残留**                                                              | 会话文件持久化                                                                                                                                                                                                                    | 每次测试前 `rm -rf ~/.pi/agent/sessions/--tmp-*--`                                                                                              |
+| **无意义会话残留**                                                            | 忘记加 `--no-session`                                                                                                                                                                                                             | 启动 pi 默认加 `--no-session`（见"Pi 启动参数约定"）                                                                                            |
+| **assert stdout 文本**                                                        | TUI/ANSI escape 序列干扰                                                                                                                                                                                                          | grep 模式匹配而非全文比对                                                                                                                       |
+| **TUI/集成 e2e 假失败**                                                       | 漏 `CI=true` → 不注入 mock-llm → `No API key found`，却表现为业务断言失败（本仓实测：6 个用例假红，加 `CI=true` 后 8 PASS/0 FAIL）                                                                                                | 跑 e2e 一律 `CI=true bash test/e2e/scripts/run-e2e.sh ...`；**失败先排除环境再查代码**                                                          |
+| **TUI 按键错位**（阻断框/选择器/卡片）                                        | 沙箱里「prompt → 阻断框出现」实测 ~~10-40s 波动（早先记的“30s~~7min”是把收尾白等误算进来了，见下一行），固定 `sleep` 会错位                                                                                                       | 用**重复 Enter 容错**（落在主输入框=空提交无副作用；落在阻断框=放行 / 选择器=选中 / 卡片=采纳），或 `expect -re` 等图案（别靠加长 budget 兜底） |
+| **单用例调试太慢**                                                            | 整模块跑一次 ~10 分钟                                                                                                                                                                                                             | `--case <子串>` 只跑名字匹配的用例（需配 `--ext`/`--skill`）；TUI 加 `--tui`                                                                    |
+| **TUI 用例莫名多等几分钟**（实测：第 3 参数 90→总 132s、420→722s、180→~300s） | 覆盖层（选择器/卡片）**没关就结束** → harness 收尾的 `send "/quit\r"` 被覆盖层当输入吞掉 → pi 不退出 → 收尾 `expect eof` 白等（`tui-functions.sh` 的 `set timeout $timeout_seconds`，该参数**同时**是就绪等待上限与收尾白等上限） | 结束前多按几次 `send "\033"` 把覆盖层关干净；第 3 参数别给大数（就绪实测 ~1s，90 足够）；**排查“卡几分钟”先看这条**                             |
+
+> **TUI 沙箱免改基建即可构造任意场景**（`tui_expect_test` 已支持）：
+>
+> - 第 6 参数 `preset_home_dir`：镜像 `$HOME` 结构的预置目录，pi 启动前拷入 → 可确定性预置 `$HOME/.pi/agent/extensions-data/<plugin>/config.json`（隔离 HOME 内落盘、不污染宿主）。
+> - `MOCK_LLM_DANGEROUS_COMMAND="rm -rf ..."` + `MOCK_LLM_DANGEROUS_REPEAT=N`：让 mock-llm 前 N 轮各发一条指定危险命令 → 触发任意次数的人工批准。
+> - 需要「一串不同命令」（如先 `mkdir` 后 `rm`）时，写专用 mock 扩展（参考 `test/e2e/extensions/permission-gate/helpers/mock-llm-promotion.ts`，按 `PG_E2E_COMMANDS` 用 `;;` 分隔生成命令序列）并 `cp` 到沙箱 `.pi/extensions/mock-llm/index.ts`。
+> - 断言优先落在**持久化产物**（config.json / state.json / audit jsonl / 日志），其次才是屏幕文本。
 
 ### 10. 累加式指标追踪器的 checkpoint 设计模式
 
@@ -928,10 +940,19 @@ npx tsx scripts/sync-to-local-pi.ts --ext foo --target ./.pi/test
 npx tsx scripts/sync-to-local-pi.ts --dry-run
 ```
 
-> ⚠️ **安全约束**：`--target` 内联模式**只允许指向隔离测试目录**（如 `./.pi/test`），
-> 禁止指向 `~/.pi/agent` 等真实用户目录——同步到用户目录一律使用 `--profile user-install`。
-> sync 工具**默认从不删除**目标中任何文件；如需显式清空目标中不属于本次同步的资源，
-> 必须加 `--purge` 参数（每次使用 `--target` 或 `--purge` 时控制台与日志都会输出 `WARN` 警告）。
+> **同步到用户目录（`~/.pi/agent`）的三种方式**（ADR-0037 语义）：
+>
+> ```bash
+> npx tsx scripts/sync-to-local-pi.ts --profile user-install                        # 整个 profile
+> npx tsx scripts/sync-to-local-pi.ts --profile user-install --ext permission-gate  # 只同步一个插件（推荐）
+> npx tsx scripts/sync-to-local-pi.ts --ext permission-gate --target ~/.pi/agent     # inline 单插件
+> ```
+>
+> - **单插件白名单**（`--profile X --ext Y`）是**排他过滤**：只同步点名的资产，其他资源类型本次不参与，且**禁用 stale 剪枝**（绝不删除未点名的资产）；点名项不在该 profile 清单内时快速失败。
+> - inline 模式（给了 `--target`）**默认不删**目标中任何文件。
+> - ⚠️ 唯一仍硬阻断的是 **`--purge` 指向 `~/.pi` / `~/.pi/agent`**：`--purge` 递归删除目标中不属于本次同步的一切，指向真实用户目录等于全毁（代码级护栏保留）。
+> - 每次运行都会在控制台与日志输出 `WARN`，说明本次是否发生删除。
+> - **坑**：其他 worktree 跑一次 sync 会把用户级覆盖成本 worktree 的版本；本 worktree 未提交的改动只有在**本 worktree 跑 sync** 后才生效（曾出现“新特性在用户级看不到”）。
 
 详细用法参考 [docs/sync-tool.md](docs/sync-tool.md)。
 

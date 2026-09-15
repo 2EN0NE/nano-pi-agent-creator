@@ -232,7 +232,7 @@ describe('deepMerge', () => {
 		const overrides = {
 			dynamicPolicyEnabled: true,
 			dynamicPolicy: {
-				scope: '/custom',
+				scope: [{ root: '/custom' }],
 				thresholds: {
 					sameCommand: 5,
 				},
@@ -240,7 +240,7 @@ describe('deepMerge', () => {
 		} as Partial<PermissionGateConfig>;
 		const merged = deepMerge(base, overrides);
 		expect(merged.dynamicPolicyEnabled).toBe(true);
-		expect(merged.dynamicPolicy.scope).toBe('/custom');
+		expect(merged.dynamicPolicy.scope).toEqual([{ root: '/custom' }]);
 		expect(merged.dynamicPolicy.thresholds.sameCommand).toBe(5);
 		expect(merged.dynamicPolicy.thresholds.sameTool).toBe(
 			base.dynamicPolicy.thresholds.sameTool,
@@ -310,7 +310,7 @@ describe('getDefaultConfig', () => {
 		expect(config.dynamicPolicy.thresholds.sameCommand).toBe(2);
 		expect(config.dynamicPolicy.thresholds.sameTool).toBe(3);
 		expect(config.dynamicPolicy.thresholds.sameFolder).toBe(4);
-		expect(config.dynamicPolicy.scope).toBe('.');
+		expect(config.dynamicPolicy.scope).toEqual([{ root: '.' }]);
 	});
 
 	it('has dangerous patterns that match expected commands', () => {

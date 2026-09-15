@@ -4,7 +4,7 @@
  * 验证：设置 tab 渲染、Tab 循环 6 个、开关切换、沉淀级别二级页、阈值调整。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -49,7 +49,13 @@ afterEach(() => {
 	process.env.HOME = origHome;
 });
 
-function setup() {
+function setup(
+	extra: {
+		pending?: number;
+		promoted?: number;
+		onOpenPromotion?: () => void;
+	} = {},
+) {
 	const config = getDefaultConfig();
 	let changed = 0;
 	const panel = new TwoTabPanel({
@@ -64,18 +70,36 @@ function setup() {
 		onConfigChanged: () => {
 			changed++;
 		},
+		onOpenPromotion: extra.onOpenPromotion,
+		getPromotionSummary: () => ({
+			pending: extra.pending ?? 0,
+			promoted: extra.promoted ?? 0,
+		}),
 	});
 	return { panel, config, getChanged: () => changed };
 }
 
 /** 切到指定 tab（Tab 循环） */
 function gotoLayer(panel: TwoTabPanel, target: string): void {
-	const order = ['session', 'project', 'user', 'history', 'analytics', 'settings'];
+	const order = ['settings', 'session', 'project', 'user', 'history', 'analytics'];
 	const idx = order.indexOf(target);
 	for (let i = 0; i < idx; i++) panel.handleInput(TAB);
 }
 
 describe('设置 tab 渲染', () => {
+	it('范围行显示生效 scope 的来源层（ADR-0059 面板展示）', () => {
+		const dir = join(tmpHome, '.pi', 'agent', 'extensions-data', 'permission-gate');
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, 'config.json'),
+			JSON.stringify({ dynamicPolicy: { scope: '/user-root' } }),
+		);
+		const { panel } = setup();
+		gotoLayer(panel, 'settings');
+		const out = panel.render(80).map(stripAnsi).join('\n');
+		expect(out).toContain('来自用户级');
+	});
+
 	it('Tab 循环 6 个一级 tab，含设置', () => {
 		const { panel } = setup();
 		gotoLayer(panel, 'settings');
@@ -233,5 +257,41 @@ describe('新增清单页（危险命令 / 权限命令 / 路径空间）', () =
 		const cred = panel.render(80).map(stripAnsi).join('\n');
 		expect(cred).toContain('[敏感凭证]');
 		expect(cred).toContain('~/.ssh');
+	});
+});
+
+describe('提升建议入口（ADR-0058：设置里的按钮，不再是独立命令）', () => {
+	it('设置列表渲染「提升建议」按钮行，含待处理/已提升条数', () => {
+		const { panel } = setup({ pending: 2, promoted: 1 });
+		gotoLayer(panel, 'settings');
+		const out = panel.render(100).map(stripAnsi).join('\n');
+		expect(out).toContain('提升建议');
+		expect(out).toContain('待处理 2 条 / 已提升 1 条');
+	});
+
+	it('按 p 打开提升建议（回调被调用一次）', () => {
+		let opened = 0;
+		const { panel } = setup({
+			onOpenPromotion: () => {
+				opened++;
+			},
+		});
+		gotoLayer(panel, 'settings');
+		panel.handleInput('p');
+		expect(opened).toBe(1);
+	});
+
+	it('光标移到「提升建议」行按 enter 同样打开', () => {
+		let opened = 0;
+		const { panel } = setup({
+			onOpenPromotion: () => {
+				opened++;
+			},
+		});
+		gotoLayer(panel, 'settings');
+		// 开关行 3 个（cursor 0-2）+ 配置列表 9 项（cursor 3-11），「提升建议」为最后一行
+		for (let i = 0; i < 11; i++) panel.handleInput(DOWN);
+		panel.handleInput(ENTER);
+		expect(opened).toBe(1);
 	});
 });

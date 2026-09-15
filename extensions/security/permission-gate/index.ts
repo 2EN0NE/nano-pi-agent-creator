@@ -25,12 +25,16 @@ import { dirname, resolve, sep } from 'node:path';
 import {
 	type PermissionGateConfig,
 	type DangerTier,
+	type TrustRoot,
+	formatScope,
+	formatScopeSource,
 	getDefaultConfig,
 	loadConfig,
 	makeCommandKey,
 	makeFolderKey,
 	makeToolKey,
 	saveConfig,
+	scopeProvenance,
 } from './config.js';
 import { assessTier, type TierHit } from './tiering.js';
 import { getRuleCounts, setRulesSessionId, cleanupRulesStore } from './approval-store.js';
@@ -42,7 +46,21 @@ import {
 } from './manual-strategies.js';
 import { warmBashParser } from './bash-parser.js';
 import { showConfirmTree, type ConfirmTreeLeaf } from './confirm-tree.js';
-import { appendAudit, newRequestId, cleanupAudit } from './audit-log.js';
+import {
+	appendAudit,
+	cleanupAudit,
+	listAuditFiles,
+	newRequestId,
+	readAuditFile,
+} from './audit-log.js';
+import {
+	extractMutationTargetArgs,
+	getProvenanceLedger,
+	resetProvenanceLedger,
+	type ProvenanceVerdict,
+} from './provenance.js';
+import { getPromotionTracker, isPromotableTier, resetPromotionTracker } from './promotion.js';
+import { handlePromotionCommand, notifyCandidate, promotionSummary } from './promotion-ui.js';
 import {
 	installPermissionGateApi,
 	registerPendingRequest,
@@ -137,29 +155,175 @@ export function extractTargetPaths(command: string): string[] {
 }
 
 /**
- * 检查命令和 cwd 是否在动态策略范围内。
+ * 提取**会改动文件系统的实参**中含未解析变量 / 命令替换的目标。
+ *
+ * 只约束 mutator 动词的实参与重定向目标（与 `provenance.judge` 一致）：
+ * `rm -rf "$T"` 的目标静态不可知，只能靠出处条件放行；而 `grep x "$f"` /
+ * `git commit -m "$(…)"` 这类无破坏性命令不该因为含变量而被整体判为范围外
+ * （否则动态频次放行对含变量命令全面失效）。
  */
-function isInScope(command: string, cwd: string, scope: string): boolean {
-	// 1. cwd 必须在 scope 内
-	if (!pathInScope(cwd, scope)) {
-		log.debug('isInScope: cwd %s not in scope %s', cwd, scope);
-		return false;
-	}
+function extractUnresolvedTargets(command: string): string[] {
+	return extractMutationTargetArgs(command).filter((t) => t.includes('$') || t.includes('`'));
+}
 
-	// 2. 提取目标路径，必须全部在 scope 内
-	const targetPaths = extractTargetPaths(command);
-	if (targetPaths.length === 0) {
-		// 没有目标路径，仅依赖 cwd 检查
-		return true;
+/**
+ * 记录一次决策到提升检测器（Ticket 05），并在**人工放行**后判定是否够格成为候选。
+ *
+ * 只在人工放行后判定：触发点必须是「用户在场、刚做完选择」那一刻。
+ *
+ * **危险等级门禁（ADR-0058）**：critical（提权/凭证/不可逆）既不计数也不产候选——
+ * 若把 critical 的放行也计入同一 key，它会把后续 warning 级同 key 的候选提前顶到阈值。
+ */
+function trackPromotion(
+	state: PermissionGateState | null,
+	ctx: ExtensionContext,
+	kind: 'manual' | 'auto',
+	sub: string,
+	tier: DangerTier | null,
+): void {
+	if (!state) return;
+	if (!isPromotableTier(tier)) {
+		log.debug(
+			'提升跳过：%s 为不可提升等级（%s）——提权/凭证/不可逆只保留在会话层',
+			extractToolName(sub),
+			tier ?? 'unknown',
+		);
+		return;
 	}
+	const cwd = ctx.cwd;
+	const tool = extractToolName(sub);
+	const dir = extractTargetDir(sub, cwd);
+	const tracker = getPromotionTracker();
+	tracker.noteDecision(kind, [makeCommandKey(sub), makeToolKey(tool), makeFolderKey(dir)]);
+	if (kind !== 'manual') return;
 
-	const allInScope = targetPaths.every((p) => {
-		const absPath = p.startsWith('~') ? resolve(p.replace('~', homedir())) : resolve(cwd, p);
-		return pathInScope(absPath, scope);
+	const candidate = tracker.detect({
+		tool,
+		command: sub,
+		dir,
+		tier,
+		thresholds: state.config.dynamicPolicy.thresholds,
 	});
+	if (!candidate) return;
+	const e = candidate.evidence;
+	log.info(
+		'提升候选：%s（%s；本会话人工 %d / 自动 %d；历史 %d 目录 / %d 会话 / 真拒绝 %d）',
+		candidate.dimension,
+		candidate.key,
+		e.sessionManual,
+		e.sessionAuto,
+		e.historyDirectories,
+		e.historySessions,
+		e.userDenials,
+	);
 
-	log.debug('isInScope: targets=%j, result=%s', targetPaths, allInScope);
-	return allInScope;
+	// Ticket 06：非阻塞提示（状态栏 + 一条通知）。不抢焦点、不阻塞 agent。
+	notifyCandidate(ctx, candidate);
+}
+
+/**
+ * 把一条**即将实际执行**的命令交给出处账本（ADR-0025 第四轴）。
+ *
+ * 只在放行分支（未命中规则 / 用户批准 / 自动放行）调用：被拦下的命令没有改变文件系统，
+ * 不能预先登记，否则会凭空产生「我创建过」的假象。
+ */
+function observeProvenance(ctx: ExtensionContext, command: string): void {
+	getProvenanceLedger().observe(command, ctx.cwd);
+}
+
+/** 信任范围匹配结果（ADR-0059：多根） */
+export interface ScopeMatch {
+	/** 是否有资格让计数生效 */
+	inScope: boolean;
+	/** 命中的根（inScope 时） */
+	root?: TrustRoot;
+	/** 未命中的原因（可观测） */
+	reason: string;
+}
+
+/**
+ * 检查命令与 cwd 是否落在信任范围内（ADR-0059：多根）。
+ *
+ * 语义：cwd 需被**某个**根覆盖；每个目标路径也需被**某个**根覆盖——
+ * 两者**各自独立**，不要求同一个根。这是「在项目内工作、删 /tmp 临时目录」
+ * 这条主路径能生效的前提（cwd 在项目根、目标在 /tmp）。
+ *
+ * 带 `requireSessionProvenance` 的根额外要求：命令的目标**由本会话创建过**
+ * （ADR-0025 第四轴）。这是范围扩大后**唯一的安全护栏**：判定是「任一维度毕业即放行」，
+ * 把临时目录纳入范围后，现成的工具级规则会立刻放行任意目标。
+ * 条件不可判定时不命中（失败即拒绝）。
+ *
+ * @param judgeProvenance 出处判定器（可选）；不提供时带条件的根一律视为不满足。
+ */
+export function matchScope(
+	command: string,
+	cwd: string,
+	roots: TrustRoot[],
+	judgeProvenance?: (command: string, cwd: string) => ProvenanceVerdict,
+): ScopeMatch {
+	if (roots.length === 0) return { inScope: false, reason: '信任范围为空（没有任何根）' };
+
+	const cwdRoot = roots.find((r) => pathInScope(cwd, r.root));
+	if (!cwdRoot) {
+		return { inScope: false, reason: `cwd ${cwd} 不在任何根内（roots=${formatScope(roots)}）` };
+	}
+
+	// 出处条件惰性求值：同一命令的多个目标共享一次判定
+	let conditionVerdict: ProvenanceVerdict | null = null;
+	const conditionSatisfied = (): boolean => {
+		if (conditionVerdict === null) {
+			conditionVerdict = judgeProvenance ? judgeProvenance(command, cwd) : 'unknown';
+			log.debug('范围出处条件判定：%s（%s）', conditionVerdict, command.slice(0, 80));
+		}
+		return conditionVerdict === 'yes';
+	};
+
+	const absTargets = extractTargetPaths(command).map((p) =>
+		p.startsWith('~') ? resolve(p.replace('~', homedir())) : resolve(cwd, p),
+	);
+	const unresolvedTargets = extractUnresolvedTargets(command);
+
+	// 既无可解析目标、也无可变目标 → 真的没目标，仅靠 cwd（历史语义），
+	// 且必须是**无条件**的根（带条件的根管的是目标）。
+	if (absTargets.length === 0 && unresolvedTargets.length === 0) {
+		const plainRoot = roots.find(
+			(r) => !r.requireSessionProvenance && pathInScope(cwd, r.root),
+		);
+		if (!plainRoot) {
+			return {
+				inScope: false,
+				reason: `命令无目标路径，且 cwd ${cwd} 只被带出处条件的根覆盖`,
+			};
+		}
+		return { inScope: true, root: plainRoot, reason: `命中根 ${plainRoot.root}` };
+	}
+
+	// 含变量的目标：字面路径不可信，只能由出处条件担保
+	if (unresolvedTargets.length > 0 && !conditionSatisfied()) {
+		return {
+			inScope: false,
+			reason: `目标 ${unresolvedTargets.join(', ')} 含未解析变量，只能靠出处条件放行，但条件不满足（出处判定=${conditionVerdict ?? 'unknown'}）`,
+		};
+	}
+
+	for (const t of absTargets) {
+		const covering = roots.filter((r) => pathInScope(t, r.root));
+		if (covering.length === 0) {
+			return {
+				inScope: false,
+				reason: `目标 ${t} 不被任何根覆盖（roots=${formatScope(roots)}）`,
+			};
+		}
+		// 有一条无条件根覆盖即可
+		if (covering.some((r) => !r.requireSessionProvenance)) continue;
+		if (conditionSatisfied()) continue;
+		return {
+			inScope: false,
+			reason: `目标 ${t} 仅被带出处条件的根覆盖，且条件不满足（出处判定=${conditionVerdict ?? 'unknown'}，roots=${formatScope(roots)}）`,
+		};
+	}
+
+	return { inScope: true, root: cwdRoot, reason: `命中根 ${cwdRoot.root}` };
 }
 
 /**
@@ -396,7 +560,10 @@ async function handleToolCall(
 			const subTool = extractToolName(sub);
 			const subDir = extractTargetDir(sub, ctx.cwd);
 
-			if (isInScope(sub, ctx.cwd, state.config.dynamicPolicy.scope)) {
+			const scopeMatch = matchScope(sub, ctx.cwd, state.config.dynamicPolicy.scope, (c, w) =>
+				getProvenanceLedger().judge(c, w),
+			);
+			if (scopeMatch.inScope) {
 				const thResult = checkThreshold(
 					sub,
 					subTool,
@@ -422,8 +589,8 @@ async function handleToolCall(
 				);
 			} else {
 				log.info(
-					'Dynamic policy: not in scope — falling through to confirm (scope=%s)',
-					state.config.dynamicPolicy.scope,
+					'Dynamic policy: not in scope — falling through to confirm (%s)',
+					scopeMatch.reason,
 				);
 			}
 		}
@@ -455,6 +622,7 @@ async function handleToolCall(
 			originalCommand: fullCommand,
 			subCommands,
 		});
+		observeProvenance(ctx, fullCommand);
 		return undefined;
 	}
 
@@ -481,7 +649,7 @@ async function handleToolCall(
 				tool: 'bash',
 				command: summarizeCommand(fullCommand),
 				tier: highestTier,
-				decision: 'deny',
+				decision: 'blocked-no-ui',
 				reasons: results.filter((r) => r.dangerous).flatMap((r) => r.reasons),
 				projectKey,
 				originalCommand: fullCommand,
@@ -557,6 +725,8 @@ async function handleToolCall(
 					},
 					r.tier,
 				);
+				trackPromotion(state, ctx, 'manual', r.cmd, r.tier);
+				observeProvenance(ctx, r.cmd);
 			}
 
 			event.input.command = `echo "[OK] User approved"\n${fullCommand}`;
@@ -585,6 +755,8 @@ async function handleToolCall(
 			command: summarizeCommand(fullCommand),
 			tier: highestTier,
 			decision: 'deny',
+			// 显式标记成因：读取端只认这个字段，否则旧行（无标记）会被误计为用户拒绝
+			denyCause: 'user',
 			reasons: results.filter((r) => r.dangerous).flatMap((r) => r.reasons),
 			projectKey,
 			originalCommand: fullCommand,
@@ -612,6 +784,8 @@ async function handleToolCall(
 			},
 			r.tier!,
 		);
+		trackPromotion(state, ctx, 'auto', r.cmd, r.tier);
+		observeProvenance(ctx, r.cmd);
 		if (r.dim && typeof r.dim === 'string') autoDims.add(r.dim);
 		else if (Array.isArray(r.dim)) r.dim.forEach((d) => autoDims.add(d));
 	}
@@ -650,7 +824,7 @@ async function handlePermissionGateCommand(
 			'权限门配置：',
 			`  已启用: ${state.config.enabled}`,
 			`  动态策略: ${state.config.dynamicPolicyEnabled}`,
-			`  范围: ${state.config.dynamicPolicy.scope}`,
+			`  范围: ${formatScope(state.config.dynamicPolicy.scope)}（来自${formatScopeSource(scopeProvenance(ctx.cwd, ctx.sessionManager?.getSessionId?.()))}）`,
 			`  模式 (${state.config.patterns.length}):`,
 			...state.config.patterns.map((p) => `    - ${p.pattern}  [${p.tier}]`),
 			`  阈值:`,
@@ -664,10 +838,19 @@ async function handlePermissionGateCommand(
 	}
 
 	// 直接打开分层策略面板（ADR-0030：主菜单取消，设置项并入面板的「设置」tab）
-	await showTwoTabPanel(ctx, state.config, () => {
-		saveConfig(ctx.cwd, state.config, 'project');
-		updateWidgetStatus(ctx, state);
-	});
+	// 提升建议入口挂在该面板的「设置」里（ADR-0058：不再单独注册命令）
+	await showTwoTabPanel(
+		ctx,
+		state.config,
+		() => {
+			saveConfig(ctx.cwd, state.config, 'project');
+			updateWidgetStatus(ctx, state);
+		},
+		{
+			onOpen: () => void handlePromotionCommand(ctx, ctx.cwd),
+			summary: () => promotionSummary(ctx.cwd),
+		},
+	);
 }
 
 /**
@@ -800,8 +983,9 @@ export default function permissionGateExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		// Load config from files
-		const config = loadConfig(ctx.cwd);
+		// Load config from files（会话级覆盖需要 sessionId，ADR-0059）
+		const sessionId = ctx.sessionManager?.getSessionId?.();
+		const config = loadConfig(ctx.cwd, undefined, sessionId);
 		log.info(
 			'Config loaded: enabled=%s, dynamicPolicy=%s',
 			config.enabled,
@@ -813,10 +997,19 @@ export default function permissionGateExtension(pi: ExtensionAPI) {
 		state = new PermissionGateState(config);
 
 		// 设置会话 ID（启用 critical 的会话级放行规则，ADR-0025；手动策略会话层，ADR-0030）
-		const sessionId = ctx.sessionManager?.getSessionId?.();
 		if (sessionId) {
 			setRulesSessionId(sessionId);
 			setManualStrategiesSessionId(sessionId);
+		}
+
+		// 出处账本（ADR-0025 第四轴）：按 sessionId 从审计日志重建，
+		// 不新增持久化文件，且 /reload 后仍然成立。
+		resetProvenanceLedger();
+		resetPromotionTracker();
+		if (sessionId) {
+			const auditEntries = listAuditFiles().flatMap((f) => readAuditFile(f));
+			getProvenanceLedger().rebuild(auditEntries, sessionId, ctx.cwd);
+			getPromotionTracker().seed(auditEntries, sessionId);
 		}
 
 		// 滚动清理过期审计分片（默认保留半年，ADR-0027）

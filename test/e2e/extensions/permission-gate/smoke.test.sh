@@ -237,7 +237,7 @@ test_it "dynamic policy blocks first dangerous command (not graduated)" <<'TEST'
 
   dump_perm_logs "$test_home"
 
-  # 验证：首次危险命令计数未达阈值 → block（no-UI，decision=deny）
+  # 验证：首次危险命令计数未达阈值 → block（no-UI，decision=blocked-no-ui）
   local audit_dir="$test_home/home/.pi/agent/extensions-data/permission-gate/audit"
   if [[ -d "$audit_dir" ]]; then
     python3 -c "
@@ -249,10 +249,10 @@ for f in files:
         if line.strip():
             entries.append(json.loads(line))
 assert len(entries) >= 1, f'expected >=1 audit entries, got {len(entries)}'
-e = [x for x in entries if x.get('decision') == 'deny'][0]
+e = [x for x in entries if x.get('decision') == 'blocked-no-ui'][0]
 for field in ('id','ts','tool','command','tier','decision','projectKey'):
     assert field in e, f'missing {field}'
-print('PASS: audit entry decision=deny (blocked, not graduated)')
+print('PASS: audit entry decision=blocked-no-ui (blocked, not graduated)')
 " 2>/dev/null || {
       echo "FAIL: expected deny (blocked) audit entry, not auto-approved"
       exit 1
@@ -266,8 +266,8 @@ print('PASS: audit entry decision=deny (blocked, not graduated)')
   exit 0
 TEST
 
-# ── 场景 5：blocked 记录持久化（decision='deny'） ──
-test_it "blocked commands write decision=deny to audit log" <<'TEST'
+# ── 场景 5：blocked 记录持久化（decision='blocked-no-ui'） ──
+test_it "blocked commands write decision=blocked-no-ui to audit log" <<'TEST'
   local slug="e2e-pg-dp5-$$"
   local test_home="$ROOT_DIR/.pi/tmp/$slug"
   mkdir -p "$test_home"
@@ -295,9 +295,9 @@ for f in files:
             entries.append(json.loads(line))
 assert len(entries) >= 1, f'expected >=1 entries, got {len(entries)}'
 
-# 检查所有条目都是 decision='deny'
+# 检查所有条目都是 decision='blocked-no-ui'
 for e in entries:
-    assert e['decision'] == 'deny', f'expected deny, got {e[\"decision\"]}'
+    assert e['decision'] == 'blocked-no-ui', f'expected deny, got {e[\"decision\"]}'
     assert 'ts' in e, 'missing ts'
     assert 'command' in e, 'missing command'
     assert 'tool' in e, 'missing tool'
@@ -345,7 +345,7 @@ for f in files:
     for line in open(f):
         if line.strip():
             entries.append(json.loads(line))
-deny = [e for e in entries if e.get('decision') == 'deny']
+deny = [e for e in entries if e.get('decision') == 'blocked-no-ui']
 print(f'Total audit entries: {len(entries)}, deny: {len(deny)}')
 
 # 3 次相同命令 → 3 条 deny 记录（audit append-only 跨 session 累积）
@@ -393,7 +393,7 @@ for f in files:
     for line in open(f):
         if line.strip():
             entries.append(json.loads(line))
-deny = [e for e in entries if e.get('decision') == 'deny']
+deny = [e for e in entries if e.get('decision') == 'blocked-no-ui']
 assert len(deny) == 2, f'expected 2 deny entries, got {len(deny)}'
 for e in deny:
     for field in ('ts','command','tool','decision','projectKey'):
@@ -514,7 +514,7 @@ for f in files:
             entries.append(json.loads(line))
 
 # 1. 验证有 1 条 deny 记录（echo done 不危险，rm -rf 未达 graduated 阈值 → 整条 deny）
-deny_entries = [e for e in entries if e.get('decision') == 'deny']
+deny_entries = [e for e in entries if e.get('decision') == 'blocked-no-ui']
 assert len(deny_entries) == 1, f'expected 1 deny entry, got {len(deny_entries)}'
 e = deny_entries[0]
 
@@ -536,6 +536,176 @@ print('PASS: all compound command checks passed')
     echo "FAIL: Python validation failed"
     exit 1
   }
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ══════════════════════════════════════════════════════════════════════
+# 提升 / 出处条件（Ticket 04 / ADR-0039 补充 + ADR-0040）
+#
+# 真实场景：**同一条命令形状**因「目标是否由本会话创建」而得到不同决策。
+# 判定链：cwd 与目标各自被某个根覆盖 → 阈值（tool:rm ≥ 3）→ 出处条件。
+# ══════════════════════════════════════════════════════════════════════
+
+# 提升场景沙箱：复用既有沙箱搭建，再换用按命令序列驱动的 mock-llm + 条件根配置。
+# $2 = scope JSON（调用方已展开绝对路径）
+setup_promotion_sandbox() {
+  local test_home="$1"
+  local scope_json="$2"
+  setup_sandbox "$test_home" auto_approve
+
+  cp "$ROOT_DIR/test/e2e/extensions/permission-gate/helpers/mock-llm-promotion.ts" \
+    "$test_home/.pi/extensions/mock-llm/index.ts"
+
+  cat >"$test_home/.pi/extensions-data/permission-gate/config.json" <<JSON
+{
+  "enabled": true,
+  "dynamicPolicyEnabled": true,
+  "dynamicPolicy": {
+    "scope": $scope_json,
+    "thresholds": { "sameCommand": 999, "sameTool": 3, "sameFolder": 999 }
+  },
+  "patterns": ["\\\\brm\\\\s+(-rf?|--recursive)"]
+}
+JSON
+
+  # 预置计数：no-UI 下不会有人工批准累加；等价于「真实用户早已批准过 rm 若干次」
+  cat >"$test_home/.pi/extensions-data/permission-gate/state.json" <<'JSON'
+{ "counts": { "tool:rm": 3 } }
+JSON
+}
+
+# ── 场景 A：条件根 + 目标由**本会话**创建 → 自动放行 ──
+test_it "范围出处条件：本会话创建的临时目录 → 自动放行" <<'TEST'
+  local slug="e2e-pg-prov-yes-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  local mine="/tmp/pg-e2e-$$-mine"
+  mkdir -p "$test_home"
+
+  setup_promotion_sandbox "$test_home" \
+    "[{\"root\":\"$test_home\"},{\"root\":\"/tmp\",\"requireSessionProvenance\":true}]"
+
+  # 真实施工序列：先创建（账本登记），再删除
+  PG_E2E_COMMANDS="mkdir -p $mine;;rm -rf $mine" \
+    run_pi "$test_home" "clean up my temp dir" || true
+
+  dump_perm_logs "$test_home"
+
+  local audit_dir="$test_home/home/.pi/agent/extensions-data/permission-gate/audit"
+  if [[ -d "$audit_dir" ]]; then
+    python3 -c "
+import json, glob
+entries = []
+for f in glob.glob('$audit_dir/*.jsonl'):
+    for line in open(f):
+        if line.strip():
+            entries.append(json.loads(line))
+rm_entries = [e for e in entries if 'rm -rf' in (e.get('originalCommand') or '')]
+assert rm_entries, f'expected an rm audit entry, got {[e.get(\"decision\") for e in entries]}'
+d = rm_entries[-1]['decision']
+assert d == 'auto', f'本会话创建的临时目录应自动放行，实际 decision={d}'
+print('PASS: 本会话创建的 /tmp 目标 → auto（条件满足 + 工具阈值已达）')
+" 2>/dev/null || {
+      echo "FAIL: 本会话创建的临时目录未被自动放行"
+      exit 1
+    }
+  else
+    echo "FAIL: audit dir NOT created at $audit_dir"
+    exit 1
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ── 场景 B：条件根 + 目标**非**本会话创建 → 仍被拦截（唯一护栏） ──
+test_it "范围出处条件：非本会话创建的 /tmp 目标 → 仍被拦截" <<'TEST'
+  local slug="e2e-pg-prov-no-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  local mine="/tmp/pg-e2e-$$-mine2"
+  local foreign="/tmp/pg-e2e-$$-foreign"
+  mkdir -p "$test_home"
+
+  setup_promotion_sandbox "$test_home" \
+    "[{\"root\":\"$test_home\"},{\"root\":\"/tmp\",\"requireSessionProvenance\":true}]"
+
+  PG_E2E_COMMANDS="mkdir -p $mine;;rm -rf $foreign" \
+    run_pi "$test_home" "delete the foreign dir" || true
+
+  dump_perm_logs "$test_home"
+
+  local audit_dir="$test_home/home/.pi/agent/extensions-data/permission-gate/audit"
+  if [[ -d "$audit_dir" ]]; then
+    python3 -c "
+import json, glob
+entries = []
+for f in glob.glob('$audit_dir/*.jsonl'):
+    for line in open(f):
+        if line.strip():
+            entries.append(json.loads(line))
+foreign = [e for e in entries if '$foreign' in (e.get('originalCommand') or '')]
+assert foreign, 'no audit entry for the foreign target'
+assert foreign[-1]['decision'] == 'blocked-no-ui', f'应被拦截，实际 {foreign[-1][\"decision\"]}'
+print('PASS: 非本会话创建的 /tmp 目标 → blocked（条件不满足，失败即拒绝）')
+" 2>/dev/null || {
+      echo "FAIL: 非本会话创建的 /tmp 目标未被拦截"
+      exit 1
+    }
+  else
+    echo "FAIL: audit dir NOT created at $audit_dir"
+    exit 1
+  fi
+
+  # 判定原因可观测（Ticket 04 验收项）
+  if grep -q "出处条件" "$test_home/.pi/logs"/permission-gate*.log 2>/dev/null; then
+    echo "PASS: 日志记录了「出处条件不满足」的判定原因"
+  else
+    echo "FAIL: 日志未记录出处条件判定原因"
+    exit 1
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ── 场景 C：对照 —— 不挂条件时同一个外部目标会被自动放行 ──
+test_it "对照：不挂条件时同一个外部 /tmp 目标被自动放行（证明条件是唯一护栏）" <<'TEST'
+  local slug="e2e-pg-prov-ctl-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  local foreign="/tmp/pg-e2e-$$-ctl-foreign"
+  mkdir -p "$test_home"
+
+  # 同一个根，但**不挂**出处条件
+  setup_promotion_sandbox "$test_home" \
+    "[{\"root\":\"$test_home\"},{\"root\":\"/tmp\"}]"
+
+  PG_E2E_COMMANDS="rm -rf $foreign" run_pi "$test_home" "delete it" || true
+
+  dump_perm_logs "$test_home"
+
+  local audit_dir="$test_home/home/.pi/agent/extensions-data/permission-gate/audit"
+  if [[ -d "$audit_dir" ]]; then
+    python3 -c "
+import json, glob
+entries = []
+for f in glob.glob('$audit_dir/*.jsonl'):
+    for line in open(f):
+        if line.strip():
+            entries.append(json.loads(line))
+foreign = [e for e in entries if '$foreign' in (e.get('originalCommand') or '')]
+assert foreign, 'no audit entry for the target'
+d = foreign[-1]['decision']
+assert d == 'auto', f'不挂条件时应自动放行，实际 decision={d}'
+print('PASS: 不挂条件 → auto（同一条命令，差别只在条件）')
+" 2>/dev/null || {
+      echo "FAIL: 不挂条件时未自动放行"
+      exit 1
+    }
+  else
+    echo "FAIL: audit dir NOT created at $audit_dir"
+    exit 1
+  fi
 
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
   exit 0

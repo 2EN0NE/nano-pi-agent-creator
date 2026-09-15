@@ -8,10 +8,11 @@
  *   - 按级别分组：confirmed（ask）/ auto / blocked（deny）计数
  *   - criticalGraduated：critical 被 graduated 自动放行的命令清单（异常：本该最严格）
  *   - topConfirmed：高频被确认命令 Top N
- *   - falseBlockRate：误拦（用户拒绝）比例 = blocked / (confirmed + auto + blocked)
+ *   - falseBlockRate：误拦（**用户拒绝**）比例 = 用户拒绝 / (confirmed + auto + 全部拦截)
+ *     注：无界面自动拦截与历史迁移条目不计入分子（不是用户意图）
  */
 
-import type { AuditEntry } from './audit-log.js';
+import { classifyDeny, isDenyDecision, type AuditEntry } from './audit-log.js';
 import type { DangerTier } from './config.js';
 
 export interface TierCounts {
@@ -52,6 +53,8 @@ export function computeAnalytics(entries: AuditEntry[], days?: number, topN = 5)
 	const criticalGraduated = new Set<string>();
 	const confirmedCounts = new Map<string, number>();
 	let totalIntercepted = 0;
+	/** 真实用户拒绝数（不含无界面自动拦截与历史迁移条目） */
+	let userBlocked = 0;
 
 	for (const e of filtered) {
 		if (e.decision === 'allow') continue; // 未命中规则，不参与分级指标
@@ -65,8 +68,9 @@ export function computeAnalytics(entries: AuditEntry[], days?: number, topN = 5)
 		} else if (e.decision === 'auto') {
 			counts.auto++;
 			if (tier === 'critical') criticalGraduated.add(e.command);
-		} else if (e.decision === 'deny') {
+		} else if (isDenyDecision(e.decision)) {
 			counts.blocked++;
+			if (classifyDeny(e) === 'user') userBlocked++;
 		}
 	}
 
@@ -86,9 +90,8 @@ export function computeAnalytics(entries: AuditEntry[], days?: number, topN = 5)
 		byTier.info.confirmed +
 		byTier.info.auto;
 
-	const totalBlocked = byTier.critical.blocked + byTier.warning.blocked + byTier.info.blocked;
-
-	const falseBlockRate = totalDecided > 0 ? totalBlocked / totalDecided : 0;
+	// 误拦率只用「用户拒绝」：无界面自动拦截与历史迁移条目不是用户意图
+	const falseBlockRate = totalDecided > 0 ? userBlocked / totalDecided : 0;
 
 	return {
 		byTier,

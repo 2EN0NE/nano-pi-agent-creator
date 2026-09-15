@@ -24,6 +24,10 @@ import { createLogger } from '@zenone/pi-logger';
 import { getProjectKey } from './records.js';
 import {
 	makeCommandKey,
+	formatScope,
+	formatScopeSource,
+	parseScopeInput,
+	scopeProvenance,
 	type DangerTier,
 	type PermissionGateConfig,
 	type PatternEntry,
@@ -42,7 +46,13 @@ import {
 	removeManualStrategyScoped,
 } from './manual-strategies.js';
 import { computeAnalytics, type AnalyticsMetrics } from './analytics.js';
-import { listAuditFiles, readAuditFile, type AuditEntry, type AuditDecision } from './audit-log.js';
+import {
+	isDenyDecision,
+	listAuditFiles,
+	readAuditFile,
+	type AuditEntry,
+	type AuditDecision,
+} from './audit-log.js';
 import { abbrevProjectPath, readSessionCurrentName } from './origins.js';
 
 const log = createLogger('permission-gate:panel');
@@ -106,12 +116,12 @@ export interface HistoryDisplayItem {
 }
 
 const LAYER_TABS: Array<{ id: LayerTabId; label: string }> = [
+	{ id: 'settings', label: '设置' },
 	{ id: 'session', label: '会话' },
 	{ id: 'project', label: '项目' },
 	{ id: 'user', label: '用户' },
 	{ id: 'history', label: '历史' },
 	{ id: 'analytics', label: '分析' },
-	{ id: 'settings', label: '设置' },
 ];
 
 const DIM_TABS: Array<{ id: DimTabId; label: string }> = [
@@ -135,6 +145,18 @@ const DECISION_LABEL: Record<AuditDecision, string> = {
 	ask: '用户确认放行',
 	auto: '规则自动放行',
 	deny: '用户拒绝（拦截）',
+	'blocked-no-ui': '无界面自动拦截',
+	'deny-legacy': '拒绝（历史迁移，成因不可判定）',
+};
+
+/** 列表行用的短标签（控制在 7 列内，避免长决策名把列表列撑乱） */
+const DECISION_SHORT: Record<AuditDecision, string> = {
+	allow: 'allow',
+	ask: 'ask',
+	auto: 'auto',
+	deny: 'deny',
+	'blocked-no-ui': 'no-ui',
+	'deny-legacy': 'legacy',
 };
 
 // ============================================================================
@@ -156,7 +178,7 @@ export function buildStrategyGroups(
 	const keyStats: Record<string, { earliestTs: string; subCmd: string }> = {};
 	if (entries) {
 		for (const e of entries) {
-			if (e.decision === 'deny' || e.decision === 'allow') continue;
+			if (isDenyDecision(e.decision) || e.decision === 'allow') continue;
 			for (const sub of e.subCommands ?? []) {
 				const cmdKey = makeCommandKey(sub);
 				if (!keyStats[cmdKey] || e.ts < keyStats[cmdKey].earliestTs) {
@@ -234,8 +256,11 @@ export class TwoTabPanel {
 	private ctx: ExtensionCommandContext;
 	private config: PermissionGateConfig;
 	private onConfigChanged: () => void;
+	private onOpenPromotion?: () => void;
+	private getPromotionSummary?: () => { pending: number; promoted: number };
 
-	private activeLayer: LayerTabId = 'session';
+	// 落地页跟随一级 tab 首项（当前为「设置」，改 LAYER_TABS 顺序即跟着变，不会脱钩）
+	private activeLayer: LayerTabId = LAYER_TABS[0].id;
 	private activeDim: DimTabId = 'cmd';
 	private analyticsScope: ScopeTabId = 'session';
 	private strategies: LayerStrategies = emptyStrategies();
@@ -262,6 +287,8 @@ export class TwoTabPanel {
 	// 当前面板打开的会话与项目（audit 溯源匹配基准）
 	private currentSessionId = '';
 	private currentCwd = '';
+	/** 生效 scope 的来源层（ADR-0059：面板必须展示层次与遮蔽）；构造时算一次，改范围后重算 */
+	private scopeOrigin = '';
 	/** 历史二级 tab：会话/项目/用户（默认「用户」= 全部，含旧记录无 sessionId/projectPath 的「未知」行） */
 	private historyScope: ScopeTabId = 'user';
 	/** 历史窗口（decision !== 'allow'，ts 降序，懒加载：从最新分片倒序分批读入） */
@@ -288,6 +315,8 @@ export class TwoTabPanel {
 		ctx: ExtensionCommandContext;
 		config: PermissionGateConfig;
 		onConfigChanged: () => void;
+		onOpenPromotion?: () => void;
+		getPromotionSummary?: () => { pending: number; promoted: number };
 	}) {
 		this.tui_ = opts.tui;
 		this.theme_ = opts.theme;
@@ -295,8 +324,13 @@ export class TwoTabPanel {
 		this.ctx = opts.ctx;
 		this.config = opts.config;
 		this.onConfigChanged = opts.onConfigChanged;
+		this.onOpenPromotion = opts.onOpenPromotion;
+		this.getPromotionSummary = opts.getPromotionSummary;
 		this.currentSessionId = opts.ctx.sessionManager?.getSessionId?.() ?? '';
 		this.currentCwd = opts.ctx.cwd ?? '';
+		this.scopeOrigin = formatScopeSource(
+			scopeProvenance(this.currentCwd, this.currentSessionId),
+		);
 		// 历史窗口首批（懒加载起点：最新分片起）
 		this.ensureHistoryWindow(TwoTabPanel.HISTORY_BATCH);
 		this.refreshData();
@@ -475,7 +509,7 @@ export class TwoTabPanel {
 	private buildHistoryItem(e: AuditEntry): HistoryDisplayItem {
 		const raw = e.originalCommand ?? e.command;
 		const summary = raw.length > 80 ? raw.slice(0, 77) + '...' : raw;
-		return { entry: e, isPassed: e.decision !== 'deny', summary };
+		return { entry: e, isPassed: !isDenyDecision(e.decision), summary };
 	}
 
 	private filteredHistory(): HistoryDisplayItem[] {
@@ -583,7 +617,7 @@ export class TwoTabPanel {
 	private settingsConfigItems(): Array<{
 		label: string;
 		value: string;
-		detail: -1 | 0 | 1 | 2 | 3 | 4 | 5;
+		detail: -1 | 0 | 1 | 2 | 3 | 4 | 5 | 6;
 	}> {
 		return [
 			{
@@ -597,7 +631,11 @@ export class TwoTabPanel {
 				value: `命令${this.config.dynamicPolicy.thresholds.sameCommand} 工具${this.config.dynamicPolicy.thresholds.sameTool} 目录${this.config.dynamicPolicy.thresholds.sameFolder}`,
 				detail: 2,
 			},
-			{ label: '范围', value: this.config.dynamicPolicy.scope, detail: -1 },
+			{
+				label: '范围',
+				value: `${formatScope(this.config.dynamicPolicy.scope)}（来自${this.scopeOrigin}）`,
+				detail: -1,
+			},
 			{
 				label: '组件详情',
 				value: this.config.widget.detailLevel === 'full' ? '完整' : '仅门控',
@@ -614,6 +652,8 @@ export class TwoTabPanel {
 				value: `系统${this.config.pathSurfaces.systemDirs.length} 凭证${this.config.pathSurfaces.credentialFiles.length}`,
 				detail: 5,
 			},
+			// 提升建议入口（按钮行）：Enter 或 p 打开「选择器 → 确认卡片」
+			{ label: '提升建议', value: this.promotionSummaryText(), detail: 6 },
 		];
 	}
 
@@ -1174,6 +1214,12 @@ export class TwoTabPanel {
 		this.tui_.requestRender();
 	}
 
+	/** 提升建议行的右侧摘要（待处理 / 已提升条数）。 */
+	private promotionSummaryText(): string {
+		const s = this.getPromotionSummary?.();
+		return s ? `待处理 ${s.pending} 条 / 已提升 ${s.promoted} 条` : '打开';
+	}
+
 	/** 一级设置项的 enter 处理（开关 toggle / 进入二级） */
 	private applySettingsSelection(): void {
 		// 开关行（cursor 0-2）
@@ -1226,19 +1272,39 @@ export class TwoTabPanel {
 				this.settingsSubCursor = 0;
 				this.pathGroup = 'system';
 				break;
+			case 6:
+				// 就地动作：打开提升建议（一级选择器 → 二级确认卡片）
+				void this.onOpenPromotion?.();
+				break;
 			case -1: {
 				// 就地处理：范围输入（第 4 项）/ 组件详情切换（第 5 项）
 				const idx = this.settingsCursor - 3;
 				if (idx === 3) {
+					// 编辑信任范围（多根，逗号分隔）。标题内带上当前值——
+					// pi 的 ctx.ui.input 不渲染 placeholder，当前值只能放标题。
+					const current = formatScope(this.config.dynamicPolicy.scope);
 					void this.ctx.ui
-						.input('范围目录路径', this.config.dynamicPolicy.scope)
+						.input(
+							`信任范围根目录（逗号分隔多个；当前：${current}；留空保持不变）`,
+							current,
+						)
 						.then((v) => {
-							if (v !== undefined && v.trim()) {
-								this.config.dynamicPolicy.scope = v.trim();
-								this.onConfigChanged();
-								this.invalidate();
-								this.tui_.requestRender();
+							if (v === undefined || !v.trim()) return; // 空 = 保留当前值
+							// 预填值就是 formatScope 的输出（含「[仅本会话创建]」注解），
+							// 必须回读剥离注解并恢复出处条件，否则编辑一次即丢条件、写入无效根。
+							const roots = parseScopeInput(v, this.ctx.cwd);
+							if (!roots) {
+								this.ctx.ui.notify('范围根目录无法识别，已保留原值', 'error');
+								return;
 							}
+							this.config.dynamicPolicy.scope = roots;
+							this.onConfigChanged();
+							// 保存后项目级已写入真实 scope → 来源层可能变化，重算展示
+							this.scopeOrigin = formatScopeSource(
+								scopeProvenance(this.currentCwd, this.currentSessionId),
+							);
+							this.invalidate();
+							this.tui_.requestRender();
 						})
 						.catch(() => {});
 				} else if (idx === 4) {
@@ -1261,6 +1327,11 @@ export class TwoTabPanel {
 		// 设置层：开关行 + 配置列表（二级页 esc 返回一级；需在 ←→ 全局处理之前，
 		// 否则阈值二级页的 ←→ 调整会被「切二级 tab」捕获）
 		if (this.activeLayer === 'settings') {
+			// p：直接打开提升建议（与设置列表里的「提升建议」行等价，便于发现）
+			if (this.settingsDetail === -1 && data === 'p') {
+				void this.onOpenPromotion?.();
+				return;
+			}
 			this.handleSettingsInput(data);
 			return;
 		}
@@ -1533,7 +1604,7 @@ export class TwoTabPanel {
 			lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
 			lines.push(
 				truncateToWidth(
-					'  ' + th.fg('dim', '↑↓ 导航  enter 确认/切换  Tab 层级  Esc 关闭'),
+					'  ' + th.fg('dim', '↑↓ 导航  enter 确认/切换  p 提升建议  Tab 层级  Esc 关闭'),
 					width,
 				),
 			);
@@ -2088,7 +2159,7 @@ export class TwoTabPanel {
 		const th = this.theme_;
 		const e = item.entry;
 		const statusMark = item.isPassed ? 'OK' : 'BLOCK';
-		const decision = e.decision.padEnd(7);
+		const decision = DECISION_SHORT[e.decision].padEnd(7);
 		const ts = e.ts.slice(5, 16).replace('T', ' '); // MM-DD HH:mm
 		const headStr = `${statusMark} ${decision}`;
 
@@ -2331,6 +2402,10 @@ export async function showTwoTabPanel(
 	ctx: ExtensionCommandContext,
 	config: PermissionGateConfig,
 	onConfigChanged: () => void,
+	promotion?: {
+		onOpen: () => void;
+		summary: () => { pending: number; promoted: number };
+	},
 ): Promise<void> {
 	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
 		// SAFETY: ctx.ui.custom 回调的 theme 形参在 pi 运行时恒为 Theme 实例，
@@ -2343,6 +2418,8 @@ export async function showTwoTabPanel(
 			ctx,
 			config,
 			onConfigChanged,
+			onOpenPromotion: promotion?.onOpen,
+			getPromotionSummary: promotion?.summary,
 		});
 		return {
 			render: (w: number) => panel.render(w),

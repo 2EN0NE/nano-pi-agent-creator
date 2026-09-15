@@ -10,7 +10,10 @@ function entry(over: Partial<AuditEntry> & { ts: string }): AuditEntry {
 		command: over.command ?? 'cmd',
 		tier: over.tier ?? null,
 		decision: over.decision ?? 'allow',
+		...(over.denyCause ? { denyCause: over.denyCause } : {}),
 		reasons: over.reasons ?? [],
+		...(over.sessionId ? { sessionId: over.sessionId } : {}),
+		...(over.projectPath ? { projectPath: over.projectPath } : {}),
 	};
 }
 
@@ -112,16 +115,54 @@ describe('computeAnalytics 审计分析聚合（T10）', () => {
 		expect(m.topConfirmed[1]).toEqual({ command: 'chmod 777 /etc/a', count: 2 });
 	});
 
-	it('误拦比例 = blocked / 拦截总数', () => {
+	it('误拦比例 = 用户拒绝 / 拦截总数', () => {
 		const entries: AuditEntry[] = [
 			entry({ ts: '2026-01-15T10:00:00Z', command: 'a', tier: 'info', decision: 'ask' }),
 			entry({ ts: '2026-01-15T10:01:00Z', command: 'b', tier: 'info', decision: 'ask' }),
-			entry({ ts: '2026-01-15T10:02:00Z', command: 'c', tier: 'info', decision: 'deny' }),
+			entry({
+				ts: '2026-01-15T10:02:00Z',
+				command: 'c',
+				tier: 'info',
+				decision: 'deny',
+				denyCause: 'user',
+				sessionId: 's1',
+			}),
 			entry({ ts: '2026-01-15T10:03:00Z', command: 'd', tier: 'info', decision: 'auto' }),
 		];
 
 		const m = computeAnalytics(entries);
-		expect(m.falseBlockRate).toBeCloseTo(0.25); // 1 blocked / 4 拦截
+		expect(m.falseBlockRate).toBeCloseTo(0.25); // 1 用户拒绝 / 4 拦截
+	});
+
+	it('误拦比例不计无界面自动拦截与历史迁移条目（不是用户意图）', () => {
+		const entries: AuditEntry[] = [
+			entry({ ts: '2026-01-15T10:00:00Z', command: 'a', tier: 'info', decision: 'ask' }),
+			entry({
+				ts: '2026-01-15T10:01:00Z',
+				command: 'c',
+				tier: 'info',
+				decision: 'deny',
+				denyCause: 'user',
+				sessionId: 's1',
+			}),
+			entry({
+				ts: '2026-01-15T10:02:00Z',
+				command: 'e',
+				tier: 'info',
+				decision: 'blocked-no-ui',
+			}),
+			entry({
+				ts: '2026-01-15T10:03:00Z',
+				command: 'f',
+				tier: 'info',
+				decision: 'deny-legacy',
+			}),
+		];
+
+		const m = computeAnalytics(entries);
+		// 4 条拦截里只有 1 条是真拒绝；无界面拦截 1 条 + 迁移 1 条不得计入分子
+		expect(m.byTier.info.blocked).toBe(3);
+		expect(m.falseBlockRate).toBeCloseTo(0.25);
 	});
 
 	it('时间窗口过滤（7 天）', () => {

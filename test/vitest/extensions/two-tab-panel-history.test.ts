@@ -92,7 +92,7 @@ function setup() {
 
 /** 切到一级 tab（Tab 循环） */
 function gotoLayer(panel: TwoTabPanel, target: string): void {
-	const order = ['session', 'project', 'user', 'history', 'analytics', 'settings'];
+	const order = ['settings', 'session', 'project', 'user', 'history', 'analytics'];
 	const idx = order.indexOf(target);
 	for (let i = 0; i < idx; i++) panel.handleInput(TAB);
 }

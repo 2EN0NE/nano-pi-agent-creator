@@ -46,15 +46,23 @@ npx tsx scripts/sync-to-local-pi.ts --ext sandbox --ext pi-logger --theme nighto
 # 同步技能
 npx tsx scripts/sync-to-local-pi.ts --skill my-skill --target ./.pi/test
 
-# 同步到用户目录（⚠ 正确方式：用 profile 而非 --target）
+# 同步到用户目录
 npx tsx scripts/sync-to-local-pi.ts --profile user-install
+
+# 只同步单个插件到用户目录（推荐）
+npx tsx scripts/sync-to-local-pi.ts --profile user-install --ext permission-gate
 ```
 
-> ⚠️ **警告**：`--target` 内联模式**只应指向隔离测试目录**（如 `./.pi/test`），
-> **不要**用 `--target ~/.pi/agent` 直接同步到用户目录——请使用
-> `--profile user-install`（由 `sync-profiles.yaml` 管理资源边界）。
-> 内联模式**默认不删除**目标中任何文件；如需清空目标中不属于本次同步的
-> 资源，必须加 `--purge` 参数（会有 WARN 强警告）。
+> **同步到真实用户目录 `~/.pi/agent` 的三种方式：**
+>
+> - `--profile user-install`：整个 profile（按「受管资产」语义剪 stale）。
+> - `--profile user-install --ext <name>`：**单插件白名单**——只同步点名的资产，
+>   其他资源类型本次不参与，且**禁用 stale 剪枝**（绝不删除未点名的资产）；
+>   点名项不在该 profile 清单内时快速失败。
+> - `--ext <name> --target ~/.pi/agent`：inline 单插件，**默认不删除**任何文件。
+>
+> ⚠️ 唯一仍然硬阻断的是 **`--purge` 指向 `~/.pi` / `~/.pi/agent`**：`--purge` 会递归删除
+> 目标中不属于本次同步的一切，指向真实用户目录等于全毁（代码级护栏）。
 > （profile 模式的默认删除行为见下文「删除语义」——只剪「受管资产」。）
 
 ## 配置文件结构
