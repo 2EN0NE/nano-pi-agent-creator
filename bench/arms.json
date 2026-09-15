@@ -1,0 +1,9 @@
+{
+	"baseline": ["bash-timeout"],
+	"arms": {
+		"none": { "triggerTools": [] },
+		"plugin-todos": { "triggerTools": ["todo"] },
+		"plugin-truncated-tool": { "triggerTools": ["rg"] },
+		"plugin-@ff-labs/pi-fff": { "triggerTools": ["ffgrep", "fffind"] }
+	}
+}

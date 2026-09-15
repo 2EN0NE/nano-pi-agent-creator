@@ -11,6 +11,7 @@
 # 用法：
 #   run-matrix.sh [--tasks slug,slug] [--configs none,plugin-truncated-tool] [--reps N]
 #                 --model <provider>/<model-id> [--thinking low] [--home <隔离HOME>] [--resume <run-id>]
+#                 [--pilot]   每个臂 × 第一个 task × rep0 先导，跑完停下（见 ADR-0057）
 set -u
 BENCH="$(cd "$(dirname "$0")" && pwd)"
 TASKS=""
@@ -20,6 +21,7 @@ MODEL="${BENCH_MODEL:-}"
 THINKING="${BENCH_THINKING:-low}"
 BENCH_HOME="${BENCH_HOME:-}"
 RESUME=""
+PILOT=""
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -51,6 +53,10 @@ while [[ $# -gt 0 ]]; do
 		RESUME="$2"
 		shift 2
 		;;
+	--pilot)
+		PILOT=1
+		shift
+		;;
 	*)
 		echo "unknown arg: $1" >&2
 		exit 2
@@ -65,37 +71,19 @@ if [[ -z "$MODEL" ]]; then
 	exit 2
 fi
 
-# --- preflight：模型必须存在于 models-store（fail-fast，而非第一个 cell 内部静默失败） ---
-MODEL_STORE="${BENCH_HOME:-$HOME}/.pi/agent/models-store.json"
-if [[ ! -f "$MODEL_STORE" ]]; then
-	echo "错误：找不到模型库 $MODEL_STORE" >&2
-	echo "先配置模型：pi --list-models 查看，或用 pi 的模型管理添加。" >&2
-	exit 2
-fi
-python3 - "$MODEL" "$MODEL_STORE" <<'PYEOF'
-import json, sys
-model, store = sys.argv[1], sys.argv[2]
-provider, sep, mid = model.partition('/')
-if not sep or not mid:
-    print(f"错误：模型格式应为 <provider>/<model-id>，got: {model}", file=sys.stderr)
-    sys.exit(2)
-data = json.load(open(store))
-ids = [m.get('id') for m in ((data.get(provider) or {}).get('models') or [])]
-if mid not in ids:
-    print(f"错误：模型 {model} 不在 {store} 中", file=sys.stderr)
-    print("可用 provider/model（pi --list-models）：", file=sys.stderr)
-    for p, v in data.items():
-        for m in ((v or {}).get('models') or []):
-            print(f"  {p}/{m.get('id')}", file=sys.stderr)
-    sys.exit(2)
-PYEOF
-# preflight 失败必须立即退出（无 set -e，显式检查）
-[[ $? -eq 0 ]] || exit 2
-
 # --- task 列表 ---
 if [[ -z "$TASKS" ]]; then
 	TASKS=$(ls "$BENCH/tasks" | paste -sd, -)
 fi
+
+# --- 前置检查：环境依赖 + 模型 + 臂（见 docs/adr/0056-bench-preflight-module.md、0057） ---
+# 传本次 run 的全部任务 + 全部臂 → 一次全量 fail-fast（而非第一个 cell 内部静默失败）。
+# BENCH_HOME 必须显式传入：它在下方才 export，若在此处读环境变量会漏掉 --home，
+# 导致模型校验查的是用户 ~/.pi/agent 而非隔离 HOME（冒烟/复现场景会误判）。
+IFS=',' read -ra _PF_TASKS <<<"$TASKS"
+_PF_ARGS=()
+for _pf_t in "${_PF_TASKS[@]}"; do _PF_ARGS+=("$BENCH/tasks/$_pf_t"); done
+BENCH_MODEL="$MODEL" BENCH_HOME="$BENCH_HOME" bash "$BENCH/preflight.sh" --arms "$CONFIGS" ${_PF_ARGS[@]+"${_PF_ARGS[@]}"} || exit 2
 
 # --- run-id：全新 or 续跑 ---
 if [[ -n "$RESUME" ]]; then
@@ -160,12 +148,22 @@ echo "查进度:    bash bench/bench-status.sh $RUN_ID"
 
 IFS=',' read -ra TASK_ARR <<<"$TASKS"
 IFS=',' read -ra CFG_ARR <<<"$CONFIGS"
+# --- pilot（先导门，见 ADR-0057）：每个臂 × 第一个 task × rep0，跑完停下 ---
+# manifest 已按全量配置写好，故先导的 cell 之后能被 --resume 复用（resume 是严格配置相等）。
+# 只跑「--tasks 的第一个」：pilot 要覆盖的是每个臂的加载 / flag 路径，不是任务维度。
+PILOT_TASK="${TASK_ARR[0]}"
 FAILED=0
+PILOT_CELLS=0
 for slug in "${TASK_ARR[@]}"; do
+	if [[ -n "$PILOT" && "$slug" != "$PILOT_TASK" ]]; then
+		continue
+	fi
 	for cfg in "${CFG_ARR[@]}"; do
 		# scoped npm 包名（@scope/pkg 含 /）不能作目录段：/ 转义为 __，analyze.py 才能 glob 到
 		CFG_SAFE="${cfg//\//__}"
 		for ((rep = 0; rep < REPS; rep++)); do
+			# pilot 只跑 rep0
+			[[ -n "$PILOT" && "$rep" != 0 ]] && break
 			CELL="$RUN_DIR/$CFG_SAFE/$slug/rep$rep"
 			# 续跑：跳过已完成 cell（result.json 存在且含 reward_binary），中断/残缺的默认重跑
 			if [[ -n "$RESUME" ]] && "$BENCH/progress.py" is_complete "$CELL"; then
@@ -176,6 +174,7 @@ for slug in "${TASK_ARR[@]}"; do
 			rm -rf "$CELL"
 			"$BENCH/progress.py" mark "$RUN_DIR" "$cfg" "$slug" "$rep" running
 			echo "=== cell $slug / $cfg / rep$rep ==="
+			PILOT_CELLS=$((PILOT_CELLS + 1))
 			if "$BENCH/run-cell.sh" "$BENCH/tasks/$slug" "$cfg" "$rep" "$CELL"; then
 				"$BENCH/progress.py" mark "$RUN_DIR" "$cfg" "$slug" "$rep" done
 			else
@@ -187,6 +186,24 @@ for slug in "${TASK_ARR[@]}"; do
 		done
 	done
 done
+
+if [[ -n "$PILOT" ]]; then
+	# pilot 不跑 analyze：半量数据上的 delta / 翻转结论会误导插件去留决策（ADR-0057）。
+	# pilot 只回答「每个臂能不能跑通」。
+	echo ""
+	if [[ "$FAILED" -gt 0 ]]; then
+		echo "pilot 完成但 $FAILED 个 cell 失败——先修再跑全量。" >&2
+		echo "RUN_ID=$RUN_ID (pilot failed=$FAILED)" >&2
+		exit 1
+	fi
+	_HOME_ARG=""
+	[[ -n "$BENCH_HOME" ]] && _HOME_ARG=" --home $BENCH_HOME"
+	echo "pilot 通过：$((PILOT_CELLS)) 个 cell（每个臂 × $PILOT_TASK × rep0），未跑 analyze。"
+	echo "确认无误后继续全量（先导已跑的 cell 会被 --resume 复用，不重烧）："
+	echo "  bash bench/run-matrix.sh --tasks $TASKS --configs $CONFIGS --reps $REPS --model $MODEL --thinking $THINKING${_HOME_ARG} --resume $RUN_ID"
+	echo "RUN_ID=$RUN_ID (pilot done)"
+	exit 0
+fi
 
 python3 "$BENCH/analyze.py" "$RUN_DIR" || {
 	echo "analyze failed: $RUN_DIR" >&2

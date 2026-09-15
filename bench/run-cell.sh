@@ -4,7 +4,7 @@
 #   - config 语义改为 none（无插件）| plugin-<name>（单插件）
 #   - 模型强制显式（BENCH_MODEL 必填，无默认）
 #   - 成本从 session jsonl 的 usage.cost 直接读，不 hardcode 费率
-#   - 新增 plugin_triggered 指标（task.json 声明 trigger_tools 时检测）
+#   - 新增 plugin_triggered 指标（触发工具名由 bench/arms.json 的臂声明，见 ADR-0057）
 #   - 阶段（clone/agent/metrics/verify）写入 progress.json（BENCH_RUN_DIR 设置时）
 #
 # 用法：run-cell.sh <task-dir> <config> <rep> <cell-out-dir>
@@ -27,7 +27,6 @@ REP="$3"
 CELL="$4"
 
 BENCH="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$BENCH/.." && pwd)"
 TASK="$TASK_DIR/task.json"
 
 SLUG=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['slug'])" "$TASK")
@@ -36,18 +35,34 @@ BASE_REF=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['base_
 AGENT_TIMEOUT=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['agent_timeout_s'])" "$TASK")
 VERIFY_TIMEOUT=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verify_timeout_s'])" "$TASK")
 
-# trigger_tools：声明目标插件注册的工具名（逗号分隔），用于 plugin_triggered 检测
-TRIGGER_TOOLS=$(python3 -c "
+# --- 臂注册表（bench/arms.json）：读本臂声明的触发工具名 ---
+# 工具名已从 task.json 下沉到臂（见 docs/adr/0057-bench-arm-registry-and-pilot.md）：
+# 任务与插件正交，不再需要「一个任务测多插件就写并集」的 hack。
+ARMS="$BENCH/arms.json"
+[[ -f "$ARMS" ]] || {
+	echo "缺少臂注册表 $ARMS" >&2
+	exit 2
+}
+# 臂封闭：未登记的臂会静默产出 plugin_triggered=null、污染触发率分母，故 fail-fast
+ARM_TRIGGER_TOOLS=$(python3 -c "
 import json,sys
-d=json.load(open(sys.argv[1]))
-print(','.join(d.get('trigger_tools', [])))
-" "$TASK")
+arms=json.load(open(sys.argv[1])).get('arms') or {}
+if sys.argv[2] not in arms:
+    sys.stderr.write('未注册的 config 臂：%s（请在 bench/arms.json 登记）\n' % sys.argv[2])
+    sys.exit(2)
+print(','.join((arms[sys.argv[2]] or {}).get('triggerTools') or []))
+" "$ARMS" "$CONFIG") || exit 2
 
 MODEL="${BENCH_MODEL:-}"
 [[ -n "$MODEL" ]] || {
 	echo "BENCH_MODEL 必填（<provider>/<model-id>），由 run-matrix.sh 或调用方注入" >&2
 	exit 2
 }
+
+# --- 前置检查：本 cell 任务的前置条件（见 docs/adr/0056-bench-preflight-module.md） ---
+# 入口自保护：smoke-test.sh 与手动调试会直接调 run-cell.sh，绕开 run-matrix.sh 的全量检查。
+# 放在文件头的 PATH 兜底之后，检查的是「实际会被 verify.sh 用到的环境」。
+bash "$BENCH/preflight.sh" "$TASK_DIR" || exit 2
 
 # --- 阶段标记：写 progress.json（仅 run-matrix.sh 编排时 BENCH_RUN_DIR 非空） ---
 phase() {
@@ -67,59 +82,19 @@ export GIT_COMMITTER_EMAIL="bench@nano-pi-agent-creator.invalid"
 mkdir -p "$CELL/session-store" "$CELL/session" "$CELL/logs" "$CELL/artifacts"
 WORKDIR="$CELL/workdir"
 
-# --- 在 extensions/ 或 test helpers 里搜索插件路径 ---
+# --- 插件名 → 路径（解析规则见 bench/find-extension.sh；preflight 的臂校验复用同一份）---
 find_extension() {
-	local name="$1"
-	local found=""
-	# 1. 目录形式 extensions/<分类>/<name>/index.ts
-	while IFS= read -r -d '' match; do
-		found="$match"
-		break
-	done < <(find "$REPO_ROOT/extensions" -maxdepth 3 -type d -name "$name" -exec test -f '{}/index.ts' \; -print0 2>/dev/null)
-	[[ -n "$found" ]] && {
-		echo "$found"
-		return
-	}
-	# 2. 单文件形式 extensions/<分类>/<name>.ts
-	while IFS= read -r -d '' match; do
-		found="$match"
-		break
-	done < <(find "$REPO_ROOT/extensions" -maxdepth 3 -type f -name "$name.ts" -print0 2>/dev/null)
-	[[ -n "$found" ]] && {
-		echo "$found"
-		return
-	}
-	# 3. test helpers（mock-llm 等）
-	for h in "$REPO_ROOT/test/helpers/$name.ts" "$REPO_ROOT/test/e2e/helpers/$name.ts"; do
-		[[ -f "$h" ]] && {
-			echo "$h"
-			return
-		}
-	done
-	# 4. npm 安装的插件（~/.pi/agent/npm/node_modules/<包名>，读 package.json 的 pi.extensions 入口）
-	local npm_nm="${HOME}/.pi/agent/npm/node_modules"
-	if [[ -f "$npm_nm/$name/package.json" ]]; then
-		local entry
-		entry=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));e=(d.get('pi') or {}).get('extensions') or [];print(e[0] if e else '')" "$npm_nm/$name/package.json" 2>/dev/null)
-		if [[ -n "$entry" ]]; then
-			entry="${entry#./}"
-			if [[ "$entry" = /* ]]; then
-				echo "$entry"
-			else
-				echo "$npm_nm/$name/$entry"
-			fi
-			return
-		fi
-	fi
-	echo ""
+	bash "$BENCH/find-extension.sh" "$1"
 }
 
 # --- 新鲜 checkout 到 base ref ---
 phase clone
 CACHE="$BENCH/.cache/$(basename "$REPO_URL" .git)"
 if [[ ! -d "$CACHE/.git" ]]; then
-	git clone "$REPO_URL" "$CACHE" >/dev/null 2>&1 || {
-		echo "clone failed: $REPO_URL" >&2
+	# 不抑制 git 的 stderr：区分「外网不可用/仓库不可达」与「任务资产问题」要靠它
+	# （见测试分析发现 P2；彻底去网络依赖——bundle fixture / 浅克隆——待专项）。
+	git clone "$REPO_URL" "$CACHE" >/dev/null || {
+		echo "clone failed（上方为 git 原始错误：网络不可用 / 仓库不可达）：$REPO_URL" >&2
 		exit 1
 	}
 fi
@@ -142,12 +117,26 @@ git -C "$WORKDIR" checkout --quiet "$BASE_REF" || {
 # （"全量环境+目标插件 vs 纯净 pi"），且目标插件若同时存在于全局副本（如 sync 过的 truncated-tool）
 # 与 -e 仓库副本，会触发重复注册冲突导致该臂失效。
 COMMON_FLAGS=(--print --approve --thinking "$THINKING" --model "$MODEL" --session-dir "$CELL/session-store" --name "$SESSION_NAME" --no-extensions --no-skills --no-prompt-templates --no-context-files --no-themes)
-# 公共基座：bash-timeout 作为评测环境安全网（防 agent 慢命令如 find / 卡死），
-# 两臂统一加载，非被测变量——配对唯一差异仍是被测插件本身。
-BASELINE_PATH=$(find_extension "bash-timeout")
-if [[ -n "$BASELINE_PATH" ]]; then
-	COMMON_FLAGS+=(-e "$BASELINE_PATH")
+# 公共基座（arms.json 的 baseline，非被测变量）：两臂统一加载，配对唯一差异仍是被测插件本身。
+# bash-timeout 是评测环境安全网（防 agent 慢命令如 find / 卡死）。
+while IFS= read -r baseline_name; do
+	[[ -z "$baseline_name" ]] && continue
+	baseline_path=$(bash "$BENCH/find-extension.sh" "$baseline_name") || {
+		echo "baseline 插件未找到：${baseline_name}（检查 bench/arms.json 的 baseline）" >&2
+		exit 2
+	}
+	COMMON_FLAGS+=(-e "$baseline_path")
+done < <(python3 -c "
+import json,sys
+print('\n'.join(json.load(open(sys.argv[1])).get('baseline') or []))
+" "$ARMS")
+
+# 冒烟专用：把测试替身 mock-llm 注入公共基座——none 臂也能不烧钱地跑冒烟（见 ADR-0057）。
+# 真实评测不设此变量。它早先是伪装成一个 config 臂（plugin-mock-llm），已废弃。
+if [[ -n "${BENCH_MOCK_LLM:-}" ]]; then
+	COMMON_FLAGS+=(-e "$BENCH_MOCK_LLM")
 fi
+
 case "$CONFIG" in
 none)
 	CFG_FLAGS=()
@@ -221,59 +210,14 @@ git -C "$WORKDIR" add -A >/dev/null 2>&1
 git -C "$WORKDIR" diff --cached "$BASE_REF" -- . ':(exclude)vendor/**' ':(exclude)**/node_modules/**' ':(exclude).verify-bin/**' ':(exclude).verify-out/**' >"$CELL/artifacts/model.patch" 2>/dev/null
 (git -C "$WORKDIR" ls-files --cached -- 'vendor/*' '*/node_modules/*' | sed -e 's/.*/[vendored dependency paths omitted from patch]/' | head -1 >>"$CELL/artifacts/model.patch" 2>/dev/null) || true
 
-# --- 指标提取 + plugin_triggered 检测 ---
+# --- 指标提取 + plugin_triggered 检测（实现见 bench/metrics.py，带单元测试） ---
 phase metrics
-TRIGGER_TOOLS="$TRIGGER_TOOLS" python3 - "$CELL" "$WALL" <<'PYEOF'
-import json, glob, os, sys
-cell, wall = sys.argv[1], float(sys.argv[2])
-trigger_tools = [t for t in (os.environ.get("TRIGGER_TOOLS") or "").split(",") if t]
-turns = 0
-tool_calls = 0
-triggered = None if not trigger_tools else False
-tot = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0}
-cost = 0.0
-for f in glob.glob(os.path.join(cell, "session", "*.jsonl")):
-    for line in open(f, errors="replace"):
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        msg = rec.get("message", {})
-        if msg.get("role") != "assistant":
-            continue
-        turns += 1
-        u = msg.get("usage") or {}
-        for k in tot:
-            tot[k] += int(u.get(k) or 0)
-        c = (u.get("cost") or {}).get("total")
-        if c:
-            cost += float(c)
-        for item in msg.get("content", []):
-            if isinstance(item, dict) and item.get("type") == "toolCall":
-                tool_calls += 1
-                name = str(item.get("name") or "")
-                if trigger_tools and any(name == t for t in trigger_tools):
-                    triggered = True
-# 成本口径：直接累加 session jsonl 的 usage.cost.total（provider 报告值），
-# 不 hardcode 模型费率（deepseek-v4-flash 等非 codex 模型费率未知）。
-patch_path = os.path.join(cell, "artifacts", "model.patch")
-patch_bytes = os.path.getsize(patch_path) if os.path.exists(patch_path) else 0
-result = {
-    "model": os.environ.get("BENCH_MODEL", ""),
-    "thinking_level": os.environ.get("BENCH_THINKING", "low"),
-    "combined_total_tokens": tot["totalTokens"],
-    "tokens_fresh_input": tot["input"] + tot["cacheWrite"],
-    "tokens_cached_input": tot["cacheRead"],
-    "tokens_output": tot["output"],
-    "combined_cost_usd": round(cost, 6),
-    "agent_wall_s": wall,
-    "turns": turns,
-    "tool_calls": tool_calls,
-    "patch_bytes": patch_bytes,
-    "plugin_triggered": triggered,
+TRIGGER_TOOLS="$ARM_TRIGGER_TOOLS" python3 "$BENCH/metrics.py" "$CELL" "$WALL" || {
+	# 原 heredoc 未检查退出码：python 崩溃会静默留下缺失的 result.json，
+	# 让 verify.sh / analyze 拿到残缺数据——正是 ADR-0027 要消灭的假信号。
+	echo "metrics.py failed: $SLUG $CONFIG rep$REP" >&2
+	exit 1
 }
-json.dump(result, open(os.path.join(cell, "result.json"), "w"), indent=2)
-PYEOF
 
 # --- 验收探针 ---
 phase verify

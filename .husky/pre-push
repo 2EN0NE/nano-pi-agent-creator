@@ -56,8 +56,13 @@ fi
 # 提取变更的扩展名和技能名
 EXTS=""
 SKILLS=""
+BENCH_CHANGED=""
 for file in $CHANGED_FILES; do
   case "$file" in
+    # bench/ 工具链变更 → 触发 bench python 单测 + bench-run 技能 e2e（见测试分析发现 P1）
+    bench/*)
+      BENCH_CHANGED=1
+      ;;
     # 目录扩展优先匹配：extensions/category/name/index.ts → name
     # 必须在单文件匹配之前，避免 index.ts 被 *.ts 模式误匹配
     extensions/*/index.ts)
@@ -92,6 +97,20 @@ done
 # scripts/ 变更（sync 工具、桥接等基础设施脚本）→ 触发 sync-tool e2e
 if echo "$CHANGED_FILES" | grep -q '^scripts/'; then
   EXTS="$EXTS sync-tool"
+fi
+
+# bench/ 变更 → 先跑 bench python 单测（对齐 CI bench-unit job），
+# 并把 bench-run 加入 SKILLS 以复用下方的 e2e 循环（测试目录 test/e2e/skills/bench-run/）。
+if [ -n "$BENCH_CHANGED" ]; then
+  echo "🔍 pre-push: bench 单元测试..."
+  if command -v python3 >/dev/null 2>&1; then
+    for t in bench/test_*.py; do
+      python3 "$t" || { echo "❌ bench 单测失败：$t"; exit 1; }
+    done
+  else
+    echo "⚠️  python3 缺失，跳过 bench 单测"
+  fi
+  SKILLS="$SKILLS bench-run"
 fi
 
 # 去重

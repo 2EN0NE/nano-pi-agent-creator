@@ -1240,10 +1240,12 @@ else
 fi
 
 if ! $FOUND_ANY; then
-	echo ""
-	echo "No test files found. Create test cases under test/e2e/extensions/<name>/smoke.test.sh"
-	echo "or test/e2e/skills/<name>/smoke.test.sh"
-	exit 0
+	echo "" >&2
+	echo "No test files found. Create test cases under test/e2e/extensions/<name>/smoke.test.sh" >&2
+	echo "or test/e2e/skills/<name>/smoke.test.sh" >&2
+	# 显式目标（--ext/--skill）无任何用例时以非零退出：静默 0 会让调用方
+	# （pre-push / CI）在“测试目录缺失”时假绿（见测试分析发现 P1）。
+	exit 1
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════

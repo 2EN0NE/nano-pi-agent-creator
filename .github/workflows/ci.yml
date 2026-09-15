@@ -159,8 +159,12 @@ jobs:
         timeout-minutes: 5
         steps:
             - uses: actions/checkout@v4
-            - name: Run analyze.py unit tests
-              run: python3 bench/test_analyze.py
+            - name: Run bench python unit tests
+              run: |
+                  for t in bench/test_*.py; do
+                    echo "== $t =="
+                    python3 "$t" || exit 1
+                  done
 
     # ── Bench Smoke（verify.sh 失败侧判定 + 骨架，阻塞，mock-llm 不烧钱）──
     bench-smoke:
@@ -222,6 +226,7 @@ jobs:
                       ;;
                     9)
                       bash test/e2e/scripts/run-e2e.sh --skill e2e-test
+                      bash test/e2e/scripts/run-e2e.sh --skill bench-run
                       ;;
                     *)
                       bash test/e2e/scripts/run-e2e.sh \
