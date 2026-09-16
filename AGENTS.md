@@ -53,6 +53,10 @@ npm run test:watch
 
 编写示例见 `test/vitest/extensions/pi-logger.test.ts`。
 
+> ⚠️ **worktree 系 vitest 用例**（`test/vitest/extensions/worktree*.test.ts`）会执行真实 git 操作
+> （worktree/merge/rebase），与 `git commit` 环境冲突：pre-commit 的 `npm test` 会排除它们，
+> 但 **pre-push / CI 必须全量跑**（CI `e2e-worktree` job 跑 `worktree*.test.ts` 全 glob）。
+
 #### 路径 B：bash/expect 集成 e2e 测试（test/e2e/）
 
 真实 Pi 进程，仅 mock LLM。传统 bash（print 模式）+ `expect` 脚本（TUI 按键交互）。
@@ -69,6 +73,11 @@ CI=true bash test/e2e/scripts/run-e2e.sh --ext pi-logger
 LATEST=$(ls -1t test/results/ | head -1)
 cat test/results/$LATEST/summary.md
 ```
+
+> **CI 分片语义（改 `ci.yml` 的 e2e job 前必读）**：分片按模块名确定性 hash 分桶
+> （`run-e2e.sh` 的 `_shard_match`），**不写硬编码模块清单**——新增模块一定落在某个 shard 上。
+> 唯一允许不在矩阵里跑的是显式 `--exclude` 的模块（当前：`worktree` / `permission-gate`，
+> 各自有专用 job）。CI 还设 `E2E_BUDGET_STRICT=1`：耗时超插件预算**一律判失败**，不降级为 WARN。
 
 #### 验证流程
 
@@ -90,11 +99,14 @@ cat test/results/$LATEST/summary.md
 
 项目使用 husky v9 管理 git hooks，按分层策略组织：**CI 是绝对标准（全部阻塞），本地 hook 轻重分层对齐 CI，但跳过耗时步骤。**
 
-| 层             | 触发时机     | 耗时 | format:check | typecheck            | lint/eslint           | test (vitest) | e2e       | semgrep       |
-| -------------- | ------------ | ---- | ------------ | -------------------- | --------------------- | ------------- | --------- | ------------- |
-| **CI**         | `git push`   | 全量 | ✅ 阻塞      | ✅ 阻塞              | ✅ 阻塞               | ✅ 阻塞       | ✅ 阻塞   | ✅ ERROR 阻塞 |
-| **pre-push**   | `git push`   | 中   | —            | ✅ 有 .ts 变更时阻塞 | —                     | ✅ 阻塞       | ✅ 仅变更 | —             |
-| **pre-commit** | `git commit` | ~5s  | ✅ 阻塞      | —                    | ✅ auto-fix 仅 staged | ✅ 阻塞       | —         | —             |
+| 层             | 触发时机     | 耗时 | format:check | typecheck            | lint/eslint + config 锚点          | test (vitest) | e2e                 | semgrep       |
+| -------------- | ------------ | ---- | ------------ | -------------------- | ---------------------------------- | ------------- | ------------------- | ------------- |
+| **CI**         | `git push`   | 全量 | ✅ 阻塞      | ✅ 阻塞              | ✅ 阻塞（含 `lint:config:anchor`） | ✅ 阻塞       | ✅ 阻塞（分片矩阵） | ✅ ERROR 阻塞 |
+| **pre-push**   | `git push`   | 中   | —            | ✅ 有 .ts 变更时阻塞 | ✅ 仅 config 锚点                  | ✅ 阻塞       | ✅ 仅变更 + 金丝雀  | —             |
+| **pre-commit** | `git commit` | ~5s  | ✅ 阻塞      | —                    | ✅ auto-fix 仅 staged              | ✅ 阻塞       | —                   | —             |
+
+> CI `config-compliance` job 里 **`npm run lint:config:anchor` 是阻塞项**（仓库级配置必须显式锚仓库根，见
+> 「[项目级配置的解析锚点](#项目级配置的解析锚点仓库级-vs-目录级强制判断)」）；历史欠账较多的 `lint:config`（规则 1/2）仍为 WARN。
 
 **① pre-commit：提交前轻量校验（`.husky/pre-commit`）**
 
@@ -112,8 +124,12 @@ npx husky run pre-commit
 **② pre-push：推送前较重校验（`.husky/pre-push`）**
 
 1. **`typecheck`** — 仅当有 `.ts/.tsx` 变更时运行 `tsc --noEmit`（阻塞，对齐 CI）
-2. **`npm test`** — Vitest 单元测试（阻塞，对齐 CI `unit-tests` job）
-3. **e2e 测试** — 自动检测本次推送变更的扩展/技能，只运行受影响模块
+2. **`lint:config:anchor`** — 仅当有 `.ts/.tsx` 变更时运行（阻塞，对齐 CI `config-compliance` job）
+3. **`npm test`** — Vitest 单元测试（阻塞，对齐 CI `unit-tests` job）
+4. **e2e 测试** — 自动检测本次推送变更的扩展/技能，只运行受影响模块
+5. **e2e 金丝雀** — 当 `test/e2e/scripts/*` 或 `test/e2e/helpers/*`（运行器/助手）变更时，额外跑
+   `--shard 0/8` 代表分片：运行器变更影响**所有**模块，但逐个跑全量太慢，用一片当金丝雀抓
+   全局性回归（脚本语法、参数解析、分片选择、沙箱/expect 助手失效）。全量由 CI 分片矩阵覆盖。
 
 ```bash
 # 修改 extensions/auto/loop.ts → 推送前自动运行:
@@ -265,6 +281,34 @@ store.reload();
 | `writeJsonAtomic(path, data)`           | 原子写入（tmp+rename）                   |
 | `loadLayeredConfig<T>(opts)`            | 一次性分层加载（不含缓存）               |
 | `createConfigStore<T>(opts)`            | 返回带缓存的 ConfigStore<T>（推荐）      |
+
+#### 项目级配置的解析锚点：仓库级 vs 目录级【强制判断】
+
+`@zenone/pi-config` 的项目级层默认锚在**会话 cwd**（`<cwd>/.pi/extensions-data/<plugin>/config.json`）。
+
+**判断规则**：配置描述的是**仓库**还是**当前目录**？
+
+| 配置描述的对象                      | 锚点                     | 写法                                        |
+| ----------------------------------- | ------------------------ | ------------------------------------------- |
+| 仓库（worktree 花名册、仓库级策略） | **git 仓库根**（强制）   | `createConfigStore({ cwd: repoRoot, ... })` |
+| 当前目录（目录作用域策略）          | 会话 cwd（默认，不要动） | `createConfigStore({ ... })`（见 ADR-0059） |
+
+`repoRoot` 用 `git rev-parse --path-format=absolute --git-common-dir` 推导（其父目录即主仓库根，**在 worktree 内也有效**；pi-worktree 的 `getRepoRoot()` 即此实现）。**不要**用 `--show-toplevel`：它在 worktree 内返回的是 worktree 自身。
+
+**为什么必须锚到仓库根**：`.pi/` 通常被 gitignore，git worktree **各自持有独立 `.pi/`**——主仓库的项目级配置在成员 worktree 里**不可见**。锚在 `ctx.cwd` 会导致：① 在 worktree / 子目录里读不到仓库级配置；② 同一份声明要在每个 worktree 各配一遍。
+
+**副作用（需知情接受）**：该 `config.json` 变成主仓库与所有 worktree **共享**——偏好类字段（如「上次选择的策略」）从「每个 cwd 各存各的」变为「全仓库一致」。
+
+**门禁（自动化，别只靠人记）**：`npm run lint:config:anchor`（`scripts/check-config-compliance.ts --anchor --error`）检查下列**仓库级配置消费者**白名单里的每个配置解析点：
+
+| 要求                                     | 写法                                                        |
+| ---------------------------------------- | ----------------------------------------------------------- |
+| 显式锚仓库根                             | `{ cwd: repoRoot }`（值不得是 `process.cwd()` / `ctx.cwd`） |
+| 或显式声明目录作用域（偏好类配置才允许） | 调用点上方写 `// config-scope: session-cwd`                 |
+
+该门禁在 CI `config-compliance` job 与 pre-push 中**阻塞**。新增仓库级配置消费者时，把扩展路径加进 `scripts/check-config-compliance.ts` 的 `REPO_SCOPED_CONFIG_CONSUMERS` 白名单。
+
+> 首个采用者：pi-worktree 的「Worktree 组」声明（2026-09，`CONTEXT.md` 术语 `Worktree 组`）。
 
 > ⚠️ **pi-logger 例外**：pi-logger 是其他扩展依赖的基础设施，为避免循环依赖，保留自身配置加载机制，但搜索路径已对齐到标准 `extensions-data/pi-logger/config.json`。
 
