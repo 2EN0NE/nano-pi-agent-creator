@@ -24,12 +24,14 @@ test_it "expect: /ci-watch panel opens with 监控分支 as first item" <<'TEST'
   tui_expect_test "ci-watch,pi-logger" '
     # 打开面板
     send "/ci-watch\r"
-    sleep 1
+    # 就绪条件：等面板条目真的渲染出来（固定 sleep 在负载下会抢跑 → 假失败）
+    wait_for {监控分支}
+    sleep 0.5
 
     # 按 esc 关闭面板（模板收尾会自动 /quit 退出）
     send "\033"
     sleep 0.5
-  ' 15
+  ' 60
 
   if [[ "$TUI_EXIT_CODE" -ne 0 && "$TUI_EXIT_CODE" -ne 124 ]]; then
     echo "FAIL: unexpected exit code $TUI_EXIT_CODE"
@@ -77,8 +79,10 @@ GH
 
   tui_expect_test "ci-watch,pi-logger" '
     send "/ci-watch invalid@ref!\r"
-    sleep 2
-  ' 15
+    # 就绪条件：等校验拒绝提示出现（而不是赌 2s 内一定走完命令 handler）
+    wait_for {无效的引用}
+    sleep 0.5
+  ' 60
 
   if [[ "$TUI_EXIT_CODE" -ne 0 && "$TUI_EXIT_CODE" -ne 124 ]]; then
     echo "FAIL: unexpected exit code $TUI_EXIT_CODE"
@@ -140,11 +144,13 @@ GH
   tui_expect_test "ci-watch,pi-logger" '
     # 开始监控 main（mock gh 返回 pending → 进入轮询 sleep）
     send "/ci-watch main\r"
-    sleep 3
+    # 就绪条件：等「开始监控」通知真的出现（再 /reload 才算"在途"）
+    wait_for {开始监控}
+    sleep 1
     # 会话重载：session_shutdown → abort 在途轮询 → 代际检查
     send "/reload\r"
     sleep 4
-  ' 20
+  ' 60
 
   if [[ "$TUI_EXIT_CODE" -ne 0 && "$TUI_EXIT_CODE" -ne 124 ]]; then
     echo "FAIL: unexpected exit code $TUI_EXIT_CODE"

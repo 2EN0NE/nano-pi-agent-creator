@@ -10,7 +10,7 @@ test_it "expect: loads extension in TUI mode without crash" <<'TEST'
   tui_expect_test "pi-logger,permission-gate" '
     send "/permission-gate\r"
     sleep 3
-  ' 15
+  ' 12
 
   if [[ "$TUI_EXIT_CODE" -eq 0 ]] || [[ "$TUI_EXIT_CODE" -eq 124 ]]; then
     echo "PASS: TUI mode exited cleanly (code=$TUI_EXIT_CODE)"
@@ -27,7 +27,7 @@ test_it "expect: TUI mode produces pi-logger output [REVIEW]" <<'TEST'
   tui_expect_test "pi-logger,permission-gate" '
     send "/permission-gate\r"
     sleep 3
-  ' 15
+  ' 12
 
   local padded
   padded=$(printf '%03d' "$CASE_INDEX")
@@ -60,7 +60,7 @@ test_it "expect: TUI mode captures status bar content [REVIEW]" <<'TEST'
   tui_expect_test "pi-logger,permission-gate" '
     send "/permission-gate\r"
     sleep 3
-  ' 15
+  ' 12
 
   echo "TUI exit code: $TUI_EXIT_CODE"
   echo "TUI output size: $(wc -c <"$TUI_OUTPUT_FILE") bytes"
@@ -88,7 +88,7 @@ test_it "expect: /permission-gate directly opens panel with 6 tabs (ADR-0030)" <
     # （命令/工具/目录）只在「会话/项目/用户」层级下渲染 → 先切一层再断言两级 tab。
     send "\t"
     sleep 1
-  ' 20
+  ' 12
 
   tui_assert_contains "[会话]" "一级 tab 会话 渲染"
   tui_assert_contains "[项目]" "一级 tab 项目 渲染"
@@ -119,7 +119,7 @@ test_it "expect: Tab switches layer, settings tab renders toggles (ADR-0030)" <<
     send "\t"
     sleep 0.4
     sleep 1
-  ' 20
+  ' 12
 
   tui_assert_contains "权限门" "设置 tab 权限门开关 渲染"
   tui_assert_contains "动态策略" "设置 tab 动态策略开关 渲染"
@@ -135,11 +135,11 @@ test_it "expect: blocking confirmation tree renders for dangerous command (ADR-0
   tui_expect_test "pi-logger,permission-gate" '
     # 发送 prompt 触发 mock-llm 的 bash tool call（rm -rf，critical）
     send "clean up the temp directory\r"
-    sleep 6
+    sleep 3
     # 树状阻断框出现后，enter 放行
     send "\r"
     sleep 2
-  ' 30
+  ' 12
   unset MOCK_LLM_DANGEROUS_COMMAND
 
   tui_assert_contains "Permission Gate" "阻断框标题 渲染"
@@ -154,10 +154,10 @@ test_it "expect: multi-line command root is flattened, no render corruption" <<'
   export MOCK_LLM_DANGEROUS_COMMAND=$'for d in a b; do\n  rm -rf "./$d"\ndone'
   tui_expect_test "pi-logger,permission-gate" '
     send "clean up temp dirs\r"
-    sleep 6
+    sleep 3
     send "\r"
     sleep 2
-  ' 30
+  ' 12
   unset MOCK_LLM_DANGEROUS_COMMAND
 
   tui_assert_contains "Permission Gate" "多行命令阻断框标题 渲染"
@@ -175,14 +175,14 @@ test_it "expect: ctrl+shift+O 展开后 enter 仍可放行（展开态视觉人�
   export MOCK_LLM_DANGEROUS_COMMAND="rm -rf ./permission-gate-test-target"
   tui_expect_test "pi-logger,permission-gate" '
     send "clean up the temp directory\r"
-    sleep 6
+    sleep 3
     # 阻断框出现后，ctrl+shift+O（Kitty CSI-u：o(111) + shift|ctrl(6)）展开全貌
     send "\x1b\[111;6u"
     sleep 1
     # 展开态主操作仍生效：enter 放行
     send "\r"
     sleep 2
-  ' 30
+  ' 12
   unset MOCK_LLM_DANGEROUS_COMMAND
 
   tui_assert_contains "Permission Gate" "展开键路径下阻断框仍渲染"
@@ -197,7 +197,7 @@ test_it "expect: leaf add-as-strategy then same command auto-passes (ADR-0030)" 
   tui_expect_test "pi-logger,permission-gate" '
     # prompt 1：触发树状阻断框
     send "clean up the temp directory\r"
-    sleep 6
+    sleep 3
     # ↓ 选中叶子 → a 打开级别选择 → enter 确认(默认 session) → enter 放行
     send "\x1b\[B"
     sleep 0.4
@@ -206,11 +206,11 @@ test_it "expect: leaf add-as-strategy then same command auto-passes (ADR-0030)" 
     send "\r"
     sleep 0.6
     send "\r"
-    sleep 8
+    sleep 4
     # prompt 2：同命令 → manual strategy 命中 → 直接放行（无阻断框）
     send "clean up the temp directory again\r"
-    sleep 15
-  ' 60
+    sleep 8
+  ' 40
   unset MOCK_LLM_DANGEROUS_COMMAND
   unset MOCK_LLM_DANGEROUS_REPEAT
 
@@ -242,7 +242,7 @@ test_it "expect: session manual strategy survives /reload (ADR-0033) [REVIEW]" <
   tui_expect_test "pi-logger,permission-gate" '
     # prompt 1：触发树状阻断框
     send "clean up the reload target\r"
-    sleep 6
+    sleep 3
     # ↓ 选中叶子 → a 打开级别选择 → enter 确认(默认 session) → enter 放行
     send "\x1b\[B"
     sleep 0.4
@@ -251,14 +251,14 @@ test_it "expect: session manual strategy survives /reload (ADR-0033) [REVIEW]" <
     send "\r"
     sleep 0.6
     send "\r"
-    sleep 8
+    sleep 4
     # /reload：session_shutdown 解绑 + session_start 重新绑定，session 文件不删
     send "/reload\r"
     sleep 10
     # prompt 2：同命令 → session 层 manual strategy 跨 /reload 命中 → 自动放行
     send "clean up the reload target again\r"
-    sleep 15
-  ' 60
+    sleep 8
+  ' 40
   unset MOCK_LLM_DANGEROUS_COMMAND
   unset MOCK_LLM_DANGEROUS_REPEAT
 
@@ -283,11 +283,11 @@ test_it "expect: 多命中原因被审计记录 (sudo rm -rf /etc)" <<'TEST'
   export MOCK_LLM_DANGEROUS_COMMAND="sudo rm -rf /etc"
   tui_expect_test "pi-logger,permission-gate" '
     send "clean up system config\r"
-    sleep 6
+    sleep 3
     # enter 放行（详情页箭头键在 expect/PTY 下不可靠，命中明细由 audit 日志断言）
     send "\r"
     sleep 2
-  ' 30
+  ' 12
   unset MOCK_LLM_DANGEROUS_COMMAND
 
   tui_assert_contains "Permission Gate" "阻断框标题 渲染"

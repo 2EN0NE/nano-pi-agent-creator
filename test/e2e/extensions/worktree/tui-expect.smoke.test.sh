@@ -214,7 +214,9 @@ test_it "expect: merge to unpushed target succeeds (local-first)" <<'TEST'
     expect -re {Merge} { }
     sleep 1
     send \"\r\"
-    sleep 4
+    # 合并本身 <1s，慢的是 agent turn + 通知渲染；池化负载下 4s 会抢跑（实测假失败）。
+    # 提示语是动态 result.message，无法 wait_for，故给足固定余量（真护栏是下面的 git 断言）。
+    sleep 12
   " 20 "" "$test_repo"
 
   # 严格断言：wt 分支已合入 dev（本地 merge 成功，未 pull）
@@ -274,7 +276,9 @@ test_it "expect: merge to remote-behind target shows sync hint (local-first)" <<
     expect -re {落后远端} { }
     sleep 1
     send \"\r\"
-    sleep 4
+    # 合并本身 <1s，慢的是 agent turn + 通知渲染；池化负载下 4s 会抢跑（实测假失败）。
+    # 提示语是动态 result.message，无法 wait_for，故给足固定余量（真护栏是下面的 git 断言）。
+    sleep 12
   " 20 "" "$test_repo"
 
   # 严格断言：merge 成功（wt 分支已合入 dev）

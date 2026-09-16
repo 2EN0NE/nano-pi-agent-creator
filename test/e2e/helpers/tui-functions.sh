@@ -343,6 +343,7 @@ tui_run_pi_test() {
 		}
 		sleep 1
 
+		stage "teardown-done"
 	EXPECT
 
 	# 将输入脚本的每一行转换为 expect send 命令
@@ -380,6 +381,7 @@ tui_run_pi_test() {
 				exec echo "124" > "$ec_file"
 			}
 		}
+		stage "teardown-done"
 	EXPECT
 
 	chmod +x "$exp_file"
@@ -479,8 +481,17 @@ tui_assert_exit_code() {
 }
 
 # 清理 TUI 测试产生的临时文件
+#
+# 调试开关：E2E_TUI_KEEP_SANDBOX=1 保留沙箱（配合 TUI_SANDBOX_ROOT 固定路径），
+# 用于**事后验尸**——TUI 用例失败时沙箱里的 checkpoint 存储/锁文件、pi 会话文件、
+# 各扩展日志是判断"产品卡住 vs 测试断言错"的关键证据，删掉就无从取证。
+# 保留时会打印路径，便于直接查看。
 tui_cleanup() {
 	if [[ -n "$TUI_TEST_HOME" && -d "$TUI_TEST_HOME" ]]; then
+		if [[ "${E2E_TUI_KEEP_SANDBOX:-0}" == "1" ]]; then
+			echo "  [tui] E2E_TUI_KEEP_SANDBOX=1 → 保留沙箱: $TUI_TEST_HOME" >&2
+			return 0
+		fi
 		rm -rf "$TUI_TEST_HOME"
 		TUI_TEST_HOME=""
 	fi
@@ -643,6 +654,24 @@ tui_expect_test() {
 			}
 		}
 
+# 有界排空：把 PTY 待读输出读走，避免 pi 写满缓冲后同步阻塞（死锁）。
+# **必须"有时间限"或"有块数限"**：`-timeout 0 -re {.+} { exp_continue }` 单用是**无界**的——
+# 只要 pi 在流式输出（PI_TUI_DEBUG / 工具执行 / agent 活跃）就永远 exp_continue，
+# 调用方循环永远推进不了（实测 pi-session-tree case 003 因此挂满 300s 被预算杀掉）。
+# 本助手：无输出立即返回（-timeout 0），有输出最多读 max_chunks 块（break）→ 两个方向都有界。
+# 用法：drain_pty 20
+		proc drain_pty {max_chunks} {
+			set __drained 0
+			expect {
+				-timeout 0
+				-re {.+} {
+					if {[incr __drained] >= \$max_chunks} { break }
+					exp_continue
+				}
+				timeout { }
+			}
+		}
+
 		# ── 用户提供的交互命令 ──
 
 		$expect_commands
@@ -691,6 +720,7 @@ tui_expect_test() {
 				}
 			}
 		}
+		stage "teardown-done"
 	EXPECT
 
 	chmod +x "$exp_file"

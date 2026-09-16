@@ -69,6 +69,7 @@ test/e2e/     — 集成端到端测试（真实 Pi 进程）
 | 关注点             | 怎么用                                                                                                   |
 | ------------------ | -------------------------------------------------------------------------------------------------------- |
 | 预算覆盖           | `E2E_EXT_BUDGET_SEC=600` 或 `--ext-budget 600`；`0` = 禁用（仅排障）                                     |
+| 插件级例外         | `test/e2e/budget-overrides.conf`（`type/name=秒`，须写理由）；临商用 `E2E_EXT_BUDGET_OVERRIDES`          |
 | 看耗时             | `summary.md` → `## Time Budget`；`summary.json` → `cases[].duration_seconds`、模块 `duration_seconds`    |
 | 超时定位           | 用例 TUI 日志里最后一条 `[tui-stage]`（`expect-start` / `pi-ready-raw` / `pi-ready` / `commands-done`）  |
 | 合并用例的步骤轨迹 | `STEP_BEGIN` / `STEP_OK` / `FAIL_MARKER step=<id> reason=<...>`                                          |

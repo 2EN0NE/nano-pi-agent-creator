@@ -49,38 +49,69 @@ test_it "expect: /rewind 真实回退文件到旧 checkpoint 状态" <<'TEST'
     export GIT_TRACE_PERFORMANCE=1
   fi
 
+  # 结果导向断言：expect 内用 $E2E_PROJ 轮询 target.txt（TUI 中文文本逐帧打碎，不可断言）
+  export E2E_PROJ="$proj"
+
   tui_expect_test "pi-rewind,pi-logger" '
+    stage "prompt-sent"
     send "please modify the file\r"
-    # 等 agent 完成（mock 的最终文本），确保 checkpoint 已 finalize
-    expect { -re {Continuing\.} { } timeout { send_error "no agent response\n"; exit 124 } }
+    # 等 agent 真的跑完 mock bash：轮询它写的 marker 文件（比断言 PTY 文本稳，也防
+    # 「agent 从未改过文件 → 最终 v1 断言天然通过」的假阳性）。120s 内没等到即失败。
+    set timeout 120
+    set ran 0
+    for {set i 0} {$i < 30} {incr i} {
+      if {[file exists [file join $env(HOME) tool-ran.txt]]} { set ran 1; break }
+      # ⚠️ 轮询期间必须**持续读取 PTY**：只 sleep 不读会让 pi 的 TUI 写满 PTY 缓冲区
+      # （macOS PTY 缓冲很小）→ pi 同步阻塞在 write 上 → 事件循环停转 → mock 工具永不执行、
+      # exec 的 close 事件也不再触发（实测：整轮 120s 零输出、锁不释放）。
+      expect { -timeout 2 -re {.+} { exp_continue } timeout { } }
+      sleep 1
+    }
+    if {!$ran} { stage "TIMEOUT-agent-tool-ran"; send_error "agent never executed the mock bash tool\n"; exit 124 }
+    stage "agent-tool-ran"
     sleep 1
 
     # /rewind 打开 checkpoint 选择覆盖层；初始选中「(当前)」，↑ 移到最新 checkpoint
     send "/rewind\r"
-    expect { -re {Rewind Checkpoints} { } timeout { send_error "no rewind overlay\n"; exit 124 } }
+    set timeout 60
+    expect { -re {Rewind Checkpoints} { } timeout { stage "TIMEOUT-rewind-overlay"; send_error "no rewind overlay\n"; exit 124 } }
+    stage "rewind-overlay"
     sleep 1
     send "\033\[A"
     sleep 1
     send "\r"
 
-    # 恢复模式列表第 1 项为「恢复代码和会话」，末项为「仅恢复代码」。
-    # 连按 down 到末尾（列表不越界，多次按必落在末项）。用普通字符键 j（
-    # ExtensionSelectorComponent 显式支持 j/k），规避连续方向键在 PTY 下偶发丢键。
-    expect { -re {恢复模式} { } timeout { send_error "no restore mode list\n"; exit 124 } }
+    # 恢复模式列表由 pi 内置 ui.select 渲染：不渲染 title，且中文选项在 PTY 流里逐帧
+    # 打碎（实测「恢复模式」「恢复代码和会话」0 命中），故不做文本等待；本地覆盖层渲染
+    # 是毫秒级，固定 sleep 后直接确认默认项（第 1 项「恢复代码和会话」）。
+    sleep 2
+    send "\r"
+    stage "restore-mode-confirmed"
+
+    # target.txt 是 agent 刚写入的未提交改动 → safeCheckout 的 dirty guard 拒绝，
+    # 转入兜底选择器（英文标题，可稳定捕获）。
+    set timeout 60
+    expect { -re {Files cannot be restored safely} { } timeout { stage "TIMEOUT-dirty-fallback"; send_error "no dirty fallback selector\n"; exit 124 } }
+    stage "dirty-fallback"
     sleep 1
-    send "j"
-    sleep 0.5
-    send "j"
-    sleep 0.5
-    send "j"
-    sleep 0.5
+    # 内置 select 只认方向键（j/k 无效），↓ 到第 2 项「Force restore code and conversation」
+    send "\033\[B"
+    sleep 1
     send "\r"
 
-    # 等待「回退完成」通知（状态驱动）——不要用固定 sleep：沙箱冷启动 + 机器负载下
-    # 交互各阶段可能慢到分钟级，固定 sleep 会假阴性；由 expect 的 timeout 兜底报错。
-    expect { -re {回退完成} { } timeout { send_error "restore did not report completion\n"; exit 124 } }
+    # 结果导向等待：轮询 target.txt 真的回到 v1（替代不可靠的中文「回退完成」通知）。
+    set timeout 120
+    set restored 0
+    for {set i 0} {$i < 60} {incr i} {
+      if {[catch {exec cat [file join $env(E2E_PROJ) target.txt]} o] == 0 && $o eq "v1"} { set restored 1; break }
+      # 同上：等文件期间也要读走 PTY，否则阻塞 pi
+      expect { -timeout 2 -re {.+} { exp_continue } timeout { } }
+      sleep 1
+    }
+    if {!$restored} { stage "TIMEOUT-file-restored"; send_error "restore did not bring target.txt back to v1\n"; exit 124 }
+    stage "file-restored"
     sleep 1
-  ' 180 80 "$proj"
+  ' 240 80 "$proj"
 
   local rc=0
 

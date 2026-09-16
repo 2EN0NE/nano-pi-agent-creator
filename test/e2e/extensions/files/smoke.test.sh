@@ -223,29 +223,41 @@ TEST
 # ══════════════════════════════════════════════════════════════════════════════
 
 test_it "直接加载 files/index.ts 无报错" <<'TEST'
-  rm -f "$ROOT_DIR/.pi/extensions/smoke.test.ts"
-  cd "$ROOT_DIR"
-  pi -a --no-session -e "$ROOT_DIR/extensions/tui/files/index.ts" -p "/files" 2>&1
-  local exit_code=$?
-  [[ $exit_code -eq 0 ]] && echo "PASS: 直接加载成功" || echo "FAIL: exit code=$exit_code"
+  # ⚠️ 不得裸调 `pi -e <源码> -p <命令>`：实测它会起**真实 LLM 会话**
+  # （一次 /diff 用例：66 请求 / 46.9K 输入 / 30.3K 输出 / 250s，且绕过 CI 的 mock 注入
+  #  → 非 hermetic、烧钱、超预算）。统一走 run_pi_and_check：CI 下自动注入 mock-llm，
+  # 并以「pi 退出码 + 日志无 ERROR」判定"加载无报错"（--expect-no-error）。
+  if run_pi_and_check --extensions "pi-logger,files" --prompt "/files" --expect-no-error; then
+    echo "PASS: 直接加载成功"
+  else
+    echo "FAIL: 加载或执行报错（exit code=$PI_EXIT_CODE）"
+  fi
   exit 0
 TEST
 
 test_it "直接加载后 /diff 命令可执行" <<'TEST'
-  rm -f "$ROOT_DIR/.pi/extensions/smoke.test.ts"
-  cd "$ROOT_DIR"
-  pi -a --no-session -e "$ROOT_DIR/extensions/tui/files/index.ts" -p "/diff" 2>&1
-  local exit_code=$?
-  [[ $exit_code -eq 0 ]] && echo "PASS: /diff 直接加载成功" || echo "FAIL: exit code=$exit_code"
+  # ⚠️ 不得裸调 `pi -e <源码> -p <命令>`：实测它会起**真实 LLM 会话**
+  # （一次 /diff 用例：66 请求 / 46.9K 输入 / 30.3K 输出 / 250s，且绕过 CI 的 mock 注入
+  #  → 非 hermetic、烧钱、超预算）。统一走 run_pi_and_check：CI 下自动注入 mock-llm，
+  # 并以「pi 退出码 + 日志无 ERROR」判定"加载无报错"（--expect-no-error）。
+  if run_pi_and_check --extensions "pi-logger,files" --prompt "/diff" --expect-no-error; then
+    echo "PASS: /diff 直接加载成功"
+  else
+    echo "FAIL: 加载或执行报错（exit code=$PI_EXIT_CODE）"
+  fi
   exit 0
 TEST
 
 test_it "直接加载后 /changes 命令可执行" <<'TEST'
-  rm -f "$ROOT_DIR/.pi/extensions/smoke.test.ts"
-  cd "$ROOT_DIR"
-  pi -a --no-session -e "$ROOT_DIR/extensions/tui/files/index.ts" -p "/changes" 2>&1
-  local exit_code=$?
-  [[ $exit_code -eq 0 ]] && echo "PASS: /changes 直接加载成功" || echo "FAIL: exit code=$exit_code"
+  # ⚠️ 不得裸调 `pi -e <源码> -p <命令>`：实测它会起**真实 LLM 会话**
+  # （一次 /diff 用例：66 请求 / 46.9K 输入 / 30.3K 输出 / 250s，且绕过 CI 的 mock 注入
+  #  → 非 hermetic、烧钱、超预算）。统一走 run_pi_and_check：CI 下自动注入 mock-llm，
+  # 并以「pi 退出码 + 日志无 ERROR」判定"加载无报错"（--expect-no-error）。
+  if run_pi_and_check --extensions "pi-logger,files" --prompt "/changes" --expect-no-error; then
+    echo "PASS: /changes 直接加载成功"
+  else
+    echo "FAIL: 加载或执行报错（exit code=$PI_EXIT_CODE）"
+  fi
   exit 0
 TEST
 
@@ -275,7 +287,9 @@ test_it "多仓库环境中扩展可正常加载 [REVIEW]" <<'TEST'
   find . -maxdepth 2 -name .git -type d | sed 's|/\.git$||'
 
   cd "$multi_root"
-  pi -a --no-session -e "$ROOT_DIR/extensions/tui/files/index.ts" -p "/files" 2>&1
+  # 本用例必须在**指定 cwd**（多仓库目录）下加载源码扩展，故不走 run_pi_and_check（它会切到自己的沙箱 cwd）。
+  # 但必须**显式加载 mock-llm**：否则 pi 会起真实 LLM 会话（实测同类用例 66 请求 / 4.3M tokens / 174-250s）。
+  pi -a --no-session -e "$ROOT_DIR/test/e2e/helpers/mock-llm.ts" -e "$ROOT_DIR/extensions/tui/files/index.ts" -p "/files" 2>&1
   local exit_code=$?
 
   echo ""

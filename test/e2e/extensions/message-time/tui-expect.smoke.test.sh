@@ -44,7 +44,7 @@ test_it "expect: user and assistant each carry a [HH:MM:SS] line above their tex
     # 状态驱动：等 mock 回复真的渲染出来（固定 sleep 在负载下会假阴性）
     expect { -re {Mock LLM is ready\.} { } timeout { send_error "no mock reply\n"; exit 124 } }
     sleep 1
-  ' 180
+  ' 30
 
   txt="$TUI_TEST_HOME/visible.txt"
   visible_text_clean "$TUI_OUTPUT_FILE" > "$txt"
@@ -66,7 +66,7 @@ test_it "expect: replaying an old session renders dated forms (cross-year + same
     send "replay-fixture-alpha\r"
     expect { -re {Mock LLM is ready\.} { } timeout { send_error "no mock reply\n"; exit 124 } }
     sleep 1
-  ' 180
+  ' 30
 
   phase1_home="$TUI_TEST_HOME"
   sessions_dir="$phase1_home/home/.pi/agent/sessions"
@@ -119,7 +119,7 @@ PY
     # 状态驱动：等历史消息重绘完成再断言时间注记
     expect { -re {replay-fixture-alpha} { } timeout { send_error "replayed session not rendered\n"; exit 124 } }
     sleep 1
-  ' 180 "" "" "" "--session $fixture"
+  ' 30 "" "" "" "--session $fixture"
 
   txt="$TUI_TEST_HOME/visible.txt"
   visible_text_clean "$TUI_OUTPUT_FILE" > "$txt"
