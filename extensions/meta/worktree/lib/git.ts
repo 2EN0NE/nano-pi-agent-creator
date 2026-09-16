@@ -5,6 +5,7 @@ import { execSync, spawnSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createLogger } from '@zenone/pi-logger';
+import { tryResolveTargetBranch } from './target.js';
 
 const log = createLogger('pi-worktree');
 
@@ -17,8 +18,30 @@ export function getCurrentBranch(repoPath: string): string {
 			encoding: 'utf-8',
 		}).trim();
 	} catch {
-		return 'main';
+		// 不再回退到写死的分支名（ADR-0061）：返回空串，由调用方按「不匹配」处理
+		return '';
 	}
+}
+
+/**
+ * 检出分支。
+ *
+ * **必须走参数数组**：目标分支名可能来自 `origin/HEAD`（由被 clone 的远端决定），
+ * 而 git ref 名允许 `$()`、反引号等字符——字符串拼接形式会被 shell 解释成命令
+ * （CWE-78，实测 `evil$(touch${IFS}/tmp/x)` 可落文件）。用 argv 传递则始终字面处理。
+ */
+export function execCheckoutBranch(
+	repoPath: string,
+	branch: string,
+): { ok: boolean; message: string } {
+	const res = spawnSync('git', ['checkout', branch], {
+		cwd: repoPath,
+		encoding: 'utf-8',
+	});
+	if (res.status !== 0) {
+		return { ok: false, message: res.stderr?.trim() || `git checkout 退出码 ${res.status}` };
+	}
+	return { ok: true, message: '' };
 }
 
 /**
@@ -81,25 +104,8 @@ export function isRebaseConflictPaused(dir: string): boolean {
 	}
 }
 
-export function getDefaultBranch(repoPath: string): string | null {
-	try {
-		const ref = execSync('git symbolic-ref --quiet refs/remotes/origin/HEAD', {
-			cwd: repoPath,
-			encoding: 'utf-8',
-		}).trim();
-		return ref.replace(/^refs\/remotes\/origin\//, '') || null;
-	} catch {
-		for (const candidate of ['main', 'master']) {
-			const check = spawnSync(
-				'git',
-				['show-ref', '--verify', '--quiet', `refs/remotes/origin/${candidate}`],
-				{ cwd: repoPath, encoding: 'utf-8' },
-			);
-			if (check.status === 0) return candidate;
-		}
-		return null;
-	}
-}
+// 注：默认分支解析已统一收敛到 `target.ts` 的解析链（ADR-0061，本地优先、禁止写死分支名）。
+// 旧的 `getDefaultBranch`（远端优先、回退 main/master）在本次改造后已无调用者，故删除。
 
 // ── 状态采集 ──
 
@@ -145,8 +151,9 @@ export function listBranches(repoPath: string): string[] {
  * 流程（均在 sourceDir 内执行）：
  *   0. 前置检查：目录存在、HEAD 是 sourceBranch、无未提交修改
  *   1. 清理遗留的悬空 rebase 状态（rebase 状态在 worktree 自己的 gitDir 下）
- *   2. Fetch origin 获取最新 onto 分支
- *   3. git rebase origin/<ontoBranch>（worktree 内，当前 HEAD = sourceBranch）
+ *   2. 目标 ref（**本地优先**，ADR-0061）——默认 rebase 到**本地** ontoBranch；
+ *      仅当 ontoBranch 显式写 `origin/<b>`（或 opts.fetch）时才 fetch 并走远端
+ *   3. git rebase <ontoRef>（worktree 内，当前 HEAD = sourceBranch）
  *   4. 冲突 → 留在 rebase 冲突状态，不 abort；其他失败 → 报告
  */
 export function execRebase(
@@ -154,6 +161,7 @@ export function execRebase(
 	sourceBranch: string,
 	ontoBranch: string,
 	sourceDir: string,
+	opts?: { fetch?: boolean },
 ): { ok: boolean; message: string; conflicts: string[] } {
 	const git = (args: string[]) =>
 		spawnSync('git', args, { cwd: sourceDir, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 });
@@ -217,21 +225,23 @@ export function execRebase(
 		/* worktree dir inaccessible, skip dirty check */
 	}
 
-	// 1. Fetch origin 获取最新 onto 分支
-	const hasRemote = git(['remote', 'get-url', 'origin']).status === 0;
-	if (hasRemote) {
-		const fetch = git(['fetch', 'origin', ontoBranch, '--quiet']);
+	// 1. 目标 ref（**本地优先**，ADR-0061）：默认 rebase 到**本地** ontoBranch。
+	//    只有用户显式写 `origin/<b>`（或 opts.fetch 显式要求）时才碰远端。
+	const wantsRemote = ontoBranch.startsWith('origin/');
+	if (opts?.fetch || wantsRemote) {
+		const remoteBranch = wantsRemote ? ontoBranch.slice('origin/'.length) : ontoBranch;
+		const fetch = git(['fetch', 'origin', remoteBranch, '--quiet']);
 		if (fetch.status !== 0) {
 			return {
 				ok: false,
-				message: `Cannot fetch 'origin/${ontoBranch}': ${fetch.stderr?.trim() || 'unknown error'}`,
+				message: `Cannot fetch 'origin/${remoteBranch}': ${fetch.stderr?.trim() || 'unknown error'}`,
 				conflicts: [],
 			};
 		}
 	}
 
 	// 2. rebase（worktree 内执行，无需指定 branch——HEAD 即 sourceBranch）
-	const ontoRef = hasRemote ? `origin/${ontoBranch}` : ontoBranch;
+	const ontoRef = ontoBranch;
 	const rebase = git(['rebase', ontoRef]);
 
 	if (rebase.status === 0) {
@@ -375,10 +385,11 @@ export function popWorktreeStash(repoPath: string): boolean {
 }
 
 /**
- * 分支与 main 的 ahead/behind 数（本地对比，不依赖远端分支存在）。
+ * 分支相对**基准分支**的 ahead/behind 数（本地对比，不依赖远端分支存在）。
  *
- * 基准固定为 `main` 分支（而非 main checkout 的 HEAD），避免 main checkout
- * 停留在其他分支时语义漂移。分支名经参数数组传递，规避 shell 注入。
+ * 基准分支不再写死（ADR-0061）：`baseBranch` 缺省时经目标分支解析链求本地基准；
+ * 解析不出来则返回 {0,0}（调用方跳过显示，不猜测）。
+ * 分支名经参数数组传递，规避 shell 注入。
  */
 /** 远端 fetch 超时（毫秒）。fetch 走网络，给足时间避免误杀；挂起时 kill 并静默降级。 */
 export const REMOTE_FETCH_TIMEOUT_MS = 120_000;
@@ -386,13 +397,20 @@ export const REMOTE_FETCH_TIMEOUT_MS = 120_000;
 export function getAheadBehind(
 	repoPath: string,
 	branch: string,
+	baseBranch?: string,
 ): { ahead: number; behind: number } {
+	const base = baseBranch ?? tryResolveTargetBranch(repoPath)?.branch;
+	if (!base) return { ahead: 0, behind: 0 };
 	try {
-		const res = spawnSync('git', ['rev-list', '--left-right', '--count', `main...${branch}`], {
-			cwd: repoPath,
-			encoding: 'utf-8',
-			maxBuffer: 16 * 1024 * 1024,
-		});
+		const res = spawnSync(
+			'git',
+			['rev-list', '--left-right', '--count', `${base}...${branch}`],
+			{
+				cwd: repoPath,
+				encoding: 'utf-8',
+				maxBuffer: 16 * 1024 * 1024,
+			},
+		);
 		if (res.status !== 0) return { ahead: 0, behind: 0 };
 		const parts = (res.stdout || '').trim().split('\t');
 		return {
@@ -448,16 +466,16 @@ function runGitAsync(
  * 供 merge 前/后提示「本地落后远端 N 提交」使用（本地优先原则：只诊断、不自动同步）。
  *
  * ahead = 本地领先远端（有未 push 提交）；behind = 本地落后远端（远端有新提交）。
- * 内部 fetch origin <branch>（只读：更新 remote-tracking ref，不改本地分支/工作区），
- * 再 rev-list 对比 branch 与 origin/<branch>。
+ * **默认不 fetch**（ADR-0061 本地优先）：只读已有的 remote-tracking ref，可能略陈旧
+ * 但绝不联网；仅当显式 `opts.fetch` 时才更新远端引用。
  *
- * fetch 用异步 spawn（带超时 kill），不阻塞 TUI 事件循环；挂起（网络黑洞/VPN 断连）
+ * fetch（仅显式）用异步 spawn（带超时 kill），不阻塞 TUI 事件循环；挂起（网络黑洞/VPN 断连）
  * 时超时 kill 后 status=null → 静默 null，绝不冻结 merge 确认 UI。
  */
 export async function getRemoteAheadBehind(
 	repoPath: string,
 	branch: string,
-	timeoutMs = REMOTE_FETCH_TIMEOUT_MS,
+	opts?: { fetch?: boolean; timeoutMs?: number },
 ): Promise<{ ahead: number; behind: number } | null> {
 	try {
 		// 1. 是否有 remote origin（本地，快）
@@ -467,13 +485,15 @@ export async function getRemoteAheadBehind(
 		});
 		if (remote.status !== 0) return null;
 
-		// 2. fetch 远端分支（异步，只读；远端分支不存在时 git 报 couldn't find remote ref → null）
-		const fetch = await runGitAsync(
-			repoPath,
-			['fetch', 'origin', branch, '--quiet'],
-			timeoutMs,
-		);
-		if (fetch.status !== 0) return null;
+		// 2. 仅在显式要求时 fetch（默认只读本地已有的 remote-tracking ref）
+		if (opts?.fetch) {
+			const fetch = await runGitAsync(
+				repoPath,
+				['fetch', 'origin', branch, '--quiet'],
+				opts.timeoutMs ?? REMOTE_FETCH_TIMEOUT_MS,
+			);
+			if (fetch.status !== 0) return null;
+		}
 
 		// 3. 本地 vs 远端差距（本地，快）
 		const count = spawnSync(

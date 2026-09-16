@@ -713,30 +713,8 @@ describe('worktree git helpers', () => {
 		expect(branches).toContain('feature/helper-test');
 	});
 
-	it('getDefaultBranch returns null for repo without remote', async () => {
-		const { getDefaultBranch } = await import(resolve(EXT_LIB, 'git.ts'));
-		// 没有 remote 时，getDefaultBranch 无法知道默认分支
-		const defaultBranch = getDefaultBranch(repoDir);
-		expect(defaultBranch).toBeNull();
-	});
-
-	it('getDefaultBranch returns null for repo without origin/main remote ref', async () => {
-		const { getDefaultBranch } = await import(resolve(EXT_LIB, 'git.ts'));
-
-		// 创建没有 remote 的仓库
-		const bareDir = join(baseDir, 'no-remote-repo');
-		mkdirSync(bareDir, { recursive: true });
-		execSync('git init --initial-branch main -q', { cwd: bareDir });
-		writeFileSync(join(bareDir, 'f.txt'), 'f');
-		execSync('git add f.txt && git commit -m init -q', {
-			cwd: bareDir,
-		});
-
-		// 没有 remote 时，getDefaultBranch 检查 origin/HEAD 和 origin/main
-		// 两者都不存在时返回 null
-		const result = getDefaultBranch(bareDir);
-		expect(result).toBeNull();
-	});
+	// 注：默认分支解析的用例已随 `git.ts` 的 getDefaultBranch 删除一并移除——
+	// 解析链（本地优先、禁止写死分支名）由 worktree-target-resolution.test.ts 覆盖。
 
 	it('getDirtyCount returns 0 for clean repo', async () => {
 		const { getDirtyCount } = await import(resolve(EXT_LIB, 'git.ts'));
@@ -1099,6 +1077,88 @@ describe('worktree setup operations', () => {
 		const allNotes = notes.join(' ');
 		expect(allNotes).toContain('env');
 		expect(allNotes).toContain('symlink');
+	});
+});
+
+// ═══════════════════════════════════════════
+// 套件 5b：插件 symlink 的本地 exclude（`.pi/` 尾斜杠坑）
+// ═══════════════════════════════════════════
+// 背景：worktree 里的 `.pi` 是**符号链接**，而 `.gitignore` 常见的 `.pi/`（带尾斜杠）
+// 只匹配目录 → `git status` 报 `?? .pi` → `getDirtyCount > 0` → 组成员被候选层锁死，
+// 组合并/同步全部做不了。修复：创建 symlink 后把路径登记到 `.git/info/exclude`。
+describe('worktree 插件 symlink 的本地 exclude', () => {
+	let baseDir: string;
+
+	beforeAll(() => {
+		baseDir = resolve(tmpdir(), 'pi-wt-exclude-test-' + Date.now());
+		mkdirSync(baseDir, { recursive: true });
+	});
+
+	afterAll(() => {
+		rmSync(baseDir, { recursive: true, force: true });
+	});
+
+	/** 建仓库（带指定 .gitignore）+ 一个已存在的 `.pi` 源目录 + 一个链式 worktree */
+	function setupFixture(name: string, ignoreLine: string): { repo: string; wt: string } {
+		const repo = join(baseDir, name);
+		mkdirSync(repo, { recursive: true });
+		execSync('git init --initial-branch main -q', { cwd: repo });
+		writeFileSync(join(repo, 'README.md'), `# ${name}\n`);
+		writeFileSync(join(repo, '.gitignore'), `${ignoreLine}\nnode_modules/\n`);
+		execSync('git add README.md .gitignore && git commit -m init -q', { cwd: repo });
+		// 模拟 pi 在本仓留下的数据目录（未跟踪）
+		mkdirSync(join(repo, '.pi', 'extensions-data'), { recursive: true });
+		writeFileSync(join(repo, '.pi', 'extensions-data', 'x.json'), '{}\n');
+		const wt = join(baseDir, `${name}-wt`);
+		execSync(`git worktree add ${wt} -b wt/${name} -q`, { cwd: repo });
+		return { repo, wt };
+	}
+
+	function excludeLines(repo: string): string[] {
+		const file = join(repo, '.git', 'info', 'exclude');
+		if (!existsSync(file)) return [];
+		return readFileSync(file, 'utf-8')
+			.split('\n')
+			.map((l: string) => l.trim())
+			.filter((l: string) => l !== '');
+	}
+
+	it('`.gitignore` 写成 `.pi/`（只匹配目录）时，symlink 不再被当成未跟踪改动', async () => {
+		const { setupSymlinkPaths } = await import(resolve(EXT_LIB, 'setup.ts'));
+		const { getDirtyCount } = await import(resolve(EXT_LIB, 'git.ts'));
+		const { repo, wt } = setupFixture('slash-repo', '.pi/');
+
+		const results = setupSymlinkPaths(repo, wt, ['.pi']);
+
+		expect(results).toEqual(['.pi: symlinked']);
+		expect(existsSync(join(wt, '.pi'))).toBe(true);
+		// 关键断言：修复前这里是 `?? .pi`
+		expect(execSync('git status --porcelain', { cwd: wt, encoding: 'utf-8' }).trim()).toBe('');
+		expect(getDirtyCount(wt)).toBe(0);
+		expect(excludeLines(repo)).toContain('.pi');
+	});
+
+	it('`.gitignore` 已写对（`.pi` 无斜杠）时不产生冗余 exclude 条目', async () => {
+		const { setupSymlinkPaths } = await import(resolve(EXT_LIB, 'setup.ts'));
+		const { repo, wt } = setupFixture('plain-repo', '.pi');
+
+		setupSymlinkPaths(repo, wt, ['.pi']);
+
+		expect(excludeLines(repo)).not.toContain('.pi');
+		expect(execSync('git status --porcelain', { cwd: wt, encoding: 'utf-8' }).trim()).toBe('');
+	});
+
+	it('重复调用不重复写入（幂等）', async () => {
+		const { setupSymlinkPaths, ensureLocalExclude } = await import(
+			resolve(EXT_LIB, 'setup.ts')
+		);
+		const { repo, wt } = setupFixture('idem-repo', '.pi/');
+
+		setupSymlinkPaths(repo, wt, ['.pi']);
+		ensureLocalExclude(wt, ['.pi']);
+		setupSymlinkPaths(repo, wt, ['.pi']); // dest 已存在 → skip，且不重写 exclude
+
+		expect(excludeLines(repo).filter((l: string) => l === '.pi')).toHaveLength(1);
 	});
 });
 

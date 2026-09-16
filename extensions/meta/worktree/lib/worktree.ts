@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { createLogger } from '@zenone/pi-logger';
 import type { OpResult, SymlinkSelections } from '../types.js';
 import { getWorktreePath, resolveWorktreePath, getManagedWorktrees } from './paths.js';
-import { getDefaultBranch } from './git.js';
+import { resolveTargetBranch, describeTarget, type ResolvedTarget } from './target.js';
 import { runWorktreeSetup } from './setup.js';
 import type { NodeModulesStrategy } from '../types.js';
 import { getNamePool, constellationOf } from '../stars.js';
@@ -43,6 +43,7 @@ export function createWorktree(
 	name: string,
 	nodeModulesStrat?: NodeModulesStrategy,
 	selections?: SymlinkSelections,
+	opts?: { baseRef?: string },
 ): OpResult {
 	const targetDir = getWorktreePath(repoRoot, name);
 
@@ -50,10 +51,21 @@ export function createWorktree(
 		return { ok: false, message: `Worktree '${name}' already exists at ${targetDir}` };
 
 	const newBranch = `wt/${name}`;
-	const defaultBranch = getDefaultBranch(repoRoot);
-	const addArgs = defaultBranch
-		? ['worktree', 'add', '-b', newBranch, targetDir, `origin/${defaultBranch}`]
-		: ['worktree', 'add', '-b', newBranch, targetDir];
+	// 基点：显式 baseRef（如组声明）→ 否则经解析链（**本地优先**，ADR-0061）。
+	// 不再拼 `origin/<default>`：远端只在用户显式写 `origin/<b>` 时参与。
+	let base: ResolvedTarget;
+	try {
+		base = resolveTargetBranch(repoRoot, { baseRef: opts?.baseRef });
+	} catch (err) {
+		return { ok: false, message: err instanceof Error ? err.message : String(err) };
+	}
+	const addArgs = ['worktree', 'add', '-b', newBranch, targetDir, base.branch];
+	log.info('creating worktree', {
+		name,
+		base: base.branch,
+		baseSource: base.source,
+		isLocal: base.isLocal,
+	});
 
 	const nmStrategy = (nodeModulesStrat || selections?.nodeModulesStrategy) ?? 'none';
 
@@ -87,7 +99,7 @@ export function createWorktree(
 	const setupNotes = runWorktreeSetup(repoRoot, targetDir, nmStrategy, selections);
 	return {
 		ok: true,
-		message: `Created '${name}' → ${newBranch}${defaultBranch ? ` (from origin/${defaultBranch})` : ''}\n  ${setupNotes.join('\n  ')}`,
+		message: `Created '${name}' → ${newBranch} (from ${describeTarget(base)})\n  ${setupNotes.join('\n  ')}`,
 		path: targetDir,
 	};
 }
@@ -182,11 +194,8 @@ export function findMergedWorktrees(
 	);
 	if (wts.length === 0) return [];
 
-	// 单次 fetch 同步所有远程状态（而非每个分支各一次）
-	spawnSync('git', ['fetch', 'origin', '--quiet'], {
-		cwd: repoRoot,
-		encoding: 'utf-8',
-	});
+	// 本地优先（ADR-0061）：**不 fetch**。只读已存在的 remote-tracking ref；
+	// 宁可漏判（远端新合并的分支需用户手动 fetch 后重跑），也不隐式联网。
 
 	return wts
 		.filter((wt) => {

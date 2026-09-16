@@ -1,11 +1,11 @@
 /**
  * pi-worktree — 只读同步差距诊断测试（getRemoteAheadBehind）
  *
- * 本地优先原则：merge 不自动同步远端，但提供只读诊断提示「本地落后远端 N 提交」。
- * getRemoteAheadBehind 只读（fetch/rev-list），无 remote、远端分支不存在、网络失败时
- * 返回 null（静默，绝不报错）。
+ * 本地优先原则（ADR-0061）：**默认不 fetch**——只读已有的 remote-tracking ref（可能
+ * 略陈旧但绝不联网），仅当显式传 `{ fetch: true }` 时才联网更新远端引用。
+ * 无 remote、远端分支不存在、网络失败时返回 null（静默，绝不报错）。
  *
- * fetch 用异步 spawn（带超时 kill），不阻塞 TUI 事件循环——这是本地优先改造的关键约束。
+ * fetch（仅显式）用异步 spawn（带超时 kill），不阻塞 TUI 事件循环。
  * 远端用 file:// bare repo 模拟（离线、无网络依赖）。
  * git 身份由 test/vitest/setup/git-ident.ts 通过环境变量注入。
  */
@@ -106,13 +106,13 @@ describe('getRemoteAheadBehind（只读同步差距诊断）', () => {
 		rmSync(baseDir, { recursive: true, force: true });
 	});
 
-	it('远端领先本地（远端有新提交）→ behind=1', async () => {
+	it('远端领先本地（本地 remote-tracking ref 陈旧）→ 默认不 fetch，报 0/0 而不联网', async () => {
 		const baseDir = resolve(tmpdir(), 'pi-wt-rab4-' + Date.now());
 		const repoDir = createGitRepo(baseDir, 'repo');
 		const remoteDir = createBareRemote(baseDir, 'origin');
 		execSync(`git remote add origin file://${remoteDir}`, { cwd: repoDir });
 		execSync(`git push -u origin main -q`, { cwd: repoDir });
-		// 另一个 clone push 提交到 origin，使远端领先
+		// 另一个 clone push 提交到 origin，使远端领先（本地 origin/main 未更新）
 		const otherDir = join(baseDir, 'other');
 		execSync(`git clone file://${remoteDir} ${otherDir} -q`);
 		writeFileSync(join(otherDir, 'remote.txt'), 'remote\n');
@@ -120,7 +120,29 @@ describe('getRemoteAheadBehind（只读同步差距诊断）', () => {
 		execSync('git push origin main -q', { cwd: otherDir });
 
 		const { getRemoteAheadBehind } = await import(resolve(EXT_LIB, 'git.ts'));
-		expect(await getRemoteAheadBehind(repoDir, 'main')).toEqual({ ahead: 0, behind: 1 });
+		// 默认：只读本地已知的 origin/main（= 本地 main）→ 0/0，绝不联网
+		expect(await getRemoteAheadBehind(repoDir, 'main')).toEqual({ ahead: 0, behind: 0 });
+
+		rmSync(baseDir, { recursive: true, force: true });
+	});
+
+	it('显式 fetch: true → 联网更新后 behind=1', async () => {
+		const baseDir = resolve(tmpdir(), 'pi-wt-rab4b-' + Date.now());
+		const repoDir = createGitRepo(baseDir, 'repo');
+		const remoteDir = createBareRemote(baseDir, 'origin');
+		execSync(`git remote add origin file://${remoteDir}`, { cwd: repoDir });
+		execSync(`git push -u origin main -q`, { cwd: repoDir });
+		const otherDir = join(baseDir, 'other');
+		execSync(`git clone file://${remoteDir} ${otherDir} -q`);
+		writeFileSync(join(otherDir, 'remote.txt'), 'remote\n');
+		execSync('git add remote.txt && git commit -m remote -q', { cwd: otherDir });
+		execSync('git push origin main -q', { cwd: otherDir });
+
+		const { getRemoteAheadBehind } = await import(resolve(EXT_LIB, 'git.ts'));
+		expect(await getRemoteAheadBehind(repoDir, 'main', { fetch: true })).toEqual({
+			ahead: 0,
+			behind: 1,
+		});
 
 		rmSync(baseDir, { recursive: true, force: true });
 	});
@@ -155,7 +177,9 @@ describe('getRemoteAheadBehind（只读同步差距诊断）', () => {
 			return realSpawn.current(cmd, args as string[], _opts);
 		});
 
-		expect(await getRemoteAheadBehind(repoDir, 'main', 50)).toBeNull();
+		expect(
+			await getRemoteAheadBehind(repoDir, 'main', { fetch: true, timeoutMs: 50 }),
+		).toBeNull();
 
 		rmSync(baseDir, { recursive: true, force: true });
 	});

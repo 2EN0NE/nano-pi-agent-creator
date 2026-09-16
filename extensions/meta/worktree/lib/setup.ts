@@ -1,8 +1,15 @@
 /**
  * pi-worktree — 环境创建时设置（symlink、node_modules、setup 脚本）
  */
-import { existsSync, readdirSync, symlinkSync, mkdirSync } from 'node:fs';
-import { join, basename, dirname } from 'node:path';
+import {
+	existsSync,
+	readdirSync,
+	symlinkSync,
+	mkdirSync,
+	readFileSync,
+	appendFileSync,
+} from 'node:fs';
+import { join, basename, dirname, isAbsolute } from 'node:path';
 import { spawnSync, spawn, execSync } from 'node:child_process';
 import { createLogger } from '@zenone/pi-logger';
 import type { NodeModulesStrategy, SymlinkSelections } from '../types.js';
@@ -115,6 +122,7 @@ export function setupEnvFiles(repoRoot: string, worktreePath: string): string[] 
 	} catch {
 		/* skip */
 	}
+	ensureLocalExclude(worktreePath, linked);
 	return linked;
 }
 
@@ -142,6 +150,79 @@ function runSetupScript(repoRoot: string, worktreePath: string): { ok: boolean; 
 	};
 }
 
+// ── 仓库本地 exclude（插件自己造的符号链接，不该被当成「未跟踪改动」）──
+
+/** 仓库本地 exclude 文件（`.git/info/exclude`，未跟踪、只影响本地工作区） */
+function localExcludeFile(worktreePath: string): string | null {
+	const res = spawnSync('git', ['rev-parse', '--git-path', 'info/exclude'], {
+		cwd: worktreePath,
+		encoding: 'utf-8',
+	});
+	if (res.status !== 0) return null;
+	const p = (res.stdout || '').trim();
+	if (!p) return null;
+	return isAbsolute(p) ? p : join(worktreePath, p);
+}
+
+/**
+ * 把「本插件刚刚 symlink 进来的路径」登记到仓库本地 exclude（`.git/info/exclude`）。
+ *
+ * 解决什么问题：worktree 里的 `.pi` / `.env` 是**符号链接**，而 `.gitignore` 里常见的
+ * 带尾斜杠写法 `.pi/` **只匹配目录、匹配不到符号链接** → `git status` 报 `?? .pi` →
+ * 成员被 `getDirtyCount` 判为「脏」→ 组的合并/同步在候选层被锁死（本仓根 .gitignore 的
+ * 注释记录了同一坑）。插件造的东西不该看起来像用户的未提交改动，故在此登记。
+ *
+ * 只登记**确实刚创建**且**尚未被现有规则忽略**的路径，因此：
+ *   - `.gitignore` 已写对（`.pi`，无斜杠）的仓库 ⇒ 不产生任何冗余条目
+ *   - 重复调用（重建 worktree / 重跑 setup）⇒ 幂等，不重复写入
+ *
+ * @returns 本次实际新增的条目（无变化时为空数组）
+ */
+export function ensureLocalExclude(worktreePath: string, relativePaths: string[]): string[] {
+	if (relativePaths.length === 0) return [];
+	const file = localExcludeFile(worktreePath);
+	if (!file) return [];
+
+	let existing = '';
+	try {
+		existing = existsSync(file) ? readFileSync(file, 'utf8') : '';
+	} catch (err) {
+		log.warn('read local exclude failed', { error: String(err), file });
+		return [];
+	}
+	const known = new Set(
+		existing
+			.split('\n')
+			.map((l) => l.trim())
+			.filter((l) => l !== ''),
+	);
+
+	const added: string[] = [];
+	for (const rel of relativePaths) {
+		if (known.has(rel)) continue;
+		// 已被 .gitignore 等规则忽略 → 不必登记
+		const ignored =
+			spawnSync('git', ['check-ignore', '-q', rel], { cwd: worktreePath }).status === 0;
+		if (ignored) continue;
+		added.push(rel);
+	}
+	if (added.length === 0) return [];
+
+	try {
+		mkdirSync(dirname(file), { recursive: true });
+		const prefix = existing === '' || existing.endsWith('\n') ? '' : '\n';
+		appendFileSync(
+			file,
+			`${prefix}# pi-worktree: 插件创建的环境符号链接（避免被当成未跟踪改动）\n${added.join('\n')}\n`,
+		);
+	} catch (err) {
+		log.warn('write local exclude failed', { error: String(err), file, added });
+		return [];
+	}
+	log.debug('local exclude updated', { file, added });
+	return added;
+}
+
 // ── 通用 symlink ──
 
 /**
@@ -156,6 +237,7 @@ export function setupSymlinkPaths(
 	relativePaths: string[],
 ): string[] {
 	const results: string[] = [];
+	const linked: string[] = [];
 	for (const relPath of relativePaths) {
 		const src = join(repoRoot, relPath);
 		const dest = join(worktreePath, relPath);
@@ -174,10 +256,13 @@ export function setupSymlinkPaths(
 			}
 			symlinkSync(src, dest);
 			results.push(`${relPath}: symlinked`);
+			linked.push(relPath);
 		} catch (err) {
 			results.push(`${relPath}: failed (${(err as Error).message})`);
 		}
 	}
+	// 只对**确实被创建**的 symlink 登记 exclude（否则它们在 git status 里是 ?? 条目）
+	ensureLocalExclude(worktreePath, linked);
 	return results;
 }
 
