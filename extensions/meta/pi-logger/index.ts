@@ -24,7 +24,6 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { resolveConfigPaths } from '@zenone/pi-config';
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
 import { TitleBar } from '../../../src/tui/helpers.js';
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
@@ -43,6 +42,7 @@ import {
 	getEffectiveConfig,
 	shouldLog,
 	shouldAppend,
+	resolveLoggerConfigPaths,
 } from './config.js';
 import { initFileAppender, writeFileLog, getLogDir } from './appenders/file-appender.js';
 import { writeConsoleLog } from './appenders/console-appender.js';
@@ -275,8 +275,8 @@ async function interactivePersist(
 	loggerName: string,
 	level: LogLevel,
 ): Promise<void> {
-	const projectPath = resolveConfigPaths('pi-logger', { cwd: ctx.cwd }).projectFile;
-	const globalPath = resolveConfigPaths('pi-logger').userFile;
+	const projectPath = resolveLoggerConfigPaths(ctx.cwd).projectFile;
+	const globalPath = resolveLoggerConfigPaths(process.cwd()).userFile;
 
 	const items: SelectItem[] = [
 		{

@@ -22,13 +22,56 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { resolveConfigPaths } from '@zenone/pi-config';
 
 // ============================================================================
 // Config file name
 // ============================================================================
 
-const CONFIG_FILE = 'pi-logger.json';
+/**
+ * 用户级 / 项目级配置文件名。
+ *
+ * **必须与 @zenone/pi-config 标准一致（`config.json`）**：本模块为破 import 环自带
+ * 路径解析（见 resolveLoggerConfigPaths），文件名写错会让用户级/项目级配置**静默失效**
+ * （见 test/vitest/extensions/pi-logger-config-layering.test.ts 的漂移哨兵用例）。
+ */
+const CONFIG_FILE = 'config.json';
+
+/** 扩展自带的**内置默认**文件名（随扩展目录分发，沿用历史命名 pi-logger.json） */
+const BUNDLED_CONFIG_FILE = 'pi-logger.json';
+
+/** 双层配置文件路径（用户级 / 项目级） */
+export interface LoggerConfigPaths {
+	userDir: string;
+	userFile: string;
+	projectDir: string;
+	projectFile: string;
+}
+
+/**
+ * 解析双层配置文件路径。
+ *
+ * **自带实现，不 import @zenone/pi-config。** 因为 pi-config / pi-state 会在模块级
+ * import pi-logger 的 `createLogger`，而本模块被 `api.ts` 静态依赖；若这里用
+ * pi-config，就会形成
+ *   pi-logger/api → config → pi-config → pi-state → pi-logger/api
+ * 的环。jiti 以 `moduleCache: false` 加载扩展，环上的模块会被**重复求值**，
+ * 从而读到尚未初始化的 `let` 而抛 TDZ（实测：`Cannot access '_runtimeConfig'
+ * before initialization` / `Cannot access 'LOGGER_NAMES'`）。
+ *
+ * 路径与 pi-config 标准**完全一致**：
+ *   - 用户级 `<home>/.pi/agent/extensions-data/<plugin>/config.json`
+ *   - 项目级 `<cwd>/.pi/extensions-data/<plugin>/config.json`
+ */
+export function resolveLoggerConfigPaths(cwd: string, homeDir = homedir()): LoggerConfigPaths {
+	const userDir = join(homeDir, '.pi', 'agent', 'extensions-data', 'pi-logger');
+	const projectDir = join(cwd, '.pi', 'extensions-data', 'pi-logger');
+	return {
+		userDir,
+		userFile: join(userDir, CONFIG_FILE),
+		projectDir,
+		projectFile: join(projectDir, CONFIG_FILE),
+	};
+}
 
 // ============================================================================
 // Default configuration (embedded in the plugin)
@@ -171,8 +214,8 @@ export function loadConfiguration(cwd: string): void {
 	// Determine plugin's own directory (where this module lives)
 	const pluginDir = dirname(fileURLToPath(import.meta.url));
 
-	const bundledPath = join(pluginDir, CONFIG_FILE);
-	const paths = resolveConfigPaths('pi-logger', { cwd });
+	const bundledPath = join(pluginDir, BUNDLED_CONFIG_FILE);
+	const paths = resolveLoggerConfigPaths(cwd);
 
 	// Load in priority order (later overrides earlier)
 	let merged: LoggerRuntimeConfig = deepClone(DEFAULT_CONFIG);
