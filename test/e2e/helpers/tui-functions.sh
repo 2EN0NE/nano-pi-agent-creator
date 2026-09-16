@@ -654,12 +654,12 @@ tui_expect_test() {
 			}
 		}
 
-# 有界排空：把 PTY 待读输出读走，避免 pi 写满缓冲后同步阻塞（死锁）。
-# **必须"有时间限"或"有块数限"**：`-timeout 0 -re {.+} { exp_continue }` 单用是**无界**的——
-# 只要 pi 在流式输出（PI_TUI_DEBUG / 工具执行 / agent 活跃）就永远 exp_continue，
-# 调用方循环永远推进不了（实测 pi-session-tree case 003 因此挂满 300s 被预算杀掉）。
-# 本助手：无输出立即返回（-timeout 0），有输出最多读 max_chunks 块（break）→ 两个方向都有界。
-# 用法：drain_pty 20
+		# 有界排空：把 PTY 待读输出读走，避免 pi 写满缓冲后同步阻塞（死锁）。
+		# **必须"有时间限"或"有块数限"**：\$(-timeout 0 -re {.+} { exp_continue }) 单用是**无界**的——
+		# 只要 pi 在流式输出（PI_TUI_DEBUG / 工具执行 / agent 活跃）就永远 exp_continue，
+		# 调用方循环永远推进不了（实测 pi-session-tree case 003 因此挂满 300s 被预算杀掉）。
+		# 本助手：无输出立即返回（-timeout 0），有输出最多读 max_chunks 块（break）→ 两个方向都有界。
+		# 用法：drain_pty 20
 		proc drain_pty {max_chunks} {
 			set __drained 0
 			expect {

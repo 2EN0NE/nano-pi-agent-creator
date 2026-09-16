@@ -53,12 +53,14 @@ extensions/org=600   # 25 smoke + 8 TUI 全要起真实 tmux 成员 + 真实 pi 
 
 **判定差异**：
 
-| 场景                                        | 超预算结果                                                                          |
-| ------------------------------------------- | ----------------------------------------------------------------------------------- |
-| 独占机器（无其它 e2e、load/CPU < 1）        | `FAIL [BUDGET]`，计入退出码（默认门禁行为）                                         |
-| 机器争用中                                  | `WARN [BUDGET]`，**不计失败**；`summary.json` 记 `budget_warnings` + `contention{}` |
-| 任意场景 + `E2E_BUDGET_STRICT=1`（CI 建议） | 一律 `FAIL [BUDGET]`（CI 独占机 → 讨论争用无意义）                                  |
+| 场景                                          | 超预算结果                                                                          |
+| --------------------------------------------- | ----------------------------------------------------------------------------------- |
+| 独占机器（无其它 e2e、load/CPU < 1）          | `FAIL [BUDGET]`，计入退出码（默认门禁行为）                                         |
+| 机器争用中                                    | `WARN [BUDGET]`，**不计失败**；`summary.json` 记 `budget_warnings` + `contention{}` |
+| 任意场景 + `E2E_BUDGET_STRICT=1`（CI 已启用） | 一律 `FAIL [BUDGET]`（CI 独占机 → 讨论争用无意义）                                  |
 
+> CI 的三个 e2e job（分片矩阵 / `e2e-worktree` / `e2e-permission-gate-smoke`）均已设
+> `E2E_BUDGET_STRICT=1`，因此**争用降级在 CI 上不生效**——超预算即红。
 > 只降级**超预算**判定；`[TIMEOUT]`（worker 被 kill = 用例没跑完）在任何情况下都仍是失败。
 > 争用时想看真实数字：等其它 e2e 结束再跑，或 `E2E_EXT_BUDGET_SEC=0` 只观察不判定。
 

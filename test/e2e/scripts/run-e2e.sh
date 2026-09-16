@@ -112,6 +112,8 @@ SMOKE_ONLY=false
 TARGET_CASE=""
 SHARD_INDEX=""
 SHARD_TOTAL=""
+# --exclude：全量/shard 模式下跳过的模块（逗号分隔）。供 CI 避免与专用 job 重复跑。
+EXCLUDE_MODULES=${E2E_EXCLUDE_MODULES:-}
 
 usage() {
 	cat <<'EOF'
@@ -133,6 +135,10 @@ Options:
   --shard <N/M>       Run only the N-th shard (0-based) of M total shards.
                        Deterministically partitions the full module set so CI
                        can split the long full e2e run into parallel jobs.
+  --exclude <list>    Comma-separated module names to skip in full/shard runs
+                       (e.g. "worktree,permission-gate"). Modules covered by a
+                       dedicated CI job should be listed here to avoid double runs.
+                       Explicit --ext/--skill targets ignore this option.
   -h, --help          Show this help
 
 Without options, runs all test modules (smoke.test.sh only).
@@ -249,6 +255,10 @@ while [[ $# -gt 0 ]]; do
 		fi
 		shift 2
 		;;
+	--exclude)
+		EXCLUDE_MODULES="$2"
+		shift 2
+		;;
 	-h | --help) usage ;;
 	*)
 		echo "Unknown option: $1" >&2
@@ -279,6 +289,17 @@ if [[ -n "$SHARD_INDEX" ]]; then
 else
 	_shard_match() { return 0; }
 fi
+
+# 是否选中该模块：先看 --exclude 排除清单，再看 shard 分桶（显式 --ext 路径不走这里）。
+_module_selected() {
+	local name="$1"
+	if [[ -n "$EXCLUDE_MODULES" ]]; then
+		case ",$EXCLUDE_MODULES," in
+		*",$name,"*) return 1 ;;
+		esac
+	fi
+	_shard_match "$name"
+}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 测试框架 API（在 source 测试文件前定义）
@@ -1382,7 +1403,7 @@ run_target() {
 		for d in "$TEST_DIR/$type_dir"/*/; do
 			local bn
 			bn=$(basename "$d")
-			if ! _shard_match "$bn"; then continue; fi
+			if ! _module_selected "$bn"; then continue; fi
 			local tf="$d/smoke.test.sh"
 			if [[ -f "$tf" ]]; then
 				add_task "$type_dir" "$bn" "$tf"
@@ -1395,7 +1416,7 @@ run_target() {
 			for d in "$TEST_DIR/$type_dir"/*/; do
 				local bn
 				bn=$(basename "$d")
-				if ! _shard_match "$bn"; then continue; fi
+				if ! _module_selected "$bn"; then continue; fi
 				local tf="$d/tui-expect.smoke.test.sh"
 				if [[ -f "$tf" ]]; then
 					add_task "$type_dir" "$bn" "$tf"
@@ -1408,7 +1429,7 @@ run_target() {
 		for d in "$TEST_DIR/$type_dir"/*/; do
 			local bn
 			bn=$(basename "$d")
-			if ! _shard_match "$bn"; then continue; fi
+			if ! _module_selected "$bn"; then continue; fi
 			if $SMOKE_ONLY; then continue; fi
 			local tf="$d/tui-integration.test.exp"
 			if [[ -f "$tf" ]]; then

@@ -66,14 +66,16 @@ test/e2e/     — 集成端到端测试（真实 Pi 进程）
 **单插件 e2e 总耗时硬预算 300s，超出即判失败**——要么用例挂起/等待异常，要么用例冗余需精简。
 完整规范见 [`docs/e2e-performance.md`](../docs/e2e-performance.md)。
 
-| 关注点             | 怎么用                                                                                                   |
-| ------------------ | -------------------------------------------------------------------------------------------------------- |
-| 预算覆盖           | `E2E_EXT_BUDGET_SEC=600` 或 `--ext-budget 600`；`0` = 禁用（仅排障）                                     |
-| 插件级例外         | `test/e2e/budget-overrides.conf`（`type/name=秒`，须写理由）；临商用 `E2E_EXT_BUDGET_OVERRIDES`          |
-| 看耗时             | `summary.md` → `## Time Budget`；`summary.json` → `cases[].duration_seconds`、模块 `duration_seconds`    |
-| 超时定位           | 用例 TUI 日志里最后一条 `[tui-stage]`（`expect-start` / `pi-ready-raw` / `pi-ready` / `commands-done`）  |
-| 合并用例的步骤轨迹 | `STEP_BEGIN` / `STEP_OK` / `FAIL_MARKER step=<id> reason=<...>`                                          |
-| 结果统计           | 文件驱动 `.results/<type>__<name>.tsv` → 主流程 `aggregate_results()`（**不得**依赖跨子 shell 内存变量） |
+| 关注点             | 怎么用                                                                                                                                              |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 预算覆盖           | `E2E_EXT_BUDGET_SEC=600` 或 `--ext-budget 600`；`0` = 禁用（仅排障）                                                                                |
+| 插件级例外         | `test/e2e/budget-overrides.conf`（`type/name=秒`，须写理由）；临商用 `E2E_EXT_BUDGET_OVERRIDES`                                                     |
+| 排除模块           | `--exclude worktree,permission-gate`（全量/shard 模式跳过；已有专用 CI job 覆盖的模块用它去重）                                                     |
+| CI 分片            | `--shard N/8`：按**模块名 hash** 分桶，**不维护硬编码模块清单**（新增模块必然落在某个 shard）；CI 上 `E2E_BUDGET_STRICT=1`，超预算**不降级**为 WARN |
+| 看耗时             | `summary.md` → `## Time Budget`；`summary.json` → `cases[].duration_seconds`、模块 `duration_seconds`                                               |
+| 超时定位           | 用例 TUI 日志里最后一条 `[tui-stage]`（`expect-start` / `pi-ready-raw` / `pi-ready` / `commands-done`）                                             |
+| 合并用例的步骤轨迹 | `STEP_BEGIN` / `STEP_OK` / `FAIL_MARKER step=<id> reason=<...>`                                                                                     |
+| 结果统计           | 文件驱动 `.results/<type>__<name>.tsv` → 主流程 `aggregate_results()`（**不得**依赖跨子 shell 内存变量）                                            |
 
 > **两条最容易踩的坑**（都表现为"每用例白等几十秒"，已修）：
 > ① 就绪检测不要依赖状态栏正则（`expect <file>` 路径不匹配 → 白等 `timeout_seconds`）；
@@ -126,7 +128,13 @@ cat test/results/$LATEST/extensions/pi-logger/summary.md
 
 ### CI 模式
 
-`CI=true` 时自动注入 `mock-llm` 扩展，无需真实 API Key。所有测试可直接在 CI 中运行。
+`CI=true` 时自动注入 mock-llm（无需 API Key），并启用**阻塞式**判定：
+
+- **耗时预算**：CI 各 e2e job 设 `E2E_BUDGET_STRICT=1` —— 超过插件预算**判失败**，不因机器负载降级为 WARN。
+- **分片矩阵**：`ci.yml` 的 `e2e` job 跑 `--shard N/8 --exclude worktree,permission-gate`；被排除的两个模块各有专用 job
+  （`e2e-worktree` / `e2e-permission-gate-smoke`），**改分片策略时不得引入硬编码模块清单**（否则新模块会静默无覆盖）。
+- **本地对齐**：pre-push 只跑变更模块；若变更的是 `test/e2e/scripts/*` 或 `test/e2e/helpers/*`（影响所有模块），
+  额外跑 `--shard 0/8` 当金丝雀（全量交给 CI）。
 
 ### 压缩/继续类集成链路必须用 TUI 模式验证
 
