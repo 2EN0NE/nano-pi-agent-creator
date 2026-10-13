@@ -70,6 +70,22 @@ fi
 export E2E_GUARD_ROOT E2E_REAL_HOME E2E_REAL_PI
 export PATH="$E2E_GUARD_ROOT/bin:$PATH"
 
+# ── 运行基座留痕（ADR-0063 决策 5）────────────────────────────────────────────
+# 只留痕、**不作阻塞断言**：上游发版的发现职责归 schedule 探测 job，把「版本前进」
+# 变成阻塞合并的原因是本末倒置。留痕是为了「这轮红是哪个 pi 版本造成的」可归因。
+# ⚠ 必须走已解析的真实路径，不能裸 `pi --version`：PATH 首位的 guard shim 会走
+# `${E2E_MODULE_AGENT_DIR:?}` 硬失败且不输出内容，留痕会静默变空。
+E2E_PI_VERSION=""
+if [[ -n "$E2E_REAL_PI" ]]; then
+	E2E_PI_VERSION="$("$E2E_REAL_PI" --version 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+fi
+if [[ -n "$E2E_PI_VERSION" ]]; then
+	echo "  pi runtime base: $E2E_PI_VERSION  ($E2E_REAL_PI)"
+else
+	echo "  ⚠️  读不到 pi 运行基座版本（$E2E_REAL_PI --version 无输出）：本轮结果无法归因到版本" >&2
+fi
+export E2E_PI_VERSION
+
 # guard 临时根清理：正常结束 / 中断 / 被杀都要收干净（E2E_KEEP_GUARD_ROOT=1 保留取证）
 E2E_GUARD_CLEANED=false
 cleanup_guard_root() {
@@ -1972,6 +1988,8 @@ GLOBAL_ELAPSED=$(($(date +%s) - GLOBAL_START_SEC))
 	echo "{"
 	echo "  \"timestamp\": \"$TIMESTAMP\","
 	echo "  \"target\": \"${TARGET_EXT:-${TARGET_SKILL:-all}}\","
+	echo "  \"pi_version\": \"$E2E_PI_VERSION\","
+	echo "  \"pi_path\": \"$E2E_REAL_PI\","
 	echo "  \"duration_seconds\": $GLOBAL_ELAPSED,"
 	echo "  \"total\": $TOTAL_CASES,"
 	echo "  \"pass\": $TOTAL_PASS,"

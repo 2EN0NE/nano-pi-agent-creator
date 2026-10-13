@@ -87,13 +87,31 @@ else
 	echo "  WARNING: node-pty rebuild failed (TUI tests will use describe.skip)"
 fi
 
-# ── 5. 安装 pi 全局 ──
+# ── 5. 安装 pi 全局（运行基座 = lock 里 npm ci 装出来的版本）──
+# ADR-0063 决策 6：基座的**唯一来源**是 `npm ci` 装出的 node_modules 版本，全局装
+# 同一版本 → 类型层（tsc 用的 devDependency）与运行层永久绑定、结果可复现。
+# `PIPELINE` 从「默认 latest」降级为**显式覆盖开关**：只有探测 job 这类刻意试新版
+# 的场景才设置它；主流水线不设 → 不再随 upstream 漂移。读不到版本即 fail-fast。
 echo ""
 echo "--- Installing pi globally ---"
-PIPELINE="${PIPELINE:-latest}"
-npm install -g "@earendil-works/pi-coding-agent@$PIPELINE"
-echo "  pi bin: $(which pi)"
-echo "  pi pkg: $(readlink -f "$(which pi)" | xargs dirname | xargs dirname)"
+SETUP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PI_DEV_PKG="$SETUP_ROOT/node_modules/@earendil-works/pi-coding-agent/package.json"
+if [[ -n "${PIPELINE:-}" ]]; then
+	PI_PKG_VERSION="$PIPELINE"
+	echo "  ⚠️  PIPELINE 覆盖基座版本: ${PI_PKG_VERSION}（非 lock 版本，仅限探测/排障）"
+else
+	PI_PKG_VERSION="$(node -p "require('$PI_DEV_PKG').version" 2>/dev/null || true)"
+	if [[ -z "$PI_PKG_VERSION" ]]; then
+		echo "  ERROR: 读不到 $PI_DEV_PKG 的 version" >&2
+		echo "  运行基座必须来自 npm ci 装出的 lock（ADR-0063 决策 6）；" >&2
+		echo "  确要刻意指定版本，请显式设置 PIPELINE=<版本>。" >&2
+		exit 1
+	fi
+fi
+npm install -g "@earendil-works/pi-coding-agent@$PI_PKG_VERSION"
+echo "  pi bin:  $(which pi)"
+echo "  pi pkg:  $(readlink -f "$(which pi)" | xargs dirname | xargs dirname)"
+echo "  pi version: $(pi --version 2>/dev/null || echo unknown)  (base=$PI_PKG_VERSION)"
 
 # ── 6. 链接 @zenone 到全局 pi（兼容 pi 在项目外运行） ──
 # 非必要：大部分 e2e 测试在项目目录内运行，jiti 通过向上遍历

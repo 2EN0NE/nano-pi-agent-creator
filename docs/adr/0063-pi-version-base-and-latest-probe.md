@@ -27,16 +27,28 @@
 | 6   | **`npm ci` 装出来的版本为基座唯一来源**：`setup-ci.sh` 从 `node_modules/@earendil-works/pi-coding-agent/package.json` 读精确版本再全局安装；`PIPELINE` 降级为**显式覆盖开关**（默认不再是 `latest`），读不到版本时 fail-fast                          | 一致性由机制保证而非断言；所有装 pi 的 job 已满足 `npm ci` 先于 `setup-ci.sh`（`ci.yml:154-156/188-190/215-217/275-277/306-308`）；探测 job 正好需要这个覆盖开关 |
 | 7   | **所有基座消费者必须跑同一运行基座**：vitest 的 node-pty TUI 用例（`resolvePiBin()`）也必须锚到 `npm ci` 装出来的版本，与 e2e 一致；具体机制（CI 显式注入 `PI_BIN=<node_modules/.bin/pi>`，或调整 `resolvePiBin()` 把仓库内版本置于全局之前）**待定** | 同一提交在两套测试层上测不同版本 = 归因失效；本次已实测到它的代价（见下节：本地类型基座 0.84.4 + 全局运行层 1.2.0）                                              |
 
+## 实现状态（滚动更新）
+
+| #     | 决策                        | 状态                            | 落点                                                                                                                                                                                         |
+| ----- | --------------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | 两层同版本 + 显式声明       | ✅ 类型层已落                   | 家族三包 `--save-exact` → 1.2.0（1.2.0 基座提升提交）；`setup-ci.sh` 侧见 #6                                                                                                                 |
+| 5     | 运行版本只留痕、不阻塞      | ✅ 已落                         | e2e：runner 启动横幅 `pi runtime base: <ver> (<path>)` + 全局 `summary.json` 的 `pi_version`/`pi_path`；vitest：`resolvePiBin()` 打 `[pi-bin] <path> → <ver>`                                |
+| 6     | `npm ci` 版本为基座唯一来源 | ✅ 已落                         | `scripts/setup-ci.sh` 读 `node_modules/@earendil-works/pi-coding-agent/package.json` 的 version → 全局装同版本；读不到即 fail-fast（exit 1）；`PIPELINE` 降级为**显式覆盖**（探测/排障才设） |
+| 7     | 所有消费者跑同一运行基座    | ⏳ 留痕已落（#5），**机制待定** | 待定项见文末（CI 注入 `PI_BIN` vs 调整 `resolvePiBin()` 顺序）                                                                                                                               |
+| 2/3/4 | latest 探测 job（非阻塞）   | ⏳ 未开工                       | 依赖 #7 的机制与探测节奏（均待定）                                                                                                                                                           |
+
 ## 已知的 1.2.0 破坏面（基座提升的待修项）
 
 **已验证**（差分实测，2026-10-13）：
 
 - `test/vitest/extensions/worktree.tui.test.ts > /worktree help shows commands` **在 1.2.0 上失败、在 0.84.4 上通过**：
   `PI_BIN=<repo>/node_modules/.bin/pi`（0.84.4）→ `4 passed`；全局 1.2.0 → `1 failed | 3 passed`。
-  现象：断言时 PTY 屏幕仍是启动态（`Startup is still in progress` + startup help），`/worktree help` 未被处理 →
-  疑与启动窗口/就绪探测（`test/vitest/helpers/tui-runner.ts:163` 的「空提交探测」）在新版的时序有关；
-  **已排除**「文案被改写」假说（1.2.0 dist 仍含 `Startup is still in progress`）。
-  影响：`pre-push`（裸 `npm test`，不排除 worktree）会因此阻塞推送；`pre-commit` 不受影响（排除 `worktree*.test.ts`）。
+  **根因（2026-10-13 定位，已修）**：既不是扩展回归，也不是启动时序——**pi ≥1.2.0 只把「可见区域」写进输出流**，
+  该帮助面板高于 24 行默认视口时，文件头 `Usage:` 从未进入流（0.84.4 会把整段文本都写进流，旧用例因此"碰巧"通过）。
+  证据：同一用例给 `rows: 40, columns: 100` → `4 passed`；流里能看到面板命令列表（`widget <on|off>`、`group <list|create|…>`）
+  却**零个** `Usage:`。修复 = 该用例放大视口 + 注释说明（1.2.0 基座提升提交）。
+  **教训**：断言"流里出现过某文本"的用例，其结论依赖渲染器的视口行为，跨版本升级时要先怀疑这类假设。
+  影响（已消除）：`pre-push`（裸 `npm test`，不排除 worktree）曾被它阻塞；`pre-commit` 从未受影响（排除 `worktree*.test.ts`）。
 - 同一实测顺带证明：**本地 `npm test` 的 TUI 用例跑的是全局 1.2.0**，即决策 7 要修的口径。
 
 **待验证**（1.2.0 的破坏性变更清单，按 dist/文档读出的候选，尚未逐条实测）：

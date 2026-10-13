@@ -44,6 +44,19 @@ const EXT_CATEGORIES = ['tui', 'context', 'security', 'auto', 'accuracy', 'verif
 let _piBin: string | null = null;
 
 /**
+ * 探测 pi 版本，仅用于留痕（ADR-0063 决策 5）。失败返回 unknown，绝不抛错。
+ */
+function probePiVersion(bin: string): string {
+	try {
+		return (
+			execSync(`"${bin}" --version`, { encoding: 'utf8', timeout: 5000 }).trim() || 'unknown'
+		);
+	} catch {
+		return 'unknown';
+	}
+}
+
+/**
  * 解析全局 pi 二进制路径，避免本地 node_modules/.bin/pi 旧版本
  */
 export function resolvePiBin(): string {
@@ -89,11 +102,16 @@ export function resolvePiBin(): string {
 	for (const c of candidates) {
 		if (existsSync(c)) {
 			_piBin = c;
+			// 运行基座留痕（ADR-0063 决策 5）：vitest 的 node-pty TUI 用例消费的就是
+			// 这个 pi，路径与版本必须出现在测试输出里，否则「这个红是哪个版本造成的」
+			// 无法归因（本仓实测过类型基座与运行层错配的代价）。
+			console.log(`[pi-bin] ${_piBin} → ${probePiVersion(_piBin)}`);
 			return _piBin;
 		}
 	}
 
 	_piBin = 'pi';
+	console.log(`[pi-bin] pi（未解析到绝对路径）→ ${probePiVersion(_piBin)}`);
 	return _piBin;
 }
 
