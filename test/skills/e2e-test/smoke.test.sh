@@ -17,7 +17,7 @@ TEST
 
 # ── 用例 2：run-e2e.sh 可执行 ──
 test_it "run-e2e.sh is executable" <<'TEST'
-  if [[ -x "$ROOT_DIR/test/scripts/run-e2e.sh" ]]; then
+  if [[ -x "$ROOT_DIR/test/e2e/scripts/run-e2e.sh" ]]; then
     exit 0
   else
     echo "run-e2e.sh is not executable"
@@ -41,7 +41,7 @@ TEST
 
 # ── 用例 4：run-e2e.sh --help 输出帮助 ──
 test_it "run-e2e.sh --help prints usage" <<'TEST'
-  output=$(bash "$ROOT_DIR/test/scripts/run-e2e.sh" --help 2>&1 || true)
+  output=$(bash "$ROOT_DIR/test/e2e/scripts/run-e2e.sh" --help 2>&1 || true)
   if echo "$output" | grep -q "Usage"; then
     exit 0
   else
@@ -49,6 +49,23 @@ test_it "run-e2e.sh --help prints usage" <<'TEST'
     echo "Got: $output"
     exit 1
   fi
+TEST
+
+# ── 用例 4b：废弃副本必须硬失败（不得"看起来还能跑"） ──
+test_it "deprecated test/scripts/run-e2e.sh fails fast" <<'TEST'
+  set +e
+  output=$(bash "$ROOT_DIR/test/scripts/run-e2e.sh" --help 2>&1)
+  code=$?
+  set -e
+  if [[ $code -eq 0 ]]; then
+    echo "deprecated runner must not exit 0 (it contains config-deleting logic)"
+    exit 1
+  fi
+  if ! echo "$output" | grep -q "已废弃"; then
+    echo "expected a deprecation error, got: $output"
+    exit 1
+  fi
+  exit 0
 TEST
 
 # ── 用例 5：AGENTS.md 引用了 e2e-test skill（需 AI 衡量） ──

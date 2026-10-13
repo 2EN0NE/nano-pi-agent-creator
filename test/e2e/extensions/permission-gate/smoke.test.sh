@@ -11,7 +11,7 @@
 #   - 在 no-UI 模式下，dynamic policy auto-approve 放行，否则 block
 #
 # 运行：
-#   bash test/scripts/run-e2e.sh --ext permission-gate
+#   bash test/e2e/scripts/run-e2e.sh --ext permission-gate
 #
 
 set -euo pipefail

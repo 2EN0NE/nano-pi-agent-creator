@@ -235,13 +235,33 @@ pool 下同一插件的多个测试文件由**不同 worker 并行**执行，以
    （如环境哨兵）都会造成两边不一致 → 必须落成**显式用例行**。
 
 **环境哨兵（`real_env_hash`）与并行会话**：哨兵校验的是**真实** `$HOME/.pi`（org 树 +
-`extensions-data` 路径集）在**整轮 e2e 前后**未变。判定已收敛到**运行级单次检查**（模块级只报 WARN）：
+`extensions-data` 内容哈希）在**整轮 e2e 前后**未变。判定已收敛到**运行级单次检查**（模块级只报 WARN）：
 
 - 变动时输出 `test/results/<ts>/env-sentinel.log`，内含 **diff 出的变动路径清单**（不再只给哈希），
   并写入全局 `summary.json` 的 `env_sentinel_failed`。
 - 严重级别：默认 `warn`（本机常同时开着交互 pi 会话，其 org/插件写入会触发；硬失败会让整轮
-  永远红、盖住真信号）；CI 无并发会话 → 用 `E2E_ENV_SENTINEL=strict` 恢复阻塞。
+  永远红、盖住真信号）；CI 无并发会话 → 用 `E2E_ENV_SENTINEL=strict` 恢复阻塞（已在 `ci.yml` 生效）。
 - 为何不改模块级硬失败：池化并发 + 并行会话下模块级归因不可靠（实测一次全量 44 个文件同时报 FAIL）。
+
+**pi 配置根 guard（ADR-0045 D6 修订，2026-09-16）**：`extensions-data` 的口径从「路径集合」
+改为**内容哈希**——旧口径是为了回避「run-e2e 自身的 config 删除/恢复也在写它」造成的误报；
+现在 runner **不再写真实 `~/.pi`**（见下），误报源只剩宿主交互会话，而旧口径对
+「改写某个已存在 config.json 的内容」是瞎的。
+
+防止用例写真实配置的机制也由「删除 + 恢复」改为**隔离**：run-e2e.sh 把一个 `pi` shim
+（`helpers/pi-home-guard.sh`）前置到 PATH，对「HOME 仍是真实 home（或为空）」的调用注入
+`PI_CODING_AGENT_DIR=<每测试文件一个的隔离 agent 目录>`；已自行隔离 HOME（或已显式设
+`PI_CODING_AGENT_DIR`）的调用原样透传。真实 pi 路径与真实 home 除环境变量外**另落盘**到
+`<guard_root>/real-pi`、`real-home`——这一步是必须的：pi 也会在**不继承 runner 环境**的进程里
+被拉起（org 经 tmux 唤醒成员时，session 取的是 tmux server 的环境快照，拿不到 `E2E_*`）。
+因此**忘记隔离 HOME 的新用例不会伤到 pi 内核的用户配置**（sessions / models / auth /
+settings）；但扩展走 `os.homedir()` 解析的 `~/.pi/agent/extensions-data/**`（pi-config /
+pi-state）与 pi-logger 的 `~/.pi/logs/**` **不在 guard 覆盖内**——用到它们的用例仍须
+自行隔离 HOME。且中断/被 kill 不再有 "恢复没跑" 的窗口。
+旧机制（每模块 `rm -f $HOME/.pi/agent/extensions-data/*/config.json` + 结尾从
+`test/results/<ts>/config-backup` 恢复）在**在用运行器** `test/e2e/scripts/run-e2e.sh` 中已删除：
+实测 1119 轮里 81 轮中断 → 配置整批丢失。`test/scripts/run-e2e.sh` 是 ADR-0004 迁移遗留的副本
+（已加 DEPRECATED 头注），仍含该逻辑，不要运行。
 
 ## 4. 并行化与依赖关系
 
@@ -269,7 +289,8 @@ pool 下同一插件的多个测试文件由**不同 worker 并行**执行，以
 - **HOME / cwd 隔离**：每个 `tui_expect_test` 自建沙箱（`$TUI_SANDBOX_ROOT/<slug>`，HOME 指向
   `$test_home/home`），因此**测试文件级并行是安全的**。
 - **禁止跨测试文件共享可变状态**：`$HOME/.pi/agent/extensions-data/*/config.json`、
-  固定路径的临时文件、固定端口等都会被并发执行污染。
+  固定路径的临时文件、固定端口等都会被并发执行污染。（真实配置已有兜底：PATH 前置的 `pi`
+  shim 会把未隔离 HOME 的调用重定向到**每测试文件一个**的隔离配置根，见 §3.4 环境哨兵段。）
 - **mock-llm**：CI 模式自动注入；并发下各自进程独立，无需额外处理。
 - **同模块多文件**在池化下可能并行：写结果必须走 append（§3.4），不要"读-改-写"共享文件。
 

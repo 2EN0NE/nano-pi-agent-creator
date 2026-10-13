@@ -5,7 +5,7 @@
 # 使用 mock-llm（共享版本 test/helpers/mock-llm.ts）模拟 LLM 回复，
 # 无需真实 API Key，让 pi 完整启动、加载扩展、处理会话。
 #
-# 运行：bash test/scripts/run-e2e.sh --ext ci-watch
+# 运行：bash test/e2e/scripts/run-e2e.sh --ext ci-watch
 # ──────────────────────────────────────────────────────────────────────────────
 
 test_describe "ci-watch extension"

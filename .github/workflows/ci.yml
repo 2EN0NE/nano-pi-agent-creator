@@ -219,6 +219,9 @@ jobs:
               env:
                   E2E_POOL_SIZE: 4
                   E2E_BUDGET_STRICT: '1'
+                  # CI 无并发交互 pi 会话 → 环境哨兵可以硬阻塞：真实 $HOME/.pi 被改动
+                  # 一律判失败（护栏见 ADR-0045 D6 修订：pi 配置根 guard + 内容哈希口径）
+                  E2E_ENV_SENTINEL: 'strict'
               run: |
                   # 显式排除（其余模块由 hash 分桶覆盖，不写清单）：
                   #   worktree       → e2e-worktree job（vitest + bash e2e + TUI）
@@ -275,6 +278,7 @@ jobs:
             - name: Run permission-gate smoke e2e
               env:
                   E2E_BUDGET_STRICT: '1'
+                  E2E_ENV_SENTINEL: 'strict'
               run: |
                   bash test/e2e/scripts/run-e2e.sh \
                     --ext permission-gate --smoke-only
@@ -308,4 +312,5 @@ jobs:
             - name: Run bash e2e worktree tests
               env:
                   E2E_BUDGET_STRICT: '1'
+                  E2E_ENV_SENTINEL: 'strict'
               run: bash test/e2e/scripts/run-e2e.sh --ext worktree

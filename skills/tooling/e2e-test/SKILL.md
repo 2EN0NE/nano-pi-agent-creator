@@ -127,11 +127,11 @@ TEST
 
 ```bash
 # 运行指定模块
-bash test/scripts/run-e2e.sh --ext <name>
-bash test/scripts/run-e2e.sh --skill <name>
+bash test/e2e/scripts/run-e2e.sh --ext <name>
+bash test/e2e/scripts/run-e2e.sh --skill <name>
 
 # 运行全部
-bash test/scripts/run-e2e.sh
+bash test/e2e/scripts/run-e2e.sh
 ```
 
 运行器自动完成：
@@ -141,6 +141,16 @@ bash test/scripts/run-e2e.sh
 - 调用 `pi -a --no-session -p "<prompt>"`
 - 收集 stdout 和 pi-logger 日志到 `test/results/<timestamp>/cases/`
 - 生成 summary.md 和 summary.json
+
+> **真实 `~/.pi` 的 pi 内核目录不会被写**：运行器会把一个 `pi` shim（`helpers/pi-home-guard.sh`）
+> 前置到 PATH，凡**未**自行隔离 `HOME` 的 pi 调用都注入
+> `PI_CODING_AGENT_DIR=<每测试文件一个的隔离配置根>`。⚠ 该变量只重定向 **pi 自身**的内核目录
+> （sessions / models / auth / settings）；扩展用 `os.homedir()` 解析的
+> `~/.pi/agent/extensions-data/**`（pi-config / pi-state）与 pi-logger 的 `~/.pi/logs/**`
+> **不受影响**——涉及它们的用例必须自行隔离 HOME。
+> 调试时若想保留隔离根取证：`E2E_KEEP_GUARD_ROOT=1 bash test/e2e/scripts/run-e2e.sh ...`；
+> 运行结束（含中断）会自动清理，无需手删。详见 `docs/adr/0045-autonomous-loop-verification.md` D6 与
+> `docs/e2e-performance.md` §3.4。
 
 ### 耗时预算与过程日志（每轮必查）
 

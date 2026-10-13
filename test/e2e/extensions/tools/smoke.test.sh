@@ -9,7 +9,7 @@
 #   - Re-registration of disabled tool → stays blocked
 #   - tool_call handler blocks disabled tools at execution time
 #
-# Run: bash test/scripts/run-e2e.sh --ext tools
+# Run: bash test/e2e/scripts/run-e2e.sh --ext tools
 #
 # NOTE: EPERM / Connection error warnings are INFRASTRUCTURE issues
 # (no model provider in test sandbox). Not code defects.

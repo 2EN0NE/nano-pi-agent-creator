@@ -33,6 +33,71 @@ RESULTS_DIR="$ROOT_DIR/test/results"
 TIMESTAMP=$(date +%Y-%m-%dT%H-%M-%S)
 RUN_DIR="$RESULTS_DIR/$TIMESTAMP"
 
+# ── e2e pi 配置根 guard（ADR-0045 D6 修订）────────────────────────────────────
+# 目标：e2e 不写真实 ~/.pi/agent 的 **pi 内核目录**（sessions / models / auth /
+# settings 都在 PI_CODING_AGENT_DIR 之下）。做法：把一个 `pi` shim 前置到 PATH——对
+# 「HOME 仍是真实 home（或为空）」的调用注入隔离 agent 目录；已自行隔离 HOME 的用例
+# 原样透传、语义不变。
+# ⚠ 覆盖边界：**不覆盖**扩展自己用 `os.homedir()` 解析的用户级路径——pi-config /
+# pi-state 的 `~/.pi/agent/extensions-data/**`（extensions/meta/pi-config/index.ts:28、
+# pi-state/api.ts:67）与 pi-logger 的 `~/.pi/logs/**`；用到它们的用例须自行隔离 HOME。
+#
+# 为什么需要：旧机制是「每模块跑完删掉全部 extensions-data/*/config.json + 结尾从备份
+# 恢复」，一旦该轮被 Ctrl-C / 超时 kill / CI 取消，恢复不执行 → 用户插件配置整批消失
+# （实测 1119 轮里 81 轮中断）。guard 让真实配置从根上不可被写，删除/恢复机制随之退场。
+E2E_REAL_HOME="$HOME"
+E2E_REAL_PI="$(command -v pi || true)"
+if [[ -z "$E2E_REAL_PI" ]]; then
+	echo "  ⚠️  PATH 中找不到 pi：e2e 用例将无法启动 pi（guard 会在调用时快速失败）" >&2
+fi
+E2E_GUARD_ROOT="$ROOT_DIR/.pi/tmp/e2e-guard-$$"
+# 建前先清空：上一轮若被 SIGKILL / 用 E2E_KEEP_GUARD_ROOT=1 保留，PID 复用会让本轮用例
+# 读到上一轮遗留的 agent/<slug>/config.json —— 而哨兵只盯真实 ~/.pi，这种污染不可见。
+# case 断言只为兜住「路径族被改走」的情形，避免 rm -rf 打到别处。
+case "$E2E_GUARD_ROOT" in
+	"$ROOT_DIR"/.pi/tmp/e2e-guard-*) rm -rf -- "$E2E_GUARD_ROOT" ;;
+esac
+mkdir -p "$E2E_GUARD_ROOT/bin" "$E2E_GUARD_ROOT/agent"
+ln -sf "$TEST_DIR/helpers/pi-home-guard.sh" "$E2E_GUARD_ROOT/bin/pi"
+# 真实 pi / 真实 home 另落一份到 guard 根下的文件：shim 可能在**不继承 runner 环境**的
+# 进程里被拉起（如 org 经 tmux 唤醒成员——tmux 用 server 的环境快照），那时读不到 E2E_*。
+if [[ -n "$E2E_REAL_PI" ]]; then
+	printf '%s\n' "$E2E_REAL_PI" >"$E2E_GUARD_ROOT/real-pi"
+fi
+if [[ -n "$E2E_REAL_HOME" ]]; then
+	printf '%s\n' "$E2E_REAL_HOME" >"$E2E_GUARD_ROOT/real-home"
+fi
+export E2E_GUARD_ROOT E2E_REAL_HOME E2E_REAL_PI
+export PATH="$E2E_GUARD_ROOT/bin:$PATH"
+
+# guard 临时根清理：正常结束 / 中断 / 被杀都要收干净（E2E_KEEP_GUARD_ROOT=1 保留取证）
+E2E_GUARD_CLEANED=false
+cleanup_guard_root() {
+	if $E2E_GUARD_CLEANED; then return 0; fi
+	E2E_GUARD_CLEANED=true
+	if [[ "${E2E_KEEP_GUARD_ROOT:-0}" == "1" ]]; then
+		echo "  [guard] E2E_KEEP_GUARD_ROOT=1 → 保留隔离配置根: $E2E_GUARD_ROOT" >&2
+		return 0
+	fi
+	rm -rf "$E2E_GUARD_ROOT" 2>/dev/null || true
+}
+# shellcheck disable=SC2329  # 仅经 trap 字符串调用，shellcheck 看不到引用
+guard_on_exit() { # EXIT trap：$? 是本轮的退出码，必须原样带回
+	local rc=$?
+	trap - EXIT INT TERM
+	cleanup_guard_root
+	exit "$rc"
+}
+# shellcheck disable=SC2329
+guard_on_signal() { # INT/TERM trap：先清临时根再以惯例码退出（否则中断会留下隔离根）
+	trap - EXIT INT TERM
+	cleanup_guard_root
+	exit "$1"
+}
+trap guard_on_exit EXIT
+trap 'guard_on_signal 130' INT
+trap 'guard_on_signal 143' TERM
+
 # ── 并发/争用感知（机器上同时跑多轮 e2e 时，绝对耗时与超时判定都会失真）──────────
 # 确定性信号 ①：**运行注册表**——每轮 e2e 在 results 下留一个以自己 pid 命名的条目，
 #   靠 kill -0 判断存活（不靠 load 猜，也不靠 pgrep 数进程数：池化 worker 是子 shell，
@@ -328,9 +393,10 @@ test_it() {
 # 三个刻意的口径（都是为消除**宿主 pi 会话 / 测试基建自身**造成的误报）：
 #   ① ~/.pi/org 比内容，排除 runtime/<成员>.json：它由真实在岗成员每轮重写
 #      （turn_start/end 的 setBusyAll），属运行痕迹而非泄漏。
-#   ② ~/.pi/agent/extensions-data 只比**路径集合**：宿主 pi 会话（whimsical/live、
-#      pi-lab/*.jsonl、各插件 config）与 run-e2e 自身的 config 备份/恢复都在持续写它，
-#      比内容必然误报；测试泄漏的形态是**新增插件目录/配置**，路径集足以捕获。
+#   ② ~/.pi/agent/extensions-data 比**内容哈希**（ADR-0045 D6 修订 2026-09-16）：
+#      旧口径只比路径集合，理由是「run-e2e 自身的 config 备份/恢复也在写它，比内容必然误报」
+#      ——guard 上线 + 删除/恢复机制退场后 runner 自身不再写这里，误报源只剩宿主交互会话，
+#      而旧口径对「改写某个已存在 config.json 的内容」是瞎的（正是踩过的坑，会漏报）。
 #   ③ 哈希工具可移植：Linux 可能只有 sha256sum（macOS 是 shasum）；对齐 scripts/offline.sh 双路兜底。
 hash_stream() {
 	if command -v sha256sum >/dev/null 2>&1; then
@@ -350,8 +416,15 @@ env_fingerprint_lines() {
 	fi
 	local e="$HOME/.pi/agent/extensions-data"
 	if [[ -d "$e" ]]; then
-		# 路径集合（不含内容）：宿主会话与 config 备份/恢复都在写它，比内容必然误报
-		find "$e" -mindepth 1 2>/dev/null | LC_ALL=C sort | sed 's/$/\t-/'
+		# 目录仍按路径集记录（新增插件目录 = 泄漏信号）；文件比内容哈希（口径见上方 ②）
+		find "$e" -mindepth 1 -type d 2>/dev/null | LC_ALL=C sort | sed 's/$/\t<dir>/'
+		find "$e" -mindepth 1 -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+			printf '%s\t%s\n' "$f" "$(hash_file "$f" 2>/dev/null)"
+		done
+		# 符号链接既非 -type d 也非 -type f：单列出来记指向，否则整条不进指纹（漏报）
+		find "$e" -mindepth 1 -type l 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+			printf '%s\t->%s\n' "$f" "$(readlink "$f" 2>/dev/null)"
+		done
 	fi
 }
 
@@ -379,12 +452,22 @@ env_sentinel_check() {
 		echo "# 说明: 若你此刻开着交互 pi 会话，它的 org/插件写入会落在这里——"
 		echo "#       关掉再跑即为干净基线；否则说明 e2e 隔离失效（ADR-0045 D6）。"
 		echo ""
-		echo "## 变动路径（- 仅 before / + 仅 after）"
-		# 注意：diff 发现差异时退出码为 1，而 runner 是 set -euo pipefail —— 不中和它会让
-		# 「检测到环境变动」这件事本身把 runner 打断（曾致 61 个模块目录全无 summary、
-		# 无全局汇总，Pool 段之后一行输出都没有）。故整条管道末尾接 || true。
-		diff <(printf '%s\n' "$RUN_ENV_FINGERPRINT_BEFORE" | sort) <(printf '%s\n' "$after" | sort) |
-			awk -F'\t' '{print $1}' | sed -n 's/^</- /p; s/^> /+ /p' | head -80 || true
+		echo "## 变动路径（- 仅 before 删除 / ~ 内容改写 / + 仅 after 新增）"
+		# 按路径键比对两份指纹：同路径两侧都在 = 内容改写。旧实现用 diff + 丢哈希，会把改写
+		# 打印成「- path」+「+ path」，与「删除+新增」混淆——而这是 strict 下唯一取证。
+		# diff/head 的非 0 退出码会打断 set -euo pipefail 的 runner（曾致 61 个模块全无
+		# summary），故整条管道末尾接 || true。
+		awk -F'\t' '
+			FNR == NR { if ($1 != "") before[$1] = $2; next }
+			{ if ($1 != "") after[$1] = $2 }
+			END {
+				for (p in before) {
+					if (p in after) { if (before[p] != after[p]) print "~ " p }
+					else print "- " p
+				}
+				for (p in after) if (!(p in before)) print "+ " p
+			}' <(printf '%s\n' "$RUN_ENV_FINGERPRINT_BEFORE" | sort) <(printf '%s\n' "$after" | sort) |
+			LC_ALL=C sort -k2 | head -80 || true
 	} >"$log"
 	echo ""
 	if [[ "${E2E_ENV_SENTINEL:-warn}" == "strict" ]]; then
@@ -394,7 +477,7 @@ env_sentinel_check() {
 	fi
 	# 注意：$VAR 后紧跟全角标点会被 macOS bash 3.2 吞进变量名（"line 327: log"）——
 	# 一律用 ${VAR} 花括号界定（同 scripts/offline.sh 的教训）。
-	echo "     变动清单：${log}（$(grep -c '^[+-] ' "${log}" 2>/dev/null || echo 0) 行）"
+	echo "     变动清单：${log}（$(grep -c '^[~+-] ' "${log}" 2>/dev/null || echo 0) 行）"
 	echo "     若同时在跑交互 pi 会话，请关掉后重跑以获得干净基线。"
 }
 
@@ -852,12 +935,24 @@ run_with_timeout() {
 	return $?
 }
 
+# 为某个测试文件准备隔离配置根（pi-home-guard 把「未隔离 HOME」的 pi 调用指到这里）。
+# 单行 `local VAR="$(...)"` 是刻意写法：bash 3.2 + `set -u` 下分行声明后再赋值会丢值（AGENTS.md）。
+set_module_agent_dir() {
+	local module_type="$1" module_name="$2" test_file="$3"
+	local guard_slug="$(printf '%s' "${module_type}__${module_name}__$(basename "$test_file")" | tr -c 'A-Za-z0-9._-' '_')"
+	E2E_MODULE_AGENT_DIR="$E2E_GUARD_ROOT/agent/$guard_slug"
+	mkdir -p "$E2E_MODULE_AGENT_DIR"
+	export E2E_MODULE_AGENT_DIR
+}
+
 # 执行 .exp 交互测试文件
 # .exp 文件是独立的 expect 脚本，每个文件 = 1 个测试用例
 run_exp_file() {
 	local exp_file="$1"
 	local module_type="$2"
 	local module_name="$3"
+
+	set_module_agent_dir "$module_type" "$module_name" "$exp_file"
 
 	local MODULE_DIR="$RUN_DIR/$module_type/$module_name"
 	local CASE_DIR="$MODULE_DIR/cases"
@@ -1063,6 +1158,8 @@ run_test_file() {
 	local test_file="$1"
 	local module_type="$2" # "ext" 或 "skill"
 	local module_name="$3"
+
+	set_module_agent_dir "$module_type" "$module_name" "$test_file"
 
 	local MODULE_DIR="$RUN_DIR/$module_type/$module_name"
 	local CASE_DIR="$MODULE_DIR/cases"
@@ -1270,26 +1367,7 @@ except Exception as e:
 	# ── 模块耗时输出 ──
 	echo ""
 	echo "  ⏱  Duration: ${module_elapsed}s (${mpass} pass, ${mfail} fail, ${mreview} review)"
-
-	# ── 模块级清理：删除所有 config 残留 ──
-	# 避免 e2e 测试数据污染用户真实的 pi 环境
-	rm -f "$HOME/.pi/agent/extensions-data/"*/config.json 2>/dev/null || true
 }
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 备份用户现存配置（测试后恢复）
-# ══════════════════════════════════════════════════════════════════════════════
-
-BACKUP_DIR="$RUN_DIR/config-backup"
-mkdir -p "$BACKUP_DIR"
-
-for cfg in "$HOME/.pi/agent/extensions-data/"*/config.json; do
-	[[ -f "$cfg" ]] || continue
-	rel_dir=$(basename "$(dirname "$cfg")")
-	mkdir -p "$BACKUP_DIR/$rel_dir"
-	cp "$cfg" "$BACKUP_DIR/$rel_dir/config.json"
-done
-BACKUP_COUNT=$(find "$BACKUP_DIR" -name "config.json" -type f 2>/dev/null | wc -l | tr -d ' ')
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 主流程
@@ -1299,7 +1377,7 @@ echo "════════════════════════�
 echo "  e2e-test 运行器"
 echo "  Timestamp: $TIMESTAMP"
 echo "  Output: $RUN_DIR"
-echo "  Config backups: $BACKUP_COUNT file(s)"
+echo "  隔离配置根: ${E2E_GUARD_ROOT}（测试结束自动清理）"
 if [[ "$CONTENTION_DETECTED" == "true" ]]; then
 	echo "  ⚠️  机器争用: 另有 ${CONTENTION_OTHERS} 个 e2e 运行中；load/CPU=${CONTENTION_LOAD_PER_CPU}"
 	echo "      → 耗时与超时判定可能失真：超预算降级为 WARN（CI / E2E_BUDGET_STRICT=1 时不降级）"
@@ -1962,21 +2040,6 @@ done
 echo ""
 echo "View latest:"
 echo "  cat test/results/$(ls -1t "$RESULTS_DIR" 2>/dev/null | head -1)/summary.md"
-echo ""
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 恢复用户备份的配置
-# ══════════════════════════════════════════════════════════════════════════════
-
-RESTORE_COUNT=0
-for bak in "$BACKUP_DIR"/*/config.json; do
-	[[ -f "$bak" ]] || continue
-	rel_dir=$(basename "$(dirname "$bak")")
-	mkdir -p "$HOME/.pi/agent/extensions-data/$rel_dir"
-	cp "$bak" "$HOME/.pi/agent/extensions-data/$rel_dir/config.json"
-	RESTORE_COUNT=$((RESTORE_COUNT + 1))
-done
-[[ $RESTORE_COUNT -gt 0 ]] && echo "  Restored $RESTORE_COUNT config backup(s)"
 echo ""
 
 # REVIEW 用例是 advisory（待 AI 衡量）；FAIL 与预算/超时失败都阻塞

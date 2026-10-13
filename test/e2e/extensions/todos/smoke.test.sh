@@ -3,7 +3,7 @@
 # smoke.test.sh — todos e2e tests
 #
 # 运行：
-#   bash test/scripts/run-e2e.sh --ext todos
+#   bash test/e2e/scripts/run-e2e.sh --ext todos
 #
 
 set -euo pipefail

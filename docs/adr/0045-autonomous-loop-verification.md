@@ -69,13 +69,38 @@ e2e 跑前 / 跑后对真实环境取指纹，不一致即判本模块 FAIL；`O
 指纹口径（2026-09-12 修订，均为消除宿主 / 基建自身的误报）：
 
 - `~/.pi/org`：**文件内容**全量哈希，排除 `runtime/<成员>.json`（真实在岗成员每轮重写，属运行痕迹）；
-- `~/.pi/agent/extensions-data`：只比**路径集合**（不含内容）——宿主 pi 会话与 run-e2e 的 config 备份/恢复都在持续写它，比内容必然误报；测试泄漏的形态是**新增插件目录/配置**，路径集足以捕获。
+- `~/.pi/agent/extensions-data`：只比**路径集合**（不含内容）——宿主 pi 会话与 run-e2e 的 config 备份/恢复都在持续写它，比内容必然误报；测试泄漏的形态是**新增插件目录/配置**，路径集足以捕获。**（2026-09-16「隔离机制」修订已取代此口径——改为内容哈希；原「run-e2e 自身在写它」的理由随删除/恢复机制退场而消失。）**
 
 > **修订（2026-09-16，实现层）**：指纹口径不变，但**判定粒度与严重级别**调整：
 > ① 归因收敛到**运行级单次检查**（整轮前后各取一次指纹）——模块级归因在「池化并发 + 同机并行交互 pi 会话」下不可靠（实测一次全量被 44 个测试文件同声报 FAIL，噪声盖过真信号）；
 > ② 变动时输出**具体变动路径清单**（`test/results/<ts>/env-sentinel.log`），不再只给哈希；
 > ③ 默认 `warn`（不阻塞；本机开着交互会话时不至于整轮永久红），CI 用 `E2E_ENV_SENTINEL=strict` 恢复硬阻塞；模块级保留一次比对，仅报 WARN。
 > 详见 `docs/e2e-performance.md` §3.4。
+
+> **修订（2026-09-16，隔离机制）**：防污染手段由「删除 + 恢复」改为**隔离**，哨兵口径随之收紧。
+>
+> **背景（事故）**：旧机制是「每模块跑完 `rm -f $HOME/.pi/agent/extensions-data/*/config.json`，整轮结束再从 `test/results/<ts>/config-backup` 恢复」。恢复只在脚本走到最后一行才执行，而轮内清理是**每模块**都做——任一中断（Ctrl-C / 超时被 kill / `set -e` 异常 / CI 取消）都让配置**整批消失且无备份可取**。实测：1119 轮含备份的运行里 **81 轮中断**；受害样例是 custom-compaction 的 `smart-compact` profile 与 custom-rename / todos / pi-shortcuts 的用户配置。
+>
+> **新机制**：run-e2e.sh 把一个 `pi` shim（`test/e2e/helpers/pi-home-guard.sh`）符号链接为 `<guard_root>/bin/pi` 并前置到 PATH。shim 判定：`HOME` 仍等于真实 home（**或为空**，`env -u HOME` 不是绕过口）→ 注入 `PI_CODING_AGENT_DIR=<每测试文件一个的隔离 agent 目录>`；已自行隔离 HOME（或已显式设 `PI_CODING_AGENT_DIR`，视为调用方自有隔离）的调用原样 `exec` 真实 pi（语义不变，PTY 语义不变）。真实 pi 与真实 home 取两路：环境变量 `E2E_REAL_PI`/`E2E_REAL_HOME`，以及 guard 根下的 `real-pi`/`real-home` 文件——后者不可省，因为 pi 也会在**不继承 runner 环境**的进程里被拉起（org 经 tmux 唤醒成员时，session 取的是 tmux server 的环境快照，拿不到任何 `E2E_*`）。隔离根在 `$ROOT_DIR/.pi/tmp/e2e-guard-<pid>/`，`trap EXIT/INT/TERM` 保证清理（`E2E_KEEP_GUARD_ROOT=1` 保留取证）。
+>
+> **验证（2026-10-17 补记；此前只留在会话记录里，按 ADR-0063「验证要求」补写）**：机制落地时跑过真 e2e——
+> `--ext tools,files` → 28 用例 / 19 PASS / 0 FAIL / 9 REVIEW（50s）；`--shard 0/8` 金丝雀 → 14 用例 / 13 PASS /
+> 0 FAIL / 1 REVIEW（61s）。两次 `env_sentinel_failed: 0`、无 `env-sentinel.log`，真实
+> `extensions-data/pi-config/config.json` 的 mtime 未变。
+>
+> **范围**：本机制只覆盖**在用运行器** `test/e2e/scripts/run-e2e.sh`。`test/scripts/run-e2e.sh` 是 ADR-0004 迁移遗留的旧副本，仍含「每模块删除 + 结尾恢复」逻辑（已加 DEPRECATED 头注），不要运行。
+>
+> 边界与取舍：① 隔离 agent 目录**为空**（不种模型/第三方包）——模型层由测试自行 mock（AGENTS.md「e2e 只 mock LLM」），泄漏调用拿不到真实模型反而是期望行为；② 只管**经由 pi 的写入**，测试脚本直接用 `mkdir/cp` 写真实路径的情况由运行级哨兵兜（CI `strict` 阻塞）；③ `PI_CODING_AGENT_DIR` 同时覆盖 `sessions/`、`models.json`、`auth.json`、`settings.json`、`npm/`，故同源问题（测试把会话写进真实 sessions）一并消失。
+
+> **④ 覆盖边界（2026-10-17 补记，修正原提交消息的过度表述）**：guard 注入的是 `PI_CODING_AGENT_DIR`，因此只覆盖
+> **pi 内核目录**（`sessions/`、`models.json`、`auth.json`、`settings.json`、`npm/`）。**扩展自己用 `os.homedir()`
+> 解析的用户级路径不在覆盖内**——`pi-config` / `pi-state` 的 `~/.pi/agent/extensions-data/**`
+> （`extensions/meta/pi-config/index.ts`、`extensions/meta/pi-state/api.ts`）与 pi-logger 的 `~/.pi/logs/**`。
+> 故准确表述是「**pi 内核目录**从根上不可被写」；原提交消息里的「真实配置从根上不可被写」**过度**，以本段为准。
+> 用到这些路径的用例必须自行隔离 `HOME`；本地哨兵默认 `warn`，这类写入不会被阻塞（CI 的 `strict` 也只覆盖
+> `~/.pi/org` 与 `extensions-data` 的内容哈希，不含 `sessions/models/auth/settings`）。
+>
+> **哨兵口径**：`~/.pi/agent/extensions-data` 由「路径集合」改为**内容哈希**（目录仍按路径记录）——旧口径的理由（run-e2e 自身在写它）随删除/恢复机制退场而消失，而旧口径对「改写已存在 config.json 的内容」是瞎的；CI 三个 e2e job 均已设 `E2E_ENV_SENTINEL=strict`。
 
 ## 可行性（spike 实测，2026-09-11）
 
