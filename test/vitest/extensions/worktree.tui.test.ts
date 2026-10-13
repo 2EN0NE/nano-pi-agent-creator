@@ -44,16 +44,22 @@ describeOrSkip('worktree v2 extension (TUI mode via node-pty)', () => {
 	});
 
 	itOrSkip('/worktree help shows commands', async () => {
-		await withTui({ extensions: 'pi-logger,worktree', useMockLLM: true }, async (tui) => {
-			await tui.send('/worktree help');
-			await tui.waitForOutput('create', 10000);
-			const text = tui.getText();
-			expect(text).toContain('Usage:');
-			expect(text).toContain('create');
-			expect(text).toContain('delete');
-			expect(text).toContain('widget');
-			expect(text).not.toContain('/stop');
-		});
+		// 该帮助面板高于 24 行默认视口：pi ≥1.2.0 只把**可见区域**写进输出流
+		// （0.84.4 会把整段文本都写进流），视口过小则文件头 `Usage:` 不在流里。
+		// 用例断言的是「流里出现过这些命令」，因此给足视口而非断言看不见的行。
+		await withTui(
+			{ extensions: 'pi-logger,worktree', useMockLLM: true, rows: 40, columns: 100 },
+			async (tui) => {
+				await tui.send('/worktree help');
+				await tui.waitForOutput('create', 10000);
+				const text = tui.getText();
+				expect(text).toContain('Usage:');
+				expect(text).toContain('create');
+				expect(text).toContain('delete');
+				expect(text).toContain('widget');
+				expect(text).not.toContain('/stop');
+			},
+		);
 	});
 
 	itOrSkip('/worktree widget on/off', async () => {

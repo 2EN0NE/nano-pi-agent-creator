@@ -177,7 +177,8 @@ export default function (pi: ExtensionAPI) {
 			if (typeof step.text === 'string') {
 				return fauxAssistantMessage(applyVars(step.text, vars) as string);
 			}
-			const args = applyVars(step.args ?? {}, vars) as Record<string, unknown>;
+			// fauxToolCall 的形参类型是 ToolCall["arguments"]（JSON 值），不能直接喂 Record<string, unknown>
+			const args = applyVars(step.args ?? {}, vars) as Parameters<typeof fauxToolCall>[1];
 			return fauxAssistantMessage([fauxToolCall(step.tool as string, args)], {
 				stopReason: 'toolUse' as never,
 			});

@@ -60,6 +60,8 @@ export class MockTerminal implements Terminal {
 	clearScreen(): void {}
 	setTitle(): void {}
 	setProgress(): void {}
+	// pi-tui 1.2.0 新增（OSC 7501 程序状态上报）：headless 终端无状态栏可上报，空实现
+	setProgramStatus(): void {}
 	async drainInput(): Promise<void> {}
 }
 
