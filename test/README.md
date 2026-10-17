@@ -113,6 +113,18 @@ cat test/results/$LATEST/summary.md
 cat test/results/$LATEST/extensions/pi-logger/summary.md
 ```
 
+运行基座的留痕位置（ADR-0063；**只留痕、不作阻塞断言**）：
+
+| 看哪儿                 | 内容                                                          |
+| ---------------------- | ------------------------------------------------------------- |
+| `summary.json`         | `pi_version`（本轮实际跑的 pi 版本）、`pi_path`（二进制路径） |
+| e2e runner 启动横幅    | `pi runtime base: <版本> (<路径>)`                            |
+| vitest TUI 用例 stdout | `[pi-bin] <路径> → <版本>`（`resolvePiBin()` 的解析结果）     |
+
+基座来源：`npm ci` 装出的 lock 版本（`scripts/setup-ci.sh` 以它为唯一来源全局安装；
+`PIPELINE=<版本>` 仅为**显式覆盖开关**）。vitest 侧默认优先 `<repo>/node_modules/.bin/pi`，
+`PI_BIN` 仍是最优先级——想刻意用全局新版跑一次就设 `PI_BIN="$(command -v pi)"`。
+
 ## Mock 边界
 
 ### Layer 1 (vitest) 允许的 mock

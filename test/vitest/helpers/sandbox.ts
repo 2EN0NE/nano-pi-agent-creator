@@ -57,19 +57,26 @@ function probePiVersion(bin: string): string {
 }
 
 /**
- * 解析全局 pi 二进制路径，避免本地 node_modules/.bin/pi 旧版本
+ * 解析 pi 二进制路径。默认锚到**仓库内 lock 版本**（`node_modules/.bin/pi`），
+ * 使类型基座（tsc 用的 devDependency）与运行基座同源（ADR-0063 决策 6/7）。
+ *
+ * 优先级：`PI_BIN`（逃生口：刻意用全局新版）→ 仓库内 lock → npm 全局前缀 → PATH。
+ * 最后一档仍排除 `node_modules/.bin`，避免绕过上面的显式优先级。
  */
 export function resolvePiBin(): string {
 	if (_piBin) return _piBin;
 
 	const candidates: string[] = [];
 
-	// 1. 环境变量 PI_BIN
+	// 1. 环境变量 PI_BIN（显式覆盖）
 	if (process.env.PI_BIN) {
 		candidates.push(process.env.PI_BIN);
 	}
 
-	// 2. npm 全局前缀
+	// 2. 仓库内 lock 版本（基座唯一来源；ADR-0063 决策 6/7）
+	candidates.push(resolve(ROOT_DIR, 'node_modules/.bin/pi'));
+
+	// 3. npm 全局前缀
 	try {
 		const prefix = execSync('npm config get prefix 2>/dev/null', {
 			encoding: 'utf8',
@@ -80,7 +87,7 @@ export function resolvePiBin(): string {
 		/* ignore */
 	}
 
-	// 3. PATH 查找（排除 node_modules/.bin）
+	// 4. PATH 查找（排除 node_modules/.bin）
 	try {
 		const cleanPath = (process.env.PATH || '')
 			.split(':')

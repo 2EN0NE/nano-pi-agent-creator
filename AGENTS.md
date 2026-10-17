@@ -74,6 +74,14 @@ LATEST=$(ls -1t test/results/ | head -1)
 cat test/results/$LATEST/summary.md
 ```
 
+> **运行基座留痕与来源（ADR-0063）**：e2e 跑的是**基座版本**——`scripts/setup-ci.sh` 从
+> `node_modules/@earendil-works/pi-coding-agent/package.json` 读版本再全局安装（读不到即
+> fail-fast）；`PIPELINE=<版本>` 已降级为**显式覆盖开关**（不再是默认 `latest`）。
+> 每次运行在启动横幅打印 `pi runtime base: <版本> (<路径>)`，并写入 `summary.json` 的
+> `pi_version` / `pi_path`；vitest 的 TUI 用例（`resolvePiBin()`）默认锚到
+> `<repo>/node_modules/.bin/pi` 并打印 `[pi-bin] <路径> → <版本>`。要用全局新版试一次，
+> 显式 `PI_BIN="$(command -v pi)"`。**版本只留痕、不作阻塞断言**（上游发版不阻塞合并）。
+
 > **CI 分片语义（改 `ci.yml` 的 e2e job 前必读）**：分片按模块名确定性 hash 分桶
 > （`run-e2e.sh` 的 `_shard_match`），**不写硬编码模块清单**——新增模块一定落在某个 shard 上。
 > 唯一允许不在矩阵里跑的是显式 `--exclude` 的模块（当前：`worktree` / `permission-gate`，
