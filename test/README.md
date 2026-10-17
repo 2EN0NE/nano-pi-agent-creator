@@ -221,6 +221,11 @@ TEST
 
 所有 TUI e2e 测试统一使用 **expect** 作为 PTY 后端。
 
+> **本地排障：`posix_spawnp failed`**（vitest TUI 用例全红，连 `/bin/echo` 都 spawn 不了）＝ `node-pty` 的
+> `prebuilds/<platform>-<arch>/spawn-helper` 丢了可执行位（`npm ci` / `npm i` 解包后常见）。修复：
+> `chmod +x node_modules/node-pty/prebuilds/$(node -p "process.platform+'-'+process.arch")/spawn-helper`，
+> 或 `npm rebuild node-pty`。**与被测 pi 版本无关**（CI 由 `scripts/setup-ci.sh` 的 rebuild 步骤兜住）。
+
 ### 两种测试模式
 
 | 模式 | 函数              | 适用场景                          | 文件                       |
