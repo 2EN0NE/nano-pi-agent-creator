@@ -7,6 +7,7 @@
  *   ③ 同一完成事件（`[evt:...]`）的重复投递不重复喂给模型。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -35,7 +36,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 	rmSync(root, { recursive: true, force: true });
 });
 

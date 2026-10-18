@@ -2,6 +2,7 @@
  * 排队上限（ADR-0055 `D4`）：满了**拒绝派发**，且**账本零改动**
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,7 +31,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 	rmSync(root, { recursive: true, force: true });
 });
 

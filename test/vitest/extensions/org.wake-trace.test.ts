@@ -7,6 +7,7 @@
  * 使日志文案或分支被改动时测试即红（防止可观测性静默回退）。
  */
 import { afterEach, beforeEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -74,7 +75,7 @@ afterEach(() => {
 	} catch {
 		/* 无会话或本机无 tmux：无需清理 */
 	}
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 	delete process.env.ORG_WAKE_VERIFY_MS;
 	rmSync(root, { recursive: true, force: true });
 });

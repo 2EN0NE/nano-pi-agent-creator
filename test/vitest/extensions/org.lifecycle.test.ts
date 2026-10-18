@@ -7,6 +7,7 @@
  * - tmux 原语：newDetachedSession / hasSession / killSession 真实往返（无 tmux 时跳过）
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -63,7 +64,7 @@ afterEach(async () => {
 	for (const s of sessions.splice(0)) await killSession(s).catch(() => {});
 	for (const p of pids.splice(0)) killIfAlive(p);
 	rmSync(root, { recursive: true, force: true });
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 });
 
 /** 起一个真实在岗的"假成员"（真进程 + 真 socket）并写 runtime */

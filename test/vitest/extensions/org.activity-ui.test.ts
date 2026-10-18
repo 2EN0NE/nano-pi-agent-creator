@@ -10,6 +10,7 @@
  * 账本、runtime、四态判定全部走真实代码。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import * as net from 'node:net';
 import { tmpdir } from 'node:os';
@@ -55,7 +56,7 @@ beforeEach(async () => {
 afterEach(async () => {
 	for (const s of servers.splice(0)) await new Promise<void>((r) => s.close(() => r()));
 	rmSync(root, { recursive: true, force: true });
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 });
 
 /** 假 control：应答 ping（在岗探测）、get_history（动态）、abort（中断） */

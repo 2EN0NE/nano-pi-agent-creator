@@ -6,6 +6,7 @@
  *   · 只在该进程**证明已死**时回收；状态未知时要超过阈值才回收；阈值可禁用。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,7 +33,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 	rmSync(root, { recursive: true, force: true });
 });
 

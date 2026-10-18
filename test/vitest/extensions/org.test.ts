@@ -7,6 +7,7 @@
  * 通过 ORG_ROOT 环境变量把 org 数据隔离到临时目录。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -77,7 +78,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 	rmSync(tmpRoot, { recursive: true, force: true });
 });
 

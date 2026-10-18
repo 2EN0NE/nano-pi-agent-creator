@@ -8,6 +8,7 @@
  * - stale runtime 清理的宽限期语义（挡启动竞态与探测抖动）
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import * as net from 'node:net';
 import { tmpdir } from 'node:os';
@@ -49,7 +50,7 @@ afterEach(async () => {
 	await closeServers(servers);
 	for (const p of pids.splice(0)) killIfAlive(p);
 	rmSync(root, { recursive: true, force: true });
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 });
 
 /** 构造仅含判定所需字段的任务（presence 只读 status 与 subTasks[].assignees[]） */

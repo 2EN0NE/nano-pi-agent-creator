@@ -8,6 +8,7 @@
  * 本测试钉住两半：`hasOpenAssignment`（任务侧"还算不算在手"）与 `releaseSlotIfStale`（按此释放本进程的槽）。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,7 +28,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 	rmSync(root, { recursive: true, force: true });
 });
 

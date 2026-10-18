@@ -4,6 +4,7 @@
 // 但 `dispatchTask` 从未调用 `ensureAwakeForDispatch` —— 开关打开与关闭行为一致。
 // 这里用 vi.mock 替掉 lifecycle 模块（真实拉起 tmux 太重且不确定），只断言接线本身。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,7 +33,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 	rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -9,6 +9,7 @@
  * - 人类操作：dispatcher 在详情按 a → y 验收 → 账本 closed（终态铁律）
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -229,7 +230,7 @@ describe('org TUI 任务看板', () => {
 		rmSync(chiefDir, { recursive: true, force: true });
 		rmSync(workerDir, { recursive: true, force: true });
 		rmSync(workerB, { recursive: true, force: true });
-		delete process.env.ORG_ROOT;
+		parkOrgRoot();
 	});
 
 	it('空态：无组织时给出指引且不超宽', async () => {

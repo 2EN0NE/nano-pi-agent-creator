@@ -12,6 +12,7 @@
  * （`test/e2e/extensions/org/smoke.test.sh` 用例 8 / 11）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -95,7 +96,7 @@ beforeEach(async () => {
 
 afterEach(() => {
 	process.chdir(origCwd);
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 	rmSync(tmpRoot, { recursive: true, force: true });
 });
 

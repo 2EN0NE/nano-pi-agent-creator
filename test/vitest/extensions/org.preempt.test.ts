@@ -5,6 +5,7 @@
  * 且失败时**不假装成功**（消息仍投递，避免"既没停、话也没送到"）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parkOrgRoot } from '../setup/org-root.js';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -49,7 +50,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-	delete process.env.ORG_ROOT;
+	parkOrgRoot();
 	rmSync(root, { recursive: true, force: true });
 });
 
