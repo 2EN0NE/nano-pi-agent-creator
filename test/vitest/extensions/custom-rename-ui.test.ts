@@ -142,9 +142,11 @@ describe('RenameSettingsPanel render', () => {
 		expect(text).toContain('off');
 	});
 
-	it('未配置模型显示 (未配置)', () => {
+	it('空 ref 显示「跟随当前模型」而非 (未配置)', () => {
 		const { snapshot } = mount({ model: { type: 'ref', ref: '' } });
-		expect(snapshot().join('\n')).toContain('(未配置)');
+		const text = snapshot().join('\n');
+		expect(text).toContain('跟随当前模型');
+		expect(text).not.toContain('(未配置)');
 	});
 });
 
@@ -157,20 +159,25 @@ describe('RenameSettingsPanel keyboard', () => {
 		expect(applyPatch).toHaveBeenCalledWith({ enabled: false });
 	});
 
-	it('未配置模型（ref 空）时开开关 → 提示 + UI 回滚（仍显示关）+ 不保存', () => {
-		const { applyPatch, notify, press, snapshot } = mount({
+	it('空 ref（跟随当前模型）时开开关 → 正常保存', () => {
+		const { applyPatch, notify, press } = mount({
 			enabled: false,
 			model: { type: 'ref', ref: '' },
 		});
-		press('\r'); // 关 → 开：应被拦截
-		expect(notify).toHaveBeenCalledWith(
-			expect.stringContaining('请先配置重命名模型'),
-			'warning',
-		);
-		expect(applyPatch).not.toHaveBeenCalled();
-		// UI 回滚：enabled 行仍显示「关」
-		const text = snapshot().join('\n');
-		expect(text).toContain('关');
+		press('\r'); // 关 → 开：空 ref 合法，放行
+		expect(applyPatch).toHaveBeenCalledWith({ enabled: true });
+		expect(notify).not.toHaveBeenCalled();
+	});
+
+	it('纯空白 ref 与空 ref 同口径：显示「跟随当前模型」且可开启', () => {
+		const { applyPatch, notify, press, snapshot } = mount({
+			enabled: false,
+			model: { type: 'ref', ref: '   ' },
+		});
+		expect(snapshot().join('\n')).toContain('跟随当前模型');
+		press('\r'); // 关 → 开：与 llm.resolveRenameModel 一致，放行
+		expect(applyPatch).toHaveBeenCalledWith({ enabled: true });
+		expect(notify).not.toHaveBeenCalled();
 	});
 
 	it('模型不可用（不在可用列表）时开开关 → 提示 + UI 回滚 + 不保存', () => {
@@ -201,6 +208,7 @@ describe('RenameSettingsPanel keyboard', () => {
 		press('\r'); // Enter → submenu
 		const text = snapshot().join('\n');
 		expect(text).toContain('选择重命名模型');
+		expect(text).toContain('跟随当前模型');
 		for (const spec of MODEL_SPECS) expect(text).toContain(spec);
 	});
 
@@ -208,7 +216,8 @@ describe('RenameSettingsPanel keyboard', () => {
 		const { applyPatch, snapshot, press } = mount();
 		press('\x1b[B'); // down → model
 		press('\r'); // open submenu
-		press('\x1b[B'); // down → anthropic
+		press('\x1b[B'); // down → deepseek/deepseek-chat（跳过首项「跟随当前模型」）
+		press('\x1b[B'); // down → anthropic/claude-sonnet-4-5
 		press('\r'); // select
 		expect(applyPatch).toHaveBeenCalledWith({
 			model: { type: 'ref', ref: 'anthropic/claude-sonnet-4-5' },
@@ -216,6 +225,18 @@ describe('RenameSettingsPanel keyboard', () => {
 		// 回到主列表（不再显示 submenu 标题）
 		const text = snapshot().join('\n');
 		expect(text).not.toContain('选择重命名模型');
+	});
+
+	it('model submenu 首项「跟随当前模型」→ applyPatch 且主列表回显非空', () => {
+		const { applyPatch, press, snapshot } = mount();
+		press('\x1b[B'); // down → model
+		press('\r'); // open submenu
+		press('\r'); // select 首项（跟随当前模型）
+		expect(applyPatch).toHaveBeenCalledWith({ model: { type: 'ref', ref: '' } });
+		// 空 ref 的 value 是空串：主列表必须回写显示值，否则值列留空（需重开面板才恢复）
+		const text = snapshot().join('\n');
+		expect(text).toContain('跟随当前模型');
+		expect(text).not.toContain('deepseek/deepseek-chat');
 	});
 
 	it('model submenu Esc → 取消不保存，回主列表', () => {
