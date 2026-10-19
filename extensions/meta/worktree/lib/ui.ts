@@ -79,6 +79,7 @@ interface WorktreeItem {
  *   f/F           Fork context
  *   c/C           Create new worktree
  *   d/D           删除选中项
+ *   g/G           建组向导（新建组声明）
  *   m/M           Merge
  *   s/S           Shell
  *   q/Q / Esc     退出
@@ -270,7 +271,7 @@ class WorktreeSwitcherPanel {
 			const namePadded = namePart + ' '.repeat(Math.max(0, 15 - nameVisible));
 			const dirtyStr =
 				item.dirty > 0 ? th.fg('warning', `dirty(${item.dirty})`) : th.fg('dim', 'clean');
-			// ahead = worktree 领先 main（待合并），behind = worktree 落后 main（需 sync）
+			// ahead = worktree 领先基准分支（待合并），behind = worktree 落后基准分支（需 sync）
 			const aheadStr = item.ahead > 0 ? th.fg('accent', ` +${item.ahead}`) : '';
 			const behindStr = item.behind > 0 ? th.fg('warning', ` -${item.behind}`) : '';
 
@@ -982,7 +983,7 @@ export async function askSymlinkTargetsPanel(ctx: any): Promise<SymlinkSelection
 // ═══════════════════════════════════════════
 
 /**
- * rebase+ff 确认弹窗。警告用户 worktree 文件将被重写。
+ * rebase-ff 确认弹窗。警告用户 worktree 文件将被重写。
  */
 export async function confirmRebaseFF(
 	ctx: any,
@@ -1584,15 +1585,14 @@ export async function showMergeFailurePanel(
 /**
  * 显示 merge/rebase 成功后的检查清单。
  *
- * @param type 'merge' | 'rebase' | 'rebase-ff'
- * @param targetBranch 目标分支名（用于 rebase-ff 的 push 提示，默认 main）
+ * @param type 'merge'（待手动提交）| 'rebase'（待 rebase --continue）。
+ *   不含 'rebase-ff'：该策略走 showMergeSuccessPanel / notify 的 push 提示，不弹本清单。
  */
 export async function showPostMergeGuide(
 	ctx: any,
 	_repoRoot: string,
 	resultMsg: string,
-	type: 'merge' | 'rebase' | 'rebase-ff',
-	targetBranch?: string,
+	type: 'merge' | 'rebase',
 ): Promise<void> {
 	if (!ctx.hasUI) return;
 
@@ -1612,14 +1612,6 @@ export async function showPostMergeGuide(
 					lines.push(
 						truncateToWidth(
 							theme.fg('accent', '  [4] git add + git commit (manual)'),
-							w,
-						),
-					);
-				} else if (type === 'rebase-ff') {
-					const pushBranch = targetBranch || 'main';
-					lines.push(
-						truncateToWidth(
-							theme.fg('accent', `  [4] git push origin ${pushBranch}`),
 							w,
 						),
 					);
@@ -1676,6 +1668,8 @@ export async function showMergeSuccessPanel(
 	sourceBranch: string,
 	targetBranch: string,
 	targetSync: { ahead: number; behind: number } | null = null,
+	/** rebase-ff 成功时传入：面板顶部追加 `git push origin <branch>` 提示（ADR-0019：插件不代推）。 */
+	pushBranch?: string,
 ): Promise<MergeSuccessResult> {
 	if (!ctx.hasUI) return { action: 'dismiss' };
 
@@ -1708,6 +1702,14 @@ export async function showMergeSuccessPanel(
 									'warning',
 									` 注意：本地 ${targetBranch} 落后远端 ${targetSync!.behind} 个提交（push 前建议先同步）`,
 								),
+								w,
+							),
+						);
+					}
+					if (pushBranch) {
+						lines.push(
+							truncateToWidth(
+								th.fg('accent', ` [push] git push origin ${pushBranch}`),
 								w,
 							),
 						);

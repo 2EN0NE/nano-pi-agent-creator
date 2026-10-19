@@ -68,8 +68,11 @@ export function hasRemoteBranch(repoRoot: string, ref: string): boolean {
 }
 
 /**
- * 仓库**默认分支名**的来源：`refs/remotes/origin/HEAD`（本地引用，**不联网**）。
- * 无远端/未设置时回退到「存在本地分支的 main / master」。都找不到返回 null。
+ * 仓库**默认分支名**的唯一来源：`refs/remotes/origin/HEAD`（本地引用，**不联网**）。
+ * 读不到（无远端 / 未设置）返回 null，交给调用方下一步（当前 HEAD → 显式报错）。
+ *
+ * **不按名称猜 main/master**：ADR-0061 决议 2 禁止写死分支名、决议 3 要求宁可报错也不猜错落点。
+ * 无 origin/HEAD 时按名称猜 main，会把 dev 上的特性合进 main——正是该 ADR 要消除的事故。
  */
 export function getDefaultBranchName(repoRoot: string): string | null {
 	try {
@@ -80,10 +83,7 @@ export function getDefaultBranchName(repoRoot: string): string | null {
 		const name = ref.replace(/^refs\/remotes\/origin\//, '');
 		if (name) return name;
 	} catch {
-		/* 无 origin/HEAD，回退 */
-	}
-	for (const candidate of ['main', 'master']) {
-		if (hasLocalBranch(repoRoot, candidate)) return candidate;
+		/* 无 origin/HEAD → 落到下一步（HEAD / 报错），不猜分支名 */
 	}
 	return null;
 }

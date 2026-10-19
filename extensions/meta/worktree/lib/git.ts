@@ -414,8 +414,8 @@ export function getAheadBehind(
 		if (res.status !== 0) return { ahead: 0, behind: 0 };
 		const parts = (res.stdout || '').trim().split('\t');
 		return {
-			// left = main 独有（main 领先 worktree）→ behind
-			// right = branch 独有（worktree 领先 main）→ ahead
+			// left = 基准分支独有（基准领先 worktree）→ behind
+			// right = branch 独有（worktree 领先基准）→ ahead
 			ahead: parseInt(parts[1] || '0', 10),
 			behind: parseInt(parts[0] || '0', 10),
 		};

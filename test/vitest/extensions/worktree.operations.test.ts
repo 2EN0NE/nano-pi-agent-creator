@@ -759,17 +759,18 @@ describe('worktree git helpers', () => {
 		expect(result.behind).toBe(1); // main 领先 1
 	});
 
-	it('getAheadBehind: main checkout 停留其他分支时基准仍为 main（不随 HEAD 漂移）', async () => {
+	it('getAheadBehind: 无 origin/HEAD 时基准落 HEAD（一律不猜 main）', async () => {
 		const { getAheadBehind, getCurrentBranch } = await import(resolve(EXT_LIB, 'git.ts'));
 		// main checkout 切到别的分支（模拟用户在 main checkout 上工作）
 		gitCreateBranch(repoDir, 'feature/unrelated');
 		gitCommit(repoDir, 'unrelated.txt', 'unrelated work');
 		expect(getCurrentBranch(repoDir)).toBe('feature/unrelated');
 
-		// 基准固定 main：feature/helper-test 相对 main 仍是 behind=1, ahead=2
+		// 无 origin/HEAD → 解析链落到 HEAD（ADR-0061 决议 3：不按名称猜分支）。
+		// 相对 main 是 behind=1，相对当前分支是 behind=2——这里断言后者，证明没有偷偷猜 main。
 		const result = getAheadBehind(repoDir, 'feature/helper-test');
 		expect(result.ahead).toBe(2);
-		expect(result.behind).toBe(1);
+		expect(result.behind).toBe(2);
 
 		// 切回 main，避免影响后续用例
 		gitCheckout(repoDir, 'main');

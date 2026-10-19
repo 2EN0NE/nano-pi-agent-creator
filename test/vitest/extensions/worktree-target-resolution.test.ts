@@ -131,6 +131,27 @@ describe('resolveTargetBranch（目标分支解析链，禁止写死分支名）
 		rmSync(baseDir, { recursive: true, force: true });
 	});
 
+	it('无 origin/HEAD 时不按名称猜 main——当前在 dev 就落 dev', async () => {
+		const baseDir = resolve(tmpdir(), 'pi-wt-tgt-noguess-' + Date.now());
+		const repo = createGitRepo(baseDir, 'repo');
+		execSync('git branch dev -q', { cwd: repo });
+		execSync('git checkout dev -q', { cwd: repo });
+		// 本地确实存在 main，但没有 origin/HEAD（无远端）
+		execSync('git show-ref --verify --quiet refs/heads/main', { cwd: repo });
+		expect(() =>
+			execSync('git symbolic-ref --quiet refs/remotes/origin/HEAD', {
+				cwd: repo,
+				stdio: 'pipe',
+			}),
+		).toThrow();
+
+		const { resolveTargetBranch } = await import(resolve(EXT_LIB, 'target.ts'));
+		const r = resolveTargetBranch(repo, {});
+		expect(r).toEqual({ branch: 'dev', source: 'head', isLocal: true });
+
+		rmSync(baseDir, { recursive: true, force: true });
+	});
+
 	it('显式写 origin/<b> → isLocal=false（远端 ref 需显式）', async () => {
 		const baseDir = resolve(tmpdir(), 'pi-wt-tgt7-' + Date.now());
 		const repo = createGitRepo(baseDir, 'repo');

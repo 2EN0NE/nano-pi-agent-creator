@@ -49,10 +49,26 @@
     3. 人为造冲突 → 断言**停在冲突态**、目标分支只有前 i-1 个提交、`continue` 能续跑剩余成员；
     4. 脏成员不可选 → 面板文本断言 + 绕过面板的执行层拒绝；
     5. 主检出的已暂存改动**不被卷进** squash 提交、合并后仍保持暂存；目标检出处于 merge 进行中 → 硬拒绝且**不产生提交**。
+- **④/⑤ 的分层落点（2026-10-19 定）**：④ 是守卫类属性，两段语义都落在 headless——面板文本/不可选见
+  `test/vitest/extensions/worktree-group-tui.test.ts`（脏成员灰显、Space 无效），执行层拒绝见
+  `test/vitest/extensions/worktree-group-ops.test.ts`（真 git，断言脏成员被跳过）；不再补 e2e。
+  ⑤ 保留一条真机 e2e（数据安全面，`test/e2e/extensions/worktree/tui-expect.smoke.test.sh` 的
+  staged 用例），headless 回归为 `worktree-group-ops.test.ts` 的「已暂存改动不会被卷进 squash 提交」。
 - **过程日志**：批量执行逐成员输出 `STEP_BEGIN`/`STEP_OK`/`FAIL_MARKER`，落 `.pi/logs/pi-worktree_*.log`（遵守 `docs/e2e-performance.md`）。
 
 ## 待定（本轮未决）
 
 - ~~**落地范围与次序**~~ **已决（2026-09）：整体落地（方案 C）**——连同 ADR-0061 的既有行为修复一起做成**一个变更**，由用户**一次性整体 UAT** 收口；内部按 ticket 拆解执行（`.scratch/worktree-group/issues/`）。
-- **本仓库自身是否迁移到组**：`scripts/recreate-worktrees.sh` 的去留、AGENTS.md 三层分支流程说明是否改写。
-- **文档同步**：插件 `README.md` 与内嵌 `skills/worktree/SKILL.md` 是否同步更新。
+- ~~**本仓库自身是否迁移到组**~~ **已决（2026-10-19）：迁移（方案 2）**——见「修订记录」。
+- ~~**文档同步**~~ **已决（2026-10-19）**：内嵌 `skills/worktree/SKILL.md` 与 `README.md` 已含组命令，无需改写；
+  项目内 `.pi/skills/worktree/` 的旧副本（无组命令）删除，改用 user-install 的现行版本。
+
+## 修订记录
+
+- **2026-10-19｜决策 11 的「不新增快捷键」按「不引入新交互范式」理解**：实现新增 `g/G` 作为建组入口
+  （操作栏已展示 `[G]roups`），与既有 `f/c/d/m/s/q` 同属单字母动作范式，既有键语义未变。
+  本次补记以消除 ADR 与实现的字面冲突；回归断言见 `test/vitest/extensions/worktree-group-tui.test.ts`。
+- **2026-10-19｜本仓库自身迁移到组**：本地声明 `all`（`baseRef=dev`、6 个成员、`squash`）；
+  `scripts/recreate-worktrees.sh` **保留**为「销毁重建」入口（组 `create` 是补建，不是它的超集）。
+  声明文件在 `.pi/extensions-data/pi-worktree/config.json`，`.pi` 被 gitignore → **不入库**，新机器/新 clone 需重建一次。
+- **2026-10-19｜验证要求 ④/⑤ 的分层落点**：见「验证要求」末的分层说明。

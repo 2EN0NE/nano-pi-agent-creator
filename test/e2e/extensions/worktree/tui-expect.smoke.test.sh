@@ -945,3 +945,103 @@ test_it "expect: group merge conflict stops fail-fast without partial or skipped
   rm -rf "$sandbox"
   tui_cleanup
 TEST
+
+# ── 测试 16：主检出的已暂存改动不被卷进 squash（ADR-0062 验证项 5）──
+# 语义保护（不是「无报错」）：合并前在主检出暂存 staged.txt → 合并后：
+#   ① 目标分支只多出成员那 1 个 squash 提交；② staged.txt **不在**该提交里；
+#   ③ staged.txt 仍处于已暂存状态且内容未变；④ 没有残留 stash（stash pop 已恢复）。
+test_it "expect: staged changes in main checkout are not swept into squash" <<'TEST'
+  local sandbox test_repo wt_parent base_count merged i
+  sandbox=$(mktemp -d "/tmp/pi-wt-staged-$$.XXXXXX")
+  test_repo="$sandbox/repo"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  git -C "$test_repo" checkout -b dev >/dev/null 2>&1
+  echo integration > "$test_repo/integration.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m integration >/dev/null 2>&1
+  git -C "$test_repo" checkout main >/dev/null 2>&1
+
+  # 单个成员：从本地 dev 派生，1 个提交
+  wt_parent="${test_repo}-worktrees"
+  mkdir -p "$wt_parent"
+  git -C "$test_repo" worktree add "$wt_parent/alpha" -b "wt/alpha" dev >/dev/null 2>&1
+  echo alpha > "$wt_parent/alpha/alpha.txt"
+  git -C "$wt_parent/alpha" add . >/dev/null 2>&1
+  git -C "$wt_parent/alpha" commit -m alpha >/dev/null 2>&1
+  base_count=$(git -C "$test_repo" rev-list --count dev)
+
+  # 主检出的「已暂存」在途改动（execMerge 会 stash push → merge → stash pop）
+  echo "staged-change" > "$test_repo/staged.txt"
+  git -C "$test_repo" add staged.txt >/dev/null 2>&1
+
+  mkdir -p "$test_repo/.pi/extensions-data/pi-worktree"
+  printf '%s' '{"groups":{"grp":{"baseRef":"dev","members":["alpha"],"mergeStrategy":"squash","env":{"nodeModules":"none","symlinkTargetIds":[]}}}}' \
+    > "$test_repo/.pi/extensions-data/pi-worktree/config.json"
+
+  tui_expect_test "pi-logger,worktree" "
+    send \"/worktree group merge grp\r\"
+    set timeout 20
+    expect -re {合并成员} { }
+    sleep 0.5
+    send \"\r\"
+    # 合并完成后会再问一次「统一对齐」：等它出现再确认（等不到则 Esc 兜底关覆盖层）
+    set timeout 45
+    expect -re {统一对齐} { }
+    sleep 0.5
+    send \"\r\"
+    sleep 1
+    send \"\033\"
+    sleep 0.5
+  " 90 "" "$test_repo"
+
+  # ① 有界轮询：目标分支多出 1 个 squash 提交
+  merged=0
+  for i in $(seq 1 20); do
+    if [[ "$(git -C "$test_repo" rev-list --count dev)" -ge "$((base_count + 1))" ]]; then
+      merged=1
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$merged" != "1" ]]; then
+    echo "FAIL: dev did not gain the squash commit (base=$base_count now=$(git -C "$test_repo" rev-list --count dev))"
+    git -C "$test_repo" log dev --oneline | head -5
+    worktree_e2e_dump_logs "$test_repo"
+    exit 1
+  fi
+  echo "PASS: dev gained 1 squash commit"
+
+  # ② squash 提交里不含 staged.txt（未被 sweep 进去）
+  if git -C "$test_repo" show --name-only --pretty=format: dev | grep -qx "staged.txt"; then
+    echo "FAIL: staged.txt was swept into the squash commit"
+    git -C "$test_repo" show --name-only --pretty=format: dev
+    exit 1
+  fi
+  echo "PASS: staged.txt not in squash commit"
+
+  # ③ 仍是已暂存状态、内容未变
+  if ! git -C "$test_repo" diff --cached --name-only | grep -qx "staged.txt"; then
+    echo "FAIL: staged.txt is no longer staged after merge"
+    git -C "$test_repo" status --porcelain
+    exit 1
+  fi
+  if [[ "$(cat "$test_repo/staged.txt")" != "staged-change" ]]; then
+    echo "FAIL: staged.txt content changed: $(cat "$test_repo/staged.txt")"
+    exit 1
+  fi
+  echo "PASS: staged.txt still staged and unchanged"
+
+  # ④ 没有残留 stash（stash pop 已恢复用户的在途改动）
+  if [[ -n "$(git -C "$test_repo" stash list)" ]]; then
+    echo "FAIL: stash left behind: $(git -C "$test_repo" stash list | head -3)"
+    exit 1
+  fi
+  echo "PASS: no stash left behind"
+
+  git -C "$test_repo" worktree remove "$wt_parent/alpha" --force >/dev/null 2>&1 || true
+  rm -rf "$sandbox"
+  tui_cleanup
+TEST

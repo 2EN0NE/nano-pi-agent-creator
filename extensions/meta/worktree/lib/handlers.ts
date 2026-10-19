@@ -1170,7 +1170,7 @@ export async function execRebaseFF(
 				message:
 					'Rebase conflict: ' +
 					conflictFiles.length +
-					' file(s). Resolve conflicts in worktree and re-run merge with rebase+ff.',
+					' file(s). Resolve conflicts in worktree and re-run merge with rebase-ff.',
 				conflicts: conflicts,
 			};
 		}
@@ -1279,7 +1279,8 @@ export async function handleMerge(
 	// ── 目标分支选择 ──
 	// 显式 --target 优先；有 UI 时列出所有本地分支让用户选择（排除被其他
 	// worktree checkout 的分支），避免误合并到非预期分支；无 UI 且未指定时
-	// 默认 main。
+	// 交给 resolveTargetBranch（显式 → 组 baseRef → origin/HEAD → 当前 HEAD → 报错，
+	// ADR-0061；不写死任何分支名）。
 	let targetBranch = flags.target || '';
 	if (!targetBranch && ctx.hasUI) {
 		const picked = await askMergeTarget(ctx, repoRoot);
@@ -1322,8 +1323,6 @@ export async function handleMerge(
 		strategy = picked;
 	}
 
-	const strategyLabel = { merge: 'merge', squash: 'squash', 'rebase-ff': 'rebase+ff' }[strategy];
-
 	log.info('merging', {
 		source: sourceBranch,
 		target: targetBranch,
@@ -1345,7 +1344,7 @@ export async function handleMerge(
 					? `\n注意：本地 ${targetBranch} 落后远端 ${sync.behind} 个提交（push 前建议先同步）`
 					: '';
 			confirmed = await ctx.ui.confirm(
-				`Merge '${sourceBranch}' -> '${targetBranch}'? (${strategyLabel})`,
+				`Merge '${sourceBranch}' -> '${targetBranch}'? (${strategy})`,
 				syncHint,
 			);
 		}
@@ -1384,7 +1383,14 @@ export async function handleMerge(
 	if (result.ok) {
 		if (ctx.hasUI && fromPanel) {
 			const targetSync = await getRemoteAheadBehind(repoRoot, targetBranch);
-			const choice = await showMergeSuccessPanel(ctx, sourceBranch, targetBranch, targetSync);
+			const choice = await showMergeSuccessPanel(
+				ctx,
+				sourceBranch,
+				targetBranch,
+				targetSync,
+				// rebase-ff 改写了本地 target，需用户自行 push 才能让远端生效（插件不代推，ADR-0019）
+				strategy === 'rebase-ff' ? targetBranch : undefined,
+			);
 			if (choice.action === 'switch') {
 				await handleUse(repoRoot, { _positional: targetBranch }, ctx);
 			} else if (choice.action === 'pull') {
@@ -1399,7 +1405,16 @@ export async function handleMerge(
 			}
 			// dismiss: 原地不动（成功合并后已切回合并前的原分支，而非 target）
 		} else {
-			ctx.ui.notify('已合并 ' + sourceBranch + ' -> ' + targetBranch, 'success');
+			ctx.ui.notify(
+				'已合并 ' +
+					sourceBranch +
+					' -> ' +
+					targetBranch +
+					(strategy === 'rebase-ff'
+						? `（rebase + ff）。下一步：git push origin ${targetBranch}`
+						: ''),
+				'success',
+			);
 		}
 	} else if (result.conflicts.length > 0) {
 		if (result.stashPopConflict) {
@@ -1449,8 +1464,8 @@ export async function handleMerge(
 			// 无冲突状态可解决，弹冲突面板反而误导 Agent 执行 rebase --continue（会失败）。
 			const guide =
 				strategy === 'squash'
-					? 'squash 合并冲突，工作区已回滚。建议先 /worktree rebase 同步到最新 main，再重新 merge。'
-					: 'rebase+ff 合并冲突，工作区已回滚。请在源 worktree 里 /worktree rebase 同步到最新 main 并解决冲突，再重新 merge。';
+					? `squash 合并冲突，工作区已回滚。建议先 /worktree rebase 同步到最新 ${targetBranch}，再重新 merge。`
+					: `rebase-ff 合并冲突，工作区已回滚。请在源 worktree 里 /worktree rebase 同步到最新 ${targetBranch} 并解决冲突，再重新 merge。`;
 			ctx.ui.notify(guide, 'warning');
 			if (fromPanel) await handlePanel(repoRoot, ctx);
 			return;

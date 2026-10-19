@@ -929,7 +929,12 @@ worktree(特性分支)  --squash-->  dev(集成主干)  --merge-->  main(发布�
 | worktree → dev | `git merge --squash` | 1 特性 = 1 提交，dev 历史保持干净                                      |
 | dev → main     | `git merge --no-ff`  | dev 永不 reset、连续开发；**禁止 squash dev → main**（丢历史导致分叉） |
 
+> 批量执行等价于逐条手工：`/worktree group merge all` 按花名册顺序逐个 squash 合并（fail-fast、可续跑）；
+> 单次仍可用上表手工命令。
+
 **worktree 复用铁律**：worktree 通过 squash 合入 dev 后，自身与 dev 分叉。**复用前必须先 `git reset --hard dev` 对齐**，否则会带上已合并的旧历史。
+
+> 整组对齐可用 `/worktree group sync all`（未合入成员走 rebase 保留提交，不丢改动；手工 `reset --hard` 仍是兜底）。
 
 **特殊情况**：仅在 dev 历史严重混乱（如大量 merge 提交）且用户明确要求时，才允许 squash dev → main 一次性压平；压平后立即 `git reset --hard main` 让 dev 重新对齐，并在压平前打 `archive/dev-<日期>` tag 保留历史。
 
@@ -955,6 +960,24 @@ bash scripts/recreate-worktrees.sh context
 ```
 
 > ⚠️ 脚本会删除对应 worktree 目录及其分支，**未提交改动会丢失**。运行前先 `git -C <worktree> status --short` 检查无未提交工作。
+
+#### 组声明与日常三件套（本机，不入库）
+
+仓库级组声明：`<repo>/.pi/extensions-data/pi-worktree/config.json`（`.pi` 被 gitignore → **不随仓库分发**，
+新机器 / 新 clone 需重建一次）。当前声明一个组：
+
+| 组    | baseRef | 成员                                                              | 策略   |
+| ----- | ------- | ----------------------------------------------------------------- | ------ |
+| `all` | `dev`   | bugfix / context / observability / security / tool / verification | squash |
+
+```bash
+/worktree group create all   # 只补建缺失成员（补建 ≠ 重建）
+/worktree group merge  all   # 按花名册顺序 squash 合并，fail-fast 可续跑
+/worktree group sync   all   # 非破坏性对齐（未合入成员走 rebase）
+```
+
+`scripts/recreate-worktrees.sh` **保留**：它是「销毁重建」（删目录与分支），组 `create` 只补建缺失成员，
+二者不等价——灾难恢复 / 彻底重来仍用脚本。
 
 ### 发版流程
 
