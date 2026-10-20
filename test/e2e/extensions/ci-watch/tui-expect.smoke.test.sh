@@ -48,12 +48,14 @@ test_it "expect: /ci-watch panel opens with 监控分支 as first item" <<'TEST'
   fi
 
   # 断言"监控分支"出现在"监控 PR"之前（第一项）
-  branch_line=$(extract_visible_text "$TUI_OUTPUT_FILE" | grep -n "监控分支" | head -1 | cut -d: -f1)
-  pr_line=$(extract_visible_text "$TUI_OUTPUT_FILE" | grep -n "监控 PR" | head -1 | cut -d: -f1)
-  if [[ -n "$branch_line" && -n "$pr_line" && "$branch_line" -lt "$pr_line" ]]; then
-    echo "PASS: 监控分支 listed before 监控 PR (branch@$branch_line < pr@$pr_line)"
+  # ⚠ 用「字节偏移」而非行号：TUI 重绘走光标定位，同一帧的多个条目可能落在同一条
+  # 物理行里（pi-tui 不按可视行输出 \n），行号比较会假失败（实测 branch=4 pr=4）。
+  branch_off=$(extract_visible_text "$TUI_OUTPUT_FILE" | grep -b -o "监控分支" | head -1 | cut -d: -f1)
+  pr_off=$(extract_visible_text "$TUI_OUTPUT_FILE" | grep -b -o "监控 PR" | head -1 | cut -d: -f1)
+  if [[ -n "$branch_off" && -n "$pr_off" && "$branch_off" -lt "$pr_off" ]]; then
+    echo "PASS: 监控分支 listed before 监控 PR (branch@$branch_off < pr@$pr_off)"
   else
-    echo "FAIL: 监控分支 not first (branch=$branch_line pr=$pr_line)"
+    echo "FAIL: 监控分支 not first (branch=$branch_off pr=$pr_off)"
     extract_visible_text "$TUI_OUTPUT_FILE" | grep -n "监控" | head -10
     exit 1
   fi

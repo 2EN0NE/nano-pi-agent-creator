@@ -2,6 +2,49 @@
 
 All notable changes to mitsupi are documented here.
 
+## v0.3.0 (2026-10-20)
+
+### 破坏性变更与语义调整
+
+- preset 的 tools / skills / instructions 改为叠加层（overlay）：激活即硬约束，清除预设即撤回；无预设时不施加任何限制。激活期间 `/tools`、`/skills`、`/prompt` 的写操作一律拒绝并告警；声明 `tools` 时为封闭集，运行时新注册的工具视为不可用；`/reload` 不再复活已清除的预设（ADR-0049/0050）。
+- `pi-rewind` 取代 `git-checkpoint`：自动 checkpoint + 自主回滚，存储路径迁移；原 `git-checkpoint` 扩展及其 e2e 移除（ADR-0038）。
+- 运行基座连续提升：pi 家族三包（`pi-ai` / `pi-coding-agent` / `pi-tui`）1.2.0 → 1.3.0，均为零兼容修复；e2e 与 vitest 的基座来源改为以 lock 为唯一来源并留痕（ADR-0063）。
+
+### 新增：多 agent 框架（org）
+
+- 目录绑定多 agent 框架：具名 org（create / join / 回归三选一 / leave / delete 归档）、任务 → 子任务 → 参与者状态机（终态铁律、返工轮次、期望时间继承）、派发（负责人单方 + 非负责人握手）、TUI 看板。
+- 在岗协作框架：`/control` 握手上岗与回落、派活闭环（dispatch → claim/report → review/accept/reject）、活动可见性、在岗干预、收件箱消化、成员串行执行与队列上限、唤醒授权（`autoWake` 门禁 + `org_wake` 工具 + `/org wake`）（ADR-0038~0055）。
+
+### 新增扩展
+
+- `message-time`：对话流每条消息注记三段式时间（今日 `[HH:MM:SS]` / 同年 `[MM-DD HH:MM:SS]` / 跨年 `[YYYY-MM-DD HH:MM:SS]`）；纯 markdown transformer 实现，零配置常开。
+
+### 功能增强
+
+- `permission-gate`：提升建议机制（tier 门禁 → 面板建议行 → 一级选择器 → 二级确认卡片 → 采纳/撤销，ADR-0058~0060）；信任范围改为多根列表，每根可挂「仅限本会话创建」出处条件；新增路径出处账本（字面路径 / 命令内变量绑定 / 跨命令变量，mtime 兜底仅限临时区）；`ctrl+shift+O` 展开命令全貌并支持 ↑↓ 滚动；审计 decision 拆分为 `blocked-no-ui` / `deny-legacy`。
+- `worktree`：本地优先基点解析（显式参数 → 组声明 → 本地同名 ref → 当前 HEAD，不猜远端，ADR-0061）；Worktree 组批量合并与同步（按花名册顺序逐个 squash、fail-fast 可续跑、脏成员双重拒绝，ADR-0062）；面板一级列表分 Groups / Worktrees 两段。
+- `bench`：新增前置检查模块与臂注册表 + 先导门（ADR-0056/0057）。
+- `custom-rename`：模型 ref 留空改为「跟随当前模型」，非法 ref 仍 fail-fast。
+- `custom-compaction`：默认自动继续文案改为压缩打断恢复提示。
+- `pi-logger`：自带默认 / 用户级 / 项目级三层配置分离；file appender 改同步写（进程被杀不丢尾行）；无 EventBus 时直接落盘并缓冲，总线建立后补投（消除启动期与退出期日志丢失）。
+- `sync`：墓碑清单清理下架扩展残留，修复内嵌后同名命令重复注册；配置重置仅「删除」进候选并在删除前备份；新增 `--profile <name> --ext <name>` 单插件白名单同步。
+
+### 工程与 CI
+
+- 新增仓库级配置锚点阻塞门禁 `lint:config:anchor`：白名单内的仓库级配置消费者必须显式锚仓库根（`git-common-dir` 派生），纳入 CI 与 pre-push。
+- e2e 耗时治理：插件级 300s 硬预算门禁（超预算判失败）+ 固定 sleep 改条件等待 + TUI 就绪改「读到输出静默」；实测 pi-session-tree 805→137s、preset 633→219s、worktree 466→173s、sync-tool 465→34s、pi-lab 366→140s。
+- e2e 结果统计改为文件驱动（修池化并行下 total=0 与退出码恒 0 的假绿）；新增 `--exclude` 排除清单，主矩阵分片改按模块名确定性 hash 分桶，CI 设 `E2E_BUDGET_STRICT=1`；permission-gate smoke 恢复为阻塞 job。
+- e2e 配置隔离改为前置 guard（注入 `PI_CODING_AGENT_DIR`），取代「删除-恢复」式隔离，修复中断时用户插件配置整批丢失；环境哨兵改为文件内容哈希 + 目录 + 符号链接口径。
+- e2e 与 vitest TUI 用例的运行基座统一取 lock（`node_modules/.bin/pi`）并打印留痕；本仓库工作树迁移到 Worktree 组管理，收敛 ADR-0062 残留。
+
+### 修复
+
+- `tui-testing` 的 `dispatchInput` 兼容 pi-tui 0.85 的 `handleTerminalInput`。
+- `org` vitest 用例的 `ORG_ROOT` 兜底改为指向临时目录，修复测试写入真实 `~/.pi/org`。
+- `permission-gate` 分析面板 vitest 时间炸弹；mock 助手类型对齐 `pi-ai/compat` 入口。
+- pre-push 门禁：e2e 运行基座路径改为绝对解析（husky 注入的相对 `node_modules/.bin` 曾让 guard 在所有沙箱里 ENOENT，导致每个模块 e2e 全红）；嵌套调用不再把父级 guard shim 当成真实 pi（`e2e-test` 技能自测曾因此无限递归空转），guard 增加自指快速失败；已删除的模块不再被选入 pre-push e2e。
+- `ci-watch` 的 TUI 用例改为按字节偏移断言条目顺序：pi-tui 以光标定位重绘、同一帧条目可能落在同一条物理行，行号比较会假失败。
+
 ## v0.2.0 (2026-09-06)
 
 ### 安全门禁（permission-gate）

@@ -49,6 +49,14 @@ if [ -z "$E2E_REAL_HOME" ]; then
 	echo "pi-home-guard: 无法确定真实 HOME：E2E_REAL_HOME 未设置，且 ${E2E_GUARD_ROOT:-<guard_root>}/real-home 不可读" >&2
 	exit 127
 fi
+# 自指保护：真实 pi 被解析成 guard shim 自身时，下面的 exec 会无限递归（嵌套 run-e2e.sh
+# 曾因此静默卡死 30min+）。宁可快速失败并给出可定位的报错。
+case "$E2E_REAL_PI" in
+*/e2e-guard-*/bin/pi)
+	echo "pi-home-guard: E2E_REAL_PI 指向 guard shim 自身（exec 会无限递归）：$E2E_REAL_PI" >&2
+	exit 127
+	;;
+esac
 
 # 比较前去尾斜杠：`HOME="$HOME/"`（或其他等价写法）不能被判成「已在沙箱」而直通真实 pi
 # ——那会把真实配置写掉，只剩运行级哨兵事后报警。

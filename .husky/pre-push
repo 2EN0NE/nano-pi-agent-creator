@@ -134,6 +134,19 @@ fi
 EXTS=$(echo "$EXTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
 SKILLS=$(echo "$SKILLS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
 
+# 只保留仍有测试目录的模块：删除扩展/技能时，变更文件列表仍会带出它的名字，
+# 但 `test/e2e/<class>/<name>/` 已随之删除，run-e2e.sh 会以 «No test files found» 失败，
+# 把一次纯删除的推送堵死（实测：dev 移除 git-checkpoint 后 pre-push 必红）。
+EXTS_KEPT=""
+for ext in $EXTS; do
+  if [ -d "test/e2e/extensions/$ext" ]; then EXTS_KEPT="$EXTS_KEPT $ext"; fi
+done
+EXTS="$EXTS_KEPT"
+SKILLS_KEPT=""
+for skill in $SKILLS; do
+  if [ -d "test/e2e/skills/$skill" ]; then SKILLS_KEPT="$SKILLS_KEPT $skill"; fi
+done
+SKILLS="$SKILLS_KEPT"
 if [ -z "$EXTS" ] && [ -z "$SKILLS" ] && [ -z "$RUNNER_CHANGED" ]; then
   # 没有变更涉及的扩展/技能，跳过
   exit 0

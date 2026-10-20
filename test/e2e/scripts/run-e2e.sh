@@ -45,8 +45,32 @@ RUN_DIR="$RESULTS_DIR/$TIMESTAMP"
 # 为什么需要：旧机制是「每模块跑完删掉全部 extensions-data/*/config.json + 结尾从备份
 # 恢复」，一旦该轮被 Ctrl-C / 超时 kill / CI 取消，恢复不执行 → 用户插件配置整批消失
 # （实测 1119 轮里 81 轮中断）。guard 让真实配置从根上不可被写，删除/恢复机制随之退场。
-E2E_REAL_HOME="$HOME"
-E2E_REAL_PI="$(command -v pi || true)"
+E2E_REAL_HOME="${E2E_REAL_HOME:-$HOME}"
+# 解析真实 pi。⚠ 两个已知坑：
+#  ① husky 的 `.husky/_/h` 往 PATH 前面塞的是**相对** `node_modules/.bin`，`command -v`
+#    会原样返回相对路径；guard 随后在沙箱 cwd（.pi/tmp/tui-exp-*）里 exec 它 → ENOENT
+#    （表现为「所有模块 e2e 全红」）。故必须绝对化。
+#  ② 嵌套调用（用例里再跑 run-e2e.sh，如 e2e-test 技能自测）时 PATH 首位是**父级 guard
+#    shim**；把 shim 当成真实 pi 会让 shim 因继承的 E2E_REAL_PI 指向自己而 exec 自身 →
+#    无限递归空转（实测卡死 30min+，0% CPU）。故优先已继承的真实值，其次跳过 guard shim。
+resolve_real_pi() {
+	local cand
+	if [[ -n "${E2E_REAL_PI:-}" && "$E2E_REAL_PI" != */e2e-guard-*/bin/pi ]]; then
+		printf '%s' "$E2E_REAL_PI"
+		return 0
+	fi
+	while IFS= read -r cand; do
+		case "$cand" in
+		*/e2e-guard-*/bin/pi) continue ;;
+		esac
+		printf '%s' "$cand"
+		return 0
+	done < <(type -ap pi 2>/dev/null || true)
+}
+E2E_REAL_PI="$(resolve_real_pi)"
+if [[ -n "$E2E_REAL_PI" && "$E2E_REAL_PI" != /* ]]; then
+	E2E_REAL_PI="$(cd "$(dirname "$E2E_REAL_PI")" && pwd)/$(basename "$E2E_REAL_PI")"
+fi
 if [[ -z "$E2E_REAL_PI" ]]; then
 	echo "  ⚠️  PATH 中找不到 pi：e2e 用例将无法启动 pi（guard 会在调用时快速失败）" >&2
 fi
