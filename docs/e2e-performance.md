@@ -294,6 +294,31 @@ pi-state）与 pi-logger 的 `~/.pi/logs/**` **不在 guard 覆盖内**——用
 - **mock-llm**：CI 模式自动注入；并发下各自进程独立，无需额外处理。
 - **同模块多文件**在池化下可能并行：写结果必须走 append（§3.4），不要"读-改-写"共享文件。
 
+### 4.4 pre-push 长跑：三处「静默全红 / 卡死」与 SSH 空闲断连
+
+推分支时 pre-push 会跑**全部受影响模块**的 e2e。发布 v0.3.0 实测（跨度 31 个提交，命中
+20 个扩展 + 2 个技能）：**单次 pre-push 约 50 分钟**。这种长跑会暴露几个**只在 pre-push
+环境下出现**的坑——它们都不报「测试失败」，而是全红、静默卡死或推送被拒，排查时极容易误判。
+
+| 现象                                                                                                                                | 根因                                                                                                                                                                    | 修复                                                                                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 所有模块 e2e 全红，case log 里 `guard/bin/pi: exec: <沙箱>/node_modules/.bin/pi: No such file or directory`                         | husky 的 `.husky/_/h` 往 PATH 前置的是**相对** `node_modules/.bin`，`command -v pi` 原样返回相对路径；guard 随后在沙箱 cwd 里 exec 它必然 ENOENT                        | `run-e2e.sh` 把 `E2E_REAL_PI` 绝对化（`cd "$(dirname …)" && pwd`）                                             |
+| 推送挂住数十分钟无输出（不是超时失败，也没有日志）；`ps` 可见 `/bin/sh .pi/tmp/e2e-guard-*/bin/pi --version` 与自身互为父子、0% CPU | **嵌套调用**（用例里再跑 `run-e2e.sh`，如 `e2e-test` 技能自测）时 PATH 首位是父级 guard shim；把它当真实 pi → 继承的 `E2E_REAL_PI` 指向 shim 自身 → `exec` 自身无限递归 | 解析真实 pi 时**优先已继承值**、跳过 `*/e2e-guard-*/bin/pi`；guard 增加自指快速失败（exit 127）                |
+| pre-push 在某模块报 `No test files found` → 推送被堵                                                                                | 删除扩展/技能时 `git diff` 仍带出它的名字，但 `test/e2e/<class>/<name>/` 已随之删除（实测移除 `git-checkpoint`）                                                        | `pre-push` 只保留**仍有测试目录**的模块                                                                        |
+| hook 全绿却推送失败，`git push` 退出码 **141（SIGPIPE）**，日志里连 `Enumerating objects` 都没有                                    | git 在**跑 pre-push 之前**就建立了 SSH 连接；长跑期间连接空闲被掐断，hook 结束后 git 往死连接写                                                                         | 推送时加 SSH keepalive：`GIT_SSH_COMMAND="ssh -o ServerAliveInterval=20 -o ServerAliveCountMax=30" git push …` |
+
+排障要点：
+
+- **退出码 141 是 SIGPIPE，不是 hook 失败**：若日志里没有任何 `Enumerating objects` / `remote:`
+  输出，先怀疑 SSH 空闲断连，不要重跑 e2e（重跑仍是 50 分钟）。
+- **`pkill` 只杀 `git push` 会留下孤儿 hook**：`.husky/pre-push` 的子进程（`run-e2e.sh`）会继续
+  跑，并与下一次推送争资源（实测导致 org 模块被杀、hook exit 1、连诊断行都不打印）。中断长跑
+  要连 `run-e2e.sh` / `pi-home-guard` 一起杀。
+- **推送期间不要并发跑别的 e2e**：模块级预算按独占机判定，争用会把 300s 模块推到超时并判失败。
+- 单模块耗时参考（v0.3.0 实测，独占机）：org 733s（例外 900s）、custom-compaction 277s、
+  permission-gate 272s、pi-rewind 260s、worktree 256s、preset 227s —— 多模块串行即上述 ~50 分钟；
+  因此「先手动逐个模块跑一遍、再推送」等于双倍成本，应直接让 pre-push 当唯一门禁。
+
 ## 5. 超预算排查清单
 
 1. `summary.md` → `Time Budget` 找超标插件；看 `cases[].duration_seconds` 找大户。
@@ -306,11 +331,13 @@ pi-state）与 pi-logger 的 `~/.pi/logs/**` **不在 guard 覆盖内**——用
 
 ## 6. 已交付的关键改动（供回溯）
 
-| 改动                                                      | 位置                       | 效果                                      |
-| --------------------------------------------------------- | -------------------------- | ----------------------------------------- |
-| 就绪检测改「读到输出静默」+ eof 崩溃探测                  | `helpers/tui-functions.sh` | 每 TUI 用例省 11-41s，且避免按键/输出交错 |
-| 收尾两段式（先 `/quit`，未退再 ESC+重试）                 | `helpers/tui-functions.sh` | 每 TUI 用例省 7-22s，且不误伤 exit=0 断言 |
-| 阶段计时 `[tui-stage]`                                    | `helpers/tui-functions.sh` | 超时可定位卡点                            |
-| 用例级耗时 + 插件级预算 + `settle_budget()` 门禁          | `scripts/run-e2e.sh`       | 超标判失败 + Time Budget 报告             |
-| 结果统计文件驱动 `.results/*.tsv` + `aggregate_results()` | `scripts/run-e2e.sh`       | 修假绿（子 shell 丢变量）                 |
-| worker 超时留痕 `.budget-timeouts/`                       | `scripts/run-e2e.sh`       | 被 kill 的模块不再静默消失                |
+| 改动                                                                | 位置                                             | 效果                                                  |
+| ------------------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------- |
+| 就绪检测改「读到输出静默」+ eof 崩溃探测                            | `helpers/tui-functions.sh`                       | 每 TUI 用例省 11-41s，且避免按键/输出交错             |
+| 收尾两段式（先 `/quit`，未退再 ESC+重试）                           | `helpers/tui-functions.sh`                       | 每 TUI 用例省 7-22s，且不误伤 exit=0 断言             |
+| 阶段计时 `[tui-stage]`                                              | `helpers/tui-functions.sh`                       | 超时可定位卡点                                        |
+| 用例级耗时 + 插件级预算 + `settle_budget()` 门禁                    | `scripts/run-e2e.sh`                             | 超标判失败 + Time Budget 报告                         |
+| 结果统计文件驱动 `.results/*.tsv` + `aggregate_results()`           | `scripts/run-e2e.sh`                             | 修假绿（子 shell 丢变量）                             |
+| worker 超时留痕 `.budget-timeouts/`                                 | `scripts/run-e2e.sh`                             | 被 kill 的模块不再静默消失                            |
+| 运行基座路径绝对化 + 嵌套调用跳过 guard shim（+ shim 自指快速失败） | `scripts/run-e2e.sh`、`helpers/pi-home-guard.sh` | pre-push 不再「全模块全红」/ 不再无限递归卡死（§4.4） |
+| pre-push 只保留仍有测试目录的模块                                   | `.husky/pre-push`                                | 纯删除扩展的推送不再被 `No test files found` 堵死     |
