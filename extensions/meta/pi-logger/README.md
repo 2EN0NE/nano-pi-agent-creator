@@ -210,3 +210,24 @@ Default location: `~/.pi/logs/YYYY-MM-DD.log`
 [2026-01-15T10:30:05.234] [TRACE] [__lifecycle__] [tool] ← bash  3450ms  ✓  result=All tests passed
 [2026-01-15T10:30:05.567] [INFO ] [__lifecycle__] [turn] ← #3  calls=2  4789ms
 ```
+
+### 写入可靠性（不丢日志的三条路径）
+
+`log.*()` 到磁盘的路径上有三个曾会**静默丢日志**的点，现已修复并有回归测试
+（`test/vitest/extensions/pi-logger-logging-durability.test.ts`）：
+
+| 场景                                                         | 曾丢失原因                                                                  | 现行为                                                                                                                                   |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **没有 EventBus**（vitest 单测、pi-logger 未加载、启动早期） | 事件只进内存缓冲，等一个可能永不到来的总线                                  | 直接按配置写文件 appender（兜底 sink）。**在项目根跑 vitest 时日志落在 `<cwd>/.pi/logs/`**，与真实会话日志同目录（`.pi` 已被 gitignore） |
+| 总线就绪时的**启动期缓冲**                                   | `initEventBus()` 同步 flush，早于调用方的 `.on()` 订阅 → 投进无人监听的总线 | flush 延后一个微任务，订阅先就位                                                                                                         |
+| **进程退出**（print 模式收尾 / 被清理 / 异常退出）           | handler 是火忘式异步写，`process.exit()` 丢掉在途 `appendFile`              | `writeFileLog` **同步落盘**（`appendFileSync`）：调用返回时该行已在盘上                                                                  |
+
+已知边界：
+
+- **无 bus + 首条日志后同一 tick 退出**：兜底 sink 需要读配置，极端情况下那一行可能丢
+  （要求「pi-logger 未加载」且「进程在同一 tick 退出」）。正常 pi 会话有总线，不受影响。
+- **SIGKILL** 无法拦截；同步写已保证此前调用过的日志都在盘上。
+- 走总线路径仍是异步投递（index.ts → appender），但 appender 内部同步写，
+  所以「日志调用返回」即已持久化。
+- 文件 appender 的行格式由 `pattern` 决定，**不包含 `details`（结构化对象）**；
+  结构化数据目前只进 tail 缓冲与 console appender。

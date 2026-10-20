@@ -25,11 +25,17 @@ test/vitest/  — 单元 + 组件测试（headless）
 test/e2e/     — 集成端到端测试（真实 Pi）
     Mock:  仅 LLM API（mock-llm）
     目标:  验证扩展在真实 Pi 进程中的行为
-    时长:  ~2min/module，CI + 提交前手动运行
+    时长:  **硬预算 ≤5min/插件**（默认 300s，超预算判失败），CI + 提交前手动运行
     约束:  每个测试只 mock 大模型服务商，其他 Pi API 均走真实路径
 ```
 
 > **铁律**：`test/e2e/` 下的所有测试，如果 mock 了 LLM 以外的任何 Pi API（sessionManager、annotate、keybinding），视为不合规。
+
+> **铁律（耗时与可观测）**：单插件 e2e **总耗时硬预算 300s**（`E2E_EXT_BUDGET_SEC` / `--ext-budget` 可覆盖，`0` 仅排障），
+> 超出即判失败——要么用例挂起/等待异常，要么冗余需精简。每条 TUI 用例必须留下可定位的**过程日志**
+> （`[tui-stage]` 阶段计时；合并用例用 `STEP_BEGIN`/`STEP_OK`/`FAIL_MARKER`），
+> 结果统计必须**文件驱动**（不得依赖跨子 shell 的内存变量）。
+> 规范与排查清单：[`docs/e2e-performance.md`](docs/e2e-performance.md)。
 
 详见 ADR：[`docs/adr/0004-tui-e2e-layered-testing.md`](docs/adr/0004-tui-e2e-layered-testing.md)。
 
@@ -47,6 +53,10 @@ npm run test:watch
 
 编写示例见 `test/vitest/extensions/pi-logger.test.ts`。
 
+> ⚠️ **worktree 系 vitest 用例**（`test/vitest/extensions/worktree*.test.ts`）会执行真实 git 操作
+> （worktree/merge/rebase），与 `git commit` 环境冲突：pre-commit 的 `npm test` 会排除它们，
+> 但 **pre-push / CI 必须全量跑**（CI `e2e-worktree` job 跑 `worktree*.test.ts` 全 glob）。
+
 #### 路径 B：bash/expect 集成 e2e 测试（test/e2e/）
 
 真实 Pi 进程，仅 mock LLM。传统 bash（print 模式）+ `expect` 脚本（TUI 按键交互）。
@@ -63,6 +73,19 @@ CI=true bash test/e2e/scripts/run-e2e.sh --ext pi-logger
 LATEST=$(ls -1t test/results/ | head -1)
 cat test/results/$LATEST/summary.md
 ```
+
+> **运行基座留痕与来源（ADR-0063）**：e2e 跑的是**基座版本**——`scripts/setup-ci.sh` 从
+> `node_modules/@earendil-works/pi-coding-agent/package.json` 读版本再全局安装（读不到即
+> fail-fast）；`PIPELINE=<版本>` 已降级为**显式覆盖开关**（不再是默认 `latest`）。
+> 每次运行在启动横幅打印 `pi runtime base: <版本> (<路径>)`，并写入 `summary.json` 的
+> `pi_version` / `pi_path`；vitest 的 TUI 用例（`resolvePiBin()`）默认锚到
+> `<repo>/node_modules/.bin/pi` 并打印 `[pi-bin] <路径> → <版本>`。要用全局新版试一次，
+> 显式 `PI_BIN="$(command -v pi)"`。**版本只留痕、不作阻塞断言**（上游发版不阻塞合并）。
+
+> **CI 分片语义（改 `ci.yml` 的 e2e job 前必读）**：分片按模块名确定性 hash 分桶
+> （`run-e2e.sh` 的 `_shard_match`），**不写硬编码模块清单**——新增模块一定落在某个 shard 上。
+> 唯一允许不在矩阵里跑的是显式 `--exclude` 的模块（当前：`worktree` / `permission-gate`，
+> 各自有专用 job）。CI 还设 `E2E_BUDGET_STRICT=1`：耗时超插件预算**一律判失败**，不降级为 WARN。
 
 #### 验证流程
 
@@ -84,11 +107,14 @@ cat test/results/$LATEST/summary.md
 
 项目使用 husky v9 管理 git hooks，按分层策略组织：**CI 是绝对标准（全部阻塞），本地 hook 轻重分层对齐 CI，但跳过耗时步骤。**
 
-| 层             | 触发时机     | 耗时 | format:check | typecheck            | lint/eslint           | test (vitest) | e2e       | semgrep       |
-| -------------- | ------------ | ---- | ------------ | -------------------- | --------------------- | ------------- | --------- | ------------- |
-| **CI**         | `git push`   | 全量 | ✅ 阻塞      | ✅ 阻塞              | ✅ 阻塞               | ✅ 阻塞       | ✅ 阻塞   | ✅ ERROR 阻塞 |
-| **pre-push**   | `git push`   | 中   | —            | ✅ 有 .ts 变更时阻塞 | —                     | ✅ 阻塞       | ✅ 仅变更 | —             |
-| **pre-commit** | `git commit` | ~5s  | ✅ 阻塞      | —                    | ✅ auto-fix 仅 staged | ✅ 阻塞       | —         | —             |
+| 层             | 触发时机     | 耗时 | format:check | typecheck            | lint/eslint + config 锚点          | test (vitest) | e2e                 | semgrep       |
+| -------------- | ------------ | ---- | ------------ | -------------------- | ---------------------------------- | ------------- | ------------------- | ------------- |
+| **CI**         | `git push`   | 全量 | ✅ 阻塞      | ✅ 阻塞              | ✅ 阻塞（含 `lint:config:anchor`） | ✅ 阻塞       | ✅ 阻塞（分片矩阵） | ✅ ERROR 阻塞 |
+| **pre-push**   | `git push`   | 中   | —            | ✅ 有 .ts 变更时阻塞 | ✅ 仅 config 锚点                  | ✅ 阻塞       | ✅ 仅变更 + 金丝雀  | —             |
+| **pre-commit** | `git commit` | ~5s  | ✅ 阻塞      | —                    | ✅ auto-fix 仅 staged              | ✅ 阻塞       | —                   | —             |
+
+> CI `config-compliance` job 里 **`npm run lint:config:anchor` 是阻塞项**（仓库级配置必须显式锚仓库根，见
+> 「[项目级配置的解析锚点](#项目级配置的解析锚点仓库级-vs-目录级强制判断)」）；历史欠账较多的 `lint:config`（规则 1/2）仍为 WARN。
 
 **① pre-commit：提交前轻量校验（`.husky/pre-commit`）**
 
@@ -106,12 +132,16 @@ npx husky run pre-commit
 **② pre-push：推送前较重校验（`.husky/pre-push`）**
 
 1. **`typecheck`** — 仅当有 `.ts/.tsx` 变更时运行 `tsc --noEmit`（阻塞，对齐 CI）
-2. **`npm test`** — Vitest 单元测试（阻塞，对齐 CI `unit-tests` job）
-3. **e2e 测试** — 自动检测本次推送变更的扩展/技能，只运行受影响模块
+2. **`lint:config:anchor`** — 仅当有 `.ts/.tsx` 变更时运行（阻塞，对齐 CI `config-compliance` job）
+3. **`npm test`** — Vitest 单元测试（阻塞，对齐 CI `unit-tests` job）
+4. **e2e 测试** — 自动检测本次推送变更的扩展/技能，只运行受影响模块
+5. **e2e 金丝雀** — 当 `test/e2e/scripts/*` 或 `test/e2e/helpers/*`（运行器/助手）变更时，额外跑
+   `--shard 0/8` 代表分片：运行器变更影响**所有**模块，但逐个跑全量太慢，用一片当金丝雀抓
+   全局性回归（脚本语法、参数解析、分片选择、沙箱/expect 助手失效）。全量由 CI 分片矩阵覆盖。
 
 ```bash
 # 修改 extensions/auto/loop.ts → 推送前自动运行:
-bash test/scripts/run-e2e.sh --ext loop
+bash test/e2e/scripts/run-e2e.sh --ext loop
 ```
 
 > pre-commit 是 `git commit` 时触发，pre-push 是 `git push` 时触发。若需要跳过 hook 使用 `--no-verify` 参数。
@@ -124,6 +154,18 @@ bash test/scripts/run-e2e.sh --ext loop
 
 - 正例：用户在最后一次对话中指明“请帮我提交此次变更”，你从对话中识别到针对什么插件进行了哪些文件的改动，从git status中把相应改变的文件进行add，剔除了不相关的文件（其他之前staged的不相干的文件剔除，本次对话产生的一些临时性文件加入了.gitignore），然后按过去的commit规范以中文提交了（可使用项目中的commit技能）
 - 反例：用户在前一轮对话说过“帮我提交”，这一轮是要我修改错误，没有在话语中提到“帮我提交”，就默认为修改完的要提交，自动commit -a合并了。
+
+### 临时产物与 pi-rewind 可记录性（本项目）
+
+本仓库启用 project-profile 的 pi-rewind 扩展（`.pi/extensions/pi-rewind`），自动 checkpoint 覆盖的**只有会话 cwd（本项目根）内、未被排除的文件**；cwd 之外的改动（`/tmp`、`~`、其它 worktree 等）**不会被 checkpoint 记录，也无法 `/rewind` 回滚**（详见 ADR-0038「范围边界」）。
+
+因此，在本项目工作时遵循：
+
+1. **希望有记录 / 可回滚的产物，一律放在项目（cwd）内**。不要在 cwd 外（尤其系统 `/tmp`）留下「想找回」的中间产物——pi-rewind 管不到。
+2. 确需在项目内建临时目录时，用**已被 `.gitignore` 忽略的目录**（`tmp/`、`temp/`、`.scratch/` 等，见根 `.gitignore`）：真实 git 与 pi-rewind 的 untracked 快照都不会纳入，`git status` 保持干净、快照无噪声。
+3. 若临时物只是「跑完即弃」，放 cwd 外亦可（不在安全网承诺内）；但涉及要回滚验证/留痕的，回到规则 1。
+
+> 配套：根 `.gitignore` 含 `/tmp/` `/temp/`（项目内同名临时目录已被忽略）；如需新增同类目录，先在 `.gitignore` 登记再使用。
 
 ## 扩展开发
 
@@ -248,6 +290,34 @@ store.reload();
 | `loadLayeredConfig<T>(opts)`            | 一次性分层加载（不含缓存）               |
 | `createConfigStore<T>(opts)`            | 返回带缓存的 ConfigStore<T>（推荐）      |
 
+#### 项目级配置的解析锚点：仓库级 vs 目录级【强制判断】
+
+`@zenone/pi-config` 的项目级层默认锚在**会话 cwd**（`<cwd>/.pi/extensions-data/<plugin>/config.json`）。
+
+**判断规则**：配置描述的是**仓库**还是**当前目录**？
+
+| 配置描述的对象                      | 锚点                     | 写法                                        |
+| ----------------------------------- | ------------------------ | ------------------------------------------- |
+| 仓库（worktree 花名册、仓库级策略） | **git 仓库根**（强制）   | `createConfigStore({ cwd: repoRoot, ... })` |
+| 当前目录（目录作用域策略）          | 会话 cwd（默认，不要动） | `createConfigStore({ ... })`（见 ADR-0059） |
+
+`repoRoot` 用 `git rev-parse --path-format=absolute --git-common-dir` 推导（其父目录即主仓库根，**在 worktree 内也有效**；pi-worktree 的 `getRepoRoot()` 即此实现）。**不要**用 `--show-toplevel`：它在 worktree 内返回的是 worktree 自身。
+
+**为什么必须锚到仓库根**：`.pi/` 通常被 gitignore，git worktree **各自持有独立 `.pi/`**——主仓库的项目级配置在成员 worktree 里**不可见**。锚在 `ctx.cwd` 会导致：① 在 worktree / 子目录里读不到仓库级配置；② 同一份声明要在每个 worktree 各配一遍。
+
+**副作用（需知情接受）**：该 `config.json` 变成主仓库与所有 worktree **共享**——偏好类字段（如「上次选择的策略」）从「每个 cwd 各存各的」变为「全仓库一致」。
+
+**门禁（自动化，别只靠人记）**：`npm run lint:config:anchor`（`scripts/check-config-compliance.ts --anchor --error`）检查下列**仓库级配置消费者**白名单里的每个配置解析点：
+
+| 要求                                     | 写法                                                        |
+| ---------------------------------------- | ----------------------------------------------------------- |
+| 显式锚仓库根                             | `{ cwd: repoRoot }`（值不得是 `process.cwd()` / `ctx.cwd`） |
+| 或显式声明目录作用域（偏好类配置才允许） | 调用点上方写 `// config-scope: session-cwd`                 |
+
+该门禁在 CI `config-compliance` job 与 pre-push 中**阻塞**。新增仓库级配置消费者时，把扩展路径加进 `scripts/check-config-compliance.ts` 的 `REPO_SCOPED_CONFIG_CONSUMERS` 白名单。
+
+> 首个采用者：pi-worktree 的「Worktree 组」声明（2026-09，`CONTEXT.md` 术语 `Worktree 组`）。
+
 > ⚠️ **pi-logger 例外**：pi-logger 是其他扩展依赖的基础设施，为避免循环依赖，保留自身配置加载机制，但搜索路径已对齐到标准 `extensions-data/pi-logger/config.json`。
 
 详细 API 说明见 [`extensions/meta/pi-config/README.md`](extensions/meta/pi-config/README.md)。
@@ -257,7 +327,11 @@ store.reload();
 扩展可以自带 agent 技能（skill），使"技能跟着插件走"（ADR-0022）。约定：
 
 - **位置**：技能放在扩展目录的 `skills/<skillName>/SKILL.md` 子目录下。
-- **声明**：扩展根 `package.json` 必须有 `pi` manifest，用 `pi.skills` 声明内嵌技能目录、`pi.extensions` 声明扩展入口（为将来 npm 包化分发做准备）：
+- **声明**：扩展根 `package.json` 必须有 `pi` manifest，声明 `pi.extensions`（扩展入口）与内嵌技能目录（为将来 npm 包化分发做准备）。技能有**两种分发方式**：
+    - **默认（安装式）**：用 `pi.skills` 声明内嵌技能目录，由 sync 工具装进目标 `skills/`，所有 pi 会话可见（适合“基础能力/普遍适用”的技能，如 `pi-logger`）。
+    - **运行期贡献式（例外）**：**不声明 `pi.skills`**，技能随扩展目录一起分发，由扩展在 `resources_discover` 事件里按条件贡献路径（`skillPaths`），仅特定进程可见。适用场景：技能**不应全局可见**、且需按上下文/角色门控（如 `org` 的在岗技能，见 ADR-0042 D4）。此方式下技能目录必须与扩展入口同目录下的 `skills/`，扩展用 `import.meta.url` 定位。
+
+默认（安装式，大多数扩展适用）：
 
 ```json
 {
@@ -270,7 +344,9 @@ store.reload();
 }
 ```
 
-- **发现**：sync 工具同步扩展时，自动读取 `pi.skills`，把声明目录下每个含 `SKILL.md` 的子目录作为内嵌技能同步到目标 `skills/` 目录——**无需在 sync-profiles.yaml 的 skills 列表中再列一遍**（内嵌技能随扩展走：扩展属于哪个 profile，技能就同步到哪个 profile）。
+运行期贡献式（例外；省略 `skills` 字段，技能仅在 `resources_discover` 被贡献时可见，如 `extensions/auto/org`）。
+
+- **发现**：sync 工具同步扩展时，自动读取 `pi.skills`，把声明目录下每个含 `SKILL.md` 的子目录作为内嵌技能同步到目标 `skills/` 目录——**无需在 sync-profiles.yaml 的 skills 列表中再列一遍**（内嵌技能随扩展走：扩展属于哪个 profile，技能就同步到哪个 profile）。未声明 `pi.skills`（运行期贡献式）的扩展，其 `skills/` 不装进目标 `skills/`，但依旧随扩展目录整体拷贝，由扩展运行期 `resources_discover` 自行贡献。
 - **命名**：内嵌技能名 = 目录名（与官方 package 语义一致）。若与 `skills/` 顶层的同名技能冲突，sync 工具 fail-fast 报错，不静默覆盖。
 - **受众**：内嵌技能面向 agent（模型），教 agent 何时/如何使用该扩展，而非面向终端用户的安装/配置说明。
 
@@ -279,6 +355,19 @@ store.reload();
 ### 扩展的快捷键设计
 
 建议以alt（option)+插件英文首字母或关联字母为插件相关快捷键，一个插件不应占用太多快捷键，建议一个插件有众多功能都需要分配快捷键时，采用二级组合按键的形式进行设计。
+
+### preset 策略源与子工具锁定（ADR-0049）【强制】
+
+`preset` 是 tools / skills / instructions 三个维度的**唯一策略声明者**；`/tools`、`/skills`、`/prompt` 是它的**子工具**（执行臂），三者均由 preset 插件注册（`extensions/meta/preset/`）。硬约束：
+
+- **preset 激活 = 硬约束 + 子工具锁死**。激活期间 `/tools`、`/skills`、`/prompt` 的写操作一律**拒绝并告警**（读视图仍可用）；要改配置只能通过 `/preset` 编辑/切换，或先清除预设。ADR-0035 的「默认不锁定、偏离仅提示」语义被取代（**激活即锁定**）。
+- **无 preset（none）= 不施加任何限制**。三轴回到「无策略」默认：工具全量启用、技能不限制、无 preset instructions。清除预设与任何恢复路径（`/reload`、`session_tree`、分支恢复）**不得复活**上一次的约束。
+- **tools 白名单是封闭集**。preset 激活且声明了 `tools` 时，运行时新注册的工具（org / MCP 等）一律视为禁用，`/tools` 视图同样显示为**不可用**；要启用须写进该 preset 的 `tools`。
+- **约束是叠加层（overlay），不得污染基础层**。preset 不得把自身约束写进 `/tools` 的基础状态（`tools-config` 快照）；清除预设即撤回 overlay。任何扩展**不得**用自有快照整体覆盖 `pi.setActiveTools()`（当前 `tools.ts` 的 `applyTools()` / `replaceTools()` 违反此条，属待修）。
+- **限制权只有两个来源：preset 与三个子工具**。其它扩展 / 实验**不得**用 `pi.setActiveTools()` 或写 `disabledTools` 去缩减活动工具集，只能观测/记录；`registerTool` 的动态注册不算限制（属 pi 的基础启用行为，在封闭集 preset 下由 overlay 遮罩）。`tool-range` 实验按 B2：默认只记录，用户显式报名后才把臂结果写基础层，preset 激活时退避（ADR-0050）。
+- **必须有语义级 e2e 保护**（仅"无报错 / 退出码"不算）：① 激活带 `tools` 的 preset 后 `/tools` 视图 == preset 白名单；② 清除 preset 后工具/技能恢复无限制；③ `/reload` 后不复活已清除的 preset；④ 动态注册工具在激活的封闭集 preset 下不可用。
+
+> 术语见 `CONTEXT.md`「preset 预设」节；决策、现状差距与实现契约见 `docs/adr/0049-preset-hard-policy-source-and-subtool-lock.md` 与 `docs/adr/0050-active-toolset-ownership-and-restriction-authority.md`。
 
 ### 测试辅助扩展（跨扩展交互测试）
 
@@ -557,7 +646,8 @@ describe('MyPanel TUI', () => {
 		const panel = new MyPanel(/* ... */);
 		tui.addChild(panel);
 		tui.setFocus(panel);
-		// dispatchInput 通过 any 桥接直达 handleInput
+		// dispatchInput 通过 any 桥接直达运行时输入入口
+		// （pi-tui ≥0.85 为 handleTerminalInput，旧版回退 handleInput）
 		// 无需 tui.start()、无需特殊 Terminal 类
 
 		const before = renderToSnapshot(tui).map(stripAnsi);
@@ -724,14 +814,25 @@ pi.on('session_start', async (_event, ctx) => {
 
 从多个扩展的 e2e 测试中总结：
 
-| 陷阱                          | 原因                          | 修复                                                 |
-| ----------------------------- | ----------------------------- | ---------------------------------------------------- |
-| **日志检查用 stdout**         | pi-logger 写文件，非 stdout   | 检查 `.pi/logs/<name>_*.log`                         |
-| **`npx pi` vs `$(which pi)`** | `npx pi` 的参数集可能不同     | 测试脚本用 `$(which pi)`                             |
-| **print 模式下扩展不加载**    | `pi -p` 不触发全部 life cycle | 用 `pi -a --no-session`                              |
-| **测试数据残留**              | 会话文件持久化                | 每次测试前 `rm -rf ~/.pi/agent/sessions/--tmp-*--`   |
-| **无意义会话残留**            | 忘记加 `--no-session`         | 启动 pi 默认加 `--no-session`（见"Pi 启动参数约定"） |
-| **assert stdout 文本**        | TUI/ANSI escape 序列干扰      | grep 模式匹配而非全文比对                            |
+| 陷阱                                                                | 原因                                                                                                                                                                                                                                                                | 修复                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **日志检查用 stdout**                                               | pi-logger 写文件，非 stdout                                                                                                                                                                                                                                         | 检查 `.pi/logs/<name>_*.log`                                                                                                                                                                                                                                                                                                      |
+| **`npx pi` vs `$(which pi)`**                                       | `npx pi` 的参数集可能不同                                                                                                                                                                                                                                           | 测试脚本用 `$(which pi)`                                                                                                                                                                                                                                                                                                          |
+| **print 模式下扩展不加载**                                          | `pi -p` 不触发全部 life cycle                                                                                                                                                                                                                                       | 用 `pi -a --no-session`                                                                                                                                                                                                                                                                                                           |
+| **测试数据残留**                                                    | 会话文件持久化                                                                                                                                                                                                                                                      | 启动 pi 一律加 `--no-session`（见下行）；未自行隔离 HOME 的调用由 guard 注入隔离配置根，不再写真实 `~/.pi/agent/sessions`；⚠ guard 只重定向 **pi 内核目录**（sessions/models/auth/settings），扩展经 `os.homedir()` 解析的 `extensions-data/**` 与 `~/.pi/logs/**` **不在覆盖内**，涉及它们的用例须自行隔离 HOME                  |
+| **无意义会话残留**                                                  | 忘记加 `--no-session`                                                                                                                                                                                                                                               | 启动 pi 默认加 `--no-session`（见"Pi 启动参数约定"）                                                                                                                                                                                                                                                                              |
+| **assert stdout 文本**                                              | TUI/ANSI escape 序列干扰                                                                                                                                                                                                                                            | grep 模式匹配而非全文比对                                                                                                                                                                                                                                                                                                         |
+| **TUI/集成 e2e 假失败**                                             | 漏 `CI=true` → 不注入 mock-llm → `No API key found`，却表现为业务断言失败（本仓实测：6 个用例假红，加 `CI=true` 后 8 PASS/0 FAIL）                                                                                                                                  | 跑 e2e 一律 `CI=true bash test/e2e/scripts/run-e2e.sh ...`；**失败先排除环境再查代码**                                                                                                                                                                                                                                            |
+| **TUI 按键错位**（阻断框/选择器/卡片）                              | 沙箱里「prompt → 阻断框出现」实测 ~~10-40s 波动（早先记的“30s~~7min”是把收尾白等误算进来了，见下一行），固定 `sleep` 会错位                                                                                                                                         | 用**重复 Enter 容错**（落在主输入框=空提交无副作用；落在阻断框=放行 / 选择器=选中 / 卡片=采纳），或 `expect -re` 等图案（别靠加长 budget 兜底）                                                                                                                                                                                   |
+| **单用例调试太慢**                                                  | 整模块跑一次 ~10 分钟                                                                                                                                                                                                                                               | `--case <子串>` 只跑名字匹配的用例（需配 `--ext`/`--skill`）；TUI 加 `--tui`                                                                                                                                                                                                                                                      |
+| **TUI 用例莫名多等**（实测：timeout 参数 15→用例 35s、45→用例 95s） | **两处白等**：① 就绪检测用状态栏正则 `(auto)\|\(0\.0%/0`，在 `expect <脚本文件>` 路径下不匹配 → 每用例白等到 `timeout_seconds`（`PI_TIMING=1` 证明 pi init+扩展仅 ~0.4s）；② 覆盖层没关 → 收尾 `/quit` 被吞 → 再白等收尾超时。两者都**不报错**（`exit=124` 被接受） | 已修：就绪改「读到输出静默」（历史用裸 `sleep` 不读走启动输出 → 后续按键与输出交错、首条命令 `Enter` 丢失，实测 `/preset plan`+`/tools` 合并成 `plan/tools`）；收尾两段式（先 `/quit`，未退再 `ESC`×3（间隔 0.6s）后重试，**ESC 紧贴 `/` 会被吞掉**）。用例仍应自觉关覆盖层。定位看 `[tui-stage]`（见 `docs/e2e-performance.md`） |
+
+> **TUI 沙箱免改基建即可构造任意场景**（`tui_expect_test` 已支持）：
+>
+> - 第 6 参数 `preset_home_dir`：镜像 `$HOME` 结构的预置目录，pi 启动前拷入 → 可确定性预置 `$HOME/.pi/agent/extensions-data/<plugin>/config.json`（隔离 HOME 内落盘、不污染宿主）。
+> - `MOCK_LLM_DANGEROUS_COMMAND="rm -rf ..."` + `MOCK_LLM_DANGEROUS_REPEAT=N`：让 mock-llm 前 N 轮各发一条指定危险命令 → 触发任意次数的人工批准。
+> - 需要「一串不同命令」（如先 `mkdir` 后 `rm`）时，写专用 mock 扩展（参考 `test/e2e/extensions/permission-gate/helpers/mock-llm-promotion.ts`，按 `PG_E2E_COMMANDS` 用 `;;` 分隔生成命令序列）并 `cp` 到沙箱 `.pi/extensions/mock-llm/index.ts`。
+> - 断言优先落在**持久化产物**（config.json / state.json / audit jsonl / 日志），其次才是屏幕文本。
 
 ### 10. 累加式指标追踪器的 checkpoint 设计模式
 
@@ -792,11 +893,11 @@ pi-lab（`extensions/meta/pi-lab/`）是实验框架，不自带实验。消费�
 `doRender()` 的 diff：`firstChanged` 从渲染树行 0 逐行对比 previousLines/newLines；**`firstChanged < prevViewportTop` → fullRender(true)**（`\x1b[2J\x1b[H\x1b[3J` 清屏+清 scrollback + 整树重绘，依赖 `\x1b[?2026h` 同步输出原子性）。
 
 - **铁律**：任何替换 editorContainer 的自定义组件，**总高必须 ≤ 终端视口高度（rows）**。否则组件顶部（树行/光标行）落在视口上方，滚动时 `firstChanged < viewportTop` 恒触发 fullRender → 同步输出失效链路（tmux/SSH/Windows Terminal）上表现为**重影/错位**。
-- **铁律 2（header 动态内容）**：渲染树**第 0 行（header）不得放随光标/滚动变化的动态内容**（当前节点 ID、计数等）——第 0 行一变，`firstChanged=0 < viewportTop`（总高略超视口即触发）就 fullRender 重影。动态状态信息应放**底部 footer**（最后一行的 firstChanged 被树内更靠前的光标行变化「掩盖」，不触发 fullRender）。
+- **铁律 2（header 动态内容）**：渲染树**第 0 行（header）不得放随光标/滚动变化的动态内容**（当前节点 ID、计数等）——第 0 行一变，`firstChanged=0 < viewportTop`（总高略超视口即触发）就 fullRender 重影。动态状态信息应放**底部 footer**（最后一行的 firstChanged 被树内更靠前的光标行变化「掩盖」，不触发 fullRender）。**例外**：显式上下文切换（如公司/数据源切换，org 看板标题 `── org:<公司名> ──` 随 Tab 切公司更新）允许第 0 行变更——切换时内容区整体换数据本就接近全量重绘，不引入滚动重影；同一上下文内仍须恒定。
 - **参考原生 `/tree`**（pi-mono tree-selector.js）：`maxVisibleLines = floor(terminalHeight/2)` 自适应 + 选中行居中（`startIndex = selected - floor(maxVisibleLines/2)`），组件总高 ≤ 视口 → 滚动纯 diff。
 - **观测工具**：`PI_TUI_DEBUG=1` → diff 渲染日志 `/tmp/tui/render-*.log`（含完整 newLines JSON）；`PI_DEBUG_REDRAW=1` → fullRender 原因 `~/.pi/agent/pi-debug.log`。
 - **e2e 盲区**：固定 80 列 + 短树（< pageSize 行）时滚动路径零覆盖——滚动类 bug 必须用长树用例（mock-llm 的 `MOCK_LLM_REPEAT` 发多条消息造 50+ 稳定节点树）。
-- 附带：扩展运行时 `setInterval`/`setTimeout` 回调不执行——需要定时器的逻辑改用事件驱动（与 #8 的 /reload 定时器失效不同，这里是运行时根本不触发）。
+- 附带：扩展运行时 `setInterval`/`setTimeout` 回调**正常触发**（2026-09-10 实测，见 ADR-0040 F1；旧结论「运行时根本不触发」已作废）。定时器可直接用于后台轮询；但 `/reload` 会令旧实例的定时器失效、必须重建（见 #8）。
 
 ### 14. 内置 bash 工具 timeout 无默认值 + 两条干预路径
 
@@ -828,7 +929,12 @@ worktree(特性分支)  --squash-->  dev(集成主干)  --merge-->  main(发布�
 | worktree → dev | `git merge --squash` | 1 特性 = 1 提交，dev 历史保持干净                                      |
 | dev → main     | `git merge --no-ff`  | dev 永不 reset、连续开发；**禁止 squash dev → main**（丢历史导致分叉） |
 
+> 批量执行等价于逐条手工：`/worktree group merge all` 按花名册顺序逐个 squash 合并（fail-fast、可续跑）；
+> 单次仍可用上表手工命令。
+
 **worktree 复用铁律**：worktree 通过 squash 合入 dev 后，自身与 dev 分叉。**复用前必须先 `git reset --hard dev` 对齐**，否则会带上已合并的旧历史。
+
+> 整组对齐可用 `/worktree group sync all`（未合入成员走 rebase 保留提交，不丢改动；手工 `reset --hard` 仍是兜底）。
 
 **特殊情况**：仅在 dev 历史严重混乱（如大量 merge 提交）且用户明确要求时，才允许 squash dev → main 一次性压平；压平后立即 `git reset --hard main` 让 dev 重新对齐，并在压平前打 `archive/dev-<日期>` tag 保留历史。
 
@@ -854,6 +960,24 @@ bash scripts/recreate-worktrees.sh context
 ```
 
 > ⚠️ 脚本会删除对应 worktree 目录及其分支，**未提交改动会丢失**。运行前先 `git -C <worktree> status --short` 检查无未提交工作。
+
+#### 组声明与日常三件套（本机，不入库）
+
+仓库级组声明：`<repo>/.pi/extensions-data/pi-worktree/config.json`（`.pi` 被 gitignore → **不随仓库分发**，
+新机器 / 新 clone 需重建一次）。当前声明一个组：
+
+| 组    | baseRef | 成员                                                              | 策略   |
+| ----- | ------- | ----------------------------------------------------------------- | ------ |
+| `all` | `dev`   | bugfix / context / observability / security / tool / verification | squash |
+
+```bash
+/worktree group create all   # 只补建缺失成员（补建 ≠ 重建）
+/worktree group merge  all   # 按花名册顺序 squash 合并，fail-fast 可续跑
+/worktree group sync   all   # 非破坏性对齐（未合入成员走 rebase）
+```
+
+`scripts/recreate-worktrees.sh` **保留**：它是「销毁重建」（删目录与分支），组 `create` 只补建缺失成员，
+二者不等价——灾难恢复 / 彻底重来仍用脚本。
 
 ### 发版流程
 
@@ -909,10 +1033,19 @@ npx tsx scripts/sync-to-local-pi.ts --ext foo --target ./.pi/test
 npx tsx scripts/sync-to-local-pi.ts --dry-run
 ```
 
-> ⚠️ **安全约束**：`--target` 内联模式**只允许指向隔离测试目录**（如 `./.pi/test`），
-> 禁止指向 `~/.pi/agent` 等真实用户目录——同步到用户目录一律使用 `--profile user-install`。
-> sync 工具**默认从不删除**目标中任何文件；如需显式清空目标中不属于本次同步的资源，
-> 必须加 `--purge` 参数（每次使用 `--target` 或 `--purge` 时控制台与日志都会输出 `WARN` 警告）。
+> **同步到用户目录（`~/.pi/agent`）的三种方式**（ADR-0037 语义）：
+>
+> ```bash
+> npx tsx scripts/sync-to-local-pi.ts --profile user-install                        # 整个 profile
+> npx tsx scripts/sync-to-local-pi.ts --profile user-install --ext permission-gate  # 只同步一个插件（推荐）
+> npx tsx scripts/sync-to-local-pi.ts --ext permission-gate --target ~/.pi/agent     # inline 单插件
+> ```
+>
+> - **删除语义（ADR-0037）**：profile 模式默认「严格剪枝」——删除目标中「受管但不在当前 profile 有效集合」的资产（含 `retired` 墓碑清单登记的已下架/内嵌扩展）；第三方资产默认保留，仅 `--purge` 才清。inline 模式（给了 `--target`）**默认不删**目标中任何文件。
+> - **单插件白名单**（`--profile X --ext Y`）是**排他过滤**：只同步点名的资产，其他资源类型本次不参与，且**禁用 stale 剪枝**（绝不删除未点名的资产）；点名项不在该 profile 清单内时快速失败。
+> - ⚠️ 唯一仍硬阻断的是 **`--purge` 指向 `~/.pi` / `~/.pi/agent`**：`--purge` 递归删除目标中不属于本次同步的一切，指向真实用户目录等于全毁（代码级护栏保留）。
+> - 每次运行都会在控制台与日志输出 `WARN`，说明本次是否发生删除。
+> - **坑**：其他 worktree 跑一次 sync 会把用户级覆盖成本 worktree 的版本；本 worktree 未提交的改动只有在**本 worktree 跑 sync** 后才生效（曾出现“新特性在用户级看不到”）。
 
 详细用法参考 [docs/sync-tool.md](docs/sync-tool.md)。
 

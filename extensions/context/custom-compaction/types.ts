@@ -201,8 +201,13 @@ export interface CompactionConfig {
 
 // ── Default values ──────────────────────────────────────────────
 
-/** Default auto-continue message */
-export const DEFAULT_AUTO_CONTINUE_MESSAGE = 'continue';
+/**
+ * Default auto-continue message — the visible text sent after compaction when a
+ * profile sets injectContinueText=true. Phrased to disambiguate from a reply to
+ * the last question, so the model resumes unfinished work instead of answering.
+ */
+export const DEFAULT_AUTO_CONTINUE_MESSAGE =
+	'刚才因上下文压缩打断了工作，如果之前还有没有做完的内容请继续，如果都已经做完了总结下你的成果。注意我这里不是回答你最后的问题或请求，只是打断后的补充。';
 
 /** Default prompt used when a profile has no custom prompt */
 export const DEFAULT_COMPACTION_PROMPT = `You are a conversation summarizer. Create a comprehensive summary of this conversation that captures:

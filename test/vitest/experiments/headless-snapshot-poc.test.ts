@@ -63,6 +63,8 @@ class MockTerminal implements Terminal {
 	clearScreen(): void {}
 	setTitle(): void {}
 	setProgress(): void {}
+	// pi-tui 1.2.0 新增（OSC 7501）
+	setProgramStatus(): void {}
 	async drainInput(): Promise<void> {}
 }
 

@@ -369,7 +369,9 @@ function mapActionToDecision(action: ApprovalEntry['action']): AuditDecision {
 		case 'confirmed':
 			return 'ask';
 		case 'blocked':
-			return 'deny';
+			// 旧数据迁移条目：旧 action 无法区分「用户拒绝」与「无界面拦截」，
+			// 一律标为 deny-legacy（读取时归入成因不可判定），不得计入用户拒绝。
+			return 'deny-legacy';
 	}
 }
 

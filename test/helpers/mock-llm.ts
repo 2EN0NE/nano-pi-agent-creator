@@ -18,7 +18,8 @@
  *   使 ctx.modelRegistry.find() 和 pi.setModel() 可以正常工作。
  */
 
-import { registerFauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai';
+// registerFauxProvider 仅由 /compat 子路径导出（主入口无此导出，且会导致类型推断为 any）
+import { registerFauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-agent';
 
 const MOCK_PROVIDER = 'mock-llm';

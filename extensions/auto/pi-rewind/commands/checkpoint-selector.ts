@@ -1,0 +1,659 @@
+import { DynamicBorder } from '@earendil-works/pi-coding-agent';
+import type { SessionInfo } from '@earendil-works/pi-coding-agent';
+import { errorMessage } from '../util';
+import {
+	Input,
+	truncateToWidth,
+	visibleWidth,
+	type Component,
+	type Focusable,
+} from '@earendil-works/pi-tui';
+import {
+	buildSessionTree,
+	filterAndSortSessions,
+	flattenSessionTree,
+	hasSessionName,
+	normalizeComparablePath,
+	normalizeTitle,
+	type FlattenedSessionNode,
+} from './checkpoint-selector-helpers';
+import { renderSessionLine } from './checkpoint-selector-render';
+
+export type SessionListProgress = (loaded: number, total: number) => void;
+export type CheckpointStatus = 'no checkpoints' | 'no session';
+export type CheckpointScope = 'current' | 'all';
+export type CheckpointSortMode = 'threaded' | 'recent' | 'relevance';
+export type CheckpointNameFilter = 'all' | 'named';
+
+export interface CheckpointSelectorSession extends SessionInfo {
+	readonly checkpointRepoDir: string | undefined;
+	readonly sourceSessionFile: string | undefined;
+	readonly checkpointStatus?: CheckpointStatus;
+}
+
+export interface CheckpointSelectorTheme {
+	fg(color: string, text: string): string;
+	bg(color: string, text: string): string;
+	bold(text: string): string;
+}
+
+export interface CheckpointSelectorKeybindings {
+	getKeys(keybinding: string): readonly string[];
+	matches(keyData: string, keybinding: string): boolean;
+}
+
+export interface CheckpointSelectorOptions {
+	readonly currentLoader: (
+		onProgress?: SessionListProgress,
+	) => Promise<CheckpointSelectorSession[]>;
+	readonly allLoader: (onProgress?: SessionListProgress) => Promise<CheckpointSelectorSession[]>;
+	readonly deleteStorage: (
+		session: CheckpointSelectorSession,
+	) => Promise<{ readonly ok: true } | { readonly ok: false; readonly message: string }>;
+	readonly currentSessionPath?: string;
+	readonly requestRender: () => void;
+	readonly onClose: () => void;
+	readonly theme: CheckpointSelectorTheme;
+	readonly keybindings: CheckpointSelectorKeybindings;
+}
+
+interface StatusMessage {
+	readonly type: 'info' | 'error';
+	readonly message: string;
+}
+
+class CheckpointSelectorHeader {
+	private loading = false;
+	private loadProgress: { readonly loaded: number; readonly total: number } | null = null;
+	private statusMessage: StatusMessage | null = null;
+	private statusTimeout: ReturnType<typeof setTimeout> | null = null;
+	private confirmingDelete: CheckpointStatus | 'storage' | false = false;
+
+	constructor(
+		private scope: CheckpointScope,
+		private sortMode: CheckpointSortMode,
+		private nameFilter: CheckpointNameFilter,
+		private showPath: boolean,
+		private readonly requestRender: () => void,
+		private readonly keybindings: CheckpointSelectorKeybindings,
+		private readonly theme: CheckpointSelectorTheme,
+	) {}
+
+	setScope(scope: CheckpointScope): void {
+		this.scope = scope;
+	}
+
+	setSortMode(sortMode: CheckpointSortMode): void {
+		this.sortMode = sortMode;
+	}
+
+	setNameFilter(nameFilter: CheckpointNameFilter): void {
+		this.nameFilter = nameFilter;
+	}
+
+	setShowPath(showPath: boolean): void {
+		this.showPath = showPath;
+	}
+
+	setLoading(loading: boolean): void {
+		this.loading = loading;
+		this.loadProgress = null;
+	}
+
+	setProgress(loaded: number, total: number): void {
+		this.loadProgress = { loaded, total };
+	}
+
+	setConfirmingDelete(confirmingDelete: CheckpointStatus | 'storage' | false): void {
+		this.confirmingDelete = confirmingDelete;
+	}
+
+	setStatusMessage(message: StatusMessage | null, autoHideMs?: number): void {
+		if (this.statusTimeout) {
+			clearTimeout(this.statusTimeout);
+			this.statusTimeout = null;
+		}
+		this.statusMessage = message;
+		if (!message || !autoHideMs) return;
+
+		this.statusTimeout = setTimeout(() => {
+			this.statusMessage = null;
+			this.statusTimeout = null;
+			this.requestRender();
+		}, autoHideMs);
+	}
+
+	render(width: number): string[] {
+		const title = this.scope === 'current' ? 'Checkpoint (Current Folder)' : 'Checkpoint (All)';
+		const leftText = this.theme.bold(title);
+		const sortLabel =
+			this.sortMode === 'threaded'
+				? 'Threaded'
+				: this.sortMode === 'recent'
+					? 'Recent'
+					: 'Fuzzy';
+		const nameLabel = this.nameFilter === 'all' ? 'All' : 'Named';
+
+		const scopeText = this.loading
+			? `${this.theme.fg('muted', '○ Current Folder | ')}${this.theme.fg(
+					'accent',
+					this.loadProgress
+						? `Loading ${this.loadProgress.loaded}/${this.loadProgress.total}`
+						: 'Loading ...',
+				)}`
+			: this.scope === 'current'
+				? `${this.theme.fg('accent', '◉ Current Folder')}${this.theme.fg('muted', ' | ○ All')}`
+				: `${this.theme.fg('muted', '○ Current Folder | ')}${this.theme.fg('accent', '◉ All')}`;
+
+		const rightText = truncateToWidth(
+			`${scopeText}  ${this.theme.fg('muted', 'Name: ')}${this.theme.fg('accent', nameLabel)}  ${this.theme.fg('muted', 'Sort: ')}${this.theme.fg('accent', sortLabel)}`,
+			width,
+			'',
+		);
+
+		const availableLeft = Math.max(0, width - visibleWidth(rightText) - 1);
+		const left = truncateToWidth(leftText, availableLeft, '');
+		const spacing = Math.max(0, width - visibleWidth(left) - visibleWidth(rightText));
+
+		const hintLine1 = truncateToWidth(
+			`${this.keyHint('tui.input.tab', 'scope')} ${this.theme.fg('muted', '·')} ${this.theme.fg('muted', 're:<pattern> regex · "phrase" exact')}`,
+			width,
+			'…',
+		);
+
+		const pathState = this.showPath ? '(on)' : '(off)';
+		const hintLine2 = truncateToWidth(
+			[
+				this.keyHint('app.session.toggleSort', 'sort'),
+				this.keyHint('app.session.toggleNamedFilter', 'named'),
+				this.keyHint('app.session.delete', 'delete'),
+				this.keyHint('app.session.togglePath', `path ${pathState}`),
+			].join(` ${this.theme.fg('muted', '·')} `),
+			width,
+			'…',
+		);
+
+		if (this.confirmingDelete) {
+			const confirmLabel =
+				this.confirmingDelete === 'no session'
+					? 'Delete orphan checkpoint storage?'
+					: 'Delete checkpoint storage?';
+			const confirmLine = truncateToWidth(
+				`${confirmLabel} ${this.keyHint('tui.select.confirm', 'confirm')} ${this.theme.fg('muted', '·')} ${this.keyHint('tui.select.cancel', 'cancel')}`,
+				width,
+				'…',
+			);
+			return [
+				`${left}${' '.repeat(spacing)}${rightText}`,
+				this.theme.fg('error', confirmLine),
+				'',
+			];
+		}
+
+		if (this.statusMessage) {
+			const color = this.statusMessage.type === 'error' ? 'error' : 'accent';
+			return [
+				`${left}${' '.repeat(spacing)}${rightText}`,
+				truncateToWidth(this.theme.fg(color, this.statusMessage.message), width, '…'),
+				'',
+			];
+		}
+
+		return [`${left}${' '.repeat(spacing)}${rightText}`, hintLine1, hintLine2];
+	}
+
+	private keyHint(keybinding: string, label: string): string {
+		return this.theme.fg('dim', this.keyText(keybinding)) + this.theme.fg('muted', ` ${label}`);
+	}
+
+	private keyText(keybinding: string): string {
+		return this.keybindings.getKeys(keybinding).join('/');
+	}
+}
+
+export class CheckpointSelectorComponent implements Component, Focusable {
+	private readonly searchInput = new Input();
+	private readonly header: CheckpointSelectorHeader;
+	private readonly titleBorder: DynamicBorder;
+	private readonly bottomBorder: DynamicBorder;
+
+	private scope: CheckpointScope = 'current';
+	private sortMode: CheckpointSortMode = 'threaded';
+	private nameFilter: CheckpointNameFilter = 'all';
+	private currentSessions: CheckpointSelectorSession[] | null = null;
+	private allSessions: CheckpointSelectorSession[] | null = null;
+	private currentLoading = false;
+	private allLoading = false;
+	private showPath = false;
+	private selectedIndex = 0;
+	private filteredSessions: FlattenedSessionNode[] = [];
+	private confirmingDeletePath: string | null = null;
+	private allLoadSeq = 0;
+	private maxVisible = 10;
+	private _focused = false;
+
+	constructor(private readonly options: CheckpointSelectorOptions) {
+		this.header = new CheckpointSelectorHeader(
+			this.scope,
+			this.sortMode,
+			this.nameFilter,
+			this.showPath,
+			this.options.requestRender,
+			this.options.keybindings,
+			this.options.theme,
+		);
+		this.titleBorder = new DynamicBorder((text: string) =>
+			this.options.theme.fg('accent', text),
+		);
+		this.bottomBorder = new DynamicBorder((text: string) =>
+			this.options.theme.fg('accent', text),
+		);
+		this.searchInput.onSubmit = () => {
+			const selected = this.filteredSessions[this.selectedIndex]?.session;
+			if (selected) this.options.onClose();
+		};
+		void this.loadScope('current', 'initial');
+	}
+
+	get focused(): boolean {
+		return this._focused;
+	}
+
+	set focused(value: boolean) {
+		this._focused = value;
+		this.searchInput.focused = value;
+	}
+
+	invalidate(): void {
+		this.titleBorder.invalidate();
+		this.bottomBorder.invalidate();
+	}
+
+	render(width: number): string[] {
+		const lines: string[] = [];
+		lines.push('');
+		lines.push(...this.titleBorder.render(width));
+		lines.push('');
+		lines.push(...this.header.render(width));
+		lines.push('');
+		lines.push(...this.searchInput.render(width));
+		lines.push('');
+
+		if (this.filteredSessions.length === 0) {
+			lines.push(
+				this.options.theme.fg('muted', truncateToWidth('  No sessions found', width, '…')),
+			);
+		} else {
+			const startIndex = Math.max(
+				0,
+				Math.min(
+					this.selectedIndex - Math.floor(this.maxVisible / 2),
+					this.filteredSessions.length - this.maxVisible,
+				),
+			);
+			const endIndex = Math.min(startIndex + this.maxVisible, this.filteredSessions.length);
+
+			for (let index = startIndex; index < endIndex; index++) {
+				const node = this.filteredSessions[index]!;
+				lines.push(this.renderSessionLine(node, index === this.selectedIndex, width));
+			}
+
+			if (startIndex > 0 || endIndex < this.filteredSessions.length) {
+				lines.push(
+					this.options.theme.fg(
+						'muted',
+						truncateToWidth(
+							`  (${this.selectedIndex + 1}/${this.filteredSessions.length})`,
+							width,
+							'',
+						),
+					),
+				);
+			}
+		}
+
+		lines.push('');
+		lines.push(...this.bottomBorder.render(width));
+		return lines.map((line) => truncateToWidth(line, width));
+	}
+
+	handleInput(keyData: string): void {
+		const kb = this.options.keybindings;
+
+		if (this.confirmingDeletePath !== null) {
+			if (kb.matches(keyData, 'tui.select.confirm')) {
+				void this.confirmDelete();
+			} else if (kb.matches(keyData, 'tui.select.cancel')) {
+				this.confirmingDeletePath = null;
+				this.header.setConfirmingDelete(false);
+				this.options.requestRender();
+			}
+			return;
+		}
+
+		if (kb.matches(keyData, 'tui.input.tab')) {
+			this.toggleScope();
+			return;
+		}
+		if (kb.matches(keyData, 'app.session.toggleSort')) {
+			this.toggleSortMode();
+			return;
+		}
+		if (kb.matches(keyData, 'app.session.toggleNamedFilter')) {
+			this.toggleNameFilter();
+			return;
+		}
+		if (kb.matches(keyData, 'app.session.togglePath')) {
+			this.showPath = !this.showPath;
+			this.header.setShowPath(this.showPath);
+			this.options.requestRender();
+			return;
+		}
+		if (kb.matches(keyData, 'app.session.delete')) {
+			this.startDeleteConfirmation();
+			return;
+		}
+		if (kb.matches(keyData, 'tui.select.up')) {
+			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			this.options.requestRender();
+			return;
+		}
+		if (kb.matches(keyData, 'tui.select.down')) {
+			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + 1);
+			this.options.requestRender();
+			return;
+		}
+		if (kb.matches(keyData, 'tui.select.pageUp')) {
+			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisible);
+			this.options.requestRender();
+			return;
+		}
+		if (kb.matches(keyData, 'tui.select.pageDown')) {
+			this.selectedIndex = Math.min(
+				this.filteredSessions.length - 1,
+				this.selectedIndex + this.maxVisible,
+			);
+			this.options.requestRender();
+			return;
+		}
+		if (kb.matches(keyData, 'tui.select.confirm')) {
+			this.options.onClose();
+			return;
+		}
+		if (kb.matches(keyData, 'tui.select.cancel')) {
+			this.options.onClose();
+			return;
+		}
+
+		this.searchInput.handleInput(keyData);
+		this.refilter();
+		this.options.requestRender();
+	}
+
+	private renderSessionLine(
+		node: FlattenedSessionNode,
+		isSelected: boolean,
+		width: number,
+	): string {
+		return renderSessionLine({
+			node,
+			isSelected,
+			width,
+			scope: this.scope,
+			showPath: this.showPath,
+			currentSessionPath: this.options.currentSessionPath,
+			confirmingDeletePath: this.confirmingDeletePath,
+			theme: this.options.theme,
+		});
+	}
+
+	private startDeleteConfirmation(): void {
+		const selected = this.filteredSessions[this.selectedIndex]?.session;
+		if (!selected) return;
+		if (this.isCurrentSessionPath(selected.path)) {
+			this.header.setStatusMessage(
+				{ type: 'error', message: 'Cannot delete the currently active checkpoint storage' },
+				3000,
+			);
+			this.options.requestRender();
+			return;
+		}
+		this.confirmingDeletePath = selected.path;
+		this.header.setConfirmingDelete(selected.checkpointStatus ?? 'storage');
+		this.options.requestRender();
+	}
+
+	private async confirmDelete(): Promise<void> {
+		const selected = this.filteredSessions[this.selectedIndex]?.session;
+		this.confirmingDeletePath = null;
+		this.header.setConfirmingDelete(false);
+		if (!selected) return;
+
+		try {
+			const result = await this.options.deleteStorage(selected);
+			if (!result.ok) {
+				this.header.setStatusMessage({ type: 'error', message: result.message }, 3000);
+				this.options.requestRender();
+				return;
+			}
+
+			this.header.setStatusMessage(
+				{ type: 'info', message: 'Checkpoint storage deleted' },
+				2000,
+			);
+			this.applyOptimisticDelete(selected);
+			this.options.requestRender();
+
+			void Promise.all([this.options.currentLoader(), this.options.allLoader()])
+				.then(([currentSessions, allSessions]) => {
+					this.currentSessions = currentSessions;
+					this.allSessions = allSessions;
+					this.setVisibleSessionsForScope(this.scope);
+					this.options.requestRender();
+				})
+				.catch((error: unknown) => {
+					const message = error instanceof Error ? error.message : String(error);
+					this.header.setStatusMessage(
+						{ type: 'error', message: `Checkpoint list refresh failed: ${message}` },
+						3000,
+					);
+					this.options.requestRender();
+				});
+		} catch (error) {
+			this.header.setStatusMessage(
+				{
+					type: 'error',
+					message: `Checkpoint storage delete failed: ${errorMessage(error)}`,
+				},
+				4000,
+			);
+			this.options.requestRender();
+		}
+	}
+
+	private applyOptimisticDelete(selected: CheckpointSelectorSession): void {
+		this.currentSessions = this.applyDeletedCheckpointStorage(
+			this.currentSessions,
+			selected,
+			'current',
+		);
+		this.allSessions = this.applyDeletedCheckpointStorage(this.allSessions, selected, 'all');
+		this.setVisibleSessionsForScope(this.scope);
+	}
+
+	private applyDeletedCheckpointStorage(
+		sessions: readonly CheckpointSelectorSession[] | null,
+		selected: CheckpointSelectorSession,
+		scope: CheckpointScope,
+	): CheckpointSelectorSession[] {
+		if (!sessions) return [];
+
+		return sessions.flatMap((session) => {
+			if (
+				selected.checkpointRepoDir &&
+				session.checkpointRepoDir === selected.checkpointRepoDir
+			) {
+				if (scope === 'all' && selected.sourceSessionFile) {
+					return [this.toNoCheckpointSession(selected)];
+				}
+				return [];
+			}
+			return [session];
+		});
+	}
+
+	private toNoCheckpointSession(session: CheckpointSelectorSession): CheckpointSelectorSession {
+		const baseTitle = normalizeTitle(session.name ?? session.firstMessage);
+		return {
+			...session,
+			path: session.sourceSessionFile ?? session.path,
+			firstMessage: session.name ? normalizeTitle(session.firstMessage) : baseTitle,
+			allMessagesText: `${baseTitle} no checkpoints session without checkpoint history ${session.cwd}`,
+			checkpointRepoDir: undefined,
+			checkpointStatus: 'no checkpoints',
+		};
+	}
+
+	private isCurrentSessionPath(pathToCheck: string): boolean {
+		return (
+			!!this.options.currentSessionPath &&
+			normalizeComparablePath(pathToCheck) ===
+				normalizeComparablePath(this.options.currentSessionPath)
+		);
+	}
+
+	private toggleSortMode(): void {
+		this.sortMode =
+			this.sortMode === 'threaded'
+				? 'recent'
+				: this.sortMode === 'recent'
+					? 'relevance'
+					: 'threaded';
+		this.header.setSortMode(this.sortMode);
+		this.refilter();
+		this.options.requestRender();
+	}
+
+	private toggleNameFilter(): void {
+		this.nameFilter = this.nameFilter === 'all' ? 'named' : 'all';
+		this.header.setNameFilter(this.nameFilter);
+		this.refilter();
+		this.options.requestRender();
+	}
+
+	private toggleScope(): void {
+		if (this.scope === 'current') {
+			this.scope = 'all';
+			this.header.setScope(this.scope);
+			if (this.allSessions !== null) {
+				this.header.setLoading(false);
+				this.setVisibleSessionsForScope('all');
+				this.options.requestRender();
+				return;
+			}
+			if (!this.allLoading) {
+				void this.loadScope('all', 'toggle');
+			}
+			return;
+		}
+
+		this.scope = 'current';
+		this.header.setScope(this.scope);
+		this.header.setLoading(this.currentLoading);
+		this.setVisibleSessionsForScope('current');
+		this.options.requestRender();
+	}
+
+	private async loadScope(scope: CheckpointScope, reason: 'initial' | 'toggle'): Promise<void> {
+		const isAll = scope === 'all';
+		if (isAll) {
+			this.allLoading = true;
+		} else {
+			this.currentLoading = true;
+		}
+
+		const seq = isAll ? ++this.allLoadSeq : undefined;
+		this.header.setScope(scope);
+		this.header.setLoading(true);
+		this.options.requestRender();
+
+		const onProgress = (loaded: number, total: number): void => {
+			if (scope !== this.scope) return;
+			if (seq !== undefined && seq !== this.allLoadSeq) return;
+			this.header.setProgress(loaded, total);
+			this.options.requestRender();
+		};
+
+		try {
+			const sessions = await (isAll
+				? this.options.allLoader(onProgress)
+				: this.options.currentLoader(onProgress));
+			if (isAll) {
+				this.allSessions = sessions;
+				this.allLoading = false;
+			} else {
+				this.currentSessions = sessions;
+				this.currentLoading = false;
+			}
+
+			if (scope !== this.scope) return;
+			if (seq !== undefined && seq !== this.allLoadSeq) return;
+
+			this.header.setLoading(false);
+			this.setVisibleSessionsForScope(scope);
+			this.options.requestRender();
+		} catch (error) {
+			if (isAll) this.allLoading = false;
+			else this.currentLoading = false;
+
+			if (scope !== this.scope) return;
+			if (seq !== undefined && seq !== this.allLoadSeq) return;
+
+			const message = error instanceof Error ? error.message : String(error);
+			this.header.setLoading(false);
+			this.header.setStatusMessage(
+				{ type: 'error', message: `Failed to load sessions: ${message}` },
+				4000,
+			);
+			if (reason === 'initial') {
+				this.filteredSessions = [];
+			}
+			this.options.requestRender();
+		}
+	}
+
+	private setVisibleSessionsForScope(scope: CheckpointScope): void {
+		const sessions = scope === 'all' ? (this.allSessions ?? []) : (this.currentSessions ?? []);
+		this.filteredSessions = this.filterSessions(sessions, this.searchInput.getValue());
+		this.selectedIndex = Math.min(
+			this.selectedIndex,
+			Math.max(0, this.filteredSessions.length - 1),
+		);
+	}
+
+	private refilter(): void {
+		this.setVisibleSessionsForScope(this.scope);
+	}
+
+	private filterSessions(
+		sessions: readonly CheckpointSelectorSession[],
+		query: string,
+	): FlattenedSessionNode[] {
+		const trimmed = query.trim();
+		const nameFiltered =
+			this.nameFilter === 'all'
+				? sessions
+				: sessions.filter((session) => hasSessionName(session));
+
+		if (this.sortMode === 'threaded' && !trimmed) {
+			return flattenSessionTree(buildSessionTree(nameFiltered));
+		}
+
+		return filterAndSortSessions(nameFiltered, query, this.sortMode, 'all').map((session) => ({
+			session,
+			depth: 0,
+			isLast: true,
+			ancestorContinues: [],
+		}));
+	}
+}

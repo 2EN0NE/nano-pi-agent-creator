@@ -1,8 +1,8 @@
 # ADR-0035: preset 四维度统一、单选交互与锁定守卫
 
-- 状态：已接受（2026-09）
+- 状态：已接受（2026-09）；**决策 3「详情面板锁定守卫」与 `Preset.locked` / `l` 键已被 ADR-0049 取代**（激活即锁定，字段移除）
 - 相关组件：`extensions/meta/preset`（`index.ts`、`tools.ts`、`skills.ts`、`prompt-editor.ts`）
-- 延伸：ADR-0034（`/mode` 恢复 + instructions 组件化）
+- 延伸：ADR-0034（`/mode` 恢复 + instructions 组件化）；ADR-0049（preset 硬约束 / 子工具锁死）
 
 ## 背景
 

@@ -4,12 +4,12 @@
  * 覆盖 ADR-0037 的纯逻辑与渲染（不 import sync-to-local-pi.ts，因其底部执行 main()）：
  *   - classifyDeletionCandidates  （受管 vs 第三方 vs 保护名单 vs 有效集合）
  *   - computeDeletionDecision     （--purge 全量 / profile 默认严格剪枝 / inline 默认不删）
- *   - collectConfigResetCandidates（删除 ∪ 更新 ∩ 有 config.json）
+ *   - collectConfigResetCandidates（删除 ∩ 有 config.json；ADR-0037 修订：更新不再进候选）
  *   - renderMultiSelect           （光标 / 勾选标记渲染）
- *   - resetConfigProfiles         （勾选删 config.json，保留 session 文件）
+ *   - resetConfigProfiles         （勾选删 config.json，先备份、仅保留最新 N 份，保留 session 文件）
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -21,6 +21,7 @@ import {
 	renderMultiSelect,
 	resetConfigProfiles,
 	findExtensionFormConflicts,
+	MAX_CONFIG_BACKUPS,
 } from '../../../scripts/lib/sync-prune.js';
 
 // ============================================================================
@@ -141,28 +142,27 @@ describe('collectConfigResetCandidates', () => {
 
 	it('被删除 + 有 config.json → 进列表（reason=deleted）', () => {
 		seedConfig('edit');
-		const r = collectConfigResetCandidates(targetDir, ['edit'], []);
+		const r = collectConfigResetCandidates(targetDir, ['edit']);
 		expect(r).toHaveLength(1);
 		expect(r[0].plugin).toBe('edit');
 		expect(r[0].reason).toBe('deleted');
 		expect(r[0].configPath).toContain('config.json');
 	});
 
-	it('被更新 + 有 config.json → 进列表（reason=updated）', () => {
+	it('被更新不再进列表（ADR-0037 修订：更新不重置配置）', () => {
 		seedConfig('review');
-		const r = collectConfigResetCandidates(targetDir, [], ['review']);
-		expect(r).toHaveLength(1);
-		expect(r[0].reason).toBe('updated');
-	});
-
-	it('无 config.json 的插件不进列表', () => {
-		const r = collectConfigResetCandidates(targetDir, ['edit'], ['review']);
+		const r = collectConfigResetCandidates(targetDir, []);
 		expect(r).toHaveLength(0);
 	});
 
-	it('同一插件同时出现在删除与更新列表时去重', () => {
+	it('无 config.json 的插件不进列表', () => {
+		const r = collectConfigResetCandidates(targetDir, ['edit']);
+		expect(r).toHaveLength(0);
+	});
+
+	it('重复名去重', () => {
 		seedConfig('edit');
-		const r = collectConfigResetCandidates(targetDir, ['edit'], ['edit']);
+		const r = collectConfigResetCandidates(targetDir, ['edit', 'edit']);
 		expect(r).toHaveLength(1);
 	});
 });
@@ -172,20 +172,20 @@ describe('collectConfigResetCandidates', () => {
 // ============================================================================
 
 describe('renderMultiSelect', () => {
-	const items = ['pi-lab [deleted]', 'review [updated]'];
+	const items = ['pi-lab [deleted]', 'review [deleted]'];
 
 	it('渲染标题、光标标记与勾选标记', () => {
 		const selected = new Set([1]);
 		const text = renderMultiSelect('T', items, 0, selected);
 		expect(text).toContain('T');
 		expect(text).toContain('> [ ] pi-lab [deleted]'); // 光标在第 0 项，未勾选
-		expect(text).toContain('  [x] review [updated]'); // 第 1 项勾选，无光标
+		expect(text).toContain('  [x] review [deleted]'); // 第 1 项勾选，无光标
 	});
 
 	it('全不选时所有项为 [ ]', () => {
 		const text = renderMultiSelect('T', items, 0, new Set());
 		expect(text).toContain('[ ] pi-lab [deleted]');
-		expect(text).toContain('[ ] review [updated]');
+		expect(text).toContain('[ ] review [deleted]');
 	});
 
 	it('包含操作提示 footer', () => {
@@ -292,7 +292,7 @@ describe('resetConfigProfiles', () => {
 		const b = seedConfig('b');
 		const candidates = [
 			{ plugin: 'a', reason: 'deleted' as const, configPath: a },
-			{ plugin: 'b', reason: 'updated' as const, configPath: b },
+			{ plugin: 'b', reason: 'deleted' as const, configPath: b },
 		];
 		const logs: string[] = [];
 		const reset = resetConfigProfiles(candidates, new Set([0]), (lvl, msg) =>
@@ -314,5 +314,46 @@ describe('resetConfigProfiles', () => {
 		);
 		expect(existsSync(a)).toBe(false);
 		expect(existsSync(sessionPath)).toBe(true);
+	});
+
+	it('删除前备份 config.json 到 .bak-<ts>', () => {
+		const a = seedConfig('a');
+		resetConfigProfiles(
+			[{ plugin: 'a', reason: 'deleted', configPath: a }],
+			new Set([0]),
+			() => {},
+		);
+		expect(existsSync(a)).toBe(false);
+		const bakFiles = readdirSync(join(targetDir, 'extensions-data', 'a')).filter((f) =>
+			f.startsWith('config.json.bak-'),
+		);
+		expect(bakFiles).toHaveLength(1);
+	});
+
+	it('仅保留最新 N 份备份，清理更早的；非时间戳备份不受影响', () => {
+		const a = seedConfig('a');
+		const dir = join(targetDir, 'extensions-data', 'a');
+		// 预置 4 份更早的时间戳备份 + 1 份非时间戳（手写）备份
+		for (let i = 1; i <= 4; i++) {
+			writeFileSync(`${a}.bak-2020010${i}-000000`, 'old');
+		}
+		writeFileSync(`${a}.bak-manual`, 'manual');
+		const logs: string[] = [];
+		resetConfigProfiles(
+			[{ plugin: 'a', reason: 'deleted', configPath: a }],
+			new Set([0]),
+			(lvl, msg) => logs.push(`${lvl}:${msg}`),
+		);
+		const all = readdirSync(dir);
+		const tsBackups = all.filter((f) => /^config\.json\.bak-\d{8}-\d{6}$/.test(f));
+		expect(tsBackups).toHaveLength(MAX_CONFIG_BACKUPS);
+		// 保留最新：新建备份与最新的旧备份；最旧的两份被清理
+		expect(tsBackups).toContain('config.json.bak-20200104-000000');
+		expect(tsBackups).not.toContain('config.json.bak-20200101-000000');
+		// 非时间戳备份不被误删
+		expect(all).toContain('config.json.bak-manual');
+		expect(logs.some((l) => l.startsWith('WARN:') && l.includes('pruned stale backup'))).toBe(
+			true,
+		);
 	});
 });

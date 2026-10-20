@@ -44,19 +44,39 @@ const EXT_CATEGORIES = ['tui', 'context', 'security', 'auto', 'accuracy', 'verif
 let _piBin: string | null = null;
 
 /**
- * 解析全局 pi 二进制路径，避免本地 node_modules/.bin/pi 旧版本
+ * 探测 pi 版本，仅用于留痕（ADR-0063 决策 5）。失败返回 unknown，绝不抛错。
+ */
+function probePiVersion(bin: string): string {
+	try {
+		return (
+			execSync(`"${bin}" --version`, { encoding: 'utf8', timeout: 5000 }).trim() || 'unknown'
+		);
+	} catch {
+		return 'unknown';
+	}
+}
+
+/**
+ * 解析 pi 二进制路径。默认锚到**仓库内 lock 版本**（`node_modules/.bin/pi`），
+ * 使类型基座（tsc 用的 devDependency）与运行基座同源（ADR-0063 决策 6/7）。
+ *
+ * 优先级：`PI_BIN`（逃生口：刻意用全局新版）→ 仓库内 lock → npm 全局前缀 → PATH。
+ * 最后一档仍排除 `node_modules/.bin`，避免绕过上面的显式优先级。
  */
 export function resolvePiBin(): string {
 	if (_piBin) return _piBin;
 
 	const candidates: string[] = [];
 
-	// 1. 环境变量 PI_BIN
+	// 1. 环境变量 PI_BIN（显式覆盖）
 	if (process.env.PI_BIN) {
 		candidates.push(process.env.PI_BIN);
 	}
 
-	// 2. npm 全局前缀
+	// 2. 仓库内 lock 版本（基座唯一来源；ADR-0063 决策 6/7）
+	candidates.push(resolve(ROOT_DIR, 'node_modules/.bin/pi'));
+
+	// 3. npm 全局前缀
 	try {
 		const prefix = execSync('npm config get prefix 2>/dev/null', {
 			encoding: 'utf8',
@@ -67,7 +87,7 @@ export function resolvePiBin(): string {
 		/* ignore */
 	}
 
-	// 3. PATH 查找（排除 node_modules/.bin）
+	// 4. PATH 查找（排除 node_modules/.bin）
 	try {
 		const cleanPath = (process.env.PATH || '')
 			.split(':')
@@ -89,11 +109,16 @@ export function resolvePiBin(): string {
 	for (const c of candidates) {
 		if (existsSync(c)) {
 			_piBin = c;
+			// 运行基座留痕（ADR-0063 决策 5）：vitest 的 node-pty TUI 用例消费的就是
+			// 这个 pi，路径与版本必须出现在测试输出里，否则「这个红是哪个版本造成的」
+			// 无法归因（本仓实测过类型基座与运行层错配的代价）。
+			console.log(`[pi-bin] ${_piBin} → ${probePiVersion(_piBin)}`);
 			return _piBin;
 		}
 	}
 
 	_piBin = 'pi';
+	console.log(`[pi-bin] pi（未解析到绝对路径）→ ${probePiVersion(_piBin)}`);
 	return _piBin;
 }
 

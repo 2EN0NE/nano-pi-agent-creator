@@ -301,7 +301,7 @@ tui_run_pi_test() {
 	local PI_CI_MODE=${CI:-false}
 
 	local slug="tui-test-$$-$RANDOM"
-	local test_home="$ROOT_DIR/.pi/tmp/$slug"
+	local test_home="${TUI_SANDBOX_ROOT:-$ROOT_DIR/.pi/tmp}/$slug"
 	mkdir -p "$test_home"
 	local output_file="$test_home/output.log"
 
@@ -343,6 +343,7 @@ tui_run_pi_test() {
 		}
 		sleep 1
 
+		stage "teardown-done"
 	EXPECT
 
 	# 将输入脚本的每一行转换为 expect send 命令
@@ -380,6 +381,7 @@ tui_run_pi_test() {
 				exec echo "124" > "$ec_file"
 			}
 		}
+		stage "teardown-done"
 	EXPECT
 
 	chmod +x "$exp_file"
@@ -479,8 +481,17 @@ tui_assert_exit_code() {
 }
 
 # 清理 TUI 测试产生的临时文件
+#
+# 调试开关：E2E_TUI_KEEP_SANDBOX=1 保留沙箱（配合 TUI_SANDBOX_ROOT 固定路径），
+# 用于**事后验尸**——TUI 用例失败时沙箱里的 checkpoint 存储/锁文件、pi 会话文件、
+# 各扩展日志是判断"产品卡住 vs 测试断言错"的关键证据，删掉就无从取证。
+# 保留时会打印路径，便于直接查看。
 tui_cleanup() {
 	if [[ -n "$TUI_TEST_HOME" && -d "$TUI_TEST_HOME" ]]; then
+		if [[ "${E2E_TUI_KEEP_SANDBOX:-0}" == "1" ]]; then
+			echo "  [tui] E2E_TUI_KEEP_SANDBOX=1 → 保留沙箱: $TUI_TEST_HOME" >&2
+			return 0
+		fi
 		rm -rf "$TUI_TEST_HOME"
 		TUI_TEST_HOME=""
 	fi
@@ -497,7 +508,7 @@ tui_cleanup() {
 #   - 中间状态可验证（如 "按 m 后标记是否出现"）
 #   - 退出码精确传递
 #
-# 用法：tui_expect_test <extension_list> <expect_commands> <timeout_seconds> [cols] [cwd] [preset_home_dir]
+# 用法：tui_expect_test <extension_list> <expect_commands> <timeout_seconds> [cols] [cwd] [preset_home_dir] [pi_args]
 #   extension_list    - 逗号分隔的依赖扩展列表
 #   expect_commands   - expect 交互命令（多行字符串）
 #   timeout_seconds   - 超时秒数（默认：15）
@@ -507,6 +518,8 @@ tui_cleanup() {
 #                       .pi/agent/extensions-data/<plugin>/config.json），
 #                       在沙箱 HOME 就绪后、pi 启动前复制到 $HOME/
 #                       （用于预置扩展配置，使面板交互可确定性落盘）
+#   pi_args           - 可选：追加到 `pi -a` 之后的参数（如 `--session /abs/x.jsonl`）
+#                       用于需要指定会话文件等场景；含空格请自行加引号
 #
 # expect_commands 中可以使用的上下文：
 #   - send "text\r"      发送文本（\r = Enter）
@@ -536,10 +549,11 @@ tui_expect_test() {
 	local cols="${4:-80}"
 	local cwd="${5:-}"
 	local preset_home_dir="${6:-}"
+	local pi_args="${7:-}"
 
 	local PI_CI_MODE=${CI:-false}
 	local slug="tui-exp-$$-$RANDOM"
-	local test_home="$ROOT_DIR/.pi/tmp/$slug"
+	local test_home="${TUI_SANDBOX_ROOT:-$ROOT_DIR/.pi/tmp}/$slug"
 	mkdir -p "$test_home"
 	local output_file="$test_home/output.log"
 
@@ -586,30 +600,93 @@ tui_expect_test() {
 		# 设置终端宽度（对齐 tui_run_pi_test，case 依赖 cols 参数做宽度断言）
 		set stty_init "cols $cols rows 24"
 
-		# 启动 pi
-		spawn pi -a
+		# ── 阶段计时（过程日志）──────────────────────────────────────────────
+		# 每步输出一行 "tui-stage <name>: +Ns (cumulative Ns)" 到 expect stdout，
+		# 随 TUI 输出一并持久化到 cases/<NNN>-tui-output.log。超时 / 被 worker kill 时，
+		# 日志里最后一条 tui-stage 就是卡点所在阶段——据此区分「固定开销需优化」
+		# （沙箱/冷启动/收尾白等）与「用例挂起」（等待条件永不满足）。
+		set __stage_t0 [clock seconds]
+		set __stage_last \$__stage_t0
+		proc stage {name} {
+			global __stage_t0 __stage_last
+			set now [clock seconds]
+			puts "\[tui-stage\] \$name: +[expr {\$now - \$__stage_last}]s (cumulative [expr {\$now - \$__stage_t0}]s)"
+			set __stage_last \$now
+			flush stdout
+		}
+		stage "expect-start"
 
-		# 等待 TUI 就绪（匹配状态栏中 (auto) 或 0.0%/0——连续出现，不会被 ANSI 打断）
-		# 注意：必须用单行 expect（多行 expect 对部分命令名如 sync 有补全时序干扰，命令不被提交）
-		expect { -re {\(auto\)|0\.0%/0} { } timeout { send_error "TIMEOUT: TUI did not become ready within ${timeout_seconds}s\n"; exit 124 } }
+		# 启动 pi
+		spawn pi -a $pi_args
+
+		# TUI 就绪判定：读到「输出静默」为止（最多 20s）。
+		# 不依赖状态栏正则（历史实现白等到 timeout_seconds 才继续），也不用裸 sleep——
+		# 裸 sleep 会把启动输出留在 pty 缓冲里，随后用例发键时与输出交错，
+		# 实测导致首条命令的 Enter 丢失（如 /preset plan 与下一条 /tools 合并成 "plan/tools"）。
+		set __quiet 0
+		set __ready_deadline [expr {[clock seconds] + 20}]
+		while {!\$__quiet && [clock seconds] < \$__ready_deadline} {
+			set timeout 1
+			expect {
+				-re {.+} { exp_continue }
+				timeout { set __quiet 1 }
+			}
+		}
+		set timeout $timeout_seconds
+		# 崩溃保险：静默后若 pi 已退出（启动失败），立即判失败而非让后续断言莫名超时
+		expect -timeout 0 {
+			eof { send_error "FAIL: pi 在启动阶段退出（TUI 未起来）\n"; exit 126 }
+			default { }
+		}
+		stage "pi-ready-raw"
 
 		# 额外等待确保 TUI 完全渲染
 		sleep 1
 
+		# 条件等待（替代固定 sleep，对齐 ADR-0045 D4「多进程一律轮询到条件」）：
+		# 用法 \$(wait_for {marker}) 等屏幕出现标记；超时即判失败（125 != 124，不会被当成"预期未退出"）
+		# （注：此处必须写成 \$(，未转义的 \$( 会被 bash 在生成脚本时当命令替换执行 →
+		#   日志里出现 "wait_for: command not found" 噪声，误导排查）
+		proc wait_for {pattern} {
+			expect {
+				-re \$pattern { }
+				timeout { send_error "TIMEOUT: wait_for \$pattern\n"; exit 125 }
+			}
+		}
+
+		# 有界排空：把 PTY 待读输出读走，避免 pi 写满缓冲后同步阻塞（死锁）。
+		# **必须"有时间限"或"有块数限"**：\$(-timeout 0 -re {.+} { exp_continue }) 单用是**无界**的——
+		# 只要 pi 在流式输出（PI_TUI_DEBUG / 工具执行 / agent 活跃）就永远 exp_continue，
+		# 调用方循环永远推进不了（实测 pi-session-tree case 003 因此挂满 300s 被预算杀掉）。
+		# 本助手：无输出立即返回（-timeout 0），有输出最多读 max_chunks 块（break）→ 两个方向都有界。
+		# 用法：drain_pty 20
+		proc drain_pty {max_chunks} {
+			set __drained 0
+			expect {
+				-timeout 0
+				-re {.+} {
+					if {[incr __drained] >= \$max_chunks} { break }
+					exp_continue
+				}
+				timeout { }
+			}
+		}
+
 		# ── 用户提供的交互命令 ──
+
 		$expect_commands
 
-		# ── 收尾：如果 pi 仍然活着，发送 /quit ──
+		stage "commands-done"
+		# ── 收尾：两段式退出 ──
+		# ① 直接 /quit：无覆盖层时最快（pi 正常退出约 3s）。
+		# ② 若 8s 内没退（多半是覆盖层吞了 /quit）：关覆盖层后再试一次。
+		#    注意 ESC 与后续按键之间要留间隔——ESC 紧贴 "/" 会被转义序列吞掉，
+		#    导致 "/quit" 退化成普通文本 "quit" 提交（实测踩坑）。
 		send "/quit\r"
-		sleep 1
-
-		# 捕获退出码
+		set timeout 8
 		expect {
 			eof {
 				catch { wait result }
-				# wait 可能失败（如 PTY 关闭时进程状态已不可得），此时无 result 变量；
-				# eof 匹配本身说明 pi 已退出，默认退出码 0 而非崩溃（崩溃会让 ec_file
-				# 缺失 → bash 层误用 expect 退出码 → 假 FAIL）。
 				if {[info exists result]} {
 					set exit_code [lindex \$result 3]
 				} else {
@@ -618,10 +695,32 @@ tui_expect_test() {
 				exec echo "\$exit_code" > "$ec_file"
 			}
 			timeout {
-				exec echo "124" > "$ec_file"
-				exit 124
+				send "\033"
+				sleep 0.6
+				send "\033"
+				sleep 0.6
+				send "\033"
+				sleep 0.6
+				send "/quit\r"
+				set timeout 10
+				expect {
+					eof {
+						catch { wait result }
+						if {[info exists result]} {
+							set exit_code [lindex \$result 3]
+						} else {
+							set exit_code 0
+						}
+						exec echo "\$exit_code" > "$ec_file"
+					}
+					timeout {
+						exec echo "124" > "$ec_file"
+						exit 124
+					}
+				}
 			}
 		}
+		stage "teardown-done"
 	EXPECT
 
 	chmod +x "$exp_file"

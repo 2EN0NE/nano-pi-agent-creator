@@ -93,6 +93,9 @@ jobs:
               run: npm run lint:tui
 
     # ── Config 合规门禁（pi-config 标准化，WARN 不阻塞）──
+    # ── Config 合规门禁 ──
+    # 规则 1/2（手写路径 / raw JSON）尚有历史欠账 → WARN 不阻塞；
+    # 规则 3（仓库级配置的解析锚点，AGENTS.md【强制判断】）无历史欠账 → **阻塞**。
     config-compliance:
         name: Config Compliance
         runs-on: ubuntu-latest
@@ -103,6 +106,8 @@ jobs:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
             - run: npm ci
+            - name: Check config anchor rule (blocking)
+              run: npm run lint:config:anchor
             - name: Check config compliance (warning, non-blocking)
               run: npm run lint:config
 
@@ -159,8 +164,12 @@ jobs:
         timeout-minutes: 5
         steps:
             - uses: actions/checkout@v4
-            - name: Run analyze.py unit tests
-              run: python3 bench/test_analyze.py
+            - name: Run bench python unit tests
+              run: |
+                  for t in bench/test_*.py; do
+                    echo "== $t =="
+                    python3 "$t" || exit 1
+                  done
 
     # ── Bench Smoke（verify.sh 失败侧判定 + 骨架，阻塞，mock-llm 不烧钱）──
     bench-smoke:
@@ -184,8 +193,10 @@ jobs:
 
     # ── E2E Tests（bash 集成测试，阻塞）──
     # 全量 e2e 模块多、耗时长（单 job 曾超 70 分钟并触发 runner 异常），
-    # 拆成并行 shard 降低单 job 资源压力。shard 4（原 8-shard 下 cancelled 的
-    # 重扩展组）进一步显式拆为 shard 4/8/9，定位挂起模块。
+    # 拆成并行 shard 降低单 job 资源压力。shard 按模块名确定性 hash 分桶（run-e2e.sh
+    # 的 `_shard_match`），**不做硬编码模块清单**——新增模块一定落在某个 shard 上。
+    # 唯一允许「不在矩阵里跑」的是下面显式 `--exclude` 的模块（各有专用 job）。
+    # E2E_BUDGET_STRICT=1：CI 是独占机，耗时超预算一律判失败，不降级为 WARN。
     e2e:
         name: E2E Tests
         runs-on: ubuntu-latest
@@ -193,7 +204,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+                shard: [0, 1, 2, 3, 4, 5, 6, 7]
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
@@ -207,25 +218,23 @@ jobs:
             - name: Run bash e2e tests (shard ${{ matrix.shard }})
               env:
                   E2E_POOL_SIZE: 4
+                  E2E_BUDGET_STRICT: '1'
+                  # CI 无并发交互 pi 会话 → 环境哨兵可以硬阻塞：真实 $HOME/.pi 被改动
+                  # 一律判失败（护栏见 ADR-0045 D6 修订：pi 配置根 guard + 内容哈希口径）
+                  E2E_ENV_SENTINEL: 'strict'
               run: |
-                  case "${{ matrix.shard }}" in
-                    4)
-                      # permission-gate 在 CI Linux 上崩溃（见 .pi/todos/TODO.md P0，
-                      # 本地 macOS 正常）。先跳过 CI 验证，等 Linux 复现修复后再恢复。
-                      echo "permission-gate e2e skipped in CI (crash on Linux)"
-                      ;;
-                    8)
-                      EXT_LIST="files,go-to-bed,pi-rate-limiter,pi-session-tree,pi-shortcuts,questionnaire,sync-tool"
-                      bash test/e2e/scripts/run-e2e.sh --ext "$EXT_LIST"
-                      ;;
-                    9)
-                      bash test/e2e/scripts/run-e2e.sh --skill e2e-test
-                      ;;
-                    *)
-                      bash test/e2e/scripts/run-e2e.sh \
-                        --shard "${{ matrix.shard }}/8"
-                      ;;
-                  esac
+                  # 显式排除（其余模块由 hash 分桶覆盖，不写清单）：
+                  #   worktree       → e2e-worktree job（vitest + bash e2e + TUI）
+                  #   permission-gate → e2e-permission-gate-smoke job（其 TUI 用例在
+                  #                     CI Linux 崩溃，TODO P0；smoke 走专用 job）
+                  bash test/e2e/scripts/run-e2e.sh \
+                    --shard "${{ matrix.shard }}/8" \
+                    --exclude worktree,permission-gate
+            - name: Warn on skipped permission-gate TUI (TODO P0)
+              if: matrix.shard == 4
+              run: |
+                  echo "::warning::permission-gate TUI skipped in CI (TODO P0)"
+                  echo "  → smoke covered by permission-gate-smoke job"
             - name: Upload test results
               if: always()
               uses: actions/upload-artifact@v4
@@ -248,6 +257,38 @@ jobs:
                     echo "(no test results directory found)"
                   fi
 
+    # ── permission-gate smoke e2e（阻塞）──
+    # CI 主矩阵用 `--exclude worktree,permission-gate` 跳过它（TUI expect 在
+    # Linux 崩溃，TODO P0）；这里用 `--smoke-only` 单跑它的 smoke.test.sh
+    # （print 模式，非崩溃路径），把该模块的主要自动化断言恢复为**阻塞**门禁。
+    e2e-permission-gate-smoke:
+        name: E2E permission-gate (smoke)
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: npm
+            - name: Install project dependencies
+              run: npm ci
+            - name: Setup CI environment
+              run: bash scripts/setup-ci.sh
+            - name: Run permission-gate smoke e2e
+              env:
+                  E2E_BUDGET_STRICT: '1'
+                  E2E_ENV_SENTINEL: 'strict'
+              run: |
+                  bash test/e2e/scripts/run-e2e.sh \
+                    --ext permission-gate --smoke-only
+            - name: Upload test results
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: e2e-permission-gate-smoke
+                  path: test/results/
+
     # ── Worktree E2E Tests (blocking) ──
     # 独立 job：worktree 扩展的测试作为 required status check 阻断合并
     e2e-worktree:
@@ -267,8 +308,9 @@ jobs:
               run: bash scripts/setup-ci.sh
             - name: Run Vitest worktree tests
               run: |
-                  npx vitest run \
-                    test/vitest/extensions/worktree.test.ts \
-                    test/vitest/extensions/worktree.operations.test.ts
+                  npx vitest run test/vitest/extensions/worktree*.test.ts
             - name: Run bash e2e worktree tests
+              env:
+                  E2E_BUDGET_STRICT: '1'
+                  E2E_ENV_SENTINEL: 'strict'
               run: bash test/e2e/scripts/run-e2e.sh --ext worktree

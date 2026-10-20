@@ -75,16 +75,19 @@ test_it "contains Chinese characters in the message field" <<'TEST'
     line=$(grep -r "whimsical:refresh" "$LOG_DIR" 2>/dev/null | head -1)
     echo "Refresh line: $line"
 
-    # Extract the message=... part (it appears after 'message=' and before the next field)
-    msg=$(echo "$line" | grep -oP 'message=\K[^ ]+')
+    # Extract the message=... part（可移植：macOS 自带 BSD grep 不支持 -P/\K）
+    msg=$(printf '%s' "$line" | sed -n 's/.*message=\([^ ]*\).*/\1/p')
     if [[ -z "$msg" ]]; then
       echo "FAIL: Could not extract message field"
       exit 1
     fi
     echo "Extracted message: $msg"
 
-    # Check for CJK characters (U+4E00–U+9FFF)
-    if echo "$msg" | grep -qP '[\x{4e00}-\x{9fff}]'; then
+    # Check for CJK characters (U+4E00–U+9FFF → UTF-8 首字节 0xE4–0xE9)
+    # 可移植：不用 grep -P（BSD grep 无 PCRE）；LC_ALL=C 下按字节匹配首字节集合。
+    # 注：该范围是 CJK 的**超集**（含假名/中日韩标点），对本用例（断言消息含中文）足够。
+    cjk_lead=$(printf '\344\345\346\347\350\351') # 0xE4..0xE9
+    if LC_ALL=C grep -q "[$cjk_lead]" <<<"$msg"; then
       echo "PASS: Message contains Chinese characters"
     else
       echo "FAIL: No CJK chars in: $msg"

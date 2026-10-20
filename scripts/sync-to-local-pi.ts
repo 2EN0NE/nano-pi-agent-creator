@@ -99,6 +99,13 @@ interface ProfileConfig {
 
 interface SyncProfilesConfig {
 	profiles: Record<string, ProfileConfig>;
+	/**
+	 * 墓碑清单：本仓库曾管理、现已下架/内嵌（名字从源清单消失）的扩展名。
+	 * 目标目录残留的同名旧副本会被当作「受管资产」纳入严格剪枝删除，
+	 * 否则被误判为「第三方资产」永久保留 → 与内嵌后重新注册的同名扩展
+	 * 重复，导致 `tools:1` / `tools:2` 重名（ADR-0037 修订）。
+	 */
+	retired?: string[];
 }
 
 interface ResolvedResource {
@@ -168,19 +175,15 @@ function parseArgs(): CLIOptions {
 				break;
 			case '--ext':
 			case '--extension':
-				opts.inline = true;
 				opts.inlineExtensions.push(args[++i] ?? '');
 				break;
 			case '--skill':
-				opts.inline = true;
 				opts.inlineSkills.push(args[++i] ?? '');
 				break;
 			case '--theme':
-				opts.inline = true;
 				opts.inlineThemes.push(args[++i] ?? '');
 				break;
 			case '--prompt':
-				opts.inline = true;
 				opts.inlinePrompts.push(args[++i] ?? '');
 				break;
 			case '--target':
@@ -206,6 +209,25 @@ function parseArgs(): CLIOptions {
 	return opts;
 }
 
+/**
+ * 从 CLI 收集的「名称过滤」（--ext/--skill/--theme/--prompt）：
+ * - 同时给了 `--target` → inline 模式，这组名字就是**要同步的清单**；
+ * - 只给 `--profile` → profile 模式，这组名字是**该 profile 内的白名单过滤**。
+ */
+function buildNameFilter(opts: CLIOptions): Partial<Record<ResourceType, string[]>> {
+	return {
+		extensions: opts.inlineExtensions,
+		skills: opts.inlineSkills,
+		themes: opts.inlineThemes,
+		prompts: opts.inlinePrompts,
+	};
+}
+
+/** 是否指定了名称过滤（任一类型非空）。 */
+function hasNameFilter(opts: CLIOptions): boolean {
+	return Object.values(buildNameFilter(opts)).some((v) => v.length > 0);
+}
+
 function printHelp(): void {
 	console.log(`Usage: npx tsx scripts/sync-to-local-pi.ts [options]
 
@@ -221,26 +243,46 @@ Options:
   --dry-run          -n   Preview only, no writes
   --config <path>    -c   Path to YAML config (default: scripts/sync-profiles.yaml)
 
-Inline mode options:
-  --ext <name>            Extension name to sync (repeatable)
-  --skill <name>          Skill name to sync (repeatable)
-  --theme <name>          Theme name to sync (repeatable)
-  --prompt <name>         Prompt name to sync (repeatable)
-  --target <dir>     -t   Target directory (required in inline mode)
+Resource selection:
+  --ext <name>            Extension name (repeatable)
+  --skill <name>          Skill name (repeatable)
+  --theme <name>          Theme name (repeatable)
+  --prompt <name>         Prompt name (repeatable)
+  --target <dir>     -t   Target directory (switches to inline mode)
+
+  These selectors mean two different things depending on whether --target is given:
+    * with --target   → inline mode: only the named items are synced to <dir>
+    * with --profile  → profile mode: WHITELIST filter inside that profile — only the
+                        named items sync, other resource types are skipped entirely,
+                        and stale pruning is disabled (never delete unnamed assets)
   --purge                DELETE target files not covered by this sync (mirror mode)
 
   -h, --help              Show this help
 
 NOTE:
-  By default this tool NEVER deletes anything — it only copies/updates synced
-  resources. Use --purge to explicitly remove target files that are not part
-  of the current sync (with a WARN confirmation). Prefer --profile over
-  --target when syncing to ~/.pi/agent, and always use an isolated dir like
-  ./.pi/test for inline tests.
+  Deletion by mode (ADR-0037):
+    - profile mode    default prune: deletes "managed" assets (names known to this
+                      repo, incl. "retired" tombstone residue in sync-profiles.yaml)
+                      that are absent from the profile's effective set; third-party
+                      assets are kept.
+    - inline mode     never deletes (incremental copy only).
+    - --purge         full mirror: also deletes third-party assets (WARN).
+
+  Syncing to the real user dir (~/.pi/agent) is allowed in all three forms:
+    * whole profile:  --profile user-install
+    * single plugin:  --profile user-install --ext <name>   (no stale pruning)
+    * single plugin:  --ext <name> --target ~/.pi/agent     (inline, no deletion)
+  --purge is still hard-blocked against ~/.pi and ~/.pi/agent: it recursively
+  deletes everything not in the current sync, which would destroy the real
+  user dir.
+
+  Prefer --profile over --target when syncing to ~/.pi/agent, and use an
+  isolated dir like ./.pi/test for inline tests.
 
 Examples:
   npx tsx scripts/sync-to-local-pi.ts                     # all profiles (default)
   npx tsx scripts/sync-to-local-pi.ts --profile user-install  # single profile
+  npx tsx scripts/sync-to-local-pi.ts --profile user-install --ext permission-gate  # 只同步一个插件到用户级
   npx tsx scripts/sync-to-local-pi.ts --dry-run               # preview all profiles
   npx tsx scripts/sync-to-local-pi.ts --ext sandbox --target ./.pi/test
   npx tsx scripts/sync-to-local-pi.ts --ext sandbox --ext pi-logger --target ./.pi/test --purge
@@ -309,8 +351,10 @@ function loadConfig(configPath: string): SyncProfilesConfig {
 			const parsed = yaml.load(raw) as SyncProfilesConfig;
 			if (parsed?.profiles) {
 				// Merge: project-local profiles override global ones with the same name
+				// 墓碑清单 union（project 追加到 global，不覆盖）
 				merged = {
 					profiles: { ...merged.profiles, ...parsed.profiles },
+					retired: [...(merged.retired ?? []), ...(parsed.retired ?? [])],
 				};
 			}
 		} catch (err) {
@@ -817,7 +861,11 @@ function buildResource(
 /**
  * Resolve all resources to sync for a given profile.
  */
-function resolveResources(profile: ProfileConfig, projectRoot: string): ResolvedResource[] {
+function resolveResources(
+	profile: ProfileConfig,
+	projectRoot: string,
+	filter?: Partial<Record<ResourceType, string[]>>,
+): ResolvedResource[] {
 	const targetDir = expandTargetPath(profile.target, projectRoot);
 	const resources: ResolvedResource[] = [];
 
@@ -830,7 +878,27 @@ function resolveResources(profile: ProfileConfig, projectRoot: string): Resolved
 	for (const type of RESOURCE_TYPES) {
 		const names = profile[type]; // string[] | "*"
 		const exclude = profile.exclude?.[type];
-		const selectedNames = resolveSourceItems(type, names, exclude, projectRoot);
+		let selectedNames = resolveSourceItems(type, names, exclude, projectRoot);
+
+		// 名称过滤（--profile X --ext Y）：只同步点名的资产。
+		// 点名的资产不在此 profile 清单内时**快速失败**，不静默跳过（避免“没同步却以为同步了”）。
+		// 排他：一旦给了名称过滤，**只同步点名的资产**；未点名的资源类型一律清空
+		// （例：只给 --ext 时，本次不再同步 skills/themes）。
+		const filterActive =
+			filter !== undefined && Object.values(filter).some((v) => v.length > 0);
+		const wanted = filterActive ? (filter?.[type] ?? []) : undefined;
+		if (wanted) {
+			const notInProfile = wanted.filter((n) => !selectedNames.includes(n));
+			if (notInProfile.length > 0) {
+				console.error(
+					`Error: profile 清单内找不到 ${type}: ${notInProfile.join(', ')}\n` +
+						`       （该 profile 的 ${type} 清单：${selectedNames.join(', ') || '(空)'}）`,
+				);
+				process.exit(1);
+			}
+			const wantedSet = new Set(wanted);
+			selectedNames = selectedNames.filter((n) => wantedSet.has(n));
+		}
 
 		for (const name of selectedNames) {
 			resources.push(buildResource(type, name, projectRoot, targetDir, extIndex, skillIndex));
@@ -1137,11 +1205,26 @@ async function processProfile(
 	name: string,
 	profile: ProfileConfig,
 	opts: CLIOptions,
+	retiredExtensions: string[],
 ): Promise<ProfileSummary> {
 	writeLog('INFO', `Profile "${name}" started`);
 
 	const targetDir = expandTargetPath(profile.target, PROJECT_ROOT);
-	const resources = resolveResources(profile, PROJECT_ROOT);
+	// 名称过滤（profile 模式下的 --ext/--skill/--theme/--prompt）：只同步点名的资产。
+	// ⚠ 过滤生效时**必须禁用 stale 剪枝**：sourceNames 只含被点名的资产，若仍按 profile
+	// 的严格剪枝语义跑，会把目标里其他既有资产（包括用户手动装的）判为“已过时”而删除
+	// （不可逆）。实现上复用 inline 的“默认不删”语义，见下方 isInline。
+	const nameFilter = buildNameFilter(opts);
+	const filterActive = hasNameFilter(opts);
+	const resources = resolveResources(profile, PROJECT_ROOT, nameFilter);
+	if (filterActive) {
+		const picked = Object.entries(nameFilter)
+			.filter(([, v]) => v.length > 0)
+			.map(([k, v]) => `${k}=${v.join(',')}`)
+			.join(' ');
+		console.warn(`  ⚠️  名称过滤生效（${picked}）：只同步点名的资产，已跳过 stale 剪枝。`);
+		writeLog('WARN', `名称过滤生效（${picked}）：只同步点名资产，跳过 stale 剪枝`);
+	}
 
 	if (resources.length === 0) {
 		console.log(`  📦 [${name}] No resources to sync.`);
@@ -1201,9 +1284,14 @@ async function processProfile(
 		sourceNames[r.type].add(r.name);
 	}
 
-	// 完整源清单（本仓库所有可用资产名）——用于区分「受管资产」与「第三方资产」（ADR-0037）
+	// 完整源清单（本仓库所有可用资产名）——用于区分「受管资产」与「第三方资产」（ADR-0037）。
+	// 并入墓碑清单（retired）：已下架/内嵌的扩展名仍视为受管，目标残留会被严格剪枝
+	// 删除，否则被误判为第三方永久保留 → 与内嵌后重新注册的同名扩展重名（tools:1/tools:2）。
 	const sourceInventory: Record<ResourceType, Set<string>> = {
-		extensions: new Set(resolveSourceItems('extensions', '*', [], PROJECT_ROOT)),
+		extensions: new Set([
+			...resolveSourceItems('extensions', '*', [], PROJECT_ROOT),
+			...retiredExtensions,
+		]),
 		skills: new Set(resolveSourceItems('skills', '*', [], PROJECT_ROOT)),
 		themes: new Set(resolveSourceItems('themes', '*', [], PROJECT_ROOT)),
 		prompts: new Set(resolveSourceItems('prompts', '*', [], PROJECT_ROOT)),
@@ -1499,7 +1587,8 @@ async function processProfile(
 
 	// ── Per-category breakdown (NEW / UPDATED / removed / kept) ──
 	const absTarget = expandTargetPath(profile.target, PROJECT_ROOT);
-	const isInline = opts.inline;
+	// filterActive 时复用 inline 的“默认不删”语义（见 processProfile 顶部说明）
+	const isInline = opts.inline || filterActive;
 	let hasStale = false;
 
 	console.log(`\n  🗂️  "${name}" — per-category breakdown:\n`);
@@ -1804,6 +1893,30 @@ async function main(): Promise<void> {
 		console.log('  ⚠️  DRY RUN MODE — no files will be written\n');
 	}
 
+	// `--target`（inline）与 `--profile`/`--all` 互斥：同时给出时 inline 会静默胜出、profile 被丢弃，
+	// 属静默降级，直接报错（否则用户以为“按 profile 同步了”，实际去了别的目录）。
+	if (opts.inline && (opts.profile || opts.all)) {
+		const which = opts.profile ? `--profile ${opts.profile}` : '--all';
+		console.error(
+			`Error: --target 与 ${which} 互斥（不能同时使用）\n` +
+				`       给了 --target ${opts.inlineTarget} 就进入 inline 模式，${which} 会被忽略。\n` +
+				'       单插件到用户目录：--profile user-install --ext <name>\n' +
+				'       指定目录：--ext <name> --target <dir>',
+		);
+		process.exit(1);
+	}
+
+	// 名称过滤 + profile 模式：必须显式指定 --profile。
+	// 否则会按默认的“所有 profile”跑，把同名资产往多个 target 重复同步。
+	if (!opts.inline && hasNameFilter(opts) && !opts.profile) {
+		console.error(
+			'Error: 在 profile 模式下用 --ext/--skill/--theme/--prompt 过滤时必须显式指定 --profile <name>\n' +
+				'       （例：--profile user-install --ext permission-gate）\n' +
+				'       若要同步到指定目录，请用 inline 模式：--ext <name> --target <dir>',
+		);
+		process.exit(1);
+	}
+
 	// ── Inline mode: build ad-hoc profile from CLI args ─────────────
 	if (opts.inline) {
 		if (!opts.inlineTarget) {
@@ -1874,7 +1987,7 @@ async function main(): Promise<void> {
 			writeLog('WARN', `--purge enabled for inline sync to ${opts.inlineTarget}`);
 		}
 
-		await processProfile('(inline)', inlineProfile, opts);
+		await processProfile('(inline)', inlineProfile, opts, []);
 		writeLog('INFO', `Inline sync completed (target: ${inlineProfile.target})`);
 		console.log(`  ✨ Inline sync done!`);
 		console.log(`     Log: ${LOG_FILE}`);
@@ -1904,21 +2017,17 @@ async function main(): Promise<void> {
 
 	const summaries: ProfileSummary[] = [];
 	for (const { name, profile } of profiles) {
-		const s = await processProfile(name, profile, opts);
+		const s = await processProfile(name, profile, opts, config.retired ?? []);
 		summaries.push(s);
 	}
 
-	// ── 配置重置交互（ADR-0037） ──────────────────────────────
-	// 收集「被删除 / 被更新、且目标下已保存过 pi-config profile」的插件。
+	// ── 配置重置交互（ADR-0037 修订） ──────────────────────────
+	// 仅收集「被删除、且目标下已保存过 pi-config profile」的插件（更新不再提示重置）。
 	// dry-run 仅预览 [would reset]，不交互、不落盘；非 TTY 由 interactiveMultiSelect 自动降级为全保留。
 	const resetCandidates: ConfigResetCandidate[] = [];
 	for (const s of summaries) {
 		resetCandidates.push(
-			...collectConfigResetCandidates(
-				s.target,
-				s.staleRemovedItems.extensions,
-				s.updatedItems.extensions,
-			),
+			...collectConfigResetCandidates(s.target, s.staleRemovedItems.extensions),
 		);
 	}
 	if (resetCandidates.length > 0) {
@@ -1929,7 +2038,7 @@ async function main(): Promise<void> {
 		} else {
 			const items = resetCandidates.map((c) => `${c.plugin} [${c.reason}]`);
 			const selected = await interactiveMultiSelect(
-				'配置重置：以下插件已被删除/更新。勾选要重置为默认 profile 的项（未勾选 = 保留现有配置）',
+				'配置重置：以下插件已被删除。勾选要重置为默认 profile 的项（未勾选 = 保留现有配置；重置前自动备份）',
 				items,
 			);
 			const resetNames = resetConfigProfiles(resetCandidates, selected, writeLog);

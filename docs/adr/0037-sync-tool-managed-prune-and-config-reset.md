@@ -70,3 +70,32 @@
 **迁移风险**：`PROTECTED_EXTERNAL` 目前只有 `extensions: herdr-agent-state`；若未来有更多第三方
 集成需要保留，需补入保护名单。交互式多选需在无第三方库的前提下用 raw mode 手写，非 TTY 降级必须
 覆盖 CI/husky/e2e 场景，否则会挂起。
+
+## 修订记录
+
+### 修订 1（2026-09）：「彻底下架」从 fail-safe 放过 → 墓碑清单受管删除
+
+**动机**：决策 4 的 fail-safe 放过在实践中暴露出残留问题。多个扩展从独立单文件内嵌进 `preset`
+（`tools` / `skills` / `commands` / `prompt-editor`）或被吸收/合并（`mode-switcher` / `test-analysis` /
+`session-breakdown`）后，其名字从源清单消失，目标目录里的旧副本被误判为「第三方」永久保留，与
+`preset` 内嵌的同名扩展各自注册一次命令 → `tools:1` / `tools:2` 重名。
+
+**变更**：在 `sync-profiles.yaml` 引入顶层 `retired` 字段（墓碑清单），登记「本仓库曾管理、现已
+下架/内嵌」的扩展名。sync 构建源清单时把它们并入——目标残留的同名资产被当作「受管资产」，profile
+默认严格剪枝即会删除，无需 `--purge`。推翻了决策 4「不引入墓碑清单」的约定。
+
+**权衡**：墓碑清单是显式维护成本（下架扩展时需登记），但换来「本仓库下架 vs 用户自装」的确定性区分，
+消除重名残留。第三方资产（`org`、`herdr-agent-state` 等）不受影响，仍默认保留。
+
+### 修订 2（2026-09）：「配置重置」仅删除才提示 + 删除前备份
+
+**动机**：决策 3 把「被更新」插件也拉进重置候选。目录扩展（如 `custom-compaction`）每次改源码
+sync 都会被判 UPDATE → 进候选，误勾选即删掉用户精心配置的 profile（如 smart-compact 压缩策略），
+造成配置反复丢失。
+
+**变更**：
+
+1. `collectConfigResetCandidates` 只接收「被删除」的插件；「被更新」不再进重置候选。
+2. `resetConfigProfiles` 删除 `config.json` 前先备份到 `config.json.bak-<YYYYMMDD-HHMMSS>`，
+   误删可恢复；同目录仅保留最新 3 份备份（`MAX_CONFIG_BACKUPS`），更早的自动清理，
+   避免明文副本无限累积。

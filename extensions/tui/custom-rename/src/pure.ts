@@ -17,7 +17,7 @@ export type ModelSelector = { type: 'ref'; ref: string };
 export interface RenameSessionConfig {
 	/** 自动重命名开关（默认 false）。 */
 	enabled: boolean;
-	/** 标题生成用的模型 selector（仅支持 ref 精确指定；未配置时默认为空 ref，解析不到模型则跳过）。 */
+	/** 标题生成用的模型 selector（仅支持 ref 精确指定；空 ref = 跟随会话当前模型，见 llm.resolveRenameModel）。 */
 	model: ModelSelector;
 	/** 标题最大长度（Unicode 码点数）。 */
 	maxTitleLength: number;
@@ -107,7 +107,7 @@ function isThinkingLevel(raw: unknown): raw is ModelThinkingLevel {
 	return typeof raw === 'string' && THINKING_LEVELS.has(raw);
 }
 
-/** 默认配置：关闭、空 ref（未精确指定模型，解析不到则跳过）、标题上限 50、不启用 thinking。 */
+/** 默认配置：关闭、空 ref（跟随会话当前模型）、标题上限 50、不启用 thinking。 */
 export const DEFAULT_RENAME_CONFIG: RenameSessionConfig = {
 	enabled: false,
 	model: { type: 'ref', ref: '' },

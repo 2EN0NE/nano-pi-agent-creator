@@ -18,6 +18,7 @@ import {
 	getLastNodeModulesStrategy,
 } from '../state.js';
 import { getDirtyCount, getAheadBehind, getCurrentBranch, listBranches } from './git.js';
+import { MAIN_CHECKOUT_NAME } from './target.js';
 
 // ── 常量 ──
 
@@ -42,17 +43,31 @@ export interface SwitchResult {
 		| 'rebase'
 		| 'shell'
 		| 'quit'
-		| 'operations';
+		| 'operations'
+		| 'group-ops'
+		| 'group-new';
 	target?: string;
 }
 
+/** 一级列表里的组条目（只读展示信息，由调用方组装） */
+export interface GroupRowItem {
+	name: string;
+	/** 例：`6 members · dev · squash` */
+	summary: string;
+	/** 目标分支解析失败等——仍可进入组菜单看原因 */
+	locked?: boolean;
+}
+
 interface WorktreeItem {
-	type: 'main' | 'worktree';
+	type: 'main' | 'worktree' | 'group';
 	name: string;
 	branch: string;
 	dirty: number;
 	ahead: number;
 	behind: number;
+	/** 仅 type='group' 使用 */
+	summary?: string;
+	locked?: boolean;
 }
 
 /**
@@ -64,6 +79,7 @@ interface WorktreeItem {
  *   f/F           Fork context
  *   c/C           Create new worktree
  *   d/D           删除选中项
+ *   g/G           建组向导（新建组声明）
  *   m/M           Merge
  *   s/S           Shell
  *   q/Q / Esc     退出
@@ -101,8 +117,9 @@ class WorktreeSwitcherPanel {
 	}
 
 	private resolveTarget_(): string {
-		if (this.items_[this.cursor_]?.type === 'main') return 'main';
-		return this.items_[this.cursor_]?.name || 'main';
+		// 主检出条目返回的是**标识名**（MAIN_CHECKOUT_NAME），不是分支名
+		if (this.items_[this.cursor_]?.type === 'main') return MAIN_CHECKOUT_NAME;
+		return this.items_[this.cursor_]?.name || MAIN_CHECKOUT_NAME;
 	}
 
 	handleInput(data: string): void {
@@ -122,14 +139,23 @@ class WorktreeSwitcherPanel {
 		}
 
 		if (matchesKey(data, 'enter') || matchesKey(data, 'space')) {
+			const cur = this.items_[this.cursor_];
 			const target = this.resolveTarget_();
-			if (target === 'main') {
-				// main: 直接切换（兼容旧行为）
-				this.done_({ action: 'switch', target: 'main' });
+			if (cur?.type === 'group') {
+				// 组：进入组操作菜单（二级）
+				this.done_({ action: 'group-ops', target });
+			} else if (target === MAIN_CHECKOUT_NAME) {
+				// 主检出：直接切换（兼容旧行为）
+				this.done_({ action: 'switch', target: MAIN_CHECKOUT_NAME });
 			} else {
-				// worktree: 弹出操作子菜单
+				// worktree：弹出操作子菜单
 				this.done_({ action: 'operations', target });
 			}
+			return;
+		}
+
+		if (data === 'g' || data === 'G') {
+			this.done_({ action: 'group-new' });
 			return;
 		}
 
@@ -144,11 +170,9 @@ class WorktreeSwitcherPanel {
 		}
 
 		if (data === 'd' || data === 'D') {
-			if (this.items_[this.cursor_]?.type === 'worktree') {
-				this.done_({
-					action: 'delete',
-					target: this.items_[this.cursor_].name,
-				});
+			const cur = this.items_[this.cursor_];
+			if (cur?.type === 'worktree') {
+				this.done_({ action: 'delete', target: cur.name });
 			}
 			return;
 		}
@@ -199,20 +223,44 @@ class WorktreeSwitcherPanel {
 		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
 
 		// 表头
-		lines.push(
-			truncateToWidth(
-				'   Name' + ' '.repeat(10) + 'Branch' + ' '.repeat(14) + 'Status',
-				width,
-			),
-		);
+		if (this.items_.some((i) => i.type !== 'group')) {
+			lines.push(
+				truncateToWidth(
+					'   Name' + ' '.repeat(10) + 'Branch' + ' '.repeat(14) + 'Status',
+					width,
+				),
+			);
+		}
 
-		// 列表
+		// 列表（一级：Groups 段 在前，Worktrees 段 在后）
+		let section: string | null = null;
 		for (let i = 0; i < this.items_.length; i++) {
 			const item = this.items_[i];
+			const sectionOf = item.type === 'group' ? 'Groups' : 'Worktrees';
+			if (section !== sectionOf) {
+				section = sectionOf;
+				lines.push(truncateToWidth(' ' + th.fg('dim', section), width));
+			}
 			const isCurrent =
 				(this.currentName_ === null && item.type === 'main') ||
 				(this.currentName_ !== null && item.name === this.currentName_);
 			const arrow = i === this.cursor_ ? th.fg('accent', '>') : ' ';
+
+			if (item.type === 'group') {
+				// 组行：只展示摘要（成员数 / 目标分支 / 策略），解析失败的组带 ! 提示
+				const mark = item.locked ? th.fg('warning', '!') : th.fg('accent', 'o');
+				const gName =
+					i === this.cursor_ ? th.fg('accent', item.name) : th.fg('text', item.name);
+				const gPadded = gName + ' '.repeat(Math.max(0, 15 - visibleWidth(item.name)));
+				lines.push(
+					truncateToWidth(
+						` ${arrow} ${mark} ${gPadded} ${th.fg('dim', item.summary ?? '')}`,
+						width,
+					),
+				);
+				continue;
+			}
+
 			const namePart =
 				i === this.cursor_
 					? th.fg('accent', item.name)
@@ -223,7 +271,7 @@ class WorktreeSwitcherPanel {
 			const namePadded = namePart + ' '.repeat(Math.max(0, 15 - nameVisible));
 			const dirtyStr =
 				item.dirty > 0 ? th.fg('warning', `dirty(${item.dirty})`) : th.fg('dim', 'clean');
-			// ahead = worktree 领先 main（待合并），behind = worktree 落后 main（需 sync）
+			// ahead = worktree 领先基准分支（待合并），behind = worktree 落后基准分支（需 sync）
 			const aheadStr = item.ahead > 0 ? th.fg('accent', ` +${item.ahead}`) : '';
 			const behindStr = item.behind > 0 ? th.fg('warning', ` -${item.behind}`) : '';
 
@@ -238,6 +286,7 @@ class WorktreeSwitcherPanel {
 		// 操作栏
 		lines.push(truncateToWidth(th.fg('dim', '─'.repeat(width)), width));
 		const actions = [
+			th.fg('dim', '[G]roups'),
 			th.fg('dim', '[F]ork'),
 			th.fg('dim', '[C]reate'),
 			th.fg('dim', '[D]elete'),
@@ -250,10 +299,13 @@ class WorktreeSwitcherPanel {
 
 		// 选中项
 		if (this.items_[this.cursor_]) {
+			const cur = this.items_[this.cursor_];
 			const actLabel =
-				this.items_[this.cursor_].type === 'main'
-					? 'main checkout'
-					: `worktree "${this.items_[this.cursor_].name}"`;
+				cur.type === 'group'
+					? `group "${cur.name}" -> ${cur.summary ?? ''}`
+					: cur.type === 'main'
+						? 'main checkout'
+						: `worktree "${cur.name}"`;
 			lines.push(truncateToWidth(th.fg('dim', ' Current: ' + actLabel), width));
 		}
 
@@ -276,10 +328,21 @@ export async function showWorktreeTui(
 	currentName: string | null,
 	errorMsg: string,
 	repoRoot: string,
+	groups: GroupRowItem[] = [],
 ): Promise<SwitchResult> {
 	return (ctx.ui.custom as <T>(cb: (...a: any[]) => any) => Promise<T>)<SwitchResult>(
 		(tui, theme, _kb, done) => {
 			const items: WorktreeItem[] = [
+				...(groups as GroupRowItem[]).map((g) => ({
+					type: 'group' as const,
+					name: g.name,
+					branch: '',
+					dirty: 0,
+					ahead: 0,
+					behind: 0,
+					summary: g.summary,
+					locked: g.locked,
+				})),
 				{
 					type: 'main',
 					name: 'main',
@@ -326,7 +389,7 @@ export async function showWorktreeTui(
 // 内联选择器（ListSelector — 通用列表选择）
 // ═══════════════════════════════════════════
 
-class ListSelector {
+export class ListSelector {
 	private tui_: { requestRender: () => void };
 	private theme_: any;
 	private done_: (v: any) => void;
@@ -515,14 +578,16 @@ export async function askSessionStrategy(
 // 多选面板（通用）
 // ═══════════════════════════════════════════
 
-interface MultiSelectItem {
+export interface MultiSelectItem {
 	id: string;
 	label: string;
 	hint: string;
 	selected: boolean;
+	/** 置灰不可选（如组里「脏」/「无提交」/「不存在」的成员）——显示但不可开 */
+	disabled?: boolean;
 }
 
-class MultiSelectPanel {
+export class MultiSelectPanel {
 	private tui_: { requestRender: () => void };
 	private theme_: any;
 	private done_: (v: string[] | null) => void;
@@ -565,8 +630,11 @@ class MultiSelectPanel {
 		}
 
 		if (matchesKey(data, 'space')) {
-			this.items_[this.cursor_].selected = !this.items_[this.cursor_].selected;
-			this.tui_.requestRender();
+			const it = this.items_[this.cursor_];
+			if (it && !it.disabled) {
+				it.selected = !it.selected;
+				this.tui_.requestRender();
+			}
 			return;
 		}
 
@@ -603,11 +671,16 @@ class MultiSelectPanel {
 		for (let i = 0; i < this.items_.length; i++) {
 			const item = this.items_[i];
 			const arrow = i === this.cursor_ ? th.fg('accent', '>') : ' ';
-			const check = item.selected ? th.fg('accent', '[x]') : th.fg('dim', '[ ]');
+			const check = item.disabled
+				? th.fg('dim', '[-]')
+				: item.selected
+					? th.fg('accent', '[x]')
+					: th.fg('dim', '[ ]');
 			const paddedLabel = item.label + ' '.repeat(Math.max(0, 17 - visibleWidth(item.label)));
+			const label = item.disabled ? th.fg('dim', paddedLabel) : paddedLabel;
 			const hintText = th.fg('dim', item.hint);
 
-			lines.push(truncateToWidth(` ${arrow} ${check} ${paddedLabel} ${hintText}`, width));
+			lines.push(truncateToWidth(` ${arrow} ${check} ${label} ${hintText}`, width));
 		}
 
 		lines.push(truncateToWidth(th.fg('dim', '\u2500'.repeat(width)), width));
@@ -910,7 +983,7 @@ export async function askSymlinkTargetsPanel(ctx: any): Promise<SymlinkSelection
 // ═══════════════════════════════════════════
 
 /**
- * rebase+ff 确认弹窗。警告用户 worktree 文件将被重写。
+ * rebase-ff 确认弹窗。警告用户 worktree 文件将被重写。
  */
 export async function confirmRebaseFF(
 	ctx: any,
@@ -1512,15 +1585,14 @@ export async function showMergeFailurePanel(
 /**
  * 显示 merge/rebase 成功后的检查清单。
  *
- * @param type 'merge' | 'rebase' | 'rebase-ff'
- * @param targetBranch 目标分支名（用于 rebase-ff 的 push 提示，默认 main）
+ * @param type 'merge'（待手动提交）| 'rebase'（待 rebase --continue）。
+ *   不含 'rebase-ff'：该策略走 showMergeSuccessPanel / notify 的 push 提示，不弹本清单。
  */
 export async function showPostMergeGuide(
 	ctx: any,
 	_repoRoot: string,
 	resultMsg: string,
-	type: 'merge' | 'rebase' | 'rebase-ff',
-	targetBranch?: string,
+	type: 'merge' | 'rebase',
 ): Promise<void> {
 	if (!ctx.hasUI) return;
 
@@ -1540,14 +1612,6 @@ export async function showPostMergeGuide(
 					lines.push(
 						truncateToWidth(
 							theme.fg('accent', '  [4] git add + git commit (manual)'),
-							w,
-						),
-					);
-				} else if (type === 'rebase-ff') {
-					const pushBranch = targetBranch || 'main';
-					lines.push(
-						truncateToWidth(
-							theme.fg('accent', `  [4] git push origin ${pushBranch}`),
 							w,
 						),
 					);
@@ -1604,6 +1668,8 @@ export async function showMergeSuccessPanel(
 	sourceBranch: string,
 	targetBranch: string,
 	targetSync: { ahead: number; behind: number } | null = null,
+	/** rebase-ff 成功时传入：面板顶部追加 `git push origin <branch>` 提示（ADR-0019：插件不代推）。 */
+	pushBranch?: string,
 ): Promise<MergeSuccessResult> {
 	if (!ctx.hasUI) return { action: 'dismiss' };
 
@@ -1636,6 +1702,14 @@ export async function showMergeSuccessPanel(
 									'warning',
 									` 注意：本地 ${targetBranch} 落后远端 ${targetSync!.behind} 个提交（push 前建议先同步）`,
 								),
+								w,
+							),
+						);
+					}
+					if (pushBranch) {
+						lines.push(
+							truncateToWidth(
+								th.fg('accent', ` [push] git push origin ${pushBranch}`),
 								w,
 							),
 						);

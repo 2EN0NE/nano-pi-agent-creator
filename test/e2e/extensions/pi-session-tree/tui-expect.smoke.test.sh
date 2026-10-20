@@ -100,6 +100,9 @@ test_it "expect: 91col narrow terminal + active tools scroll ghosting repro (KNO
     while {$i < 15} {
       send "\033\[B"
       incr i
+      # ⚠️ 循环内也要读走 PTY：只 send/sleep 不读，pi 的 TUI 写满 PTY 缓冲后会**同步阻塞**
+      # （实测同型缺陷在 pi-rewind 上表现为事件循环冻结、锁不释放）。-timeout 0 → 立即返回，不改变按键节奏。
+      drain_pty 20
       sleep 0.3
     }
     set new [drain 2 30]
@@ -147,6 +150,8 @@ test_it "expect: consolidated long-tree panel interactions (single process)" <<'
     while {$i <= 20} {
       send "msg $i\r"
       incr i
+      # 本循环每轮触发一次 mock 流式输出 → 不排空极易写满 PTY（与 pi-rewind 的死锁同型）
+      drain_pty 20
       sleep 0.5
     }
     sleep 8
@@ -303,6 +308,9 @@ test_it "expect: consolidated long-tree panel interactions (single process)" <<'
     while {$j < 30} {
       send "\033\[B"
       incr j
+      # ⚠️ 循环内也要读走 PTY：只 send/sleep 不读，pi 的 TUI 写满 PTY 缓冲后会**同步阻塞**
+      # （实测同型缺陷在 pi-rewind 上表现为事件循环冻结、锁不释放）。-timeout 0 → 立即返回，不改变按键节奏。
+      drain_pty 20
       sleep 0.3
     }
     set new [drain 2 30]

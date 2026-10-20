@@ -98,11 +98,6 @@ interface Preset {
 	skills?: string[];
 	/** Instructions to append to system prompt */
 	instructions?: string;
-	/**
-	 * 锁定（ADR-0035）：激活态下四维度（model/tools/skills/instructions）
-	 * 任一修改若导致偏离则拒绝（而非 widget 提醒）。默认不锁定。三级持久化。
-	 */
-	locked?: boolean;
 }
 
 interface PresetsConfig {
@@ -246,17 +241,7 @@ export function persistPresetToUser(cwd: string, name: string, preset: Preset): 
 interface OriginalState {
 	model: Model<Api> | undefined;
 	thinkingLevel: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-	tools: string[];
 }
-
-/**
- * 清除预设后恢复的默认工具集。
- * 与 tools.ts 的 BASE_TOOLS（tool-range 实验 core 臂的基础部分）构成对照契约：
- * core 臂 = 本默认集 + 搜索类 3 工具（由 resolveCoreToolNames 动态解析），
- * 变更任一侧须同步另一侧。
- * （tool-range-contract.test.ts 固定此对照关系）
- */
-export const DEFAULT_CLEAR_TOOLS = ['read', 'bash', 'edit', 'write'] as const;
 
 export default function presetExtension(pi: ExtensionAPI) {
 	// 子模块：工具/技能/命令/prompt/模型控制（作为 preset 的基础能力，统一注册命令）
@@ -434,23 +419,39 @@ export default function presetExtension(pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 工具变更委托：优先尝试 tools.ts 的 replaceTools API，不存在则退化到
-	 * pi.setActiveTools() 直接操作。
-	 *
-	 * 解耦设计：preset.ts 不 import tools.ts，通过 `(globalThis as any).__toolsApi`
-	 * 鸭子类型调用。若 tools.ts 未加载，`__toolsApi` 不存在，走 fallback。
-	 *
-	 * @param toolNames - 要启用的工具名列表
+	 * 设置 / 撤回 tools 叠加层（ADR-0049 决策 5）。preset 不写基础层。
+	 * toolNames = null → 撤回 overlay（该维度不限制）。
+	 * tools.ts 未加载时退化到 pi.setActiveTools。
 	 */
-	function applyToolsToPi(toolNames: string[]) {
-		// 从 globalThis 而非 pi 上读 __toolsApi（避免 pi 对象 Proxy / freeze）
+	function applyToolsOverlay(toolNames: string[] | null) {
 		const api = (globalThis as any).__toolsApi;
-		if (api?.replaceTools) {
-			api.replaceTools(toolNames);
+		if (api?.setOverlay && api?.clearOverlay) {
+			if (toolNames === null) api.clearOverlay();
+			else api.setOverlay(toolNames);
 		} else {
-			// Fallback: tools.ts 未加载，直接操作 pi 内置活性列表
-			pi.setActiveTools(toolNames);
+			pi.setActiveTools(toolNames ?? pi.getAllTools().map((t) => t.name));
 		}
+	}
+
+	/**
+	 * 设置 / 撤回 skills 叠加层（ADR-0049 决策 5）。
+	 * undefined → 撤回 overlay；[] → 全部禁止；非空 → 白名单。
+	 */
+	function applySkillsOverlay(skills: string[] | undefined) {
+		const api = (globalThis as any).__skillsApi;
+		if (!api) return;
+		if (skills === undefined) api.clearOverlay?.();
+		else api.setOverlay?.(skills);
+	}
+
+	/** 清除 preset 在 /prompt 留下的 override（切换/清除预设时保证不残留）。 */
+	function resetPresetInstructionsOverride() {
+		const api = (
+			globalThis as {
+				__promptEditorApi?: { clearOverride?: (k: string) => boolean };
+			}
+		).__promptEditorApi;
+		api?.clearOverride?.('preset_instructions:preset');
 	}
 
 	// Register --preset CLI flag
@@ -472,7 +473,6 @@ export default function presetExtension(pi: ExtensionAPI) {
 			originalState = {
 				model: ctx.model,
 				thinkingLevel: pi.getThinkingLevel(),
-				tools: pi.getActiveTools(),
 			};
 		}
 
@@ -500,47 +500,33 @@ export default function presetExtension(pi: ExtensionAPI) {
 			pi.setThinkingLevel(preset.thinkingLevel);
 		}
 
-		// Apply tools if specified
-		// - 非空数组：白名单（只启用列出的工具，其余禁用）
-		// - 空数组 []：不限制工具（恢复全部工具，等价于 pi -ne 的完整工具集）
-		// - 未配置（undefined）：不改变当前工具状态
+		// Apply tools as preset overlay（ADR-0049）：非空白名单 → 封闭集 overlay；
+		// 空数组 / 未配置 → 撤回 overlay（该维度不限制）。不写基础层。
 		if (preset.tools !== undefined) {
 			const allToolNames = pi.getAllTools().map((t) => t.name);
-
-			if (preset.tools.length > 0) {
-				const validTools = preset.tools.filter((t) => allToolNames.includes(t));
-				const invalidTools = preset.tools.filter((t) => !allToolNames.includes(t));
-
-				if (invalidTools.length > 0) {
-					ctx.ui.notify(
-						`Preset "${name}": Unknown tools: ${invalidTools.join(', ')}`,
-						'warning',
-					);
-				}
-
-				if (validTools.length > 0) {
-					applyToolsToPi(validTools);
-				}
-			} else {
-				// 空数组 = 不限制工具，恢复全部工具
-				applyToolsToPi(allToolNames);
+			const invalidTools = preset.tools.filter((t) => !allToolNames.includes(t));
+			if (invalidTools.length > 0) {
+				ctx.ui.notify(
+					`Preset "${name}": Unknown tools: ${invalidTools.join(', ')}`,
+					'warning',
+				);
 			}
+			// overlay 保留**声明名**（非当前已注册集）：白名单是封闭集，未注册名现在
+			// 不生效，但一旦运行时注册（org/MCP 等）就按 preset 声明启用。若按「过滤后
+			// 空集」回落为 null，会把非空白名单静默降级成「不限制」（ADR-0049 R3）。
+			applyToolsOverlay(preset.tools.length > 0 ? preset.tools : null);
+		} else {
+			// 切换到未声明 tools 的 preset：撤回上一个 preset 的 overlay
+			applyToolsOverlay(null);
 		}
+		// preset 接管工具维度时令 tool-range 实验退避（ADR-0050）
+		(globalThis as any).__toolsApi?.clearExperimentInjection?.();
 
-		// Apply skills if specified
-		// - 非空数组：白名单（只启用列出的技能）
-		// - 空数组 []：全部禁止（如 raw-pi 模拟无扩展环境）
-		// - 未配置（undefined）：不限制（不改变技能状态）
-		if (preset.skills !== undefined) {
-			const skillsApi = (
-				globalThis as {
-					__skillsApi?: { replaceSkills?: (s: string[] | null) => void };
-				}
-			).__skillsApi;
-			if (skillsApi?.replaceSkills) {
-				skillsApi.replaceSkills(preset.skills);
-			}
-		}
+		// Apply skills as preset overlay（ADR-0049）：
+		// 非空数组 → 白名单；[] → 全部禁止；未配置 → 撤回 overlay。
+		applySkillsOverlay(preset.skills);
+		// 切换预设时清除旧的 prompt override，避免抑制新预设的 instructions
+		resetPresetInstructionsOverride();
 
 		// Store active preset for system prompt injection
 		activePresetName = name;
@@ -563,14 +549,17 @@ export default function presetExtension(pi: ExtensionAPI) {
 			activePreset = undefined;
 			_startUsage(null);
 			persistSessionState();
+			// 撤回 preset 叠加层（基础层原样保留，ADR-0049 决策 5）
+			applyToolsOverlay(null);
+			applySkillsOverlay(undefined);
+			(globalThis as any).__toolsApi?.clearExperimentInjection?.();
+			resetPresetInstructionsOverride();
+			// model/thinking 恢复进入 preset 前的快照（非工具维度）
 			if (originalState) {
 				if (originalState.model) {
 					await pi.setModel(originalState.model);
 				}
 				pi.setThinkingLevel(originalState.thinkingLevel);
-				applyToolsToPi(originalState.tools);
-			} else {
-				applyToolsToPi([...DEFAULT_CLEAR_TOOLS]);
 			}
 			ctx.ui.notify('预设已清除，恢复默认值', 'info');
 			updateStatus(ctx);
@@ -850,25 +839,6 @@ export default function presetExtension(pi: ExtensionAPI) {
 					sessionPresets.delete(name);
 					return true;
 				},
-				toggleLock: (name) => {
-					const scoped = resolveScopedPreset(name);
-					if (!scoped) return false;
-					const newLocked = !scoped.preset.locked;
-					const updated = { ...scoped.preset, locked: newLocked };
-					if (scoped.scope === 'session') {
-						sessionPresets.set(name, updated);
-						persistSessionState();
-					} else if (scoped.scope === 'project') {
-						projectPresets = persistPresetToProject(ctx.cwd, name, updated);
-					} else {
-						userPresets = persistPresetToUser(ctx.cwd, name, updated);
-					}
-					// 锁定/解锁当前激活 preset 时，同步 activePreset（供守卫读取 locked）
-					if (activePresetName === name) {
-						activePreset = updated;
-					}
-					return newLocked;
-				},
 			};
 
 			const result = await ctx.ui.custom<string | null | EditInstructionsRequest>(
@@ -997,40 +967,6 @@ export default function presetExtension(pi: ExtensionAPI) {
 		return drift;
 	}
 
-	/**
-	 * 判断「变更后的目标值」是否偏离 preset 在该维度的设定值。
-	 * 仅在维度已被 preset 配置时调用（canModify 守卫用）。
-	 */
-	function dimensionDeviates(p: Preset, dim: string, nextValue: unknown): boolean {
-		switch (dim) {
-			case 'tools': {
-				const expected = validToolNames(p.tools ?? []).sort();
-				const next = [...(nextValue as string[])].sort();
-				return next.join('\u0000') !== expected.join('\u0000');
-			}
-			case 'skills': {
-				const expected = validSkillNames(p.skills ?? []).sort();
-				const next = [...(nextValue as string[])].sort();
-				return next.join('\u0000') !== expected.join('\u0000');
-			}
-			case 'instructions': {
-				const ov = nextValue as { enabled: boolean; content?: string };
-				if (ov.enabled === false) return true;
-				if (ov.content !== undefined && ov.content !== p.instructions) return true;
-				return false;
-			}
-			case 'model': {
-				const m = nextValue as { provider: string; id: string };
-				return m.provider !== p.provider || m.id !== p.model;
-			}
-			case 'thinking': {
-				return nextValue !== p.thinkingLevel;
-			}
-			default:
-				return false;
-		}
-	}
-
 	/** 偏离维度 → 中文标签（notify 用）。 */
 	const DIMENSION_LABEL: Record<string, string> = {
 		model: '模型',
@@ -1062,26 +998,21 @@ export default function presetExtension(pi: ExtensionAPI) {
 			}
 			case 'tools': {
 				if (!p.tools || p.tools.length === 0) return false;
-				// 过滤无效工具名后再回滚（与 applyPreset 一致）；全部无效则 applyPreset 本就不改变工具状态，跳过。
-				const validTools = validToolNames(p.tools);
-				if (validTools.length === 0) return false;
-				const api = (
-					globalThis as { __toolsApi?: { replaceTools?: (t: string[]) => void } }
-				).__toolsApi;
-				if (!api?.replaceTools) return false;
-				api.replaceTools(validTools);
+				if (validToolNames(p.tools).length === 0) return false;
+				const api = (globalThis as { __toolsApi?: { setOverlay?: (t: string[]) => void } })
+					.__toolsApi;
+				if (!api?.setOverlay) return false;
+				// 回滚写入声明名（非「当前已注册」过滤集），保持封闭集语义与 applyPreset 一致。
+				api.setOverlay(p.tools);
 				return true;
 			}
 			case 'skills': {
 				if (p.skills === undefined) return false;
-				const api = (
-					globalThis as {
-						__skillsApi?: { replaceSkills?: (s: string[] | null | undefined) => void };
-					}
-				).__skillsApi;
-				if (!api?.replaceSkills) return false;
-				// 过滤无效技能名后回滚（[] 仍表示「全部禁止」，与 applySkills 过滤结果对齐）。
-				api.replaceSkills(validSkillNames(p.skills));
+				const api = (globalThis as { __skillsApi?: { setOverlay?: (s: string[]) => void } })
+					.__skillsApi;
+				if (!api?.setOverlay) return false;
+				// 过滤无效技能名后回滚（[] 仍表示「全部禁止」）。
+				api.setOverlay(validSkillNames(p.skills));
 				return true;
 			}
 			case 'instructions': {
@@ -1100,12 +1031,11 @@ export default function presetExtension(pi: ExtensionAPI) {
 	}
 
 	/**
-	 * turn 边界兜底回滚（ADR-0035）：model/thinking 已有事件即时回滚；
-	 * tools/skills/instructions 无修改事件，只能在 turn_start 兜底——
-	 * 检测到锁定 preset 的任一维度偏离，改回设定值并 notify（warning）。
+	 * turn 边界兜底回滚（ADR-0049 决策 4）：preset 激活即硬约束；
+	 * 前置守卫已拒绝三子工具的写操作，此处兜底「第三方绕过入口直接改状态」的残留偏离。
 	 */
 	async function rollbackDrift(ctx: ExtensionContext): Promise<void> {
-		if (!activePreset?.locked || !activePresetName) return;
+		if (!activePreset || !activePresetName) return;
 		const drift = detectDrift(ctx);
 		if (drift.length === 0) return;
 		for (const dim of drift) {
@@ -1215,9 +1145,8 @@ export default function presetExtension(pi: ExtensionAPI) {
 		getInstructions: () => activePreset?.instructions ?? null,
 	};
 
-	// 锁定守卫（ADR-0035）：tools/skills/prompt 修改入口在修改前调用 canModify。
-	// 按维度判断：仅「锁定且该维度被 preset 配置且本次变更会引入偏离」时拒绝；
-	// 未配置维度放行，改回 preset 设定值（nextValue 等于设定）放行。
+	// 子工具锁死（ADR-0049 决策 4）：preset 激活期间，tools/skills/instructions
+	// 的写操作一律拒绝并告警；非激活态放行（用户自由维护基础层）。
 	(
 		globalThis as {
 			__presetGuard?: {
@@ -1228,35 +1157,13 @@ export default function presetExtension(pi: ExtensionAPI) {
 			};
 		}
 	).__presetGuard = {
-		canModify: (dimension: string, nextValue?: unknown) => {
-			if (!activePreset?.locked) return { allowed: true };
-			const p = activePreset;
-			const dim = dimension as 'model' | 'thinking' | 'tools' | 'skills' | 'instructions';
-
-			// 该维度未被 preset 配置 → 修改不会引入偏离 → 放行
-			const configured =
-				(dim === 'model' && !!p.provider && !!p.model) ||
-				(dim === 'thinking' && !!p.thinkingLevel) ||
-				(dim === 'tools' && !!p.tools && p.tools.length > 0) ||
-				(dim === 'skills' && p.skills !== undefined) ||
-				(dim === 'instructions' && !!p.instructions);
-			if (!configured) return { allowed: true };
-
-			// 调用方提供了目标新值 → 精确判断是否偏离设定值
-			if (nextValue !== undefined) {
-				if (dimensionDeviates(p, dim, nextValue)) {
-					return {
-						allowed: false,
-						reason: `preset 已锁定，${dimension} 修改将偏离 preset 设定`,
-					};
-				}
-				return { allowed: true };
-			}
-
-			// 无目标新值：该维度当前已偏离 → 放行（用户可能在改回）；未偏离 → 拒绝
-			const currentDrift = latestCtx ? detectDrift(latestCtx) : [];
-			if (currentDrift.includes(dim)) return { allowed: true };
-			return { allowed: false, reason: `preset 已锁定，${dimension} 修改不被允许` };
+		canModify: (dimension: string) => {
+			if (!activePreset) return { allowed: true };
+			const label = DIMENSION_LABEL[dimension] ?? dimension;
+			return {
+				allowed: false,
+				reason: `preset「${activePresetName ?? ''}」已激活，${label} 修改不被允许（请先编辑或清除预设）`,
+			};
 		},
 	};
 
@@ -1277,8 +1184,13 @@ export default function presetExtension(pi: ExtensionAPI) {
 		// /reload 会先触发 shutdown，在 shutdown 删会误删当前会话文件。
 		const sessionId = ctx.sessionManager?.getSessionId?.();
 		let restoredActiveName: string | null = null;
+		// session 层是否已有落盘状态：存在时以它的 activeName 为准（含 null = 已清除），
+		// 不再回落到旧 preset-state entry（否则 /reload 会复活已清除的 preset，ADR-0049 决策 2）。
+		let hasStoredState = false;
 		if (sessionId) {
 			presetStore.setSessionId(sessionId);
+			const sessionFile = presetStore.getPaths().sessionFile;
+			hasStoredState = sessionFile ? existsSync(sessionFile) : false;
 			presetStore.cleanupExpired();
 			const stored = presetStore.get();
 			for (const [name, preset] of Object.entries(stored.presets)) {
@@ -1315,12 +1227,14 @@ export default function presetExtension(pi: ExtensionAPI) {
 			)
 			.pop() as { data?: { name: string } } | undefined;
 
-		// 恢复选中状态：--preset flag 已由 applyPreset 设置 activePresetName，
-		// 否则优先 presetStore.activeName（applyPreset 立即写，新机制），
-		// fallback 到会话 entry（turn_start 写，旧机制）。
+		// 恢复选中状态：--preset flag 已由 applyPreset 设置 activePresetName；
+		// 否则以 session 层 activeName 为准（存在落盘状态时，null = 已清除，不回落到旧 entry）；
+		// 仅当 session 层无落盘状态时，才 fallback 到会话 entry（旧机制）。
 		const restoreName =
 			!presetFlag && activePresetName === undefined
-				? (restoredActiveName ?? presetEntry?.data?.name ?? null)
+				? hasStoredState
+					? restoredActiveName
+					: (presetEntry?.data?.name ?? null)
 				: null;
 
 		if (restoreName) {
@@ -1329,24 +1243,21 @@ export default function presetExtension(pi: ExtensionAPI) {
 				activePresetName = restoreName;
 				activePreset = scoped.preset;
 				_startUsage(restoreName);
-				// Re-apply preset tools so mode stays consistent.
-				// User /tools changes in-session are respected;
-				// preset re-applies only on session restart.
-				if (scoped.preset.tools && scoped.preset.tools.length > 0) {
-					const valid = scoped.preset.tools.filter((t) =>
-						pi
-							.getAllTools()
-							.map((tt) => tt.name)
-							.includes(t),
-					);
-					if (valid.length > 0) {
-						applyToolsToPi(valid);
-						log.debug('preset restored — tools re-applied', {
-							preset: restoreName,
-							tools: valid,
-						});
-					}
-				}
+				// 三轴 overlay 一致重建（ADR-0049 决策 5 / 修 N4）：tools 封闭集 + skills
+				// overlay；instructions 由 activePreset 经 prompt 组件生效。
+				// overlay 写声明名（未注册名留待运行时注册后生效），非空白名单不得降级为「不限制」。
+				const declaredTools = scoped.preset.tools;
+				const validTools = (declaredTools ?? []).filter((t) =>
+					pi.getAllTools().some((tt) => tt.name === t),
+				);
+				applyToolsOverlay(declaredTools && declaredTools.length > 0 ? declaredTools : null);
+				applySkillsOverlay(scoped.preset.skills);
+				resetPresetInstructionsOverride();
+				log.info('preset restored — overlays re-applied', {
+					preset: restoreName,
+					tools: validTools,
+					skills: scoped.preset.skills ?? null,
+				});
 			} else {
 				// activeName 指向已不存在的 preset（如会话级 preset 被删），清空并落盘
 				activePresetName = undefined;
@@ -1362,8 +1273,8 @@ export default function presetExtension(pi: ExtensionAPI) {
 	// tools 无变化事件，靠 turn_start 兜底检测。
 	pi.on('model_select', async (_event, ctx) => {
 		latestCtx = ctx;
-		// 锁定守卫（ADR-0035）：锁定且 model 偏离 → 回滚 + error（/model 内置命令无法前置拦截）
-		if (activePreset?.locked && activePreset.provider && activePreset.model) {
+		// 硬约束（ADR-0049）：preset 激活且 model 偏离 → 回滚 + error（/model 内置命令无法前置拦截）
+		if (activePreset && activePreset.provider && activePreset.model) {
 			const m = ctx.model;
 			if (m && (m.provider !== activePreset.provider || m.id !== activePreset.model)) {
 				const presetModel = ctx.modelRegistry.find(
@@ -1380,8 +1291,8 @@ export default function presetExtension(pi: ExtensionAPI) {
 	});
 	pi.on('thinking_level_select', (_event, ctx) => {
 		latestCtx = ctx;
-		// 锁定守卫（ADR-0035）：锁定且 thinking 偏离 → 回滚 + error
-		if (activePreset?.locked && activePreset.thinkingLevel) {
+		// 硬约束（ADR-0049）：preset 激活且 thinking 偏离 → 回滚 + error
+		if (activePreset && activePreset.thinkingLevel) {
 			if (pi.getThinkingLevel() !== activePreset.thinkingLevel) {
 				pi.setThinkingLevel(activePreset.thinkingLevel);
 				ctx.ui.notify('preset 已锁定，thinking 修改不被允许', 'error');
@@ -1465,8 +1376,6 @@ export interface PresetPanelActions {
 	copyToSession: (name: string) => string | null;
 	/** 会话级 s：提升为项目级（写 config.json + 移除会话级），返回是否成功 */
 	promoteToProject: (name: string) => Promise<boolean>;
-	/** l：切换锁定（ADR-0035）。三级持久化，返回新的锁定状态（true=已锁定） */
-	toggleLock: (name: string) => boolean;
 }
 
 /** 详情视口最多展示的行数（超出则 ↑↓ 滚动）。 */
@@ -1675,17 +1584,6 @@ export class PresetPanelComponent implements Component {
 			if (item?.scope === 'session') {
 				void this.handlePromote();
 			}
-		} else if (matchesKey(data, 'l')) {
-			// l：切换锁定（ADR-0035）。toggleLock 三级持久化 + 同步 activePreset。
-			const item = this.items[this.selectedIndex];
-			if (item && item.preset && this.actions) {
-				const locked = this.actions.toggleLock(item.name);
-				this.refreshItems(item.name);
-				this.actions.notify(
-					locked ? `已锁定「${item.name}」：偏离将被拒绝` : `已解锁「${item.name}」`,
-					locked ? 'warning' : 'info',
-				);
-			}
 		} else if (matchesKey(data, Key.escape)) {
 			this.onDone(null);
 		} else if (matchesKey(data, Key.up)) {
@@ -1871,8 +1769,7 @@ export class PresetPanelComponent implements Component {
 		const lines: string[] = [];
 		const item = this.items[this.selectedIndex];
 		if (!item) return lines;
-		const lockMark = item.preset?.locked ? ' [锁定]' : '';
-		lines.push(this.cyan(topBorder(`── 预设详情: ${item.name}${lockMark} `, width)));
+		lines.push(this.cyan(topBorder(`── 预设详情: ${item.name} `, width)));
 
 		const contentWidth = Math.max(0, width - PANEL_INDENT.length);
 		const body = this.buildDetailBody(item, contentWidth);

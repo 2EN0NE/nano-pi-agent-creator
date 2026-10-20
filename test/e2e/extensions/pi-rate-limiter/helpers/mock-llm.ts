@@ -57,11 +57,11 @@ export default function (pi: ExtensionAPI) {
 	faux.setResponses([fauxAssistantMessage('Mock LLM is ready.')]);
 
 	// ── 暴露控制接口给测试脚本 ──
-	pi.events.on('mock-llm:set-responses', (responses: FauxResponseStep[]) => {
-		faux.setResponses(responses);
+	pi.events.on('mock-llm:set-responses', (data) => {
+		faux.setResponses(data as FauxResponseStep[]);
 	});
-	pi.events.on('mock-llm:append-responses', (responses: FauxResponseStep[]) => {
-		faux.appendResponses(responses);
+	pi.events.on('mock-llm:append-responses', (data) => {
+		faux.appendResponses(data as FauxResponseStep[]);
 	});
 
 	// ── session 启动时切换到 mock 模型 ──

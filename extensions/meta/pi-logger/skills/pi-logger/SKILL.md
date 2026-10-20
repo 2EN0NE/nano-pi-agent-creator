@@ -107,6 +107,10 @@ export default function myExtension(pi: ExtensionAPI) {
 
 ## 日志文件
 
+> **可靠性**：日志写入是**同步**的（调用返回即已落盘，进程随后退出也不丢）；
+> 当 EventBus 不存在时（单元测试、pi-logger 未加载、启动早期）会走兜底直接写文件——
+> 所以在项目根跑 `npm test` 时，扩展日志同样能在 `<cwd>/.pi/logs/` 里看到。
+
 日志按 source 分文件输出，格式为 `{日志目录}/{source}_{YYYYMMDD}.log`：
 
 ```

@@ -6,6 +6,10 @@
  * output destinations or level filtering — all handled centrally by the
  * pi-logger extension via the EventBus.
  *
+ * **无 EventBus 的兜底**：当总线还不存在（单元测试、pi-logger 未加载、启动早期），
+ * 事件不再只攒在内存缓冲里等一个可能永不到来的总线，而是直接按配置写文件
+ * appender，避免日志静默消失。走总线时行为与此前完全一致。
+ *
  * Usage in any extension:
  * ```typescript
  * import { createLogger } from '<path>/pi-logger/api.js';
@@ -19,6 +23,8 @@
 import type { EventBus } from '@earendil-works/pi-coding-agent';
 import type { LogEvent, LogLevel, Logger } from './types.js';
 import { LOG_EVENT_CHANNEL } from './types.js';
+import { getRuntimeConfig, loadConfiguration, shouldAppend, shouldLog } from './config.js';
+import { writeFileLog } from './appenders/file-appender.js';
 
 // ============================================================================
 // Global EventBus reference (stored on globalThis to survive jiti module isolation)
@@ -80,10 +86,20 @@ export function initEventBus(bus: EventBus): void {
 	// Flush buffered events
 	const pending = getPendingEvents();
 	if (pending.length > 0) {
-		for (const event of pending) {
-			bus.emit(LOG_EVENT_CHANNEL, event);
-		}
-		pending.length = 0;
+		const events = pending.splice(0, pending.length);
+		// ⚠️ 延到微任务再投递：调用方惯例是「先 initEventBus() 再 .on() 订阅」
+		//（见 index.ts 的工厂），同步 flush 会在订阅建立**之前**把启动期缓冲日志
+		// 投进无人监听的总线 → 整段启动日志静默丢失。延后一个微任务即可让同一
+		// 同步块内的订阅先就位，对调用方顺序不再敏感。
+		queueMicrotask(() => {
+			for (const event of events) {
+				try {
+					bus.emit(LOG_EVENT_CHANNEL, event);
+				} catch {
+					// 启动期补投是尽力而为：不能让日志失败阻断启动
+				}
+			}
+		});
 	}
 }
 
@@ -219,9 +235,43 @@ function emitLogEvent(level: LogLevel, source: string, message: string, details?
 			});
 			throw err;
 		}
-	} else {
-		// Buffer until pi-logger's initEventBus() is called
+	} else if (!deliverWithoutBus(event)) {
+		// 无 bus 且兜底不可用（或它拒绝处理）→ 保持原有缓冲语义，等 initEventBus 后投递
 		bufferEvent(event);
+	}
+}
+
+// ============================================================================
+// 无 bus 兜底：直接落盘
+// ============================================================================
+
+// 首次兜底投递时按 cwd 解析一次配置（与 pi-logger 在 session_start 所做的一致），
+// 以取得正确的相对路径 base；模块级标志在 jiti 下按扩展实例各一份，重复调用幂等。
+let SOLO_CONFIG_LOADED = false;
+
+/**
+ * 没有事件总线时直接写文件 appender（见文件头「无 bus 兜底」说明）。
+ *
+ * @returns true = 事件已处理（写入，或按级别有意丢弃）；false = 兜底不可用
+ *          （文件 appender 关闭 / 配置读取异常）→ 调用方保持缓冲语义
+ */
+function deliverWithoutBus(event: LogEvent): boolean {
+	try {
+		if (!SOLO_CONFIG_LOADED) {
+			SOLO_CONFIG_LOADED = true;
+			loadConfiguration(process.cwd());
+		}
+		const config = getRuntimeConfig();
+		if (!config.appenders.file.enabled) return false;
+		// 级别被过滤 = 有意不写，仍算已处理（不该进缓冲等下次再投）
+		if (!shouldLog(event.source, event.level)) return true;
+		if (!shouldAppend(config.appenders.file.level, event.level)) return true;
+		void writeFileLog(event, config).catch(() => {
+			// 写失败不打断调用方（与 appender 的静默策略一致）
+		});
+		return true;
+	} catch {
+		return false;
 	}
 }
 

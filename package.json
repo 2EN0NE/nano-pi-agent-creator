@@ -1,6 +1,6 @@
 {
 	"name": "mitsupi",
-	"version": "1.6.0",
+	"version": "0.3.0",
 	"description": "zenone's pi coding agent commands, skills, extensions, and themes",
 	"repository": {
 		"type": "git",
@@ -43,9 +43,9 @@
 	},
 	"devDependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.26",
-		"@earendil-works/pi-ai": "^0.84.4",
-		"@earendil-works/pi-coding-agent": "^0.84.4",
-		"@earendil-works/pi-tui": "^0.84.4",
+		"@earendil-works/pi-ai": "1.3.0",
+		"@earendil-works/pi-coding-agent": "1.3.0",
+		"@earendil-works/pi-tui": "1.3.0",
 		"@eslint/js": "^10.0.1",
 		"@types/js-yaml": "^4.0.9",
 		"@zenone/pi-config": "file:extensions/meta/pi-config",
@@ -73,6 +73,7 @@
 		"lint:fix": "eslint . --fix",
 		"lint:tui": "tsx scripts/check-tui-compliance.ts --error",
 		"lint:config": "tsx scripts/check-config-compliance.ts",
+		"lint:config:anchor": "tsx scripts/check-config-compliance.ts --anchor --error",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
@@ -82,7 +83,7 @@
 		"test:watch": "vitest",
 		"test:ci": "CI=true vitest run --pool forks --reporter default --reporter junit",
 		"e2e": "bash test/e2e/scripts/run-e2e.sh",
-		"check": "npm run format:check && npm run typecheck && npm run semgrep:ci && npm run lint && npm run lint:tui && npm run lint:config"
+		"check": "npm run format:check && npm run typecheck && npm run semgrep:ci && npm run lint && npm run lint:tui && npm run lint:config:anchor && npm run lint:config"
 	},
 	"lint-staged": {
 		"*.{js,mjs,cjs}": "eslint --fix",

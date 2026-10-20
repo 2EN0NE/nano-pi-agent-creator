@@ -53,13 +53,33 @@ test/vitest/  — 单元 + 组件测试（headless）
 test/e2e/     — 集成端到端测试（真实 Pi 进程）
     Mock:  仅 LLM API（mock-llm）
     目标:  验证扩展在真实 Pi 进程中的行为
-    时长:  ~2min/module，CI + 提交前手动运行
+    时长:  **硬预算 ≤5min/插件**（默认 300s，超预算判失败），CI + 提交前手动运行
     约束:  每个测试只 mock 大模型服务商，其他 Pi API 均走真实路径
 ```
 
 > **铁律**：`test/e2e/` 下的所有测试，如果 mock 了 LLM 以外的任何 Pi API（sessionManager、annotate、keybinding），视为不合规。
 
 详见 ADR：[`docs/adr/0004-tui-e2e-layered-testing.md`](../docs/adr/0004-tui-e2e-layered-testing.md)。
+
+## 耗时预算与过程日志（必读）
+
+**单插件 e2e 总耗时硬预算 300s，超出即判失败**——要么用例挂起/等待异常，要么用例冗余需精简。
+完整规范见 [`docs/e2e-performance.md`](../docs/e2e-performance.md)。
+
+| 关注点             | 怎么用                                                                                                                                              |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 预算覆盖           | `E2E_EXT_BUDGET_SEC=600` 或 `--ext-budget 600`；`0` = 禁用（仅排障）                                                                                |
+| 插件级例外         | `test/e2e/budget-overrides.conf`（`type/name=秒`，须写理由）；临商用 `E2E_EXT_BUDGET_OVERRIDES`                                                     |
+| 排除模块           | `--exclude worktree,permission-gate`（全量/shard 模式跳过；已有专用 CI job 覆盖的模块用它去重）                                                     |
+| CI 分片            | `--shard N/8`：按**模块名 hash** 分桶，**不维护硬编码模块清单**（新增模块必然落在某个 shard）；CI 上 `E2E_BUDGET_STRICT=1`，超预算**不降级**为 WARN |
+| 看耗时             | `summary.md` → `## Time Budget`；`summary.json` → `cases[].duration_seconds`、模块 `duration_seconds`                                               |
+| 超时定位           | 用例 TUI 日志里最后一条 `[tui-stage]`（`expect-start` / `pi-ready-raw` / `pi-ready` / `commands-done`）                                             |
+| 合并用例的步骤轨迹 | `STEP_BEGIN` / `STEP_OK` / `FAIL_MARKER step=<id> reason=<...>`                                                                                     |
+| 结果统计           | 文件驱动 `.results/<type>__<name>.tsv` → 主流程 `aggregate_results()`（**不得**依赖跨子 shell 内存变量）                                            |
+
+> **两条最容易踩的坑**（都表现为"每用例白等几十秒"，已修）：
+> ① 就绪检测不要依赖状态栏正则（`expect <file>` 路径不匹配 → 白等 `timeout_seconds`）；
+> ② 收尾前要关覆盖层（`ESC`），否则 `/quit` 被吞 → 白等收尾超时。
 
 ## 使用方法
 
@@ -93,6 +113,18 @@ cat test/results/$LATEST/summary.md
 cat test/results/$LATEST/extensions/pi-logger/summary.md
 ```
 
+运行基座的留痕位置（ADR-0063；**只留痕、不作阻塞断言**）：
+
+| 看哪儿                 | 内容                                                          |
+| ---------------------- | ------------------------------------------------------------- |
+| `summary.json`         | `pi_version`（本轮实际跑的 pi 版本）、`pi_path`（二进制路径） |
+| e2e runner 启动横幅    | `pi runtime base: <版本> (<路径>)`                            |
+| vitest TUI 用例 stdout | `[pi-bin] <路径> → <版本>`（`resolvePiBin()` 的解析结果）     |
+
+基座来源：`npm ci` 装出的 lock 版本（`scripts/setup-ci.sh` 以它为唯一来源全局安装；
+`PIPELINE=<版本>` 仅为**显式覆盖开关**）。vitest 侧默认优先 `<repo>/node_modules/.bin/pi`，
+`PI_BIN` 仍是最优先级——想刻意用全局新版跑一次就设 `PI_BIN="$(command -v pi)"`。
+
 ## Mock 边界
 
 ### Layer 1 (vitest) 允许的 mock
@@ -108,7 +140,13 @@ cat test/results/$LATEST/extensions/pi-logger/summary.md
 
 ### CI 模式
 
-`CI=true` 时自动注入 `mock-llm` 扩展，无需真实 API Key。所有测试可直接在 CI 中运行。
+`CI=true` 时自动注入 mock-llm（无需 API Key），并启用**阻塞式**判定：
+
+- **耗时预算**：CI 各 e2e job 设 `E2E_BUDGET_STRICT=1` —— 超过插件预算**判失败**，不因机器负载降级为 WARN。
+- **分片矩阵**：`ci.yml` 的 `e2e` job 跑 `--shard N/8 --exclude worktree,permission-gate`；被排除的两个模块各有专用 job
+  （`e2e-worktree` / `e2e-permission-gate-smoke`），**改分片策略时不得引入硬编码模块清单**（否则新模块会静默无覆盖）。
+- **本地对齐**：pre-push 只跑变更模块；若变更的是 `test/e2e/scripts/*` 或 `test/e2e/helpers/*`（影响所有模块），
+  额外跑 `--shard 0/8` 当金丝雀（全量交给 CI）。
 
 ### 压缩/继续类集成链路必须用 TUI 模式验证
 
@@ -182,6 +220,11 @@ TEST
 ## TUI 模式测试
 
 所有 TUI e2e 测试统一使用 **expect** 作为 PTY 后端。
+
+> **本地排障：`posix_spawnp failed`**（vitest TUI 用例全红，连 `/bin/echo` 都 spawn 不了）＝ `node-pty` 的
+> `prebuilds/<platform>-<arch>/spawn-helper` 丢了可执行位（`npm ci` / `npm i` 解包后常见）。修复：
+> `chmod +x node_modules/node-pty/prebuilds/$(node -p "process.platform+'-'+process.arch")/spawn-helper`，
+> 或 `npm rebuild node-pty`。**与被测 pi 版本无关**（CI 由 `scripts/setup-ci.sh` 的 rebuild 步骤兜住）。
 
 ### 两种测试模式
 

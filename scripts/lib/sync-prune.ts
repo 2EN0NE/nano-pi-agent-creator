@@ -8,8 +8,8 @@
  * 有效集合 / 严格剪枝 / 保护名单。
  */
 
-import { existsSync, rmSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, rmSync, readdirSync, copyFileSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
 import * as readline from 'node:readline';
 
 // ── 删除候选分类（Ticket 01） ──────────────────────────────────
@@ -115,26 +115,30 @@ export function findExtensionFormConflicts(
 
 export interface ConfigResetCandidate {
 	plugin: string;
-	reason: 'deleted' | 'updated';
+	reason: 'deleted';
 	configPath: string;
 }
 
 /**
- * 收集「被删除 / 被更新、且目标下已保存过 pi-config profile」的插件。
+ * 收集「被删除、且目标下已保存过 pi-config profile」的插件。
+ *
+ * ADR-0037 修订：仅「删除」进重置候选；「更新」不再提示重置——否则
+ * 目录扩展（如 custom-compaction）每次改源码 sync 都会被列入，误勾选即
+ * 删掉用户精心配置的 profile（如 smart-compact）。
+ *
  * 只返回 extensions-data/<plugin>/config.json 实际存在的项（无 profile 可重置的
  * 插件自然不进列表）。纯读操作，无副作用。
  */
 export function collectConfigResetCandidates(
 	targetDir: string,
 	removedExtensions: string[],
-	updatedExtensions: string[],
 ): ConfigResetCandidate[] {
 	const seen = new Set<string>();
 	const out: ConfigResetCandidate[] = [];
-	const entries: Array<[string, 'deleted' | 'updated']> = [
-		...removedExtensions.map((p): [string, 'deleted'] => [p, 'deleted']),
-		...updatedExtensions.map((p): [string, 'updated'] => [p, 'updated']),
-	];
+	const entries: Array<[string, 'deleted']> = removedExtensions.map((p): [string, 'deleted'] => [
+		p,
+		'deleted',
+	]);
 	for (const [plugin, reason] of entries) {
 		if (seen.has(plugin)) continue;
 		seen.add(plugin);
@@ -249,8 +253,13 @@ export function interactiveMultiSelect(title: string, items: string[]): Promise<
 	});
 }
 
+/** 配置备份保留份数上限（最新 N 份），更早的按时间戳自动清理。 */
+export const MAX_CONFIG_BACKUPS = 3;
+
 /**
  * 应用配置重置：删除勾选项的 config.json（保留同目录 <sessionId>.json session 文件）。
+ * 删除前先备份到 config.json.bak-<YYYYMMDD-HHMMSS>，误删可恢复（ADR-0037 修订）；
+ * 同目录仅保留最新 MAX_CONFIG_BACKUPS 份备份，避免明文副本无限累积。
  * 返回实际被重置的插件名列表。
  */
 export function resetConfigProfiles(
@@ -263,16 +272,66 @@ export function resetConfigProfiles(
 		if (!selected.has(i)) return;
 		try {
 			if (existsSync(c.configPath)) {
+				const backupPath = `${c.configPath}.bak-${backupTimestamp()}`;
+				copyFileSync(c.configPath, backupPath);
 				rmSync(c.configPath, { force: true });
+				pruneConfigBackups(c.configPath, MAX_CONFIG_BACKUPS, log);
+				log(
+					'WARN',
+					`[CONFIG RESET] ${c.plugin} (${c.reason}) → defaults (deleted ${c.configPath}; backup ${backupPath})`,
+				);
+			} else {
+				log(
+					'WARN',
+					`[CONFIG RESET] ${c.plugin} (${c.reason}) → config not found (${c.configPath})`,
+				);
 			}
 			reset.push(c.plugin);
-			log(
-				'WARN',
-				`[CONFIG RESET] ${c.plugin} (${c.reason}) → defaults (deleted ${c.configPath})`,
-			);
 		} catch (err) {
 			log('ERROR', `Failed to reset config for ${c.plugin}: ${err}`);
 		}
 	});
 	return reset;
+}
+
+/**
+ * 清理同目录下过期的 config.json 备份，仅保留最新 `keep` 份。
+ * 只匹配 `config.json.bak-YYYYMMDD-HHMMSS`（时间戳可按字典序比较新旧），
+ * 其他手写备份（如 config.json.bak-manual）不受影响。
+ */
+function pruneConfigBackups(
+	configPath: string,
+	keep: number,
+	log: (level: 'INFO' | 'WARN' | 'ERROR', message: string) => void,
+): void {
+	const dir = dirname(configPath);
+	const prefix = `${basename(configPath)}.bak-`;
+	let entries: string[];
+	try {
+		entries = readdirSync(dir);
+	} catch {
+		return;
+	}
+	const backups = entries
+		.filter((f) => f.startsWith(prefix) && /^\d{8}-\d{6}$/.test(f.slice(prefix.length)))
+		.sort((a, b) => a.localeCompare(b));
+	for (const f of backups.slice(0, Math.max(0, backups.length - keep))) {
+		const stale = join(dir, f);
+		try {
+			rmSync(stale, { force: true });
+			log('WARN', `[CONFIG RESET] pruned stale backup ${stale}`);
+		} catch (err) {
+			log('ERROR', `Failed to prune stale backup ${stale}: ${err}`);
+		}
+	}
+}
+
+/** 生成 `YYYYMMDD-HHMMSS` 时间戳（与 offline.sh 的 .bak 命名一致）。 */
+function backupTimestamp(): string {
+	const d = new Date();
+	const p = (n: number) => String(n).padStart(2, '0');
+	return (
+		`${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+		`-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+	);
 }

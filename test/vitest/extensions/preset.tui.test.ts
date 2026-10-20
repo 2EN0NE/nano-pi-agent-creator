@@ -76,7 +76,6 @@ function makeActions(overrides: Partial<PresetPanelActions> = {}): PresetPanelAc
 		editField: async () => null,
 		copyToSession: () => null,
 		promoteToProject: async () => false,
-		toggleLock: () => false,
 		...overrides,
 	};
 }

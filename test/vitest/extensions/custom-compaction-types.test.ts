@@ -117,8 +117,8 @@ describe('createDefaultProfile — injectContinueText', () => {
 		expect(createDefaultProfile().injectContinueText).toBe(false);
 	});
 
-	it('keeps autoContinueMessage default as "continue" (fallback text)', () => {
+	it('keeps autoContinueMessage default as the compaction-interrupt resume text (fallback text)', () => {
 		expect(createDefaultProfile().autoContinueMessage).toBe(DEFAULT_AUTO_CONTINUE_MESSAGE);
-		expect(DEFAULT_AUTO_CONTINUE_MESSAGE).toBe('continue');
+		expect(DEFAULT_AUTO_CONTINUE_MESSAGE).toContain('上下文压缩打断了工作');
 	});
 });

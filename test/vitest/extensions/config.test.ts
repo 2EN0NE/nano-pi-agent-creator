@@ -9,7 +9,11 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, getDefaultConfig } from '../../../extensions/security/permission-gate/config';
+import {
+	loadConfig,
+	getDefaultConfig,
+	scopeProvenance,
+} from '../../../extensions/security/permission-gate/config';
 
 let tmpDir: string;
 let tmpHome: string;
@@ -59,16 +63,16 @@ describe('loadConfig — 双层合并', () => {
 		expect(c.enabled).toBe(true);
 	});
 
-	it('scope 相对路径解析为绝对路径', () => {
+	it('scope 相对路径解析为绝对路径（规范化为根列表）', () => {
 		writeJson(projectFile(), { dynamicPolicy: { scope: './sub' } });
 		const c = loadConfig(tmpCwd, tmpHome);
-		expect(c.dynamicPolicy.scope).toBe(resolve(tmpCwd, 'sub'));
+		expect(c.dynamicPolicy.scope).toEqual([{ root: resolve(tmpCwd, 'sub') }]);
 	});
 
-	it('scope 绝对路径保持不变', () => {
+	it('scope 绝对路径保持不变（规范化为根列表）', () => {
 		writeJson(projectFile(), { dynamicPolicy: { scope: '/abs/scope' } });
 		const c = loadConfig(tmpCwd, tmpHome);
-		expect(c.dynamicPolicy.scope).toBe('/abs/scope');
+		expect(c.dynamicPolicy.scope).toEqual([{ root: '/abs/scope' }]);
 	});
 });
 
@@ -220,5 +224,85 @@ describe('loadConfig — 命令清单对象化 + 内置解释注入', () => {
 		});
 		const c = loadConfig(tmpCwd, tmpHome);
 		expect(c.patterns).toEqual([{ pattern: '\\bmycmd\\s', tier: 'warning', note: '我的说明' }]);
+	});
+});
+
+describe('loadConfig — 会话级 scope 覆盖（ADR-0059：会话 > 项目 > 用户）', () => {
+	const sessionFile = (sid: string) =>
+		join(tmpHome, '.pi', 'agent', 'extensions-data', 'permission-gate', `${sid}.json`);
+
+	it('会话级 scope 覆盖项目级与用户级', () => {
+		writeJson(userFile(), { dynamicPolicy: { scope: '/user-root' } });
+		writeJson(projectFile(), { dynamicPolicy: { scope: '/project-root' } });
+		// 会话文件与 pi-state 状态共享：counts 等无关键必须被忽略，不能混进配置
+		writeJson(sessionFile('sess-1'), {
+			dynamicPolicy: { scope: '/session-root' },
+			counts: { 'tool:rm': 3 },
+		});
+		const c = loadConfig(tmpCwd, tmpHome, 'sess-1');
+		expect(c.dynamicPolicy.scope).toEqual([{ root: resolve('/session-root') }]);
+	});
+
+	it('未提供 sessionId 时不读会话层（向后兼容）', () => {
+		writeJson(sessionFile('sess-1'), { dynamicPolicy: { scope: '/session-root' } });
+		const c = loadConfig(tmpCwd, tmpHome);
+		expect(c.dynamicPolicy.scope).toEqual([{ root: resolve(tmpCwd) }]);
+	});
+});
+
+describe('scopeProvenance — 生效 scope 的来源层与遮蔽（ADR-0059 面板展示）', () => {
+	const sessionFile = (sid: string) =>
+		join(tmpHome, '.pi', 'agent', 'extensions-data', 'permission-gate', `${sid}.json`);
+
+	it('无显式声明 → 默认', () => {
+		expect(scopeProvenance(tmpCwd, null, tmpHome)).toEqual({
+			source: 'default',
+			shadowed: [],
+		});
+	});
+
+	it('用户级声明 → 来源 user，未被遮蔽', () => {
+		writeJson(userFile(), { dynamicPolicy: { scope: '/user-root' } });
+		expect(scopeProvenance(tmpCwd, null, tmpHome)).toEqual({
+			source: 'user',
+			shadowed: [],
+		});
+	});
+
+	it('项目级真实收紧遮蔽用户级', () => {
+		writeJson(userFile(), { dynamicPolicy: { scope: '/user-root' } });
+		writeJson(projectFile(), { dynamicPolicy: { scope: '/project-root' } });
+		const p = scopeProvenance(tmpCwd, null, tmpHome);
+		expect(p.source).toBe('project');
+		expect(p.shadowed).toEqual(['user']);
+	});
+
+	it('会话级优先于项目/用户级，且后两者被标记为遮蔽', () => {
+		writeJson(userFile(), { dynamicPolicy: { scope: '/user-root' } });
+		writeJson(projectFile(), { dynamicPolicy: { scope: '/project-root' } });
+		writeJson(sessionFile('sess-1'), { dynamicPolicy: { scope: '/session-root' } });
+		const p = scopeProvenance(tmpCwd, 'sess-1', tmpHome);
+		expect(p.source).toBe('session');
+		expect(p.shadowed).toEqual(['project', 'user']);
+	});
+
+	it('下层含无条件的项目外根 → 项目级 [cwd] 是真实收紧（遮蔽用户级，fail-safe）', () => {
+		writeJson(userFile(), { dynamicPolicy: { scope: '/user-root' } });
+		writeJson(projectFile(), { dynamicPolicy: { scope: tmpCwd } });
+		const p = scopeProvenance(tmpCwd, null, tmpHome);
+		expect(p.source).toBe('project');
+		expect(p.shadowed).toEqual(['user']);
+	});
+
+	it('下层只有带出处条件的项目外根 → 项目级默认值不算收紧（不遮蔽用户级）', () => {
+		writeJson(userFile(), {
+			dynamicPolicy: {
+				scope: [{ root: tmpCwd }, { root: '/guarded', requireSessionProvenance: true }],
+			},
+		});
+		writeJson(projectFile(), { dynamicPolicy: { scope: tmpCwd } });
+		const p = scopeProvenance(tmpCwd, null, tmpHome);
+		expect(p.source).toBe('user');
+		expect(p.shadowed).toEqual([]);
 	});
 });

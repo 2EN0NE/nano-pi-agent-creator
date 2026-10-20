@@ -65,6 +65,9 @@ profiles:
             - no-sleep # macOS 防睡眠（caffeinate）
             - continue # /continue 续写快捷命令
             - cloud-sessions # 云会话同步（npm 包）
+            # ── agent 组织（目录绑定 agent 框架，ADR-0038） ──
+            - control # 对等会话通信（org 依赖；仅 --session-control 时建 socket）
+            - org # 目录绑定 agent 组织：join/派发/可指认/注意力/健康（多 agent 场景按需加载）
             # ── 验证/评估 ──
             - review # /review 代码审查 / 测试覆盖分析（profile 驱动）
             # ── 可观测性 ──
@@ -79,6 +82,7 @@ profiles:
             - quit # /quit 命令 + 会话总结卡片
             - whimsical # 工作提示词（sigma 维度）
             - custom-rename # 新 session 首轮自动命名（/auto-rename 开关）
+            - message-time # user/assistant 消息顶部时间注记（三段式日期）
             # ── 上下文组装 ──
             - goal # 设立目标与时间、预算等限制
             - custom-compaction # 自定义压缩策略（配置在 ~/.pi/agent/extensions-data/）
@@ -112,8 +116,8 @@ profiles:
     # 同步本项目特有的插件到 .pi/ 目录。
     # 排除已放 user-install 的全局插件（避免 flag/tool 重复注册），
     # 以及日常不用或本项目独有的插件。
-    # 剩余的是：项目特定/低成熟度/实验阶段的插件（edit、git-checkpoint、
-    #           loop、claude-rules、smart-context 等）与演示插件（DEMO:*）。
+    # 剩余的是：项目特定/低成熟度/实验阶段的插件（edit、loop、claude-rules、
+    # smart-context 等）与演示插件（DEMO:*）。
     #
     # 技能按分类同步：
     #   - development/ + tooling/ → project profile（开发流程 + 工具链）
@@ -193,8 +197,10 @@ profiles:
                 - worktree
                 - goal
                 - custom-rename # 已放 user-install（会话自动命名）
+                - message-time # 已放 user-install（消息时间注记）
                 # 以下插件为不常用或待观察
-                - control # 适合多agent场景，平常不需要
+                - control # 已放 user-install（agent 组织，ADR-0038）
+                - org # 已放 user-install（agent 组织，ADR-0038）
                 - DEMO:prompt-customizer # 演示性质
                 - DEMO:catch-the-fox # 演示性质、趣味
                 - split-fork # 目前仅支持Ghostty，按需介入
@@ -204,4 +210,18 @@ profiles:
 
             skills: []
             prompts: []
+
+# ── 墓碑清单（ADR-0037 修订） ──────────────────────────────────
+# 本仓库曾管理、现已下架/内嵌进其它扩展（名字从源清单消失）的扩展名。
+# 目标目录里残留的同名旧副本会被当作「受管资产」纳入严格剪枝删除，
+# 否则被误判为「第三方资产」永久保留 → 与内嵌后重新注册的同名扩展
+# 重复，导致 `tools:1` / `tools:2` 重名。
+retired:
+    - tools # 内嵌进 preset（preset/tools.ts 注册 /tools）
+    - skills # 内嵌进 preset（preset/skills.ts 注册 /skills）
+    - commands # 内嵌进 preset（preset/commands.ts 注册 /commands）
+    - prompt-editor # 内嵌进 preset（preset/prompt-editor.ts 注册 /prompt）
+    - mode-switcher # ADR-0031：preset 吸收，/mode 已并入 /preset
+    - test-analysis # 并入 review（目录插件）
+    - session-breakdown # 并入 session-analytics
 # pi-lens-ignore: YAML:0

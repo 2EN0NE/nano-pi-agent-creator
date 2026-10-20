@@ -38,7 +38,7 @@ export default function dynamicRegistrar(pi: ExtensionAPI) {
 			_signal: AbortSignal | undefined,
 			_onUpdate: unknown,
 			_ctx: unknown,
-		): Promise<AgentToolResult> => {
+		): Promise<AgentToolResult<unknown>> => {
 			const pattern = params.pattern ?? '';
 			log.info('mock_search executed', { pattern });
 			return {

@@ -9,6 +9,29 @@
 
 test_describe "worktree extension (expect TUI mode)"
 
+# ── 过程日志检索（pi-logger appender 的相对 path 按 pi 的 cwd 解析，故多候选根）──
+# 找到含指定模式行则打印该根目录；找不到返回 1。供 ADR-0062 过程日志断言复用。
+worktree_e2e_log_root() {
+  local pattern="$1" repo="$2" d
+  for d in "$repo/.pi/logs" "$TUI_TEST_HOME/.pi/logs" "$TUI_TEST_HOME/home/.pi/logs"; do
+    if [[ -d "$d" ]] && grep -rh "$pattern" "$d" >/dev/null 2>&1; then
+      echo "$d"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 断言失败时打印日志现场，便于直接定位（不吞错误）
+worktree_e2e_dump_logs() {
+  local repo="$1" d
+  for d in "$repo/.pi/logs" "$TUI_TEST_HOME/.pi/logs" "$TUI_TEST_HOME/home/.pi/logs"; do
+    echo "  - $d"
+    ls -la "$d" 2>/dev/null | head -5
+    grep -rh "pi-worktree" "$d" 2>/dev/null | tail -3 || true
+  done
+}
+
 # ── 测试 1：TUI 模式加载不崩溃 ──
 test_it "expect: loads in TUI mode without crash" <<'TEST'
   tui_expect_test "pi-logger,worktree" '
@@ -214,14 +237,26 @@ test_it "expect: merge to unpushed target succeeds (local-first)" <<'TEST'
     expect -re {Merge} { }
     sleep 1
     send \"\r\"
-    sleep 4
-  " 20 "" "$test_repo"
+    # 合并本身 <1s，慢的是 agent turn + 通知渲染；池化负载下 4s 会抢跑（实测假失败）。
+    # 提示语是动态 result.message，无法 wait_for，故给足固定余量（真护栏是下面的 git 断言）。
+    sleep 12
+  " 30 "" "$test_repo"
 
-  # 严格断言：wt 分支已合入 dev（本地 merge 成功，未 pull）
-  if git -C "$test_repo" merge-base --is-ancestor "wt/$wt_name" dev; then
+  # 严格断言：wt 分支已合入 dev（本地 merge 成功，未 pull）。
+  # 合并本身 <1s，但 agent turn + 通知渲染在池化负载下会抖动 → **有界轮询**而非单次采样，
+  # 避免全量套件里假失败（真护栏仍是这条 git 断言，最多等 30s）。
+  local merged=0 i
+  for i in $(seq 1 15); do
+    if git -C "$test_repo" merge-base --is-ancestor "wt/$wt_name" dev 2>/dev/null; then
+      merged=1
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$merged" == "1" ]]; then
     echo "PASS: merge to unpushed dev succeeded (wt/$wt_name merged into dev)"
   else
-    echo "FAIL: wt/$wt_name not merged into dev"
+    echo "FAIL: wt/$wt_name not merged into dev (waited 30s)"
     git -C "$test_repo" log dev --oneline | head -5
     exit 1
   fi
@@ -268,13 +303,16 @@ test_it "expect: merge to remote-behind target shows sync hint (local-first)" <<
   mkdir -p "$wt_parent"
   git -C "$test_repo" worktree add "$wt_dir" "wt/$wt_name" >/dev/null 2>&1
 
-  # confirm 对话框应出现「本地 dev 落后远端」提示（getRemoteAheadBehind 真实 fetch 生效）
+  # confirm 对话框应出现「本地 dev 落后远端」提示（**只读本地 remote-tracking ref**，ADR-0061：
+  # 不隐式 fetch——故由本用例前置的 `git fetch origin` 先把 origin/dev 拉出来）
   tui_expect_test "pi-logger,worktree" "
     send \"/worktree merge --source $wt_name --target dev --strategy merge\r\"
     expect -re {落后远端} { }
     sleep 1
     send \"\r\"
-    sleep 4
+    # 合并本身 <1s，慢的是 agent turn + 通知渲染；池化负载下 4s 会抢跑（实测假失败）。
+    # 提示语是动态 result.message，无法 wait_for，故给足固定余量（真护栏是下面的 git 断言）。
+    sleep 12
   " 20 "" "$test_repo"
 
   # 严格断言：merge 成功（wt 分支已合入 dev）
@@ -577,6 +615,433 @@ test_it "expect: create worktree migrates pi session file to worktree" <<'TEST'
   fi
 
   git -C "$test_repo" worktree remove "$wt_dir" --force >/dev/null 2>&1 || true
+  rm -rf "$sandbox"
+  tui_cleanup
+TEST
+
+# ── 测试 10：组声明 → /worktree group create（真实 Pi 进程内的组执行层）──
+# 语义保护（不是「无报错」）：组创建后缺失成员**落盘为 worktree**，且基点 == **本地**目标分支
+#   - origin 指向不存在路径：任何隐式 fetch 都会失败 → 基准取自本地 dev 即证明本地优先
+#   - 已存在成员不被改动（组创建只补建）
+test_it "expect: group create materializes missing member from local target" <<'TEST'
+  local sandbox test_repo wt_parent dev_sha
+  sandbox=$(mktemp -d "/tmp/pi-wt-group-e2e-$$.XXXXXX")
+  test_repo="$sandbox/repo"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  # 本地集成分支 dev（领先其远端；远端不可达）
+  git -C "$test_repo" checkout -b dev >/dev/null 2>&1
+  echo integration > "$test_repo/integration.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m integration >/dev/null 2>&1
+  git -C "$test_repo" checkout main >/dev/null 2>&1
+  git -C "$test_repo" remote add origin file:///nonexistent/repo.git
+  dev_sha=$(git -C "$test_repo" rev-parse dev)
+
+  # 已存在成员（模拟此前建好的 worktree）
+  wt_parent="${test_repo}-worktrees"
+  mkdir -p "$wt_parent"
+  git -C "$test_repo" worktree add "$wt_parent/keep" -b wt/keep dev >/dev/null 2>&1
+  local keep_sha; keep_sha=$(git -C "$wt_parent/keep" rev-parse HEAD)
+
+  # 仓库级组声明（组只在仓库级生效）
+  mkdir -p "$test_repo/.pi/extensions-data/pi-worktree"
+  printf '%s' '{"groups":{"grp":{"baseRef":"dev","members":["keep","fresh"],"mergeStrategy":"squash","env":{"nodeModules":"none","symlinkTargetIds":[]}}}}' \
+    > "$test_repo/.pi/extensions-data/pi-worktree/config.json"
+
+  tui_expect_test "pi-logger,worktree" "
+    send \"/worktree group create grp\r\"
+    # 等候选面板真的渲染（图案等待，不用固定 sleep 碰运气）；未匹配则直接进下一步，
+    # 由下面的有界轮询兜底，不把「面板晚到」当失败。
+    set timeout 20
+    expect -re {创建成员} { }
+    set timeout 40
+    sleep 0.5
+    send \"\r\"
+    # 重复 Enter 容错（AGENTS.md「TUI 按键错位」）：面板已关时落在主输入框 = 空提交，无副作用
+    sleep 2
+    send \"\r\"
+    sleep 1
+  " 40 "" "$test_repo"
+
+  # ① 屏幕证据（真门禁，不吞失败）：候选面板标题渲染过。面板没出现 → 创建根本不会发生
+  tui_assert_contains "创建成员"
+
+  # ② 持久化产物证据：缺失成员被真实创建（有界轮询，池化负载下创建会晚于 expect 脚本结束）
+  local materialized=0 i
+  for i in $(seq 1 15); do
+    if [[ -d "$wt_parent/fresh" ]]; then
+      materialized=1
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$materialized" != "1" ]]; then
+    echo "FAIL: group create did not materialize 'fresh' worktree (waited 30s)"
+    ls -la "$wt_parent" 2>/dev/null
+    exit 1
+  fi
+  local fresh_sha fresh_branch
+  fresh_sha=$(git -C "$wt_parent/fresh" rev-parse HEAD)
+  fresh_branch=$(git -C "$wt_parent/fresh" symbolic-ref --short HEAD)
+  if [[ "$fresh_sha" != "$dev_sha" ]]; then
+    echo "FAIL: fresh base = $fresh_sha, expected local dev = $dev_sha"
+    exit 1
+  fi
+  if [[ "$fresh_branch" != "wt/fresh" ]]; then
+    echo "FAIL: fresh branch = $fresh_branch, expected wt/fresh"
+    exit 1
+  fi
+  echo "PASS: fresh materialized at local dev ($dev_sha), branch wt/fresh"
+
+  # ③ 已存在成员未被改动
+  local keep_after; keep_after=$(git -C "$wt_parent/keep" rev-parse HEAD)
+  if [[ "$keep_after" != "$keep_sha" ]]; then
+    echo "FAIL: existing member 'keep' was modified ($keep_sha -> $keep_after)"
+    exit 1
+  fi
+  echo "PASS: existing member untouched"
+
+  # ④ 过程日志（ADR-0062）：逐成员 STEP_BEGIN/STEP_OK 必须真的落盘、可 grep（硬门禁）
+  local found_log=""
+  if found_log=$(worktree_e2e_log_root "STEP_BEGIN" "$test_repo"); then
+    echo "PASS: STEP_* process log found in $found_log"
+    grep -rh "STEP_BEGIN\|STEP_OK" "$found_log" | tail -4
+  else
+    echo "FAIL: no STEP_BEGIN line under any log root (ADR-0062 过程日志要求)"
+    worktree_e2e_dump_logs "$test_repo"
+    exit 1
+  fi
+
+  git -C "$test_repo" worktree remove "$wt_parent/keep" --force >/dev/null 2>&1 || true
+  rm -rf "$sandbox"
+  tui_cleanup
+TEST
+
+# ── 测试 11：组声明 → /worktree group merge（真实 Pi 内的批量合并，ADR-0062 验证项 2）──
+# 语义保护（不是「无报错」）：N 个成员 = 目标分支 N 个 squash 提交；成员被即时对齐到目标分支；
+# **未触碰远端**（origin 指向不存在路径 → 任何 fetch/push 都会失败）；逐成员 STEP_* 落盘可 grep。
+test_it "expect: group merge lands N commits on local target without touching remote" <<'TEST'
+  local sandbox test_repo wt_parent base_count merged i found_log m
+  sandbox=$(mktemp -d "/tmp/pi-wt-group-merge-$$.XXXXXX")
+  test_repo="$sandbox/repo"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  # 本地集成分支 dev；远端不可达（任何隐式 fetch / push 都会失败）
+  git -C "$test_repo" checkout -b dev >/dev/null 2>&1
+  echo integration > "$test_repo/integration.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m integration >/dev/null 2>&1
+  git -C "$test_repo" checkout main >/dev/null 2>&1
+  git -C "$test_repo" remote add origin file:///nonexistent/repo.git
+
+  # 两个成员：各从**本地 dev** 派生、各 1 个提交
+  wt_parent="${test_repo}-worktrees"
+  mkdir -p "$wt_parent"
+  for m in alpha beta; do
+    git -C "$test_repo" worktree add "$wt_parent/$m" -b "wt/$m" dev >/dev/null 2>&1
+    echo "$m" > "$wt_parent/$m/$m.txt"
+    git -C "$wt_parent/$m" add . >/dev/null 2>&1
+    git -C "$wt_parent/$m" commit -m "$m" >/dev/null 2>&1
+  done
+  base_count=$(git -C "$test_repo" rev-list --count dev)
+
+  mkdir -p "$test_repo/.pi/extensions-data/pi-worktree"
+  printf '%s' '{"groups":{"grp":{"baseRef":"dev","members":["alpha","beta"],"mergeStrategy":"squash","env":{"nodeModules":"none","symlinkTargetIds":[]}}}}' \
+    > "$test_repo/.pi/extensions-data/pi-worktree/config.json"
+
+  tui_expect_test "pi-logger,worktree" "
+    send \"/worktree group merge grp\r\"
+    set timeout 20
+    expect -re {合并成员} { }
+    sleep 0.5
+    send \"\r\"
+    # 合并完成后会再问一次「统一对齐」：等它出现再确认（等不到则 Esc 兜底关覆盖层）
+    set timeout 45
+    expect -re {统一对齐} { }
+    sleep 0.5
+    send \"\r\"
+    sleep 1
+    send \"\033\"
+    sleep 0.5
+  " 90 "" "$test_repo"
+
+  # ① 有界轮询：目标分支拿到 2 个新提交（squash → 每成员 1 个）
+  merged=0
+  for i in $(seq 1 20); do
+    if [[ "$(git -C "$test_repo" rev-list --count dev)" -ge "$((base_count + 2))" ]]; then
+      merged=1
+      break
+    fi
+    sleep 2
+  done
+  local now_count
+  now_count=$(git -C "$test_repo" rev-list --count dev)
+  if [[ "$merged" != "1" ]]; then
+    echo "FAIL: dev did not gain 2 squash commits (base=$base_count now=$now_count)"
+    git -C "$test_repo" log dev --oneline | head -5
+    worktree_e2e_dump_logs "$test_repo"
+    exit 1
+  fi
+  echo "PASS: dev gained 2 squash commits ($base_count -> $now_count)"
+
+  # ② 成员已被对齐：不再位于目标分支之外的分叉上、工作区干净、且内容确已进入 dev。
+  #    注意不能断言「成员目录里没有 $m.txt」—— squash 合入后该内容**本就属于 dev**。
+  for m in alpha beta; do
+    if ! git -C "$wt_parent/$m" merge-base --is-ancestor HEAD dev 2>/dev/null; then
+      echo "FAIL: member $m still diverges from dev (HEAD=$(git -C "$wt_parent/$m" rev-parse HEAD))"
+      exit 1
+    fi
+    if [[ -n "$(git -C "$wt_parent/$m" status --porcelain)" ]]; then
+      echo "FAIL: member $m workspace not clean after align"
+      git -C "$wt_parent/$m" status --short | head -5
+      exit 1
+    fi
+    if ! git -C "$test_repo" cat-file -e "dev:$m.txt" 2>/dev/null; then
+      echo "FAIL: member $m content ($m.txt) not found on dev"
+      exit 1
+    fi
+  done
+  echo "PASS: both members aligned to dev (clean, no divergence)"
+
+  # ③ 未触碰远端：不得出现 remote-tracking ref（origin 不可达，一旦 fetch 必失败）
+  if git -C "$test_repo" show-ref --verify --quiet refs/remotes/origin/dev; then
+    echo "FAIL: remote-tracking ref origin/dev exists → plugin touched the remote"
+    exit 1
+  fi
+  echo "PASS: no remote-tracking ref created (remote untouched)"
+
+  # ④ 逐成员过程日志（ADR-0062）：2 条 STEP_BEGIN + 2 条 STEP_OK
+  found_log=""
+  if found_log=$(worktree_e2e_log_root "STEP_BEGIN" "$test_repo"); then
+    local begins oks
+    begins=$(grep -rh "STEP_BEGIN" "$found_log" | grep -c "action=merge" || true)
+    oks=$(grep -rh "STEP_OK" "$found_log" | grep -c "action=merge" || true)
+    if [[ "$begins" -lt 2 || "$oks" -lt 2 ]]; then
+      echo "FAIL: expected >=2 STEP_BEGIN and >=2 STEP_OK for action=merge (got $begins/$oks)"
+      grep -rh "STEP_" "$found_log" | tail -6
+      exit 1
+    fi
+    echo "PASS: STEP_* process log: $begins BEGIN / $oks OK ($found_log)"
+  else
+    echo "FAIL: no STEP_BEGIN line under any log root (ADR-0062 过程日志要求)"
+    worktree_e2e_dump_logs "$test_repo"
+    exit 1
+  fi
+
+  for m in alpha beta; do
+    git -C "$test_repo" worktree remove "$wt_parent/$m" --force >/dev/null 2>&1 || true
+  done
+  rm -rf "$sandbox"
+  tui_cleanup
+TEST
+
+# ── 测试 12：组合并冲突 → fail-fast（ADR-0062 验证项 3 前半）──
+# 语义保护：冲突成员停在 rebase 冲突态；**目标分支不产生该成员提交**；
+# 声明的后续成员**未被处理**（禁止「跳过失败成员继续」—— 那会合入引用不存在代码的提交）。
+# 「解决冲突后续完剩余成员」由 vitest 覆盖（`worktree-group-ops.test.ts` 的「组『fail-fast + 可续跑』
+# 的续跑半程」describe：执行层重跑幂等 + 命令面重跑只处理剩余成员），
+# 此处不引入人工解冲突步骤。
+test_it "expect: group merge conflict stops fail-fast without partial or skipped merges" <<'TEST'
+  local sandbox test_repo wt_parent dev_sha base_count beta_tip found_log m
+  sandbox=$(mktemp -d "/tmp/pi-wt-group-conflict-$$.XXXXXX")
+  test_repo="$sandbox/repo"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  # dev 上先有一版 shared.txt
+  git -C "$test_repo" checkout -b dev >/dev/null 2>&1
+  echo dev > "$test_repo/shared.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m dev-shared >/dev/null 2>&1
+  git -C "$test_repo" remote add origin file:///nonexistent/repo.git
+
+  wt_parent="${test_repo}-worktrees"
+  mkdir -p "$wt_parent"
+  # alpha：改同一行 → rebase 到 dev 必冲突（声明顺序第一，故先失败）
+  git -C "$test_repo" worktree add "$wt_parent/alpha" -b wt/alpha dev >/dev/null 2>&1
+  echo alpha > "$wt_parent/alpha/shared.txt"
+  git -C "$wt_parent/alpha" add . >/dev/null 2>&1
+  git -C "$wt_parent/alpha" commit -m alpha-shared >/dev/null 2>&1
+  # beta：无冲突（若被「跳过失败成员继续」处理，它会带上自己的提交 → 用于证明 fail-fast 到位）
+  git -C "$test_repo" worktree add "$wt_parent/beta" -b wt/beta dev >/dev/null 2>&1
+  echo beta > "$wt_parent/beta/beta.txt"
+  git -C "$wt_parent/beta" add . >/dev/null 2>&1
+  git -C "$wt_parent/beta" commit -m beta >/dev/null 2>&1
+  # dev 前进：与 alpha 的改动冲突
+  echo dev2 > "$test_repo/shared.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m dev-shared-2 >/dev/null 2>&1
+  dev_sha=$(git -C "$test_repo" rev-parse dev)
+  base_count=$(git -C "$test_repo" rev-list --count dev)
+  beta_tip=$(git -C "$test_repo" rev-parse wt/beta)
+
+  mkdir -p "$test_repo/.pi/extensions-data/pi-worktree"
+  printf '%s' '{"groups":{"grp":{"baseRef":"dev","members":["alpha","beta"],"mergeStrategy":"squash","env":{"nodeModules":"none","symlinkTargetIds":[]}}}}' \
+    > "$test_repo/.pi/extensions-data/pi-worktree/config.json"
+
+  tui_expect_test "pi-logger,worktree" "
+    send \"/worktree group merge grp\r\"
+    set timeout 20
+    expect -re {合并成员} { }
+    sleep 0.5
+    send \"\r\"
+    sleep 3
+    send \"\033\"
+    sleep 0.5
+  " 60 "" "$test_repo"
+
+  # ① fail-fast：目标分支**没有**任何新增提交（alpha 冲突 → 停在第一个成员）
+  local now_count now_sha
+  now_count=$(git -C "$test_repo" rev-list --count dev)
+  now_sha=$(git -C "$test_repo" rev-parse dev)
+  if [[ "$now_sha" != "$dev_sha" || "$now_count" != "$base_count" ]]; then
+    echo "FAIL: dev changed on conflict ($base_count/$dev_sha -> $now_count/$now_sha)"
+    git -C "$test_repo" log dev --oneline | head -5
+    exit 1
+  fi
+  echo "PASS: target branch unchanged on conflict (fail-fast, no partial commits)"
+
+  # ② 冲突成员停在 rebase 冲突态（状态在该 worktree 自己的 gitdir 下）
+  if [[ ! -d "$test_repo/.git/worktrees/alpha/rebase-merge" && ! -d "$test_repo/.git/worktrees/alpha/rebase-apply" ]]; then
+    echo "FAIL: alpha is not left in a rebase conflict state"
+    ls -la "$test_repo/.git/worktrees/alpha" 2>/dev/null | head -10
+    worktree_e2e_dump_logs "$test_repo"
+    exit 1
+  fi
+  echo "PASS: alpha left in rebase conflict state"
+
+  # ③ 后续成员未被处理（禁止跳过失败成员继续）
+  local beta_now
+  beta_now=$(git -C "$test_repo" rev-parse wt/beta)
+  if [[ "$beta_now" != "$beta_tip" ]]; then
+    echo "FAIL: later member beta was processed despite fail-fast ($beta_tip -> $beta_now)"
+    exit 1
+  fi
+  echo "PASS: later member untouched"
+
+  # ④ 失败过程日志：FAIL_MARKER 带成员名（单行、可 grep）
+  if found_log=$(worktree_e2e_log_root "FAIL_MARKER" "$test_repo"); then
+    if grep -rh "FAIL_MARKER" "$found_log" | grep -q "member=alpha"; then
+      echo "PASS: FAIL_MARKER logged for member=alpha ($found_log)"
+    else
+      echo "FAIL: FAIL_MARKER found but without member=alpha"
+      grep -rh "FAIL_MARKER" "$found_log" | tail -3
+      exit 1
+    fi
+  else
+    echo "FAIL: no FAIL_MARKER line under any log root (ADR-0062 过程日志要求)"
+    worktree_e2e_dump_logs "$test_repo"
+    exit 1
+  fi
+
+  for m in alpha beta; do
+    git -C "$test_repo" worktree remove "$wt_parent/$m" --force >/dev/null 2>&1 || true
+  done
+  rm -rf "$sandbox"
+  tui_cleanup
+TEST
+
+# ── 测试 16：主检出的已暂存改动不被卷进 squash（ADR-0062 验证项 5）──
+# 语义保护（不是「无报错」）：合并前在主检出暂存 staged.txt → 合并后：
+#   ① 目标分支只多出成员那 1 个 squash 提交；② staged.txt **不在**该提交里；
+#   ③ staged.txt 仍处于已暂存状态且内容未变；④ 没有残留 stash（stash pop 已恢复）。
+test_it "expect: staged changes in main checkout are not swept into squash" <<'TEST'
+  local sandbox test_repo wt_parent base_count merged i
+  sandbox=$(mktemp -d "/tmp/pi-wt-staged-$$.XXXXXX")
+  test_repo="$sandbox/repo"
+  mkdir -p "$test_repo"
+  git init --initial-branch main "$test_repo" >/dev/null 2>&1
+  echo init > "$test_repo/README.md"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m init >/dev/null 2>&1
+
+  git -C "$test_repo" checkout -b dev >/dev/null 2>&1
+  echo integration > "$test_repo/integration.txt"
+  git -C "$test_repo" add . && git -C "$test_repo" commit -m integration >/dev/null 2>&1
+  git -C "$test_repo" checkout main >/dev/null 2>&1
+
+  # 单个成员：从本地 dev 派生，1 个提交
+  wt_parent="${test_repo}-worktrees"
+  mkdir -p "$wt_parent"
+  git -C "$test_repo" worktree add "$wt_parent/alpha" -b "wt/alpha" dev >/dev/null 2>&1
+  echo alpha > "$wt_parent/alpha/alpha.txt"
+  git -C "$wt_parent/alpha" add . >/dev/null 2>&1
+  git -C "$wt_parent/alpha" commit -m alpha >/dev/null 2>&1
+  base_count=$(git -C "$test_repo" rev-list --count dev)
+
+  # 主检出的「已暂存」在途改动（execMerge 会 stash push → merge → stash pop）
+  echo "staged-change" > "$test_repo/staged.txt"
+  git -C "$test_repo" add staged.txt >/dev/null 2>&1
+
+  mkdir -p "$test_repo/.pi/extensions-data/pi-worktree"
+  printf '%s' '{"groups":{"grp":{"baseRef":"dev","members":["alpha"],"mergeStrategy":"squash","env":{"nodeModules":"none","symlinkTargetIds":[]}}}}' \
+    > "$test_repo/.pi/extensions-data/pi-worktree/config.json"
+
+  tui_expect_test "pi-logger,worktree" "
+    send \"/worktree group merge grp\r\"
+    set timeout 20
+    expect -re {合并成员} { }
+    sleep 0.5
+    send \"\r\"
+    # 合并完成后会再问一次「统一对齐」：等它出现再确认（等不到则 Esc 兜底关覆盖层）
+    set timeout 45
+    expect -re {统一对齐} { }
+    sleep 0.5
+    send \"\r\"
+    sleep 1
+    send \"\033\"
+    sleep 0.5
+  " 90 "" "$test_repo"
+
+  # ① 有界轮询：目标分支多出 1 个 squash 提交
+  merged=0
+  for i in $(seq 1 20); do
+    if [[ "$(git -C "$test_repo" rev-list --count dev)" -ge "$((base_count + 1))" ]]; then
+      merged=1
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$merged" != "1" ]]; then
+    echo "FAIL: dev did not gain the squash commit (base=$base_count now=$(git -C "$test_repo" rev-list --count dev))"
+    git -C "$test_repo" log dev --oneline | head -5
+    worktree_e2e_dump_logs "$test_repo"
+    exit 1
+  fi
+  echo "PASS: dev gained 1 squash commit"
+
+  # ② squash 提交里不含 staged.txt（未被 sweep 进去）
+  if git -C "$test_repo" show --name-only --pretty=format: dev | grep -qx "staged.txt"; then
+    echo "FAIL: staged.txt was swept into the squash commit"
+    git -C "$test_repo" show --name-only --pretty=format: dev
+    exit 1
+  fi
+  echo "PASS: staged.txt not in squash commit"
+
+  # ③ 仍是已暂存状态、内容未变
+  if ! git -C "$test_repo" diff --cached --name-only | grep -qx "staged.txt"; then
+    echo "FAIL: staged.txt is no longer staged after merge"
+    git -C "$test_repo" status --porcelain
+    exit 1
+  fi
+  if [[ "$(cat "$test_repo/staged.txt")" != "staged-change" ]]; then
+    echo "FAIL: staged.txt content changed: $(cat "$test_repo/staged.txt")"
+    exit 1
+  fi
+  echo "PASS: staged.txt still staged and unchanged"
+
+  # ④ 没有残留 stash（stash pop 已恢复用户的在途改动）
+  if [[ -n "$(git -C "$test_repo" stash list)" ]]; then
+    echo "FAIL: stash left behind: $(git -C "$test_repo" stash list | head -3)"
+    exit 1
+  fi
+  echo "PASS: no stash left behind"
+
+  git -C "$test_repo" worktree remove "$wt_parent/alpha" --force >/dev/null 2>&1 || true
   rm -rf "$sandbox"
   tui_cleanup
 TEST

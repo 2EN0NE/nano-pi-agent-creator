@@ -138,7 +138,12 @@ export function buildTitleMessages(
 const RENAME_TIMEOUT_MS = 30_000;
 
 /**
- * 按 selector 解析模型（仅 ref 精确指定）。返回 null = 不可用，调用方静默跳过。
+ * 按 selector 解析模型。返回 null = 不可用，调用方静默跳过。
+ *
+ * - `ref` 为空（含纯空白）= 「跟随当前模型」：回退 ctx.model，仍过 hasConfiguredAuth。
+ * - `ref` 非空：精确指定 provider/modelId，解析/查找/凭证任一失败即 null（不回落，
+ *   避免用户手写的 ref 拼错时被静默换成别的模型）。
+ *
  * 走 ctx.modelRegistry（pi 三源合并后的模型注册表），hasConfiguredAuth 过滤掉未配置凭证的模型。
  * ref 拆分统一走 pure.parseModelRef（与 env 覆盖校验同一实现，见 pure.ts）。
  *
@@ -148,6 +153,11 @@ export function resolveRenameModel(
 	ctx: ExtensionContext,
 	selector: { type: 'ref'; ref: string },
 ): Model<Api> | null {
+	if (selector.ref.trim() === '') {
+		const current = ctx.model;
+		if (!current) return null;
+		return ctx.modelRegistry.hasConfiguredAuth(current) ? current : null;
+	}
 	const parsed = parseModelRef(selector.ref);
 	if (!parsed) return null;
 	const model = ctx.modelRegistry.find(parsed.provider, parsed.modelId);

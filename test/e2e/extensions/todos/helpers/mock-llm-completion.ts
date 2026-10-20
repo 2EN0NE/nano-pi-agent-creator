@@ -7,7 +7,7 @@
  * 默认回复："All done! The fix is ready for review."
  */
 
-import { registerFauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai';
+import { registerFauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-agent';
 
 const MOCK_PROVIDER = 'mock-llm-completion';

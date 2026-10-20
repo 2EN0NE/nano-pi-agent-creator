@@ -24,12 +24,14 @@ test_it "expect: /ci-watch panel opens with 监控分支 as first item" <<'TEST'
   tui_expect_test "ci-watch,pi-logger" '
     # 打开面板
     send "/ci-watch\r"
-    sleep 1
+    # 就绪条件：等面板条目真的渲染出来（固定 sleep 在负载下会抢跑 → 假失败）
+    wait_for {监控分支}
+    sleep 0.5
 
     # 按 esc 关闭面板（模板收尾会自动 /quit 退出）
     send "\033"
     sleep 0.5
-  ' 15
+  ' 60
 
   if [[ "$TUI_EXIT_CODE" -ne 0 && "$TUI_EXIT_CODE" -ne 124 ]]; then
     echo "FAIL: unexpected exit code $TUI_EXIT_CODE"
@@ -46,12 +48,14 @@ test_it "expect: /ci-watch panel opens with 监控分支 as first item" <<'TEST'
   fi
 
   # 断言"监控分支"出现在"监控 PR"之前（第一项）
-  branch_line=$(extract_visible_text "$TUI_OUTPUT_FILE" | grep -n "监控分支" | head -1 | cut -d: -f1)
-  pr_line=$(extract_visible_text "$TUI_OUTPUT_FILE" | grep -n "监控 PR" | head -1 | cut -d: -f1)
-  if [[ -n "$branch_line" && -n "$pr_line" && "$branch_line" -lt "$pr_line" ]]; then
-    echo "PASS: 监控分支 listed before 监控 PR (branch@$branch_line < pr@$pr_line)"
+  # ⚠ 用「字节偏移」而非行号：TUI 重绘走光标定位，同一帧的多个条目可能落在同一条
+  # 物理行里（pi-tui 不按可视行输出 \n），行号比较会假失败（实测 branch=4 pr=4）。
+  branch_off=$(extract_visible_text "$TUI_OUTPUT_FILE" | grep -b -o "监控分支" | head -1 | cut -d: -f1)
+  pr_off=$(extract_visible_text "$TUI_OUTPUT_FILE" | grep -b -o "监控 PR" | head -1 | cut -d: -f1)
+  if [[ -n "$branch_off" && -n "$pr_off" && "$branch_off" -lt "$pr_off" ]]; then
+    echo "PASS: 监控分支 listed before 监控 PR (branch@$branch_off < pr@$pr_off)"
   else
-    echo "FAIL: 监控分支 not first (branch=$branch_line pr=$pr_line)"
+    echo "FAIL: 监控分支 not first (branch=$branch_off pr=$pr_off)"
     extract_visible_text "$TUI_OUTPUT_FILE" | grep -n "监控" | head -10
     exit 1
   fi
@@ -77,8 +81,10 @@ GH
 
   tui_expect_test "ci-watch,pi-logger" '
     send "/ci-watch invalid@ref!\r"
-    sleep 2
-  ' 15
+    # 就绪条件：等校验拒绝提示出现（而不是赌 2s 内一定走完命令 handler）
+    wait_for {无效的引用}
+    sleep 0.5
+  ' 60
 
   if [[ "$TUI_EXIT_CODE" -ne 0 && "$TUI_EXIT_CODE" -ne 124 ]]; then
     echo "FAIL: unexpected exit code $TUI_EXIT_CODE"
@@ -140,11 +146,13 @@ GH
   tui_expect_test "ci-watch,pi-logger" '
     # 开始监控 main（mock gh 返回 pending → 进入轮询 sleep）
     send "/ci-watch main\r"
-    sleep 3
+    # 就绪条件：等「开始监控」通知真的出现（再 /reload 才算"在途"）
+    wait_for {开始监控}
+    sleep 1
     # 会话重载：session_shutdown → abort 在途轮询 → 代际检查
     send "/reload\r"
     sleep 4
-  ' 20
+  ' 60
 
   if [[ "$TUI_EXIT_CODE" -ne 0 && "$TUI_EXIT_CODE" -ne 124 ]]; then
     echo "FAIL: unexpected exit code $TUI_EXIT_CODE"

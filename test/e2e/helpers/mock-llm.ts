@@ -20,10 +20,117 @@
 
 import { registerFauxProvider } from '@earendil-works/pi-ai/compat';
 import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-agent';
 
 const MOCK_PROVIDER = 'mock-llm';
 const MOCK_MODEL_ID = 'mock-model-1';
+
+// ── MOCK_LLM_TOOL_SCRIPT（ADR-0045 D3）：按脚本注入工具调用 ─────────────────────
+//
+// 多 agent 自主闭环 e2e 的外置大脑：让"两个真实 pi 进程"能各自按剧本行动
+// （A 派发 → B 认领/交付 → A 验收），从而验证**机制支持 agent 自主**。
+//
+// 注意：本文件被 run-e2e.sh **单文件拷贝**成 `<sandbox>/.pi/extensions/mock-llm/index.ts`，
+// 因此纯逻辑必须内联在此（不能拆到同目录文件）。
+
+/** 脚本的一步：一次工具调用，或一段文本（吸收中间轮次 / 收尾） */
+export interface ToolScriptStep {
+	tool?: string;
+	args?: Record<string, unknown>;
+	text?: string;
+}
+
+/**
+ * 解析 `MOCK_LLM_TOOL_SCRIPT`。空/未设置 → 空数组（不影响现有用例）。
+ * 非法输入 **fail fast 并注明变量名**——静默跳过会让 e2e 变成"跑了但没验证"。
+ */
+export function parseToolScript(raw: string | undefined): ToolScriptStep[] {
+	if (!raw || !raw.trim()) return [];
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (e) {
+		throw new Error(
+			`MOCK_LLM_TOOL_SCRIPT 不是合法 JSON：${e instanceof Error ? e.message : String(e)}`,
+		);
+	}
+	if (!Array.isArray(parsed)) throw new Error('MOCK_LLM_TOOL_SCRIPT 必须是 JSON 数组');
+	return parsed.map((el, i): ToolScriptStep => {
+		if (typeof el !== 'object' || el === null) {
+			throw new Error(`MOCK_LLM_TOOL_SCRIPT[${i}] 必须是对象`);
+		}
+		const { tool, args, text } = el as { tool?: unknown; args?: unknown; text?: unknown };
+		if (text !== undefined) {
+			if (typeof text !== 'string') {
+				throw new Error(`MOCK_LLM_TOOL_SCRIPT[${i}].text 必须是字符串`);
+			}
+			return { text };
+		}
+		if (typeof tool !== 'string') {
+			throw new Error(`MOCK_LLM_TOOL_SCRIPT[${i}] 需要 tool（字符串）或 text`);
+		}
+		if (args !== undefined && (typeof args !== 'object' || args === null)) {
+			throw new Error(`MOCK_LLM_TOOL_SCRIPT[${i}].args 必须是对象`);
+		}
+		return { tool, args: (args ?? {}) as Record<string, unknown> };
+	});
+}
+
+/** 递归收集请求消息里的全部文本（含嵌套 content 数组） */
+function collectText(value: unknown, out: string[]): void {
+	if (typeof value === 'string') {
+		out.push(value);
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const v of value) collectText(v, out);
+		return;
+	}
+	if (value && typeof value === 'object') {
+		for (const v of Object.values(value as Record<string, unknown>)) collectText(v, out);
+	}
+}
+
+/**
+ * 从**请求消息**里抽取运行时占位符的值。
+ *
+ * 任务号 `M-xxxxxx` 由 org 运行时生成，脚本无法预知，故写 `{{taskId}}` 由这里填。
+ */
+export function extractScriptVars(messages: unknown): Record<string, string> {
+	const texts: string[] = [];
+	collectText(messages, texts);
+	const taskId = texts.join('\n').match(/\bM-[a-z0-9]{6,}\b/)?.[0] ?? '';
+	return { taskId };
+}
+
+/** 递归替换 `{{key}}`；未知 key → 空串（不把语法泄漏给模型） */
+export function applyVars(value: unknown, vars: Record<string, string>): unknown {
+	if (typeof value === 'string') {
+		return value.replace(/\{\{(\w+)\}\}/g, (_m, k: string) => vars[k] ?? '');
+	}
+	if (Array.isArray(value)) return value.map((v) => applyVars(v, vars));
+	if (value && typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+			out[k] = applyVars(v, vars);
+		}
+		return out;
+	}
+	return value;
+}
+
+/** 成员目录里的脚本文件名（被唤醒进程无法从 env 收脚本，改由 cwd 文件提供；shell 侧按此硬编码，见 smoke.test.sh） */
+const TOOL_SCRIPT_FILE = '.mock-llm-script.json';
+
+function readCwdScriptFile(): string | undefined {
+	try {
+		return readFileSync(join(process.cwd(), TOOL_SCRIPT_FILE), 'utf8');
+	} catch {
+		return undefined;
+	}
+}
 
 export default function (pi: ExtensionAPI) {
 	const faux = registerFauxProvider({
@@ -50,7 +157,34 @@ export default function (pi: ExtensionAPI) {
 	// marker 应已被 context hook 过滤，不出现在任何请求里。
 	const recordContext = process.env.MOCK_LLM_RECORD_CONTEXT === '1';
 	const INVISIBLE_MARKER = 'custom-compaction:invisible-continue';
-	if (dangerousCommand) {
+
+	// MOCK_LLM_TOOL_SCRIPT：顺序回放脚本（ADR-0045 D3）——多 agent 自主闭环的"外置大脑"。
+	// 优先于其它模式（显式 opt-in）。每次 LLM 请求消费一步；用尽后回落到收尾文本，
+	// 否则 agent 会因 "No more faux responses queued" 卡住。
+	//
+	// 回退：环境变量缺失时读 **cwd** 下的 `.mock-llm-script.json`。
+	// 用途是 ADR-0048 `E1`——被「唤醒」拉起的成员进程只继承 PATH/HOME/ORG_ROOT，
+	// 无法从唤醒者注入 MOCK_LLM_TOOL_SCRIPT；脚本改放成员目录，成员自己读到。
+	const script = parseToolScript(process.env.MOCK_LLM_TOOL_SCRIPT ?? readCwdScriptFile());
+	if (script.length > 0) {
+		let cursor = 0;
+		const scriptLoop = async (context: unknown) => {
+			const vars = extractScriptVars((context as { messages?: unknown })?.messages);
+			const step = script[cursor];
+			cursor += 1;
+			faux.appendResponses([scriptLoop]); // 无限链：后续请求仍有响应
+			if (!step) return fauxAssistantMessage('Mock LLM script finished.');
+			if (typeof step.text === 'string') {
+				return fauxAssistantMessage(applyVars(step.text, vars) as string);
+			}
+			// fauxToolCall 的形参类型是 ToolCall["arguments"]（JSON 值），不能直接喂 Record<string, unknown>
+			const args = applyVars(step.args ?? {}, vars) as Parameters<typeof fauxToolCall>[1];
+			return fauxAssistantMessage([fauxToolCall(step.tool as string, args)], {
+				stopReason: 'toolUse' as never,
+			});
+		};
+		faux.setResponses([scriptLoop]);
+	} else if (dangerousCommand) {
 		let toolsLeft = dangerousRepeat;
 		const loop = async () => {
 			faux.appendResponses([loop]);

@@ -10,7 +10,7 @@
 #   - 手动沙箱搭建：mock-llm 在 test/ 下，不在标准的 extensions/ 中
 #
 # 运行：
-#   bash test/scripts/run-e2e.sh --ext pi-rate-limiter
+#   bash test/e2e/scripts/run-e2e.sh --ext pi-rate-limiter
 #
 # 验证内容：
 #   1. mock-llm + pi-rate-limiter 同时加载无报错

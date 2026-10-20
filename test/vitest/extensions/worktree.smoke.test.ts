@@ -133,6 +133,33 @@ describe('worktree extension — getRepoRoot (real git)', () => {
 		expect(getRepoRoot(outside)).toBeNull();
 		rmSync(outside, { recursive: true, force: true });
 	});
+
+	it('finds main repo root from inside a member worktree（组声明锚点，ADR-0062）', async () => {
+		const wtDir = `${repoDir}-worktrees/wt-anchor`;
+		mkdirSync(`${repoDir}-worktrees`, { recursive: true });
+		execSync(`git worktree add -b wt/anchor "${wtDir}" main`, { cwd: repoDir });
+
+		// 组声明只写在**主仓库**（仓库级）；成员 worktree 内没有自己的 .pi/ 声明
+		const cfgDir = join(repoDir, '.pi/extensions-data/pi-worktree');
+		mkdirSync(cfgDir, { recursive: true });
+		writeFileSync(
+			join(cfgDir, 'config.json'),
+			JSON.stringify({ groups: { fta: { baseRef: 'main', members: ['a', 'b'] } } }),
+		);
+		const sub = join(wtDir, 'nested-dir');
+		mkdirSync(sub, { recursive: true });
+
+		// 硬约束（AGENTS.md「仓库级 vs 目录级」+ ADR-0062 约束 2）：
+		// 从成员 worktree（及其子目录）必须解析回**主仓库根**（--git-common-dir）
+		expect(getRepoRoot(wtDir)).toBe(repoDir);
+		expect(getRepoRoot(sub)).toBe(repoDir);
+
+		// 由此锚点读到的是仓库级声明——若锚到 worktree 自身，组会静默消失
+		const { loadGroups } = await import(resolve(LIB_DIR, 'groups.ts'));
+		expect(Object.keys(loadGroups(getRepoRoot(wtDir)!).groups)).toEqual(['fta']);
+
+		execSync(`git worktree remove "${wtDir}" --force`, { cwd: repoDir });
+	});
 });
 
 // ═══════════════════════════════════════════

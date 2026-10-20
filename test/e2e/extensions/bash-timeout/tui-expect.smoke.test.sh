@@ -20,8 +20,11 @@ test_it "expect: default timeout kills a long-running command" <<'TEST'
   MOCK_LLM_TOOL_CALLS=1 MOCK_LLM_BASH_COMMAND="sleep 30" tui_expect_test "bash-timeout" '
     exec sh -c {mkdir -p .pi/extensions-data/bash-timeout && echo "{\"defaultTimeoutSeconds\": 2}" > .pi/extensions-data/bash-timeout/config.json}
     send "hi\r"
-    sleep 12
-  ' 25
+    # 就绪条件：等超时杀进程的提示真的出现（固定 sleep 在负载下会抢跑 → 假失败）。
+    # wait_for 超时会以 125 退出并带定位标记，比"断言忽然失败"更好排查。
+    wait_for {timed out}
+    sleep 1
+  ' 40
 
   tui_assert_contains "timed out" "bash command should be killed by default timeout"
   tui_cleanup

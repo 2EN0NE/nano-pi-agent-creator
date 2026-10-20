@@ -61,8 +61,13 @@ const THINKING_LEVEL_VALUES: ReadonlyArray<ModelThinkingLevel> = [
 	'max',
 ];
 
+/** 「跟随当前模型」在 UI 上的显示名（值为空 ref，见 llm.resolveRenameModel）。 */
+const FOLLOW_CURRENT_LABEL = '跟随当前模型';
+
 function modelRefOf(cfg: RenameSessionConfig): string {
-	return cfg.model.type === 'ref' && cfg.model.ref ? cfg.model.ref : '';
+	// trim：纯空白 ref 与 llm.resolveRenameModel 同口径（空 = 跟随当前模型），
+	// 否则面板会把它当成一个「不可用的显式模型」拦下开启。
+	return cfg.model.type === 'ref' ? cfg.model.ref.trim() : '';
 }
 
 /** id → config patch（纯函数，可单测）。 */
@@ -130,7 +135,7 @@ export class RenameSettingsPanel implements Component {
 			{
 				id: 'model',
 				label: '重命名模型',
-				currentValue: modelRefOf(cfg) || '(未配置)',
+				currentValue: modelRefOf(cfg) || FOLLOW_CURRENT_LABEL,
 				submenu: (_cur: string, done: (v?: string) => void) => this.buildModelSubmenu(done),
 			},
 			{
@@ -159,7 +164,7 @@ export class RenameSettingsPanel implements Component {
 	}
 
 	private applyChange(id: string, newValue: string): void {
-		// 开开关前置校验：必须先有「可用」的重命名模型（ref 已配置且在可用模型列表中）。
+		// 开开关前置校验：空 ref（跟随当前模型）放行；显式 ref 必须在可用模型列表中。
 		// SettingsList 的循环切换会先改 currentValue 再回调（onChange 无法阻止），
 		// 校验失败必须 updateValue 回滚 UI，否则屏幕显示「开」但未落盘。
 		if (id === 'enabled' && newValue === '开' && !this.canEnable()) {
@@ -173,18 +178,26 @@ export class RenameSettingsPanel implements Component {
 		}
 		if (this.deps.applyPatch(patch)) {
 			log.info(`setting changed ${id}=${newValue}`);
+			// SettingsList 回调前已把 currentValue 改成原始值；模型项的「跟随当前模型」
+			// value 是空串，不回写显示值就会留一个空的值列（需重开面板才恢复）。
+			if (id === 'model') {
+				this.mainSettings?.updateValue(
+					'model',
+					modelRefOf(this.deps.getConfig()) || FOLLOW_CURRENT_LABEL,
+				);
+			}
 		} else {
 			this.deps.notify('保存失败', 'error');
 		}
 	}
 
-	/** 校验「自动重命名」能否开启：模型 ref 已配置且可用（否则 notify 提示原因）。 */
+	/**
+	 * 校验「自动重命名」能否开启：空 ref（跟随当前模型）直接放行——当前模型是否有凭证
+	 * 由触发点每轮重查（见 llm.resolveRenameModel），不在这里拦；显式 ref 须在可用列表内。
+	 */
 	private canEnable(): boolean {
 		const ref = modelRefOf(this.deps.getConfig());
-		if (!ref) {
-			this.deps.notify('请先配置重命名模型（回车「重命名模型」选择）', 'warning');
-			return false;
-		}
+		if (!ref) return true;
 		if (!this.deps.getModelSpecs().includes(ref)) {
 			this.deps.notify(`模型 ${ref} 不可用，请先在「重命名模型」中重新选择`, 'warning');
 			return false;
@@ -194,15 +207,22 @@ export class RenameSettingsPanel implements Component {
 
 	// ── 二级 submenu ──
 
-	/** 模型列表（SelectList），Enter 选值 → done(spec)，Esc → done()。 */
+	/** 模型列表（SelectList）：首项「跟随当前模型」= 空 ref，其余为具体模型。 */
 	private buildModelSubmenu(done: (v?: string) => void): Component {
 		const current = modelRefOf(this.deps.getConfig());
 		const specs = this.deps.getModelSpecs();
-		const items: SelectItem[] = specs.map((spec) => ({
-			value: spec,
-			label: spec,
-			description: spec === current ? '当前' : '可选模型',
-		}));
+		const items: SelectItem[] = [
+			{
+				value: '',
+				label: FOLLOW_CURRENT_LABEL,
+				description: current === '' ? '当前' : '不指定，使用会话当前模型',
+			},
+			...specs.map((spec) => ({
+				value: spec,
+				label: spec,
+				description: spec === current ? '当前' : '可选模型',
+			})),
+		];
 		return this.buildSelectSubmenu('选择重命名模型', items, done);
 	}
 

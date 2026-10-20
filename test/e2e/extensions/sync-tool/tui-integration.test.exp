@@ -1,11 +1,12 @@
 #!/usr/bin/env expect
 # ──────────────────────────────────────────────────────────────────────────────
-# sync-tool 配置重置 — expect 交互测试（ADR-0037）
+# sync-tool 配置重置 — expect 交互测试（ADR-0037 修订 2）
 #
 # 验证 raw-mode 多选提示的按键闭环：
-#   1. 更新插件（有 config.json）→ 弹出聚合多选
+#   1. 受管资产 edit 被默认剪枝删除（有 config.json）→ 弹出聚合多选
 #   2. Space 勾选 → Enter 确认
-#   3. 勾选项的 config.json 被删除（回落默认 profile）
+#   3. 勾选项的 config.json 被删除（回落默认 profile），且生成
+#      config.json.bak-* 备份（可恢复，修订 2 新增）
 #
 # 由 run-e2e.sh 自动发现并执行（约定命名 tui-integration.test.exp）。
 # 直接调试：expect test/e2e/extensions/sync-tool/tui-integration.test.exp
@@ -23,10 +24,11 @@ set tmp_root [exec mktemp -d]
 set target "$tmp_root/target"
 set cfg "$tmp_root/sync-profiles.yaml"
 
-# 预置旧版 quit.ts（内容不同 → sync 判定 UPDATE）+ quit 的 pi-config profile
-exec mkdir -p "$target/extensions" "$target/extensions-data/quit"
-exec sh -c "echo old > '$target/extensions/quit.ts'"
-exec sh -c "echo '{\"k\":\"v\"}' > '$target/extensions-data/quit/config.json'"
+# 预置受管资产 edit（在源清单但不在 profile 清单 → 默认剪枝删除 → 进 reset 候选）
+# 以及 edit 的 pi-config profile（被剪枝删除后进「配置重置」候选）
+exec mkdir -p "$target/extensions/edit" "$target/extensions-data/edit"
+exec sh -c "echo managed > '$target/extensions/edit/index.ts'"
+exec sh -c "echo '{\"k\":\"v\"}' > '$target/extensions-data/edit/config.json'"
 
 # 写临时 sync config（块式 YAML，避免 Tcl 方括号替换）
 set fh [open "$cfg" w]
@@ -50,7 +52,7 @@ expect {
 
 sleep 1
 
-# Space 勾选第一项（quit）
+# Space 勾选第一项（edit）
 send " "
 sleep 0.3
 # Enter 确认
@@ -66,12 +68,19 @@ expect {
 }
 
 # 勾选项的 config.json 应被删除（回落默认）
-if {[file exists "$target/extensions-data/quit/config.json"]} {
+if {[file exists "$target/extensions-data/edit/config.json"]} {
 	send_error "FAIL: config.json not reset after space+enter\n"
 	exit 1
-} else {
-	puts "PASS: config.json reset via space+enter"
 }
+
+# 删除前应生成 config.json.bak-* 备份（ADR-0037 修订 2）
+set bak [glob -nocomplain "$target/extensions-data/edit/config.json.bak-*"]
+if {[llength $bak] == 0} {
+	send_error "FAIL: no config.json.bak-* backup generated\n"
+	exit 1
+}
+
+puts "PASS: config.json reset with backup via space+enter"
 
 exec rm -rf "$tmp_root"
 exit 0

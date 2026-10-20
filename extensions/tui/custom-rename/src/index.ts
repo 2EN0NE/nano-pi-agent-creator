@@ -34,14 +34,15 @@ interface TurnEndLikeEvent {
 let renameInFlight = false;
 
 /**
- * 最近一次「模型不可用」告警对应的 model ref（session 级，模块单例）。
+ * 最近一次「模型不可用」告警对应的**模型身份**（session 级，模块单例）。
  *
- * 模型不可用（ref 未配置 / 未注册 / 无凭证）是配置问题而非瞬时错误——若每个成功 turn
- * 都重新告警会刷屏。因此同一 ref 只向用户告警一次，之后静默跳过；一旦用户通过
+ * 模型不可用（跟随的当前模型无凭证 / 指定 ref 未注册或无凭证）是配置问题而非瞬时错误——若每个成功 turn
+ * 都重新告警会刷屏。因此同一模型只向用户告警一次，之后静默跳过；一旦用户通过
  * /auto-rename 面板把 ref 换成可用模型（或模型恢复可用），下一个可触发 turn 重新评估，
  * 「按提示修好模型后本会话即可自动重命名」，无需 /reload 或新开会话。
  *
- * 缓存键为 config.model.ref 原始值：未配置时为空串，用户一旦填入模型即视为新 ref 重新评估。
+ * 缓存键 = 模型身份：显式 ref 用 ref 原始值；「跟随当前模型」用当时的 `provider/id`
+ * （当前模型可被 /model 换掉，若仍以恒为空串的 ref 作键，换了模型也会被静默跳过、不再告警）。
  */
 let warnedModelRef: string | null = null;
 
@@ -112,21 +113,30 @@ export default function renameSessionExtension(pi: ExtensionAPI): void {
 			}
 
 			// 6. 模型可用性检查：每次可触发 turn 都重查（registry 查找，廉价），配置修复后
-			// 自动恢复、无需 /reload。不可用属配置问题：同一 ref 只告警一次（warnedModelRef
-			// 缓存），避免每个成功 turn 刷 warning；且不消耗 lastAttemptCount / renameInFlight
-			// —— 用户按提示用 /auto-rename 换可用模型后，下一个成功 turn 即重新评估触发。
+			// 自动恢复、无需 /reload。不可用属配置问题：同一**模型身份**只告警一次
+			// （warnedModelRef 缓存），避免每个成功 turn 刷 warning；且不消耗
+			// lastAttemptCount / renameInFlight —— 用户按提示用 /auto-rename 换可用模型后，
+			// 下一个成功 turn 即重新评估触发。
 			// 实测高频坑：config 里的模型不在 modelRegistry（如 models.json 只配了 cli-proxy）。
+			const following = config.model.ref.trim() === '';
+			// 空 ref = 「跟随当前模型」：身份随 ctx.model 变化（/model 可中途换模型），
+			// 不能用恒为空串的 ref 作去重键，否则换了模型也不再告警。
+			const unavailableKey = following
+				? `follow:${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : '(none)'}`
+				: config.model.ref;
 			if (!resolveRenameModel(ctx, config.model)) {
-				const ref = config.model.ref || '(未配置)';
-				if (warnedModelRef === config.model.ref) {
-					log.debug('skip: model unavailable (already warned, ref=%s)', ref);
+				// 文案与「指定 ref 不可用」分开，否则会误导成配置写错
+				// （此时没有任何 ref 可写错，缺的是当前模型的凭证）。
+				const what = following ? '跟随的当前模型' : `模型 ${config.model.ref}`;
+				const hint = following
+					? '请为当前模型配置凭证，或用 /auto-rename 指定其他模型'
+					: '用 /auto-rename 选择可用模型后，下一成功轮自动重试';
+				if (warnedModelRef === unavailableKey) {
+					log.debug('skip: model unavailable (already warned, key=%s)', unavailableKey);
 				} else {
-					warnedModelRef = config.model.ref;
-					ctx.ui.notify(
-						`自动重命名未执行：模型 ${ref} 不可用。用 /auto-rename 选择可用模型后，下一成功轮自动重试`,
-						'warning',
-					);
-					log.warn('model unavailable (%s)', ref);
+					warnedModelRef = unavailableKey;
+					ctx.ui.notify(`自动重命名未执行：${what}不可用。${hint}`, 'warning');
+					log.warn('model unavailable (%s)', unavailableKey);
 				}
 				return;
 			}

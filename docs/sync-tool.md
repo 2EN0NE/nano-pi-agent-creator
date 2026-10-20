@@ -46,15 +46,23 @@ npx tsx scripts/sync-to-local-pi.ts --ext sandbox --ext pi-logger --theme nighto
 # 同步技能
 npx tsx scripts/sync-to-local-pi.ts --skill my-skill --target ./.pi/test
 
-# 同步到用户目录（⚠ 正确方式：用 profile 而非 --target）
+# 同步到用户目录
 npx tsx scripts/sync-to-local-pi.ts --profile user-install
+
+# 只同步单个插件到用户目录（推荐）
+npx tsx scripts/sync-to-local-pi.ts --profile user-install --ext permission-gate
 ```
 
-> ⚠️ **警告**：`--target` 内联模式**只应指向隔离测试目录**（如 `./.pi/test`），
-> **不要**用 `--target ~/.pi/agent` 直接同步到用户目录——请使用
-> `--profile user-install`（由 `sync-profiles.yaml` 管理资源边界）。
-> 内联模式**默认不删除**目标中任何文件；如需清空目标中不属于本次同步的
-> 资源，必须加 `--purge` 参数（会有 WARN 强警告）。
+> **同步到真实用户目录 `~/.pi/agent` 的三种方式：**
+>
+> - `--profile user-install`：整个 profile（按「受管资产」语义剪 stale）。
+> - `--profile user-install --ext <name>`：**单插件白名单**——只同步点名的资产，
+>   其他资源类型本次不参与，且**禁用 stale 剪枝**（绝不删除未点名的资产）；
+>   点名项不在该 profile 清单内时快速失败。
+> - `--ext <name> --target ~/.pi/agent`：inline 单插件，**默认不删除**任何文件。
+>
+> ⚠️ 唯一仍然硬阻断的是 **`--purge` 指向 `~/.pi` / `~/.pi/agent`**：`--purge` 会递归删除
+> 目标中不属于本次同步的一切，指向真实用户目录等于全毁（代码级护栏）。
 > （profile 模式的默认删除行为见下文「删除语义」——只剪「受管资产」。）
 
 ## 配置文件结构
@@ -225,6 +233,9 @@ cd ~/.pi/agent/extensions/sandbox && npm link @zenone/pi-logger
 - **受管资产**：目标中名字能在本仓库源清单（`extensions/`、`skills/`、`themes/`、`prompts/`）按名匹配到的资产。
 - **有效集合** = include（`*` 或显式清单）减去 exclude。
 - **第三方资产**（名字不在源清单，如 herdr 安装的集成）默认**永不删除**，仅 `--purge` 清。
+- **墓碑清单**（`retired`，`sync-profiles.yaml` 顶层字段）：本仓库曾管理、现已下架/内嵌的扩展名。
+  它们并入源清单，目标残留被当作受管资产删除——否则被误判为第三方永久保留，与内嵌后重新注册的
+  同名扩展重名（`tools:1` / `tools:2`）。见 ADR-0037 修订 1。
 - **保护名单**（`PROTECTED_EXTERNAL`）中的第三方集成，`--purge` 也跳过。
 - **形态冲突残留**：目标里名字在源清单、但形态与源不一致的残留（源是目录扩展、目标残留同名单文件
   `.ts`，或反向）也会被删除，且**所有模式**（profile / inline，含无 `--purge`）都修正——这属于形态
@@ -279,11 +290,13 @@ npx tsx scripts/sync-to-local-pi.ts --profile user-install --purge
 
 ## 配置重置（pi-config profile）
 
-被**删除**或**更新**、且目标下存在 `extensions-data/<plugin>/config.json`
-（即该插件保存过 pi-config profile）的插件，sync 结束后会弹出一个聚合多选列表：
+被**删除**、且目标下存在 `extensions-data/<plugin>/config.json`
+（即该插件保存过 pi-config profile）的插件，sync 结束后会弹出一个聚合多选列表
+（「被更新」的插件不再进列表——更新不重置用户配置，见 ADR-0037 修订 2）：
 
 - `↑/↓` 移动、`空格` 勾选、`a` 全选/全不选、`回车` 确认、`Ctrl+C` 中止（=全保留）
-- 勾选 = 重置：删除 `config.json`，插件下次启动回落内嵌默认 profile
+- 勾选 = 重置：先备份 `config.json` 到 `config.json.bak-<YYYYMMDD-HHMMSS>`，再删除，
+  插件下次启动回落内嵌默认 profile（同目录仅保留最新 3 份备份，更早的自动清理）
 - 未勾选 = 保留现有配置
 
 非交互环境（CI / husky / e2e / 管道）自动降级为**全保留**并打印 `WARN`；

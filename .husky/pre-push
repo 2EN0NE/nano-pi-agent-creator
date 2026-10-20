@@ -40,6 +40,13 @@ if echo "$CHANGED_FILES" | grep -q '\.tsx\?$'; then
     exit 1
   fi
 
+	echo "🔍 pre-push: config 锚点门禁（阻塞，对齐 CI config-compliance job）..."
+  npm run lint:config:anchor
+  if [ $? -ne 0 ]; then
+    echo "❌ 仓库级配置消费者未声明解析锚点。见 AGENTS.md「项目级配置的解析锚点」。"
+    exit 1
+  fi
+
 	echo "🔍 pre-push: config 合规门禁（WARN，不阻塞）..."
   npm run lint:config
   echo "⚠️  config 合规违规已列出（当前为 WARN，不阻塞推送）。请尽快将基础组件与独立插件解耦。"
@@ -56,35 +63,50 @@ fi
 # 提取变更的扩展名和技能名
 EXTS=""
 SKILLS=""
+BENCH_CHANGED=""
+# e2e 运行器 / TUI 助手变更 → 影响**所有**模块，用「代表 shard」做金丝雀（见文件末尾）
+RUNNER_CHANGED=""
 for file in $CHANGED_FILES; do
+  name=""
   case "$file" in
-    # 目录扩展优先匹配：extensions/category/name/index.ts → name
-    # 必须在单文件匹配之前，避免 index.ts 被 *.ts 模式误匹配
-    extensions/*/index.ts)
-      name=$(basename "$(dirname "$file")")
-      EXTS="$EXTS $name"
+    # e2e 基础设施（run-e2e.sh、tui-functions.sh 等）→ 影响所有模块，触发金丝雀分片
+    test/e2e/scripts/*|test/e2e/helpers/*)
+      RUNNER_CHANGED=1
       ;;
-    # 单文件扩展：extensions/category/name.ts → name
-    # ⚠ bash case 中 * 会匹配斜杠，必须排除深层嵌套文件
-    # 如 extensions/cat/name/sub.ts 应跳过（属于目录扩展的内部文件）
-    extensions/*/*.ts)
+    # bench/ 工具链变更 → 触发 bench python 单测 + bench-run 技能 e2e（见测试分析发现 P1）
+    bench/*)
+      BENCH_CHANGED=1
+      ;;
+    # 顶层技能：skills/<category>/<name>/SKILL.md 或 skills/<name>/SKILL.md
+    skills/*/*/SKILL.md|skills/*/SKILL.md)
+      name=$(basename "$(dirname "$file")")
+      SKILLS="$SKILLS $name"
+      ;;
+    # 扩展资产：extensions/<category>/<name>/** —— 入口 index.ts、单文件 name.ts、
+    # 内部 lib/**、内嵌 skills/**（ADR-0022：内嵌技能随扩展分发，故归其扩展名下）
+    # ⚠ 历史缺陷：过去只匹配 extensions/*/index.ts 与 extensions/*/*.ts，导致
+    # extensions/<cat>/<name>/lib/*.ts 这类嵌套改动被整段跳过——改了实现却不在
+    # 推送前跑该模块 e2e。统一按「extensions/ 之后的第 2 段」取模块名。
+    extensions/*)
       rel="${file#extensions/}"
-      case "$rel" in
-        */*/*) ;;  # 超过1层目录 → 跳过
-        *)
-          name=$(basename "$file" .ts)
-          EXTS="$EXTS $name"
-          ;;
+      rest="${rel#*/}" # 去掉 category 段
+      case "$rest" in
+        */*) name="${rest%%/*}" ;;  # 目录扩展（入口 / 内部文件 / 内嵌技能）
+        *.ts) name="${rest%.ts}" ;; # 单文件扩展 extensions/<cat>/<name>.ts
+        *) ;;                       # 其他（无扩展名归属）→ 不触发
       esac
+      if [ -n "$name" ]; then EXTS="$EXTS $name"; fi
       ;;
-    # 技能在分类子目录中：skills/category/name/SKILL.md
-    skills/*/*/SKILL.md)
-      name=$(basename "$(dirname "$file")")
-      SKILLS="$SKILLS $name"
+    # e2e 测试自身变更 → 触发被测模块（改断言 / 加用例都必须真的跑一遍）
+    test/e2e/extensions/*)
+      rel="${file#test/e2e/extensions/}"
+      name="${rel%%/*}"
+      if [ -n "$name" ]; then EXTS="$EXTS $name"; fi
       ;;
-    skills/*/SKILL.md)
-      name=$(basename "$(dirname "$file")")
-      SKILLS="$SKILLS $name"
+    test/e2e/skills/*)
+      rel="${file#test/e2e/skills/}"
+      name="${rel%%/*}"
+      if [ -n "$name" ]; then SKILLS="$SKILLS $name"; fi
       ;;
   esac
 done
@@ -94,11 +116,38 @@ if echo "$CHANGED_FILES" | grep -q '^scripts/'; then
   EXTS="$EXTS sync-tool"
 fi
 
+# bench/ 变更 → 先跑 bench python 单测（对齐 CI bench-unit job），
+# 并把 bench-run 加入 SKILLS 以复用下方的 e2e 循环（测试目录 test/e2e/skills/bench-run/）。
+if [ -n "$BENCH_CHANGED" ]; then
+  echo "🔍 pre-push: bench 单元测试..."
+  if command -v python3 >/dev/null 2>&1; then
+    for t in bench/test_*.py; do
+      python3 "$t" || { echo "❌ bench 单测失败：$t"; exit 1; }
+    done
+  else
+    echo "⚠️  python3 缺失，跳过 bench 单测"
+  fi
+  SKILLS="$SKILLS bench-run"
+fi
+
 # 去重
 EXTS=$(echo "$EXTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
 SKILLS=$(echo "$SKILLS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
 
-if [ -z "$EXTS" ] && [ -z "$SKILLS" ]; then
+# 只保留仍有测试目录的模块：删除扩展/技能时，变更文件列表仍会带出它的名字，
+# 但 `test/e2e/<class>/<name>/` 已随之删除，run-e2e.sh 会以 «No test files found» 失败，
+# 把一次纯删除的推送堵死（实测：dev 移除 git-checkpoint 后 pre-push 必红）。
+EXTS_KEPT=""
+for ext in $EXTS; do
+  if [ -d "test/e2e/extensions/$ext" ]; then EXTS_KEPT="$EXTS_KEPT $ext"; fi
+done
+EXTS="$EXTS_KEPT"
+SKILLS_KEPT=""
+for skill in $SKILLS; do
+  if [ -d "test/e2e/skills/$skill" ]; then SKILLS_KEPT="$SKILLS_KEPT $skill"; fi
+done
+SKILLS="$SKILLS_KEPT"
+if [ -z "$EXTS" ] && [ -z "$SKILLS" ] && [ -z "$RUNNER_CHANGED" ]; then
   # 没有变更涉及的扩展/技能，跳过
   exit 0
 fi
@@ -131,6 +180,20 @@ for skill in $SKILLS; do
     ALL_PASS=false
   fi
 done
+
+# e2e 运行器 / TUI 助手变更：影响所有模块，但逐个跑全量太慢。
+# 用「固定代表分片」做金丝雀：能抓住脚本语法错、参数解析错、_shard_match 误选、
+# 沙箱/expect 助手失效这类全局性回归；剩余模块由 CI 分片矩阵覆盖。
+if [ -n "$RUNNER_CHANGED" ]; then
+  echo "   → e2e 基础设施变更：金丝雀分片（shard 0/8）"
+  CI=true bash test/e2e/scripts/run-e2e.sh --shard 0/8 >/dev/null 2>&1
+  if [ $? -eq 0 ] || [ $? -eq 124 ]; then
+    echo "      ✅ canary shard passed"
+  else
+    echo "      ⚠️  canary shard failed（run-e2e.sh / tui-functions.sh 可能已坏）"
+    ALL_PASS=false
+  fi
+fi
 
 if [ "$ALL_PASS" = false ]; then
   echo "⚠️  Some e2e tests flagged review-required or had failures."

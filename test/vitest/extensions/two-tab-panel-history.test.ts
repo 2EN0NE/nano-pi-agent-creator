@@ -35,6 +35,15 @@ let tmpCwd: string;
 const origHome = process.env.HOME;
 const CUR_SESSION = 'session-cur-0001';
 
+/**
+ * 审计记录的「当前时间」锚点。
+ *
+ * 不可写死日期：分析面板默认只统计最近 30 天（analytics.ts 的 cutoff），
+ * 写死的历史日期一旦超出窗口就会被过滤 → 用例随时间流逝必然转红（时间炸弹）。
+ * 同时它保证同一用例的多条记录 ts 完全一致（排序稳定）。
+ */
+const NOW = new Date().toISOString();
+
 function mockTheme(): PanelTheme {
 	return { fg: (_c: string, t: string) => t, bold: (s: string) => s };
 }
@@ -46,7 +55,8 @@ function auditDir(): string {
 
 function appendEntries(entries: AuditEntry[]): void {
 	mkdirSync(auditDir(), { recursive: true });
-	const file = join(auditDir(), '2026-09-02.jsonl');
+	// 分片名与 audit-log 约定一致（= 记录 ts 的 YYYY-MM-DD），同样不可写死日期
+	const file = join(auditDir(), `${entries[0].ts.slice(0, 10)}.jsonl`);
 	const lines = entries.map((e) => JSON.stringify(e)).join('\n');
 	writeFileSync(file, lines + '\n', 'utf8');
 }
@@ -92,7 +102,7 @@ function setup() {
 
 /** 切到一级 tab（Tab 循环） */
 function gotoLayer(panel: TwoTabPanel, target: string): void {
-	const order = ['session', 'project', 'user', 'history', 'analytics', 'settings'];
+	const order = ['settings', 'session', 'project', 'user', 'history', 'analytics'];
 	const idx = order.indexOf(target);
 	for (let i = 0; i < idx; i++) panel.handleInput(TAB);
 }
@@ -109,7 +119,7 @@ function curKey(): string {
 function makeEntry(p: Partial<AuditEntry> & { decision: AuditEntry['decision'] }): AuditEntry {
 	return {
 		id: p.id ?? 'x',
-		ts: p.ts ?? '2026-09-02T10:00:00.000Z',
+		ts: p.ts ?? NOW,
 		tool: 'bash',
 		command: p.command ?? 'rm -rf ./target',
 		tier: 'critical',

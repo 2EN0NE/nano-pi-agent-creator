@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import type { MergeStrategy } from '../types.js';
 import {
 	getCurrentBranch,
+	execCheckoutBranch,
 	execRebase,
 	findInProgressDir,
 	getConflictFiles,
@@ -17,6 +18,7 @@ import {
 	getRemoteAheadBehind,
 	getAheadBehind,
 } from './git.js';
+import { MAIN_CHECKOUT_NAME, resolveTargetBranch, TargetResolutionError } from './target.js';
 import {
 	createWorktree,
 	removeWorktree,
@@ -51,6 +53,8 @@ import {
 	buildConflictResolvePrompt,
 	buildMergeAdvicePrompt,
 } from './ui.js';
+import { buildGroupRows } from './group-ui.js';
+import { loadGroups, takeNewGroupWarnings } from './groups.js';
 import {
 	switchToSession,
 	findExistingSession,
@@ -115,6 +119,7 @@ export const COMMANDS = [
 	'prune [--dry-run]',
 	'shell',
 	'widget <on|off>',
+	'group <list|create|merge|sync|new|edit|delete> [<组名>] [--members a,b]',
 ];
 
 export function formatHelp(): string {
@@ -129,6 +134,10 @@ export function formatHelp(): string {
 		'Names are auto-assigned from zodiac+star pool (e.g. Aries-Hamal)',
 		'unless --name is given. Branch is always wt/<name>.',
 		'Worktrees created outside the repo in <repo>-worktrees/ directory.',
+		'',
+		'Branches (local-first): create/rebase/merge resolve the target branch from',
+		'  --from/--target → group baseRef → repo default branch (local) → current HEAD,',
+		'and never guess. Local refs only; add `origin/<b>` explicitly to use a remote ref.',
 	].join('\n');
 }
 
@@ -247,6 +256,12 @@ export async function handleWorktreeCommand(
 		case 'widget':
 			handleWidget(flags, ctx);
 			break;
+		case 'group': {
+			// 动态 import：group-ops 需要 handlers 的 execMerge，静态引用会成环
+			const { handleGroupCommand } = await import('./group-ops.js');
+			await handleGroupCommand(repoRoot, flags, ctx);
+			break;
+		}
 		default:
 			ctx.ui.notify(formatHelp(), 'info');
 	}
@@ -293,9 +308,32 @@ function _dirtyPreview(worktreePath: string): string {
 async function handlePanel(repoRoot: string, ctx: any): Promise<void> {
 	const currentName = _getCurrentName(repoRoot, ctx.cwd);
 	const worktrees = getManagedWorktrees(repoRoot);
-	const result = await showWorktreeTui(ctx, worktrees, currentName, '', repoRoot);
+	// 一级列表的 Groups 段（组声明可读性失败不阻塞面板，仅告警）
+	const { groups, warnings } = loadGroups(repoRoot);
+	// 只提示一次：每次打开面板都会重新发现同一条配置问题
+	for (const w of takeNewGroupWarnings(warnings)) ctx.ui.notify(w, 'warning');
+	const result = await showWorktreeTui(
+		ctx,
+		worktrees,
+		currentName,
+		'',
+		repoRoot,
+		buildGroupRows(repoRoot, groups),
+	);
 
 	switch (result.action) {
+		case 'group-ops':
+			if (result.target) {
+				// 动态 import：group-ops 需要本模块的 execMerge，静态引用会成环
+				const { runGroupMenuFlow } = await import('./group-ops.js');
+				await runGroupMenuFlow(repoRoot, result.target, ctx);
+			}
+			break;
+		case 'group-new': {
+			const { runGroupWizardFlow } = await import('./group-ops.js');
+			await runGroupWizardFlow(repoRoot, ctx);
+			break;
+		}
 		case 'switch':
 			if (result.target) {
 				await handleUse(repoRoot, { _positional: result.target }, ctx);
@@ -307,7 +345,7 @@ async function handlePanel(repoRoot: string, ctx: any): Promise<void> {
 			}
 			break;
 		case 'fork':
-			await handleFork(repoRoot, result.target || 'main', ctx);
+			await handleFork(repoRoot, result.target || MAIN_CHECKOUT_NAME, ctx);
 			break;
 		case 'create':
 			await handleCreate(repoRoot, {}, ctx);
@@ -373,8 +411,10 @@ async function handleCreate(
 		targetIds: selections.targets.map((t) => t.id).join(','),
 	});
 
-	// 3. 创建
-	const result = createWorktree(repoRoot, name, selections.nodeModulesStrategy, selections);
+	// 3. 创建（基点：--from 显式指定 → 否则经解析链，本地优先）
+	const result = createWorktree(repoRoot, name, selections.nodeModulesStrategy, selections, {
+		baseRef: flags.from,
+	});
 	if (!result.ok) {
 		ctx.ui.notify(result.message, 'error');
 		return;
@@ -434,7 +474,7 @@ async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: a
 		return;
 	}
 
-	const isMain = target === 'main';
+	const isMain = target === MAIN_CHECKOUT_NAME;
 	const targetCwd = isMain ? repoRoot : resolveWorktreePath(repoRoot, target);
 
 	if (!existsSync(targetCwd)) {
@@ -465,14 +505,26 @@ async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: a
 	// 策略1：仅 checkout 分支，不切换 session
 	// 仅对 main 目标有效——worktree 分支已被对应目录占用，git 禁止重复 checkout
 	if (strategy === 'checkout') {
+		// 主检出要切到哪个分支：经解析链（ADR-0061，**不写死分支名**）
+		let checkoutBranch: string;
+		try {
+			checkoutBranch = resolveTargetBranch(repoRoot).branch;
+		} catch (err) {
+			ctx.ui.notify(
+				err instanceof TargetResolutionError ? err.message : `解析目标分支失败：${err}`,
+				'error',
+			);
+			return;
+		}
 		const currentBranch = getCurrentBranch(repoRoot);
-		if (currentBranch === 'main') {
-			ctx.ui.notify('Already on branch main', 'info');
+		if (currentBranch === checkoutBranch) {
+			ctx.ui.notify(`Already on branch ${checkoutBranch}`, 'info');
 			return;
 		}
 		try {
-			execSync('git checkout main', { cwd: repoRoot, encoding: 'utf-8' });
-			ctx.ui.notify("Switched to branch 'main'", 'success');
+			const res = execCheckoutBranch(repoRoot, checkoutBranch);
+			if (!res.ok) throw new Error(res.message);
+			ctx.ui.notify(`Switched to branch '${checkoutBranch}'`, 'success');
 		} catch (err: any) {
 			ctx.ui.notify(`Checkout failed: ${err.stderr?.trim() || err.message}`, 'error');
 		}
@@ -534,7 +586,7 @@ async function handleUse(repoRoot: string, flags: Record<string, string>, ctx: a
 // ═══════════════════════════════════════════
 
 async function handleFork(repoRoot: string, target: string, ctx: any): Promise<void> {
-	const isMain = target === 'main';
+	const isMain = target === MAIN_CHECKOUT_NAME;
 	const targetCwd = isMain ? repoRoot : resolveWorktreePath(repoRoot, target);
 
 	if (!existsSync(targetCwd)) {
@@ -1118,7 +1170,7 @@ export async function execRebaseFF(
 				message:
 					'Rebase conflict: ' +
 					conflictFiles.length +
-					' file(s). Resolve conflicts in worktree and re-run merge with rebase+ff.',
+					' file(s). Resolve conflicts in worktree and re-run merge with rebase-ff.',
 				conflicts: conflicts,
 			};
 		}
@@ -1217,7 +1269,7 @@ export async function handleMerge(
 		sourceWorktree = result.target || '';
 	}
 
-	if (!sourceWorktree || sourceWorktree === 'main') {
+	if (!sourceWorktree || sourceWorktree === MAIN_CHECKOUT_NAME) {
 		ctx.ui.notify('Please specify --source <worktree-name>', 'warning');
 		return;
 	}
@@ -1227,14 +1279,32 @@ export async function handleMerge(
 	// ── 目标分支选择 ──
 	// 显式 --target 优先；有 UI 时列出所有本地分支让用户选择（排除被其他
 	// worktree checkout 的分支），避免误合并到非预期分支；无 UI 且未指定时
-	// 默认 main。
+	// 交给 resolveTargetBranch（显式 → 组 baseRef → origin/HEAD → 当前 HEAD → 报错，
+	// ADR-0061；不写死任何分支名）。
 	let targetBranch = flags.target || '';
 	if (!targetBranch && ctx.hasUI) {
 		const picked = await askMergeTarget(ctx, repoRoot);
 		if (!picked) return; // 用户取消
 		targetBranch = picked;
 	}
-	if (!targetBranch) targetBranch = 'main';
+	if (!targetBranch) {
+		// 自动解析（本地优先，ADR-0061）——不写死分支名，解析不出来就报错不猜
+		try {
+			const resolved = resolveTargetBranch(repoRoot);
+			targetBranch = resolved.branch;
+			log.info('resolved merge target branch', {
+				branch: resolved.branch,
+				source: resolved.source,
+				local: resolved.isLocal,
+			});
+		} catch (err) {
+			ctx.ui.notify(
+				err instanceof TargetResolutionError ? err.message : `解析目标分支失败：${err}`,
+				'error',
+			);
+			return;
+		}
+	}
 
 	// ── 策略选择 ──
 	let strategy: MergeStrategy = 'merge';
@@ -1252,8 +1322,6 @@ export async function handleMerge(
 		}
 		strategy = picked;
 	}
-
-	const strategyLabel = { merge: 'merge', squash: 'squash', 'rebase-ff': 'rebase+ff' }[strategy];
 
 	log.info('merging', {
 		source: sourceBranch,
@@ -1276,7 +1344,7 @@ export async function handleMerge(
 					? `\n注意：本地 ${targetBranch} 落后远端 ${sync.behind} 个提交（push 前建议先同步）`
 					: '';
 			confirmed = await ctx.ui.confirm(
-				`Merge '${sourceBranch}' -> '${targetBranch}'? (${strategyLabel})`,
+				`Merge '${sourceBranch}' -> '${targetBranch}'? (${strategy})`,
 				syncHint,
 			);
 		}
@@ -1315,7 +1383,14 @@ export async function handleMerge(
 	if (result.ok) {
 		if (ctx.hasUI && fromPanel) {
 			const targetSync = await getRemoteAheadBehind(repoRoot, targetBranch);
-			const choice = await showMergeSuccessPanel(ctx, sourceBranch, targetBranch, targetSync);
+			const choice = await showMergeSuccessPanel(
+				ctx,
+				sourceBranch,
+				targetBranch,
+				targetSync,
+				// rebase-ff 改写了本地 target，需用户自行 push 才能让远端生效（插件不代推，ADR-0019）
+				strategy === 'rebase-ff' ? targetBranch : undefined,
+			);
 			if (choice.action === 'switch') {
 				await handleUse(repoRoot, { _positional: targetBranch }, ctx);
 			} else if (choice.action === 'pull') {
@@ -1330,7 +1405,16 @@ export async function handleMerge(
 			}
 			// dismiss: 原地不动（成功合并后已切回合并前的原分支，而非 target）
 		} else {
-			ctx.ui.notify('已合并 ' + sourceBranch + ' -> ' + targetBranch, 'success');
+			ctx.ui.notify(
+				'已合并 ' +
+					sourceBranch +
+					' -> ' +
+					targetBranch +
+					(strategy === 'rebase-ff'
+						? `（rebase + ff）。下一步：git push origin ${targetBranch}`
+						: ''),
+				'success',
+			);
 		}
 	} else if (result.conflicts.length > 0) {
 		if (result.stashPopConflict) {
@@ -1380,8 +1464,8 @@ export async function handleMerge(
 			// 无冲突状态可解决，弹冲突面板反而误导 Agent 执行 rebase --continue（会失败）。
 			const guide =
 				strategy === 'squash'
-					? 'squash 合并冲突，工作区已回滚。建议先 /worktree rebase 同步到最新 main，再重新 merge。'
-					: 'rebase+ff 合并冲突，工作区已回滚。请在源 worktree 里 /worktree rebase 同步到最新 main 并解决冲突，再重新 merge。';
+					? `squash 合并冲突，工作区已回滚。建议先 /worktree rebase 同步到最新 ${targetBranch}，再重新 merge。`
+					: `rebase-ff 合并冲突，工作区已回滚。请在源 worktree 里 /worktree rebase 同步到最新 ${targetBranch} 并解决冲突，再重新 merge。`;
 			ctx.ui.notify(guide, 'warning');
 			if (fromPanel) await handlePanel(repoRoot, ctx);
 			return;
@@ -1524,7 +1608,7 @@ export async function handleRebase(
 		sourceWorktree = result.target || '';
 	}
 
-	if (!sourceWorktree || sourceWorktree === 'main') {
+	if (!sourceWorktree || sourceWorktree === MAIN_CHECKOUT_NAME) {
 		ctx.ui.notify(
 			'Please specify --source <worktree-name> or switch to a worktree first.',
 			'warning',
@@ -1533,7 +1617,27 @@ export async function handleRebase(
 	}
 
 	const sourceBranch = 'wt/' + sourceWorktree;
-	const ontoBranch = flags.target || 'main';
+	// 目标分支：显式 --target → 否则经解析链（本地优先，ADR-0061，不写死分支名）
+	let ontoBranch: string;
+	if (flags.target) {
+		ontoBranch = flags.target;
+	} else {
+		try {
+			const resolved = resolveTargetBranch(repoRoot);
+			ontoBranch = resolved.branch;
+			log.info('resolved rebase target branch', {
+				branch: resolved.branch,
+				source: resolved.source,
+				local: resolved.isLocal,
+			});
+		} catch (err) {
+			ctx.ui.notify(
+				err instanceof TargetResolutionError ? err.message : `解析目标分支失败：${err}`,
+				'error',
+			);
+			return;
+		}
+	}
 	const sourceDir = resolveWorktreePath(repoRoot, sourceWorktree);
 
 	log.info('rebasing', { source: sourceBranch, onto: ontoBranch, repo: basename(repoRoot) });
@@ -1541,7 +1645,9 @@ export async function handleRebase(
 	// （pi 的 notify('info') 是聊天区持久行，rebase 完成后无紧随成功 notify 替换会残留）
 
 	// Worktree-Local Rebase（ADR-0018）：变基在持有该分支的 worktree 目录内执行
-	const result = execRebase(repoRoot, sourceBranch, ontoBranch, sourceDir);
+	const result = execRebase(repoRoot, sourceBranch, ontoBranch, sourceDir, {
+		fetch: flags.fetch !== undefined,
+	});
 
 	if (result.ok) {
 		// P0-2: rebase 成功 → 步骤引导

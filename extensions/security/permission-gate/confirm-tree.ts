@@ -5,11 +5,21 @@
  * 树节点前颜色小点提示风险（critical→红 / warning→黄 / info→强调 / 无风险→白）。
  * 放行/拒绝是整条命令的会话级语义，不改写命令；叶子详情页展示风险判断到最小粒度。
  *
- * 键位：↑↓ 导航 · ←→ 叶子详情进出 · alt+←→ 折叠 · a 添加为策略 · enter 放行 · esc 拒绝。
+ * 键位：↑↓ 导航 · ←→ 叶子详情进出 · alt+←→ 折叠 · a 添加为策略 · ctrl+shift+O 展开全貌 · enter 放行 · esc 拒绝。
+ *
+ * 命令过长被单行截断时，ctrl+shift+O 展开为多行全貌（主命令与子命令详情均适用），
+ * 展开后内容超出视口高度用 ↑↓ 滚动查看。
  */
 
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { parseKey, truncateToWidth } from '@earendil-works/pi-tui';
+import {
+	isKeyRepeat,
+	matchesKey,
+	parseKey,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from '@earendil-works/pi-tui';
 import { topBorder } from '../../../src/tui/helpers.js';
 import type { DangerTier } from './config.js';
 import { parseBashCommand } from './bash-parser.js';
@@ -111,6 +121,12 @@ export class ConfirmTree {
 	private scopeSelect = false;
 	private scopeCursor = 0;
 	private scrollOffset = 0;
+	/** ctrl+shift+O 展开全貌（命令多行换行展示） */
+	private expanded = false;
+	/** 展开态下的垂直滚动偏移（↑↓ 调整） */
+	private scroll = 0;
+	/** 展开态最大滚动偏移（由最近一次 render 计算，供 handleInput 收口） */
+	private scrollMax = 0;
 
 	private readonly leafCount: number;
 	private readonly maxIndex: number;
@@ -166,21 +182,100 @@ export class ConfirmTree {
 			return this.renderScopeSelect(width);
 		}
 
+		const title = th.fg('error', topBorder('── Permission Gate · DANGER ', width));
+		const body = this.buildBody(width);
+
+		// 非展开态：保持原有布局（标题 + 内容 + 空行 + 提示行）
+		if (!this.expanded) {
+			return [title, ...body, '', this.renderHint(width)];
+		}
+
+		// 展开态：标题 + 提示行固定，中间内容区可垂直滚动（↑↓）
+		const rows = this.tui.terminal?.rows || 24;
+		const viewport = Math.max(3, rows - 2);
+		const maxScroll = Math.max(0, body.length - viewport);
+		// 不回写 this.scroll（偏移完全由 handleInput 收口）；这里仅缓存上界供其 clamp
+		this.scrollMax = maxScroll;
+		const scroll = Math.max(0, Math.min(this.scroll, maxScroll));
+		const visible = body.slice(scroll, scroll + viewport);
+		const range =
+			maxScroll > 0 ? `  (${scroll + 1}-${scroll + visible.length}/${body.length})` : '';
+		return [title, ...visible, this.renderHint(width, range)];
+	}
+
+	/**
+	 * 渲染命令文本：非展开态单行截断；展开态按宽度换行展示全貌。
+	 * prefix 为每行前缀（首行与续行等宽），color 仅作用于命令文本。
+	 */
+	private commandLines(opts: {
+		prefix: string;
+		cont: string;
+		text: string;
+		width: number;
+		color?: (s: string) => string;
+	}): string[] {
+		const sanitized = sanitizeCommand(opts.text);
+		if (!this.expanded) {
+			return [
+				truncateToWidth(
+					opts.prefix + (opts.color ? opts.color(sanitized) : sanitized),
+					opts.width,
+				),
+			];
+		}
+		const colored = opts.color ? opts.color(sanitized) : sanitized;
+		const wrapWidth = Math.max(1, opts.width - visibleWidth(opts.prefix));
+		const wrapped = wrapTextWithAnsi(colored, wrapWidth);
+		return wrapped.map((line, i) =>
+			truncateToWidth((i === 0 ? opts.prefix : opts.cont) + line, opts.width),
+		);
+	}
+
+	/** 构建除标题/提示行之外的内容（根命令 + 叶子列表 / 详情页）。 */
+	private buildBody(width: number): string[] {
+		const th = this.theme;
 		const lines: string[] = [];
-		const add = (s: string) => lines.push(truncateToWidth(s, width));
 
-		add(th.fg('error', topBorder('── Permission Gate · DANGER ', width)));
-
-		// ── 根节点 ──
-		const rootPrefix = this.cursor === 0 && this.detailLeaf < 0 ? '> ' : '  ';
-		add(
-			truncateToWidth(rootPrefix + th.fg('accent', sanitizeCommand(this.fullCommand)), width),
+		// ── 根节点（主命令）──
+		const rootPrefix = this.cursor === 0 && this.detailLeaf < 0 && !this.expanded ? '> ' : '  ';
+		lines.push(
+			...this.commandLines({
+				prefix: rootPrefix,
+				cont: '  ',
+				text: this.fullCommand,
+				width,
+				color: (s) => th.fg('accent', s),
+			}),
 		);
 
-		// ── 叶子（展开时）──
+		// ── 叶子（列表视图）──
 		if (this.detailLeaf < 0) {
 			if (this.collapsed) {
-				add(truncateToWidth('  ' + th.fg('dim', `+ ${this.leafCount} 条子命令`), width));
+				lines.push(
+					truncateToWidth('  ' + th.fg('dim', `+ ${this.leafCount} 条子命令`), width),
+				);
+			} else if (this.expanded) {
+				// 展开态：全部叶子逐条换行展示，超出视口由 viewport 滚动承载
+				for (let i = 0; i < this.leafCount; i++) {
+					const leaf = this.leaves[i];
+					const isLast = i === this.leafCount - 1;
+					const connector = isLast ? '└─ ' : '├─ ';
+					// 展开态光标已冻结（↑↓ 仅滚动，不移动 cursor），不渲染误导性的 > 选中标记
+					const selPrefix = '  ';
+					const dot = th.fg(confirmDotColor(leaf.tier), '●');
+					const label = confirmTierLabel(leaf.tier);
+					// tier 标签前置到 connector 行（命令文本之前），避免命令换行后首行
+					// 占满宽度时标签被整体截断（ADR-0023：标签必须始终可见）。
+					const first = selPrefix + connector + dot + ' ' + (label ? label + ' ' : '');
+					const contIndent = ' '.repeat(visibleWidth(first));
+					const cmdLines = this.commandLines({
+						prefix: first,
+						cont: contIndent,
+						text: leaf.cmd,
+						width,
+					});
+					lines.push(...cmdLines);
+				}
 			} else {
 				this.ensureCursorVisible();
 				const start = this.scrollOffset;
@@ -193,7 +288,7 @@ export class ConfirmTree {
 					const dot = th.fg(confirmDotColor(leaf.tier), '●');
 					const label = confirmTierLabel(leaf.tier);
 					const cmdText = sanitizeCommand(leaf.cmd);
-					add(
+					lines.push(
 						truncateToWidth(
 							selPrefix + connector + dot + ' ' + cmdText + '  ' + label,
 							width,
@@ -201,67 +296,109 @@ export class ConfirmTree {
 					);
 				}
 				if (this.leafCount > this.maxVisibleLeaves) {
-					add(th.fg('dim', `  (${start + 1}-${end}/${this.leafCount} 子命令，↑↓ 滚动)`));
+					lines.push(
+						th.fg('dim', `  (${start + 1}-${end}/${this.leafCount} 子命令，↑↓ 滚动)`),
+					);
 				}
 			}
 		}
 
-		// ── 详情页 ──
+		// ── 详情页（子命令详情）──
 		if (this.detailLeaf >= 0) {
 			const leaf = this.leaves[this.detailLeaf];
-			add('');
-			add('  ' + th.fg('text', th.bold('子命令详情')));
-			add('  ' + th.fg('text', `命令: ${sanitizeCommand(leaf.cmd)}`));
+			lines.push('');
+			lines.push(truncateToWidth('  ' + th.fg('text', th.bold('子命令详情')), width));
+			const cmdPrefix = '  ' + th.fg('text', '命令: ');
+			const cmdCont = ' '.repeat(visibleWidth(cmdPrefix));
+			lines.push(
+				...this.commandLines({
+					prefix: cmdPrefix,
+					cont: cmdCont,
+					text: leaf.cmd,
+					width,
+					color: (s) => th.fg('text', s),
+				}),
+			);
 			const tierText = leaf.tier ? TIER_CN[leaf.tier] : '无风险';
-			add('  ' + th.fg(confirmDotColor(leaf.tier), `等级: ${tierText}`));
+			lines.push(
+				truncateToWidth(
+					'  ' + th.fg(confirmDotColor(leaf.tier), `等级: ${tierText}`),
+					width,
+				),
+			);
 
 			// 命中明细：优先逐条（结构化 hits），否则回退旧扁平 reasons
 			if (leaf.hits && leaf.hits.length > 0) {
-				add('  ' + th.fg('text', '命中:'));
+				lines.push(truncateToWidth('  ' + th.fg('text', '命中:'), width));
 				for (const hit of leaf.hits) {
 					const label = hitSourceLabel(hit);
 					const explain = sanitizeCommand(hit.explain);
-					add(
-						'    ' +
-							th.fg(confirmDotColor(hit.tier), label) +
-							' ' +
-							th.fg('text', explain),
+					lines.push(
+						truncateToWidth(
+							'    ' +
+								th.fg(confirmDotColor(hit.tier), label) +
+								' ' +
+								th.fg('text', explain),
+							width,
+						),
 					);
 				}
 			} else if (leaf.reasons.length > 0) {
 				const reasons = leaf.reasons.map((r) => REASON_CN[r] ?? r).join(', ');
-				add('  ' + th.fg('text', `命中: ${reasons}`));
+				lines.push(truncateToWidth('  ' + th.fg('text', `命中: ${reasons}`), width));
 			} else {
-				add('  ' + th.fg('text', '命中: N/A'));
+				lines.push(truncateToWidth('  ' + th.fg('text', '命中: N/A'), width));
 			}
 
 			// 解析该子命令，展示工具/路径/重定向（最小粒度风险判断）
 			const parsed = parseBashCommand(leaf.cmd);
 			if (parsed.ok && parsed.commands.length > 0) {
 				const c = parsed.commands[0];
-				if (c.commandName) add('  ' + th.fg('text', `工具: ${c.commandName}`));
+				if (c.commandName)
+					lines.push(
+						truncateToWidth('  ' + th.fg('text', `工具: ${c.commandName}`), width),
+					);
 				if (c.pathArguments.length > 0) {
-					add('  ' + th.fg('text', `路径: ${c.pathArguments.join(', ')}`));
+					lines.push(
+						truncateToWidth(
+							'  ' + th.fg('text', `路径: ${c.pathArguments.join(', ')}`),
+							width,
+						),
+					);
 				}
 				if (c.redirects.length > 0) {
 					const rd = c.redirects
 						.map((r) => `${r.target}(${r.direction === 'write' ? '写' : '读'})`)
 						.join(', ');
-					add('  ' + th.fg('text', `重定向: ${rd}`));
+					lines.push(truncateToWidth('  ' + th.fg('text', `重定向: ${rd}`), width));
 				}
 			}
 		}
 
-		add('');
-		if (this.detailLeaf >= 0) {
-			add(th.fg('dim', '  ← 返回  enter 放行  esc 拒绝'));
-		} else {
-			add(
-				th.fg('dim', '  ↑↓ 导航  ←→ 详情  alt+←→ 折叠  a 添加为策略  enter 放行  esc 拒绝'),
-			);
-		}
-
 		return lines;
+	}
+
+	/**
+	 * 底部提示行（展开态与非展开态文案不同）。
+	 * 主操作（enter 放行 / esc 拒绝）放在最前，保证窄终端截断时不会丢失确认/拒绝入口。
+	 */
+	private renderHint(width: number, range = ''): string {
+		const th = this.theme;
+		if (this.expanded) {
+			const tail = `ctrl+shift+O 折叠  ↑↓ 滚动  enter 放行  esc 拒绝${range}`;
+			const text = this.detailLeaf >= 0 ? `  ← 返回  ${tail}` : `  ${tail}`;
+			return th.fg('dim', truncateToWidth(text, width));
+		}
+		if (this.detailLeaf >= 0) {
+			return truncateToWidth(th.fg('dim', '  ← 返回  enter 放行  esc 拒绝'), width);
+		}
+		return truncateToWidth(
+			th.fg(
+				'dim',
+				'  enter 放行  esc 拒绝  ↑↓ ←→ 详情  alt+←→ 折叠  a 添加为策略  ctrl+shift+O 展开',
+			),
+			width,
+		);
 	}
 
 	handleInput(data: string): void {
@@ -304,6 +441,38 @@ export class ConfirmTree {
 		}
 		if (key === 'escape' || key === 'esc') {
 			this.finish('deny');
+			return;
+		}
+
+		// ctrl+shift+O 展开/折叠全貌（列表与详情均可用；用原始序列匹配，parseKey 输出顺序不定）。
+		// 过滤 repeat 事件：Kitty 键盘协议下长按会持续发 repeat，而 !expanded 是非幂等 toggle，
+		// 不滤会导致展开/折叠反复翻转（抖动）。
+		if (matchesKey(data, 'ctrl+shift+o') && !isKeyRepeat(data)) {
+			this.expanded = !this.expanded;
+			this.scroll = 0;
+			this.tui.requestRender();
+			return;
+		}
+
+		// 展开态：↑↓ 滚动查看全貌，其余键忽略（←→ 可退出详情）
+		if (this.expanded) {
+			// 先把偏移收口到最近一次 render 的上界，避免批量输入后 up 需要先「还债」
+			this.scroll = Math.max(0, Math.min(this.scroll, this.scrollMax));
+			if (key === 'up') {
+				this.scroll = Math.max(0, this.scroll - 1);
+				this.tui.requestRender();
+				return;
+			}
+			if (key === 'down') {
+				this.scroll = Math.min(this.scroll + 1, this.scrollMax);
+				this.tui.requestRender();
+				return;
+			}
+			if (this.detailLeaf >= 0 && (key === 'left' || key === 'right')) {
+				this.detailLeaf = -1;
+				this.scroll = 0;
+				this.tui.requestRender();
+			}
 			return;
 		}
 

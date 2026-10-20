@@ -18,8 +18,46 @@ import type { DangerTier } from './config.js';
 
 const log = createLogger('permission-gate:audit');
 
-/** 审计决策：allow（放行）/ ask（需确认）/ auto（自动放行）/ deny（拒绝） */
-export type AuditDecision = 'allow' | 'ask' | 'auto' | 'deny';
+/**
+ * 审计决策：
+ *   allow         — 直接放行（未命中规则）
+ *   ask           — 用户确认放行
+ *   auto          — 规则自动放行
+ *   deny          — 用户拒绝（确认框中选择拒绝；由写入端标记 `denyCause`）
+ *   blocked-no-ui — 无界面时的自动拦截（**不是**用户意图，不得计入「用户拒绝」）
+ *   deny-legacy   — 旧数据迁移而来的条目（成因不可判定）
+ */
+export type AuditDecision = 'allow' | 'ask' | 'auto' | 'deny' | 'blocked-no-ui' | 'deny-legacy';
+
+/** 拒绝类决策的成因分类 */
+export type DenyCause = 'user' | 'no-ui' | 'unknown';
+
+/** 是否属于「拒绝」类决策（用户拒绝 / 无界面自动拦截 / 迁移条目） */
+export function isDenyDecision(decision: AuditDecision): boolean {
+	return decision === 'deny' || decision === 'blocked-no-ui' || decision === 'deny-legacy';
+}
+
+/**
+ * 拒绝成因分类；非拒绝类决策返回 null。
+ *
+ * - `deny` 且**写入端标记了** `denyCause` → 按标记归类
+ * - `deny` 无标记 → 拆分前写入的历史行（也带 sessionId/projectPath，靠字段无法区分），
+ *   成因**不可判定**，不得当作用户拒绝
+ * - `blocked-no-ui` → 无界面自动拦截（不是用户意图）
+ * - `deny-legacy` → 旧数据迁移条目，成因不可判定
+ */
+export function classifyDeny(entry: Pick<AuditEntry, 'decision' | 'denyCause'>): DenyCause | null {
+	switch (entry.decision) {
+		case 'blocked-no-ui':
+			return 'no-ui';
+		case 'deny-legacy':
+			return 'unknown';
+		case 'deny':
+			return entry.denyCause ?? 'unknown';
+		default:
+			return null;
+	}
+}
 
 export interface AuditEntry {
 	/** 唯一 ID（request/control ID，供外部通道凭 ID 确认） */
@@ -34,6 +72,13 @@ export interface AuditEntry {
 	tier: DangerTier | null;
 	/** 决策结果 */
 	decision: AuditDecision;
+	/**
+	 * 拒绝成因（仅拒绝类决策有意义）。
+	 *
+	 * 写入端只在**确知**成因时标记（用户拒绝 → `'user'`）；旧行缺此字段，
+	 * 读取端归类为 `unknown`，绝不把「拆分前的无界面拦截」误计入用户拒绝。
+	 */
+	denyCause?: DenyCause;
 	/** 命中维度 */
 	reasons: string[];
 	/** 项目标识（getProjectKey 的 git:/path: sha 前缀），历史/策略 tab 按此过滤 */

@@ -127,11 +127,11 @@ TEST
 
 ```bash
 # 运行指定模块
-bash test/scripts/run-e2e.sh --ext <name>
-bash test/scripts/run-e2e.sh --skill <name>
+bash test/e2e/scripts/run-e2e.sh --ext <name>
+bash test/e2e/scripts/run-e2e.sh --skill <name>
 
 # 运行全部
-bash test/scripts/run-e2e.sh
+bash test/e2e/scripts/run-e2e.sh
 ```
 
 运行器自动完成：
@@ -141,6 +141,46 @@ bash test/scripts/run-e2e.sh
 - 调用 `pi -a --no-session -p "<prompt>"`
 - 收集 stdout 和 pi-logger 日志到 `test/results/<timestamp>/cases/`
 - 生成 summary.md 和 summary.json
+
+> **真实 `~/.pi` 的 pi 内核目录不会被写**：运行器会把一个 `pi` shim（`helpers/pi-home-guard.sh`）
+> 前置到 PATH，凡**未**自行隔离 `HOME` 的 pi 调用都注入
+> `PI_CODING_AGENT_DIR=<每测试文件一个的隔离配置根>`。⚠ 该变量只重定向 **pi 自身**的内核目录
+> （sessions / models / auth / settings）；扩展用 `os.homedir()` 解析的
+> `~/.pi/agent/extensions-data/**`（pi-config / pi-state）与 pi-logger 的 `~/.pi/logs/**`
+> **不受影响**——涉及它们的用例必须自行隔离 HOME。
+> 调试时若想保留隔离根取证：`E2E_KEEP_GUARD_ROOT=1 bash test/e2e/scripts/run-e2e.sh ...`；
+> 运行结束（含中断）会自动清理，无需手删。详见 `docs/adr/0045-autonomous-loop-verification.md` D6 与
+> `docs/e2e-performance.md` §3.4。
+
+### 耗时预算与过程日志（每轮必查）
+
+单插件 e2e **总耗时硬预算 300s**，超出即 runner 判失败（退出码非零）。规范与排查见
+[`docs/e2e-performance.md`](../../../docs/e2e-performance.md)。跑完测试**先看这三样**：
+
+```bash
+R=$(ls -1t test/results | head -1)
+sed -n '/## Time Budget/,/^$/p' test/results/$R/summary.md      # 每插件耗时 / 是否超标
+python3 -c "import json;d=json.load(open('test/results/$R/summary.json'));print(d['total'],d['budget_failures'],[m['name'] for m in d['modules']])"
+# 超时/耗时大户 → 看该用例 TUI 日志里最后一条阶段打点：
+grep -a '\[tui-stage\]' test/results/$R/extensions/<name>/cases/*-tui-output.log
+```
+
+**判读**：
+
+| 现象                                 | 含义 / 处置                                                                 |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| `budget_failures > 0` 或某插件 >300s | 必须处置：定位挂起，或精简/合并冗余用例（不要放宽预算）                     |
+| 最后一条 stage 停在 `pi-ready-raw`   | pi 启动/环境问题（沙箱构建失败、pi 崩溃 `exit=126`）                        |
+| 停在 `commands-done` 之前            | 用例内等待；检查 `wait_for` 条件是否永不满足                                |
+| `commands-done` 之后很慢             | 覆盖层没关 → 收尾白等；用例结束前补 `send "\033"`                           |
+| `summary.json.total == 0` 但跑过用例 | 结果统计异常（假绿），检查 `.results/*.tsv` 是否写入、`aggregate_results()` |
+
+**写用例时的两条要求**：
+
+1. **过程日志**：多交互合并的用例必须输出 `STEP_BEGIN` / `STEP_OK` / `FAIL_MARKER step=<id> reason=<...>`；
+   需要更细的定位时在 expect 里插 `stage "阶段名"`。
+2. **可并行/可拆分**：同一重前置的交互合并进**一个** pi 进程（共享前置）；互不依赖的用例拆成独立文件
+   （可被池化并行）。禁止跨测试文件共享可变状态（配置目录、固定路径、端口）。
 
 ### 方式二：快速手动测试（不修改 test 文件时）
 

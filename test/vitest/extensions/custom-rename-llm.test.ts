@@ -18,6 +18,7 @@ import {
 	callRenameLLM,
 	extractFinalText,
 	extractUserPromptText,
+	resolveRenameModel,
 	truncateForTitle,
 } from '../../../extensions/tui/custom-rename/src/llm.js';
 import type { RenameSessionConfig } from '../../../extensions/tui/custom-rename/src/pure.js';
@@ -59,6 +60,7 @@ function createCtx(
 		{ type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } },
 	],
 	modelRegistryOverride?: Partial<Record<string, unknown>>,
+	currentModel?: Model<Api>,
 ): ExtensionContext {
 	return {
 		sessionManager: {
@@ -66,6 +68,7 @@ function createCtx(
 			getSessionId: () => 'test-session-id',
 		},
 		signal: new AbortController().signal,
+		model: currentModel,
 		modelRegistry: {
 			find: vi.fn(() => STUB_MODEL),
 			hasConfiguredAuth: vi.fn(() => true),
@@ -149,6 +152,37 @@ describe('RENAME_SYSTEM_PROMPT / RENAME_INSTRUCTION', () => {
 		expect(RENAME_INSTRUCTION).toContain('修复登录超时');
 		expect(RENAME_INSTRUCTION).toContain('refactor-config-loader');
 		expect(RENAME_INSTRUCTION).toContain('我帮你修复了登录 bug');
+	});
+});
+
+// ── resolveRenameModel ──
+
+const CURRENT_MODEL: Model<Api> = { ...STUB_MODEL, id: 'current-model', provider: 'current' };
+
+describe('resolveRenameModel', () => {
+	it('空 ref → 回落 ctx.model（跟随当前模型）', () => {
+		const ctx = createCtx(undefined, undefined, CURRENT_MODEL);
+		expect(resolveRenameModel(ctx, { type: 'ref', ref: '' })).toBe(CURRENT_MODEL);
+	});
+
+	it('纯空白 ref → 同样视为跟随当前模型', () => {
+		const ctx = createCtx(undefined, undefined, CURRENT_MODEL);
+		expect(resolveRenameModel(ctx, { type: 'ref', ref: '   ' })).toBe(CURRENT_MODEL);
+	});
+
+	it('空 ref 且无当前模型 → null', () => {
+		const ctx = createCtx(undefined, undefined, undefined);
+		expect(resolveRenameModel(ctx, { type: 'ref', ref: '' })).toBeNull();
+	});
+
+	it('空 ref 且当前模型未配置凭证 → null', () => {
+		const ctx = createCtx(undefined, { hasConfiguredAuth: vi.fn(() => false) }, CURRENT_MODEL);
+		expect(resolveRenameModel(ctx, { type: 'ref', ref: '' })).toBeNull();
+	});
+
+	it('非空非法 ref 不回落当前模型（fail-fast）', () => {
+		const ctx = createCtx(undefined, { find: vi.fn(() => undefined) }, CURRENT_MODEL);
+		expect(resolveRenameModel(ctx, { type: 'ref', ref: 'nope/nope-model' })).toBeNull();
 	});
 });
 

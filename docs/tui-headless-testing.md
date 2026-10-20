@@ -87,7 +87,9 @@ const after = renderToSnapshot(tui).map(stripAnsi);
 expect(after).not.toEqual(before);
 ```
 
-**原理**：`dispatchInput` 通过 `any` 桥接直接调用 `TUI.handleInput()`（私有方法），与 `renderToSnapshot` 调用 `compositeOverlays()` 是同一种模式。**无需 `tui.start()`，无需特殊 Terminal 类。**
+**原理**：`dispatchInput` 通过 `any` 桥接直接调用 TUI 的运行时输入入口
+（pi-tui ≥0.85 为 `handleTerminalInput()`；旧版回退 `handleInput()`），
+与 `renderToSnapshot` 调用 `compositeOverlays()` 是同一种模式。**无需 `tui.start()`，无需特殊 Terminal 类。**
 
 ### 交互测试（高级）：模拟完整终端事件链路
 
@@ -105,10 +107,10 @@ const term = new InteractiveMockTerminal(80, 24);
 const tui = new TuiMainScreen(term);
 tui.addChild(myComponent);
 tui.setFocus(myComponent);
-tui.start(); // 必须：建立 terminal → handleInput 链路
+tui.start(); // 必须：建立 terminal → 输入入口链路
 
 term.sendInput('\t');
-// sendInput → onInput 回调 → handleInput 完整路径（含 OSC 消费、input listeners、kitty 协议处理）
+// sendInput → onInput 回调 → 输入入口（handleTerminalInput）完整路径（含 OSC 消费、input listeners、kitty 协议处理）
 ```
 
 **大多数场景用 `dispatchInput` 即可**，`InteractiveMockTerminal` 仅用于测试 TUI 事件路由层本身的正确性。
@@ -151,12 +153,13 @@ class MockTerminal implements Terminal {
 
 ### `dispatchInput(tui, data)` 【推荐】
 
-直接向 TUI 注入按键事件。通过 `any` 桥接调用 `TUI.handleInput()`。
+直接向 TUI 注入按键事件。通过 `any` 桥接调用其运行时输入入口
+（pi-tui ≥0.85 为 `handleTerminalInput()`；旧版回退 `handleInput()`）。
 
-- **无需 `tui.start()`**：不需要建立 terminal → handleInput 链路
+- **无需 `tui.start()`**：不需要建立 terminal → 输入入口链路
 - **无需特殊 Terminal 类**：用普通 `MockTerminal` 即可
 - 与 `compositeOverlays()` 相同的桥接模式
-- 链路：`dispatchInput` → `TUI.handleInput` → `focusedComponent.handleInput` → 状态变化
+- 链路：`dispatchInput` → `TUI.handleTerminalInput` → `focusedComponent.handleInput` → 状态变化
 
 ```typescript
 const tui = new TuiMainScreen(new MockTerminal(80, 24));

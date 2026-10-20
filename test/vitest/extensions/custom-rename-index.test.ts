@@ -99,13 +99,14 @@ function createMockPi(): MockSetup {
 // 通知 spy：每个测试在 beforeEach 重建（见 describe 内 beforeEach）。
 let notifyMock: ReturnType<typeof vi.fn>;
 
-function createMockCtx(opts: { entries?: unknown[] } = {}): ExtensionContext {
+function createMockCtx(opts: { entries?: unknown[]; model?: unknown } = {}): ExtensionContext {
 	return {
 		sessionManager: {
 			getEntries: () => opts.entries ?? ONE_ASSISTANT,
 			getSessionId: () => 'test-session-id',
 		},
 		signal: new AbortController().signal,
+		model: opts.model,
 		ui: { notify: notifyMock },
 	} as unknown as ExtensionContext;
 }
@@ -275,6 +276,37 @@ describe('renameSessionExtension turn_end handler', () => {
 		await vi.waitFor(() =>
 			expect(setup.setSessionNameMock).toHaveBeenCalledWith('修复登录超时'),
 		);
+	});
+
+	it('空 ref（跟随当前模型）不可用 → 文案指向当前模型', async () => {
+		vi.mocked(loadRenameConfig).mockReturnValue({
+			...ENABLED_CONFIG,
+			model: { type: 'ref', ref: '' },
+		});
+		vi.mocked(resolveRenameModel).mockReturnValue(null);
+		await fire(setup, createMockCtx());
+		expect(notifyMock).toHaveBeenCalledWith(
+			expect.stringContaining('跟随的当前模型不可用'),
+			'warning',
+		);
+		expect(callRenameLLM).not.toHaveBeenCalled();
+	});
+
+	it('空 ref（跟随当前模型）：换成另一个同样不可用的当前模型 → 重新告警', async () => {
+		vi.mocked(loadRenameConfig).mockReturnValue({
+			...ENABLED_CONFIG,
+			model: { type: 'ref', ref: '' },
+		});
+		vi.mocked(resolveRenameModel).mockReturnValue(null);
+		// 第一个当前模型不可用 → 告警一次
+		await fire(setup, createMockCtx({ model: { provider: 'p1', id: 'm1' } }));
+		expect(notifyMock).toHaveBeenCalledTimes(1);
+		// 同一模型仍不可用 → 去重，静默
+		await fire(setup, createMockCtx({ model: { provider: 'p1', id: 'm1' } }));
+		expect(notifyMock).toHaveBeenCalledTimes(1);
+		// /model 换成另一个（同样无凭证）的模型 → 身份已变，必须重新告警
+		await fire(setup, createMockCtx({ model: { provider: 'p2', id: 'm2' } }));
+		expect(notifyMock).toHaveBeenCalledTimes(2);
 	});
 
 	it('LLM 调用窗口内用户已手动命名 → 落库前重查命中，不覆盖', async () => {

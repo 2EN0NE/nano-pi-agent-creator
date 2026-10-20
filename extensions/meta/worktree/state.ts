@@ -26,6 +26,9 @@ let cached: WorktreePrefs = { ...DEFAULT_PREFS };
 
 function getStore(): ConfigStore<WorktreePrefs> {
 	if (!store) {
+		// config-scope: session-cwd —— 偏好（上次选择的策略）描述的是「当前目录」的使用习惯，
+		// 不是仓库事实，且只写用户级（save(..., 'user')）。组声明（仓库级）走 groups.ts 的
+		// 仓库根锚点。见 AGENTS.md「项目级配置的解析锚点：仓库级 vs 目录级【强制判断】」。
 		store = createConfigStore<WorktreePrefs>({
 			pluginName: 'pi-worktree',
 			defaults: DEFAULT_PREFS,

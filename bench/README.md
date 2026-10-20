@@ -6,17 +6,27 @@
 
 ## 目录结构
 
-```
+```text
 bench/
+├── arms.json        # 臂注册表：baseline（公共基座）+ 各臂的 triggerTools（单一来源，见 ADR-0057）
+├── preflight.sh     # 前置检查：环境 / 工具链 / 本地包 / 模型 / 臂，缺失即 fail-fast（见 ADR-0056）
+├── find-extension.sh # 插件名 → 扩展入口路径（run-cell 与 preflight 共用的解析规则）
 ├── run-cell.sh      # 单 cell：checkout → agent → 指标提取 → verify.sh（阶段写 progress.json）
-├── run-matrix.sh    # task × config × rep 矩阵编排 → analyze.py（强制 --model、--resume 续跑）
+├── metrics.py       # 指标提取：session jsonl → result.json（抽成 module 以便单测，见 ADR-0057）
+├── run-matrix.sh    # task × config × rep 矩阵编排 → analyze.py（强制 --model、--resume 续跑、--pilot 先导门）
 ├── progress.py      # progress.json 读写/查询（run-matrix 与 bench-status 的结构化契约）
 ├── bench-status.sh  # 进度查询：bench-status.sh [<run-id>] [--log N]
 ├── analyze.py       # 配对边际价值统计（含 plugin_triggered 触发率）
-├── smoke-test.sh    # 冒烟测试（mock-llm 不烧钱，验证 verify.sh 失败侧判定）
-├── test_*.py        # analyze.py / progress.py 的单元测试（python3 bench/test_*.py）
+├── smoke-test.sh    # 冒烟测试（mock-llm 不烧钱；遍历 arms.json 全部臂 × 全部任务，跳过本机解析不到的臂）
+├── test_*.py        # analyze.py / progress.py / metrics.py 的单元测试（python3 bench/test_*.py）
 └── tasks/<slug>/    # 任务三件套：task.json + prompt.txt + verify.sh (+probe.mjs)
 ```
+
+> `preflight.sh` / `find-extension.sh` / `run-matrix.sh --pilot` 的契约行为（fail-fast 聚合报告、四级解析与优先级、先导门调用集合）由 `test/e2e/skills/bench-run/smoke.test.sh` 覆盖——纯 bash + stub 驱动，不启动 pi、不调用 LLM：
+>
+> ```bash
+> bash test/e2e/scripts/run-e2e.sh --skill bench-run
+> ```
 
 ## 快速开始
 
@@ -42,15 +52,33 @@ cat bench/results/<run-id>/analysis-summary.json
 
 ## 配置臂（config）
 
+臂清单与每个臂的**触发工具名**登记在 `bench/arms.json`（臂注册表，单一来源，见 ADR-0057）：
+
+```json
+{
+	"baseline": ["bash-timeout"],
+	"arms": {
+		"none": { "triggerTools": [] },
+		"plugin-todos": { "triggerTools": ["todo"] },
+		"plugin-truncated-tool": { "triggerTools": ["rg"] },
+		"plugin-@ff-labs/pi-fff": { "triggerTools": ["ffgrep", "fffind"] }
+	}
+}
+```
+
+- **`baseline`**：两臂公共基座（非被测变量）。`bash-timeout` 是评测环境安全网（防 agent 慢命令如 `find /` 卡死），`none` 与 `plugin-*` 都加载——配对唯一差异仍是被测插件本身。
+- **`triggerTools`**：该臂被测插件注册的工具名，用于 `plugin_triggered` 判定。挂在**臂**上而非 `task.json` 上，使任务与插件正交（同一个任务可测多个插件臂，不再需要并集 hack）。`none` 臂为空数组 → 该臂的 `plugin_triggered` 记为 `null`（无目标插件可判定）。
+- **臂封闭**：`--configs` 里出现未登记的臂即 fail-fast（`preflight.sh` 在启动时一次校完，不会跑到那个 cell 才发现 `plugin not found`）。
+
 双臂统一在 `COMMON_FLAGS` 关闭扩展/技能自动发现（`--no-extensions --no-skills` 等），plugin 臂只经显式 `-e` 加载目标插件。这样 `none` 与 `plugin-*` 的唯一差异就是被测插件本身——若只隔离 none 臂，plugin 臂会读入 `~/.pi/agent/extensions` 全量用户扩展（配对不对称），且目标插件若同时存在于 sync 同步的全局副本，会与 `-e` 副本重复注册（同工具名冲突）导致该臂失效。
 
-| config           | 含义                                                         | 加载方式                     |
-| ---------------- | ------------------------------------------------------------ | ---------------------------- |
-| `none`           | 纯净 Pi 对照（无任何扩展）                                   | 仅共享隔离 flags，无 `-e`    |
-| `plugin-<name>`  | 单插件 + 其 meta 依赖                                        | 共享隔离 flags + `-e <路径>` |
-| `plugin-<a>+<b>` | 多插件（`+` 分隔，如 mock 验证时 `truncated-tool+mock-llm`） | 共享隔离 flags + 逐个 `-e`   |
+| config           | 含义                                                  | 加载方式                                 |
+| ---------------- | ----------------------------------------------------- | ---------------------------------------- |
+| `none`           | 纯净 Pi 对照（无被测插件）                            | `baseline` + 隔离 flags，无被测插件 `-e` |
+| `plugin-<name>`  | 单插件 + 其依赖链                                     | `baseline` + 隔离 flags + `-e <路径>`    |
+| `plugin-<a>+<b>` | 多插件（`+` 分隔；多插件臂同样需在 `arms.json` 登记） | `baseline` + 隔离 flags + 逐个 `-e`      |
 
-插件名由 `run-cell.sh` 的 `find_extension()` 按序搜索：
+插件名由 `bench/find-extension.sh` 按序搜索（`run-cell.sh` 与 `preflight.sh` 的臂校验共用同一份，避免两份实现漂移）：
 
 1. `extensions/<分类>/<name>/index.ts`（目录形式）或 `extensions/<分类>/<name>.ts`（单文件）——本仓库自家插件
 2. `test/helpers/<name>.ts`、`test/e2e/helpers/<name>.ts`——测试辅助（mock-llm）
@@ -76,13 +104,14 @@ cat bench/results/<run-id>/analysis-summary.json
 	"slug": "scc-bounded-memory-spilling",
 	"repo": "https://github.com/boyter/scc.git",
 	"base_ref": "bc2796e",
+	"language": "go",
 	"agent_timeout_s": 1500,
-	"verify_timeout_s": 300,
-	"trigger_tools": ["rg"]
+	"verify_timeout_s": 300
 }
 ```
 
-- `trigger_tools`（可选）：目标插件注册的工具名，用于 `plugin_triggered` 检测。缺省时该指标记为 `null`（无法判断触发）。
+- 任务**不含**插件信息（`trigger_tools` 已下沉到 `bench/arms.json` 的臂，见 ADR-0057）。
+- `language`：`preflight.sh` 据此映射工具链依赖（`go → go`、`typescript → node, npm`）。
 - `verify.sh` 从任务验收标准推导，输出 `reward_binary` / `reward_partial` / `checks`。
 
 ## 模型配置
@@ -127,6 +156,19 @@ bash bench/run-matrix.sh --resume run-20260906-143821 \
   --tasks scc-bounded-memory-spilling --configs none,plugin-truncated-tool \
   --reps 1 --model deepseek/deepseek-v4-flash
 ```
+
+### 先导门（`--pilot`）
+
+一轮全量可能烧几小时；先用 `--pilot` 花 ~25min 确认**每个臂都能跑通**，再决定要不要上全量：
+
+```bash
+bash bench/run-matrix.sh --tasks a,b --configs none,plugin-x --reps 3 \
+  --model deepseek/deepseek-v4-flash --pilot
+```
+
+- 跑 **每个臂 × `--tasks` 的第一个任务 × rep0**，然后**停下**（不跑 `analyze.py`——半量数据上的 delta/翻转结论会误导插件去留决策），打印可复制的 `--resume` 命令。
+- pilot 与全量**同属一个 run**（`manifest.json` 记录的是全量配置），所以先导已跑的 cell 会被后续 `--resume` 跳过，不重复烧钱。这是 ADR-0031「`--resume` 严格配置相等」逼出的设计：若 pilot 是独立的 `reps=1` run，`reps=3` 的全量无法复用它。
+- 有 cell 失败即 `exit 1`（先导门的意义就是拦住明显的环境/资产问题）。
 
 ## 会话记录与命名
 
@@ -212,7 +254,7 @@ bench 只能量化「装/卸扩展」在**真实 repo 编码任务**上的边际
 | edit           | `plugin-edit`           | `edit` | 精准编辑 → 编辑成功率 / 少走弯路 |
 | todos          | `plugin-todos`          | `todo` | 长任务规划 → solve 稳定性        |
 
-> 换测插件时：`task.json` 的 `trigger_tools` 是任务级声明「默认被测插件的工具名」，需同步改成该插件的工具（如测 edit 改为 `["edit"]`）；一个任务配多个插件臂时需多组声明。
+> 换测插件时：在 `bench/arms.json` 加一个臂（`plugin-<name>` → 该插件注册的工具名）。工具名挂在**臂**上而非任务上，所以同一个任务可以同时测多个插件臂、互不影响（见 ADR-0057）。
 
 ## 案例库自动补充（后续阶段）
 
