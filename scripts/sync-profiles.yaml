@@ -83,6 +83,7 @@ profiles:
             - whimsical # 工作提示词（sigma 维度）
             - custom-rename # 新 session 首轮自动命名（/auto-rename 开关）
             - message-time # user/assistant 消息顶部时间注记（三段式日期）
+            - plannotator-tui # /plannotator-tui 在 Herdr 面板里评审（依赖 herdr 的 annotate 插件）
             # ── 上下文组装 ──
             - goal # 设立目标与时间、预算等限制
             - custom-compaction # 自定义压缩策略（配置在 ~/.pi/agent/extensions-data/）
@@ -198,6 +199,7 @@ profiles:
                 - goal
                 - custom-rename # 已放 user-install（会话自动命名）
                 - message-time # 已放 user-install（消息时间注记）
+                - plannotator-tui # 已放 user-install（Herdr 面板评审）
                 # 以下插件为不常用或待观察
                 - control # 已放 user-install（agent 组织，ADR-0038）
                 - org # 已放 user-install（agent 组织，ADR-0038）
