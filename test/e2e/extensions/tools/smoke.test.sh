@@ -155,94 +155,16 @@ test_it "tools + ctx-simulator: auto-enables ctx_execute on late registration [R
 TEST
 
 # ====================================================================
-# SCENARIO 4: tools + ctx-simulator — disabled ctx_search stays blocked
+# SCENARIO 4: 旧 tools-config entry 不再影响行为（ADR-0065 D2）
 # ====================================================================
-test_it "tools + ctx-simulator: disabled ctx_search stays blocked [REVIEW]" <<'TEST'
+# 私有基础层（disabledTools / tools-config）已删除：历史会话里残留的 tools-config
+# entry 不再禁用工具 —— 动态注册的工具照常可用，且不被 tool_call 硬拦截。
+test_it "旧 tools-config entry 被忽略：动态工具不被拦截（ADR-0065）" <<'TEST'
   local slug="e2e-tools-s4-$$"
-  local test_home="$ROOT_DIR/.pi/tmp/$slug"
-  setup_test_home "$test_home" tools ctx-simulator
-
-  # Pre-configure: ctx_search is DISABLED
-  mkdir -p "$test_home/.pi/sessions"
-  python3 -c "
-import json, os, uuid
-sid = str(uuid.uuid4())
-d = f'$test_home/.pi/sessions/{sid}'
-os.makedirs(d, exist_ok=True)
-entry = {
-    'type': 'custom',
-    'customType': 'tools-config',
-    'data': {
-        'enabledTools': ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls', 'ctx_execute'],
-        'disabledTools': ['ctx_search'],
-    }
-}
-with open(f'{d}/branch.json', 'w') as f: json.dump([entry], f)
-with open(f'$test_home/.pi/sessions/current.json', 'w') as f: json.dump({'sessionId': sid}, f)
-" 2>/dev/null
-
-  run_pi "$test_home" "$slug" "hi"
-
-  dump_logs "$test_home"
-
-  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
-
-  mark_for_review "Verify disabledTools keeps ctx_search blocked:"$'\n'"1. tools log 不出现 'tool blocked' 直到 LLM 调用；基础层 disabledTools 决定有效集"$'\n'"2. tool_call 触发时 tools log 出现 'tool blocked' with ctx_search"$'\n'"3. ctx-simulator log: 'ctx_search registered' still appears (它只负责注册)"
-TEST
-
-# ====================================================================
-# SCENARIO 5: full cycle — enable → disable → stays disabled
-# ====================================================================
-test_it "full cycle: enable → disable → re-register → stays disabled [REVIEW]" <<'TEST'
-  local slug="e2e-tools-s5-$$"
-  local test_home="$ROOT_DIR/.pi/tmp/$slug"
-  setup_test_home "$test_home" tools ctx-simulator
-
-  # ── Phase 1: fresh start, all tools auto-enabled ──
-  echo "──────────────────── PHASE 1 ────────────────────"
-  run_pi "$test_home" "$slug-p1" "hi"
-  echo "--- tools log p1 ---"
-  cat "$test_home/.pi/logs/tools_"*.log 2>/dev/null || echo "(none)"
-
-  # ── Phase 2: user disabled ctx_search, re-run ──
-  echo "──────────────────── PHASE 2 ────────────────────"
-  rm -f "$test_home/.pi/logs/"*.log
-  mkdir -p "$test_home/.pi/sessions"
-  python3 -c "
-import json, os, uuid
-sid = str(uuid.uuid4())
-d = f'$test_home/.pi/sessions/{sid}'
-os.makedirs(d, exist_ok=True)
-entry = {
-    'type': 'custom',
-    'customType': 'tools-config',
-    'data': {
-        'enabledTools': ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls', 'ctx_execute'],
-        'disabledTools': ['ctx_search'],
-    }
-}
-with open(f'{d}/branch.json', 'w') as f: json.dump([entry], f)
-with open(f'$test_home/.pi/sessions/current.json', 'w') as f: json.dump({'sessionId': sid}, f)
-" 2>/dev/null
-
-  run_pi "$test_home" "$slug-p2" "hi"
-  echo "--- tools log p2 ---"
-  cat "$test_home/.pi/logs/tools_"*.log 2>/dev/null || echo "(none)"
-
-  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
-
-  mark_for_review "Full cycle (ADR-0049/0050 基础层 opt-out):"$'\n'"PHASE 1: 新工具默认启用，无 'tool blocked'"$'\n'"PHASE 2: ctx_search 在 disabledTools → tool_call 时 'tool blocked'"$'\n'"This proves: enable → disable → 重新注册后仍被基础层禁用"
-TEST
-
-# ====================================================================
-# SCENARIO 6: tool_call handler blocks disabled tool at execution
-# ====================================================================
-test_it "tool_call handler blocks disabled ctx_search, allows enabled ctx_execute [REVIEW]" <<'TEST'
-  local slug="e2e-tools-s6-$$"
   local test_home="$ROOT_DIR/.pi/tmp/$slug"
   setup_test_home "$test_home" tools ctx-simulator call-observer
 
-  # Pre-configure: ctx_search DISABLED, ctx_execute ENABLED
+  # 预置历史遗留的 tools-config entry（旧版本的私有基础层）
   mkdir -p "$test_home/.pi/sessions"
   python3 -c "
 import json, os, uuid
@@ -252,10 +174,7 @@ os.makedirs(d, exist_ok=True)
 entry = {
     'type': 'custom',
     'customType': 'tools-config',
-    'data': {
-        'enabledTools': ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls', 'ctx_execute'],
-        'disabledTools': ['ctx_search'],
-    }
+    'data': {'disabledTools': ['ctx_search']},
 }
 with open(f'{d}/branch.json', 'w') as f: json.dump([entry], f)
 with open(f'$test_home/.pi/sessions/current.json', 'w') as f: json.dump({'sessionId': sid}, f)
@@ -263,14 +182,17 @@ with open(f'$test_home/.pi/sessions/current.json', 'w') as f: json.dump({'sessio
 
   run_pi "$test_home" "$slug" "Use ctx_search to search for 'test' in the knowledge base"
 
-  dump_logs "$test_home"
-
-  echo "=== stdout (first 40 lines) ==="
-  head -40 "$ROOT_DIR/.pi/tmp/${slug}-stdout.log" 2>/dev/null || echo "(none)"
+  local tools_log="$test_home/.pi/logs/tools_"*.log
+  if grep -q "tool blocked" $tools_log 2>/dev/null; then
+    echo "FAIL: 旧 tools-config entry 仍在拦截工具（基础层应已删除，ADR-0065 D2）"
+    grep "tool blocked" $tools_log
+    dump_logs "$test_home"
+    exit 1
+  fi
+  echo "PASS: 旧 tools-config entry 不再拦截工具（ADR-0065 D2）"
 
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
-
-  mark_for_review "Verify execution-level blocking:"$'\n'"1. call-observer log: 'tool_call attempt' with ctx_search (LLM tried to use it)"$'\n'"2. tools log: 'tool blocked' with ctx_search (tool_call handler blocked)"$'\n'"3. ctx-simulator log: NO 'ctx_search executed' (execution was prevented)"$'\n'"4. ctx_execute should NOT be blocked (not in disabledTools)"
+  exit 0
 TEST
 
 # ====================================================================
@@ -332,9 +254,9 @@ test_it "tool-range 未报名 → 只观测不限制（无 arm 分配）" <<'TES
 TEST
 
 # ====================================================================
-# SCENARIO 8: tool-range 显式报名 → 臂结果写入基础层
+# SCENARIO 8: tool-range 显式报名 → 臂结果生效（core 收紧 / full 不限制，不落长期状态）
 # ====================================================================
-test_it "tool-range 显式报名 → 分配臂并应用（core: enabled=7 disabled>0 / full: disabled=0）" <<'TEST'
+test_it "tool-range 显式报名 → 分配臂并生效（core: effective=7 injected>0 / full: injected=0）" <<'TEST'
   local slug="e2e-tools-s8-$$"
   local test_home="$ROOT_DIR/.pi/tmp/$slug"
   setup_tool_range_enrolled_sandbox "$test_home"
@@ -362,23 +284,25 @@ test_it "tool-range 显式报名 → 分配臂并应用（core: enabled=7 disabl
   fi
   echo "INFO: assigned line: $assigned_line"
 
-  local arm effective
+  local arm effective injected
   arm=$(sed -n 's/.*arm=\([a-z]*\).*/\1/p' <<<"$assigned_line")
   effective=$(sed -n 's/.*effective=\([0-9]*\).*/\1/p' <<<"$assigned_line")
+  injected=$(sed -n 's/.*injected=\([0-9]*\).*/\1/p' <<<"$assigned_line")
 
   if [[ "$arm" == "core" ]]; then
-    # core 臂：7 个核心工具生效（基础 4 + 搜索 3，增强缺失时回退内置 grep/find/ls）
-    if [[ "$effective" -eq 7 ]]; then
-      echo "PASS: core arm applied (effective=7)"
+    # core 臂 = 施加限制：7 个核心工具生效（基础 4 + 搜索 3）+ 其余被实验注入禁用
+    if [[ "$effective" -eq 7 && "$injected" -gt 0 ]]; then
+      echo "PASS: core arm applied (effective=7 injected=$injected)"
     else
-      echo "FAIL: core arm not applied correctly (effective=$effective)"
+      echo "FAIL: core arm not applied correctly (effective=$effective injected=$injected)"
       exit 1
     fi
   elif [[ "$arm" == "full" ]]; then
-    if [[ "$effective" -gt 7 ]]; then
-      echo "PASS: full arm applied (effective=$effective)"
+    # full 臂 = 不施加限制（ADR-0065）：不注入禁用项，活动集保持 pi 现状
+    if [[ "$injected" -eq 0 ]]; then
+      echo "PASS: full arm imposes no restriction (injected=0 effective=$effective)"
     else
-      echo "FAIL: full arm not applied correctly (effective=$effective)"
+      echo "FAIL: full arm should not restrict tools (injected=$injected)"
       exit 1
     fi
   else

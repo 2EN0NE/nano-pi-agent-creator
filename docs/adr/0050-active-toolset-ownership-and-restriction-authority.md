@@ -1,6 +1,7 @@
 # ADR-0050: 活动工具集的写者与限制权归属
 
 - 状态：已接受（2026-09-13）
+- **修正（2026-10-25）**：决策 1/4/5 与实现契约 4 里"基础层"这一层已被 **ADR-0065** 删除（pi 1.4 的装载清单是第三个来源，且恢复早于扩展 `session_start`）。`tool-range` 收紧活动集时也不再写任何长期状态。决策 2/3/6（限制权归属、实验退避）仍然有效。
 - 相关组件：`extensions/meta/preset`（`tools.ts` / `skills.ts`）、`extensions/meta/pi-lab`、所有可能调用 `pi.setActiveTools()` 的扩展（如 `extensions/auto/org`）
 - 延伸：ADR-0049（preset 是硬约束策略源，约束是 overlay）、ADR-0043（org 在岗门控要求 org 碰 `setActiveTools`）
 - 术语：见 `CONTEXT.md`「preset 预设」节（基础层 / 约束叠加层 / 活动工具集）

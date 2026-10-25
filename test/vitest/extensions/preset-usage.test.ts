@@ -94,6 +94,7 @@ function makeFakePi(records: Recorded[]): FakePi {
 		setThinkingLevel: () => {},
 		getActiveTools: () => ['read', 'bash'],
 		setActiveTools: () => {},
+		getSettings: () => ({}),
 		getAllTools: () => [
 			{ name: 'read' },
 			{ name: 'bash' },

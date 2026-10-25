@@ -94,6 +94,7 @@ function makeFakePi(opts: {
 		},
 		appendEntry: () => {},
 		getFlag: (name: string) => (name === 'preset' ? opts.presetFlag : undefined),
+		getSettings: () => ({}),
 		_handlers,
 		_setActiveCalls,
 		_selectCalls: () => _selectCalls,
@@ -120,14 +121,14 @@ async function fireSessionStart(pi: FakePi, ctx: unknown): Promise<void> {
 }
 
 describe('tool-range 实验分流（ADR-0050 B2）', () => {
-	it('未报名（默认）→ 不 select、不施加限制，活动集 = 基础层', async () => {
+	it('未报名（默认）→ 不 select、不施加限制、不干预 pi 的工具状态', async () => {
 		const pi = makeFakePi({ selectArm: 'core' });
 		toolsExtension(pi as never);
 		await fireSessionStart(pi, makeCtx());
 
 		expect(pi._selectCalls()).toBe(0);
-		const last = pi._setActiveCalls[pi._setActiveCalls.length - 1];
-		expect(last).toEqual(ALL_TOOLS);
+		// ADR-0065：无 overlay / 无复位 / 无注入 → 不调 setActiveTools
+		expect(pi._setActiveCalls).toEqual([]);
 	});
 
 	it('已报名 + select=core → 分流到 7 个 core 工具（其余禁用）', async () => {
@@ -147,11 +148,11 @@ describe('tool-range 实验分流（ADR-0050 B2）', () => {
 		toolsExtension(pi as never);
 		await fireSessionStart(pi, makeCtx());
 
-		const last = pi._setActiveCalls[pi._setActiveCalls.length - 1];
-		expect(last).toEqual(ALL_TOOLS);
+		// full 臂不收紧：无注入 → 不调 setActiveTools（活动集保持 pi 现状 = 全量）
+		expect(pi._setActiveCalls).toEqual([]);
 	});
 
-	it('已报名 + 已有 tools-config entry → 跳过实验分流（select 不被调用）', async () => {
+	it('旧 tools-config entry 不再影响行为（基础层已移除，实验照常分流）', async () => {
 		enroll();
 		const entries = [
 			{ type: 'custom', customType: 'tools-config', data: { disabledTools: ['edit'] } },
@@ -160,11 +161,9 @@ describe('tool-range 实验分流（ADR-0050 B2）', () => {
 		toolsExtension(pi as never);
 		await fireSessionStart(pi, makeCtx(entries));
 
-		expect(pi._selectCalls()).toBe(0);
-		// restoreFromBranch 应用基础层（= 全集 - edit），实验不追加
+		expect(pi._selectCalls()).toBe(1);
 		const last = pi._setActiveCalls[pi._setActiveCalls.length - 1];
-		expect(last).not.toContain('edit');
-		expect(last).toContain('read');
+		expect(last).toEqual(['read', 'bash', 'edit', 'write', 'rg', 'ffgrep', 'fffind']);
 	});
 
 	it('已报名 + --preset flag 存在 → 跳过实验分流（select 不被调用）', async () => {
@@ -183,7 +182,7 @@ describe('tool-range 实验分流（ADR-0050 B2）', () => {
 		await fireSessionStart(pi, makeCtx());
 
 		expect(pi._selectCalls()).toBe(1);
-		const last = pi._setActiveCalls[pi._setActiveCalls.length - 1];
-		expect(last).toEqual(ALL_TOOLS);
+		// 未成功分流 → 无注入，不调 setActiveTools
+		expect(pi._setActiveCalls).toEqual([]);
 	});
 });

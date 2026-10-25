@@ -1,6 +1,7 @@
 # ADR-0049: preset 作为 tools/skills/instructions 的硬约束策略源，子工具激活即锁死
 
 - 状态：已接受（2026-09-13）
+- **修正（2026-10-25）**：决策 2 的「工具全量启用」与决策 5/6 的「清除 preset = 基础层原样保留」已被 **ADR-0065** 取代——pi 1.4 引入装载清单（transcript 记录 + 恢复早于扩展 `session_start`），私有基础层已删除，无 preset 状态一律回到**默认工具选择**。本 ADR 的「preset 是唯一策略声明者 / 激活即锁定 / 封闭集」仍然有效。
 - 相关组件：`extensions/meta/preset`（`index.ts` / `tools.ts` / `skills.ts` / `prompt-editor.ts`）、`extensions/auto/org`（动态注册工具的代表方）
 - 修订：取代 ADR-0035 的「默认不锁定、偏离仅提示」默认语义（激活即锁定）；ADR-0031/0032/0033 的字段三态与三级来源仍然有效
 - 术语：见 `CONTEXT.md`「preset 预设」节（preset 策略源 / 子工具 / 无 preset 状态 / 基础层 / 约束叠加层 / 活动工具集）

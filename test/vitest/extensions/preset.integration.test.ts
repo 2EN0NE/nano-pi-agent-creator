@@ -61,6 +61,8 @@ interface FakePiConfig {
 	setModelResult?: boolean;
 	allTools?: string[];
 	activeTools?: string[];
+	/** pi 的 `defaultTools` 设置（默认 undefined = 未配置）。 */
+	defaultTools?: string[];
 	/** 可变引用：测试中途改动 current 以模拟第三方改 tools（turn_start 兜底回滚用）。 */
 	activeToolsRef?: { current: string[] };
 	thinkingLevel?: string;
@@ -103,6 +105,7 @@ function makeFakePi(cfg: FakePiConfig = {}) {
 			// 模拟 pi runtime：活动集随 setActiveTools 变化（供真实 overlay 路径断言）
 			if (cfg.activeToolsRef) cfg.activeToolsRef.current = [...tools];
 		},
+		getSettings: () => ({ defaultTools: cfg.defaultTools }),
 		getAllTools: () =>
 			(cfg.allTools ?? ['read', 'bash', 'edit', 'write']).map((t) => ({ name: t })),
 		appendEntry: (type: string, data: unknown) => {
@@ -765,7 +768,7 @@ describe('preset turn_start 兜底回滚（ADR-0035 扩展）', () => {
 });
 
 describe('preset 真实 closure — session 恢复', () => {
-	it('turn_start appendEntry；第二次 session_start 从 entry 恢复并 re-apply tools', async () => {
+	it('激活时落 preset-state entry；新会话实例从 entry 恢复并 re-apply 工具白名单', async () => {
 		setupDirs({ plan: { tools: ['read'] } });
 		const { pi, rec, commands, handlers } = makeFakePi({ allTools: ['read', 'bash'] });
 		presetExtension(pi as never);
@@ -773,27 +776,28 @@ describe('preset 真实 closure — session 恢复', () => {
 		const ctx1 = makeCtx();
 		await fireEvent(handlers, 'session_start', null, ctx1.ctx);
 		await commands['preset']('plan', ctx1.ctx);
-		await fireEvent(handlers, 'turn_start', null, ctx1.ctx);
+		// entry 在激活时即落盘（不再等 turn_start），保证"未发消息就退出"也能恢复
 		expect(
 			rec.appendEntryCalls.some(
 				(e) => e.type === 'preset-state' && (e.data as any).name === 'plan',
 			),
 		).toBe(true);
 
-		// 第二次会话：从 entries 恢复（模拟 /reload 或重启）
+		// 第二次会话：全新实例（等价 /reload 或重启），只靠 entries 恢复
 		const persisted = rec.appendEntryCalls.find((e) => e.type === 'preset-state');
 		const entries = [{ type: 'custom', customType: 'preset-state', data: persisted?.data }];
 		const ctx2 = makeCtx({ entries });
-		rec.setActiveToolsCalls.length = 0;
-		await fireEvent(handlers, 'session_start', null, ctx2.ctx);
+		const second = makeFakePi({ allTools: ['read', 'bash'] });
+		presetExtension(second.pi as never);
+		await fireEvent(second.handlers, 'session_start', null, ctx2.ctx);
 
-		expect(rec.setActiveToolsCalls).toContainEqual(['read']);
+		expect(second.rec.setActiveToolsCalls).toContainEqual(['read']);
 		cleanupDirs();
 	});
 });
 
 describe('preset 真实 closure — 清除恢复 originalState', () => {
-	it('applySelection((none)) 恢复快照的 model/thinkingLevel/tools', async () => {
+	it('applySelection((none)) 恢复 model/thinkingLevel 快照，tools 回到默认工具选择', async () => {
 		setupDirs({ plan: { thinkingLevel: 'high' } });
 		const { pi, rec, commands, handlers } = makeFakePi({
 			thinkingLevel: 'off',
@@ -808,7 +812,8 @@ describe('preset 真实 closure — 清除恢复 originalState', () => {
 
 		expect(rec.setModelCalls).toContainEqual({ provider: 'mock', id: 'm1' });
 		expect(rec.setThinkingLevelCalls).toContain('off');
-		expect(rec.setActiveToolsCalls).toContainEqual(['read', 'bash']);
+		// ADR-0065：工具不保留"快照"，清除即回到默认工具选择（mock 未配 defaultTools → 全部工具）
+		expect(rec.setActiveToolsCalls.at(-1)).toEqual(['read', 'bash', 'edit', 'write']);
 		cleanupDirs();
 	});
 

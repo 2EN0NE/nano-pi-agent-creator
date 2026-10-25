@@ -361,13 +361,14 @@ store.reload();
 `preset` 是 tools / skills / instructions 三个维度的**唯一策略声明者**；`/tools`、`/skills`、`/prompt` 是它的**子工具**（执行臂），三者均由 preset 插件注册（`extensions/meta/preset/`）。硬约束：
 
 - **preset 激活 = 硬约束 + 子工具锁死**。激活期间 `/tools`、`/skills`、`/prompt` 的写操作一律**拒绝并告警**（读视图仍可用）；要改配置只能通过 `/preset` 编辑/切换，或先清除预设。ADR-0035 的「默认不锁定、偏离仅提示」语义被取代（**激活即锁定**）。
-- **无 preset（none）= 不施加任何限制**。三轴回到「无策略」默认：工具全量启用、技能不限制、无 preset instructions。清除预设与任何恢复路径（`/reload`、`session_tree`、分支恢复）**不得复活**上一次的约束。
+- **无 preset（none）= 不施加任何限制**。三轴回到「无策略」默认：**工具回到默认工具选择**（pi 的 `defaultTools` 解析 ∪ 非内置工具，ADR-0065）、技能不限制、无 preset instructions。清除预设与任何恢复路径（`/reload`、`session_tree`、分支恢复）**不得复活**上一次的约束。
 - **tools 白名单是封闭集**。preset 激活且声明了 `tools` 时，运行时新注册的工具（org / MCP 等）一律视为禁用，`/tools` 视图同样显示为**不可用**；要启用须写进该 preset 的 `tools`。
-- **约束是叠加层（overlay），不得污染基础层**。preset 不得把自身约束写进 `/tools` 的基础状态（`tools-config` 快照）；清除预设即撤回 overlay。任何扩展**不得**用自有快照整体覆盖 `pi.setActiveTools()`（当前 `tools.ts` 的 `applyTools()` / `replaceTools()` 违反此条，属待修）。
-- **限制权只有两个来源：preset 与三个子工具**。其它扩展 / 实验**不得**用 `pi.setActiveTools()` 或写 `disabledTools` 去缩减活动工具集，只能观测/记录；`registerTool` 的动态注册不算限制（属 pi 的基础启用行为，在封闭集 preset 下由 overlay 遮罩）。`tool-range` 实验按 B2：默认只记录，用户显式报名后才把臂结果写基础层，preset 激活时退避（ADR-0050）。
-- **必须有语义级 e2e 保护**（仅"无报错 / 退出码"不算）：① 激活带 `tools` 的 preset 后 `/tools` 视图 == preset 白名单；② 清除 preset 后工具/技能恢复无限制；③ `/reload` 后不复活已清除的 preset；④ 动态注册工具在激活的封闭集 preset 下不可用。
+- **preset 不得污染长期工具状态**（ADR-0065）。preset 不持有任何"基础层"快照；`/tools` 手改直接写 pi 的活动集（由 pi 记录），清除/切换 preset 一律复位到**默认工具选择**。任何扩展**不得**从 `pi.getActiveTools()` 反推禁用集（pi 1.4 的装载清单会在扩展 `session_start` 之前恢复，反推必然把上一次 preset 的限制固化）。
+- **会话恢复只认 preset 状态**。`preset-state` entry 的 `name: null` = 已清除 → 复位到默认工具选择；有 name = 仍激活 → 重放白名单；**无记录 = 不干预** pi（保护 `--no-builtin-tools` / `--tools -name` 等启动修饰）。
+- **限制权只有两个来源：preset 与三个子工具**。其它扩展 / 实验**不得**用 `pi.setActiveTools()` 或写 `disabledTools` 去缩减活动工具集，只能观测/记录；`registerTool` 的动态注册不算限制（属 pi 的基础启用行为，在封闭集 preset 下由 overlay 遮罩）。`tool-range` 实验按 B2：默认只记录，用户显式报名后才按其臂收紧活动集（不落长期状态），preset 激活时退避（ADR-0050 / ADR-0065）。
+- **必须有语义级 e2e 保护**（仅"无报错 / 退出码"不算）：① 激活带 `tools` 的 preset 后 `/tools` 视图 == preset 白名单；② 清除 preset 后工具/技能恢复无限制（`bash` 可调用）；③ `/reload` 后不复活已清除的 preset；④ 动态注册工具在激活的封闭集 preset 下不可用；⑤ **resume 复位**：已清除 → 工具回到默认工具选择；仍激活 → 保持白名单（探针 `test/e2e/helpers/tools-probe.ts`）。
 
-> 术语见 `CONTEXT.md`「preset 预设」节；决策、现状差距与实现契约见 `docs/adr/0049-preset-hard-policy-source-and-subtool-lock.md` 与 `docs/adr/0050-active-toolset-ownership-and-restriction-authority.md`。
+> 术语见 `CONTEXT.md`「preset 预设」节；决策与实现契约见 `docs/adr/0049-preset-hard-policy-source-and-subtool-lock.md`、`docs/adr/0050-active-toolset-ownership-and-restriction-authority.md`；**工具权威与复位语义以 `docs/adr/0065-tool-authority-and-default-tool-selection.md` 为准**（它修正了 0049 的"两层"假设与 0050 的"两个来源"）。
 
 ### 测试辅助扩展（跨扩展交互测试）
 
@@ -855,6 +856,10 @@ Pi 除 chat 外还有两类非对话模型：`classifier`（`bool` / `choice` / 
 
 > 校验代码、`registerProvider` 接自建判定服务、`models.json` 覆盖 `baseUrl`、坑清单与实测记录见
 > [`docs/pi-ext-knowledge/classifier-models-jev.md`](docs/pi-ext-knowledge/classifier-models-jev.md)。
+
+### 16. `before_agent_start`：`systemPromptOptions` 可变、`systemPrompt` 是懒渲染
+
+`event.systemPrompt` 是 **getter**（每次读取都拿同一个 `systemPromptOptions` 重建），`systemPromptOptions` 是**可变**对象（后注册的 handler 能看到前面的修改）。所以运行时裁剪技能/工具说明只需就地写 `event.systemPromptOptions.skills`，pi 自己渲染并以 **section diff** 增量下发；`return { systemPrompt }` 等价 `forceSystemPrompt`（整段钉死、失去 diff、不利缓存），只留给整段重写场景。两个已知坑：① **就地裁剪 = 改变共享字段语义**——之后读 `options.skills` 的扩展（如 resources-tree 的分母）看到的是「可见集」而非「全量」，要用 `pi.getCommands()`（`source === "skill"`）拿全量；② **force 会整段覆盖 sections**，早于裁剪方的 force 会把未过滤快照钉死，而扩展加载顺序由 `readdirSync` 决定、pi 不排序 → 裁剪方必须自带兜底（见 `skills.ts` 的 `path: options|force|snapshot`）。细节见 [`ADR-0066`](docs/adr/0066-skills-runtime-filtering-via-system-prompt-options.md)。
 
 ---
 

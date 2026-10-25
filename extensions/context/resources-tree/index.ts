@@ -152,6 +152,8 @@ export default function (pi: ExtensionAPI): void {
 				enabledNames.add(m[1]);
 			}
 
+			// 注意：`all` 可能已被 preset 的 skills 白名单就地裁剪（ADR-0066），因此这份
+			// 列表是「当前可见集」还是「全量」取决于 handler 注册顺序；分母另有权威来源（见下）。
 			const all = event.systemPromptOptions.skills;
 			const use = enabledNames.size > 0 ? all.filter((s) => enabledNames.has(s.name)) : all;
 			state.loadedSkills = use.map((s) => ({
@@ -166,17 +168,24 @@ export default function (pi: ExtensionAPI): void {
 		}
 
 		// ── Denominator from Pi's authoritative total ──────────────
-		// Update fsSkillCount from systemPromptOptions.skills (Pi's full loaded
-		// list, including sources like ~/.agents/ that loadAllSkillsFromFs misses).
-		if (event.systemPromptOptions.skills) {
-			state.fsSkillCount = new Set(event.systemPromptOptions.skills.map((s) => s.name)).size;
-		}
+		// 分母要的是「Pi 已加载的全量技能」，不能用 event.systemPromptOptions.skills：
+		// 那是事件链上共享的可变对象，preset 的 skills 白名单会就地裁剪它（ADR-0066），
+		// handler 注册顺序不同就会让分母变成可见集（如 "0/0"）。
+		// 也不能用 ctx.getSystemPromptOptions()——它只挂在**命令** ctx 上，事件 ctx 没有
+		// （实测 before_agent_start 的 ctx 上为 undefined）。改用 pi.getCommands()：它直读
+		// resourceLoader 的完整技能清单（agent-session.js: getCommands → getSkills().skills），
+		// 不受 options 裁剪影响，且与 handler 顺序无关。
+		const loadedSkillCount = new Set(
+			pi
+				.getCommands()
+				.filter((c) => c.source === 'skill')
+				.map((c) => c.name),
+		).size;
+		if (loadedSkillCount > 0) state.fsSkillCount = loadedSkillCount;
 
 		// ── Debug logging (emitted to pi-logger EventBus if available) ──
-		log.info('before_agent_start skill_counts', {
-			xmlSkillCount: state.xmlSkillCount,
-			fsSkillCount: state.fsSkillCount,
-		});
+		// 数字写进 message：pi-logger 的文件 appender 只落 message、不落 details 字段。
+		log.info('before_agent_start skill_counts=%s/%s', state.xmlSkillCount, state.fsSkillCount);
 
 		if (!ctx.hasUI) return promptResult;
 

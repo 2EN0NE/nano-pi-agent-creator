@@ -269,6 +269,9 @@ export default function presetExtension(pi: ExtensionAPI) {
 	 * （否则 /reload 后选中状态丢失——之前只在 turn_start 写 entry，选中后未发对话即丢失）。
 	 */
 	function persistSessionState(): void {
+		// 会话 entry 与文件落盘解耦：entry 是工具轴判定「preset 是否涉及过」的唯一判据，
+		// 无 session 文件（如 --no-session）时它仍必须写（ADR-0065）。
+		pi.appendEntry('preset-state', { name: activePresetName ?? null });
 		const sessionFile = presetStore.getPaths().sessionFile;
 		if (!sessionFile) return;
 		// readJsonFile 对「文件不存在」与「损坏/非对象」都返回 null，须用 existsSync 区分：
@@ -568,6 +571,17 @@ export default function presetExtension(pi: ExtensionAPI) {
 
 		const scoped = resolveScopedPreset(name);
 		if (scoped) {
+			// 陈旧引用：TUI 下先交互式修复，再激活（ADR-0065）
+			if (ctx.mode === 'tui') {
+				const issues = detectStaleIssues(scoped.preset, ctx);
+				if (issues.length > 0) {
+					const proceed = await repairStaleRefs(name, scoped.preset, issues, ctx);
+					if (!proceed) {
+						updateStatus(ctx);
+						return;
+					}
+				}
+			}
 			await applyPreset(name, scoped.preset, ctx);
 			ctx.ui.notify(`预设 "${name}" 已激活`, 'info');
 			updateStatus(ctx);
@@ -898,6 +912,186 @@ export default function presetExtension(pi: ExtensionAPI) {
 		return skills.filter((n) => all.includes(n));
 	}
 
+	// ── 陈旧引用（stale reference）：只查本地可用性，不探测上游（ADR-0065）────────
+	type StaleDimension = 'tools' | 'skills' | 'model';
+
+	interface StaleIssue {
+		dimension: StaleDimension;
+		/** 当前值（tool/skill 名，或 `provider/model`）。 */
+		value: string;
+		reason: string;
+		/** 本地可选的替换候选。 */
+		candidates: string[];
+	}
+
+	const STALE_LABEL: Record<StaleDimension, string> = {
+		tools: '工具',
+		skills: '技能',
+		model: '模型',
+	};
+
+	/** 本地可用模型（`provider/model` 形式）。 */
+	function availableModelKeys(ctx: ExtensionContext): string[] {
+		return ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`);
+	}
+
+	/** 该 preset 引用但本地已不存在的项。判定只看本地配置。 */
+	function detectStaleIssues(preset: Preset, ctx: ExtensionContext): StaleIssue[] {
+		const issues: StaleIssue[] = [];
+		const allTools = pi.getAllTools().map((t) => t.name);
+		for (const tool of preset.tools ?? []) {
+			if (!allTools.includes(tool)) {
+				issues.push({
+					dimension: 'tools',
+					value: tool,
+					reason: '本地未注册该工具',
+					candidates: allTools,
+				});
+			}
+		}
+		// 技能维度只在技能清单已收集时判定：未收集时 `getSkillNames()` 返回 []，
+		// 会把 preset 声明的技能全判成「本地不存在」，用户选「移除」即误删配置（ADR-0065）。
+		const skillsApi = (
+			globalThis as {
+				__skillsApi?: { getSkillNames?: () => string[]; isLoaded?: () => boolean };
+			}
+		).__skillsApi;
+		if (skillsApi?.isLoaded?.()) {
+			const allSkills = skillsApi.getSkillNames?.() ?? [];
+			for (const skill of preset.skills ?? []) {
+				if (!allSkills.includes(skill)) {
+					issues.push({
+						dimension: 'skills',
+						value: skill,
+						reason: '本地不存在该技能',
+						candidates: allSkills,
+					});
+				}
+			}
+		}
+		if (preset.provider && preset.model) {
+			if (!ctx.modelRegistry.find(preset.provider, preset.model)) {
+				issues.push({
+					dimension: 'model',
+					value: `${preset.provider}/${preset.model}`,
+					reason: '本地 models 配置里没有该模型/provider',
+					candidates: availableModelKeys(ctx),
+				});
+			}
+		}
+		return issues;
+	}
+
+	/** 在 preset 上就地替换（next=null 表示移除）。 */
+	function applyStaleFix(preset: Preset, issue: StaleIssue, next: string | null): void {
+		if (issue.dimension === 'tools') {
+			preset.tools = (preset.tools ?? [])
+				.map((t) => (t === issue.value ? next : t))
+				.filter((t): t is string => Boolean(t));
+			return;
+		}
+		if (issue.dimension === 'skills') {
+			preset.skills = (preset.skills ?? [])
+				.map((s) => (s === issue.value ? next : s))
+				.filter((s): s is string => Boolean(s));
+			return;
+		}
+		if (next === null) {
+			delete preset.provider;
+			delete preset.model;
+			return;
+		}
+		const index = next.indexOf('/');
+		preset.provider = index === -1 ? next : next.slice(0, index);
+		preset.model = index === -1 ? preset.model : next.slice(index + 1);
+	}
+
+	/** 按 preset 的所属层级写回（project/user 落 config.json，session 落会话文件）。 */
+	function saveScopedPreset(name: string, preset: Preset, ctx: ExtensionContext): void {
+		const scoped = resolveScopedPreset(name);
+		if (scoped?.scope === 'project') {
+			projectPresets = persistPresetToProject(ctx.cwd, name, preset);
+		} else if (scoped?.scope === 'user') {
+			userPresets = persistPresetToUser(ctx.cwd, name, preset);
+		} else {
+			sessionPresets.set(name, preset);
+		}
+		persistSessionState();
+	}
+
+	/**
+	 * 陈旧引用交互式修复（ADR-0065）。
+	 *
+	 * 第一个动作永远是「修改并保存」——逐项从本地候选里挑正确值写回；
+	 * 第二个「移除」；第三个「取消」。返回 false = 用户取消，不应继续激活。
+	 */
+	async function repairStaleRefs(
+		name: string,
+		preset: Preset,
+		issues: StaleIssue[],
+		ctx: ExtensionContext,
+	): Promise<boolean> {
+		const detail = issues
+			.map((i) => `${STALE_LABEL[i.dimension]}  ${i.value}  —  ${i.reason}`)
+			.join('\n');
+		const decision = await showSelect(
+			ctx,
+			`预设 "${name}" 有 ${issues.length} 项在本地已失效`,
+			[
+				{
+					value: 'fix',
+					label: '修改并保存',
+					description: '逐项挑选本地可用的正确值，写回该预设',
+				},
+				{ value: 'remove', label: '移除', description: '删除这些失效项，写回该预设' },
+				{ value: 'cancel', label: '取消', description: '不激活，也不修改配置' },
+			],
+			{ detail, mode: 'warning' },
+		);
+		if (!decision || decision.value === 'cancel') {
+			log.info('stale refs: user cancelled', { preset: name, issues: issues.length });
+			return false;
+		}
+
+		// 先把所有选择收齐，再统一改 preset：中途取消（Esc）时不能留下"改了一半"的内存状态
+		// ——会话级 preset 在下一次 persistSessionState 时会被静默落盘（ADR-0065）。
+		const picks: Array<{ issue: StaleIssue; next: string | null }> = [];
+		if (decision.value === 'fix') {
+			for (const issue of issues) {
+				if (issue.candidates.length === 0) {
+					ctx.ui.notify(
+						`${STALE_LABEL[issue.dimension]} "${issue.value}" 没有本地候选可替换，已保留`,
+						'warning',
+					);
+					continue;
+				}
+				const picked = await showSelect(
+					ctx,
+					`修改${STALE_LABEL[issue.dimension]}：${issue.value}（当前值）`,
+					issue.candidates.map((c) => ({ value: c, label: c })),
+				);
+				if (!picked) {
+					log.info('stale refs: user cancelled mid-fix, nothing applied', {
+						preset: name,
+					});
+					return false;
+				}
+				picks.push({ issue, next: picked.value });
+			}
+		} else {
+			for (const issue of issues) picks.push({ issue, next: null });
+		}
+		for (const { issue, next } of picks) applyStaleFix(preset, issue, next);
+
+		saveScopedPreset(name, preset, ctx);
+		log.info('stale refs repaired', {
+			preset: name,
+			action: decision.value,
+			issues: issues.map((i) => `${i.dimension}:${i.value}`),
+		});
+		return true;
+	}
+
 	/**
 	 * 检测当前实际状态是否偏离 activePreset 的设定。
 	 * 返回偏离维度短名，空数组 = 未偏离。
@@ -1126,9 +1320,8 @@ export default function presetExtension(pi: ExtensionAPI) {
 					return;
 				}
 
-				await applyPreset(name, scoped.preset, ctx);
-				ctx.ui.notify(`预设 "${name}" 已激活`, 'info');
-				updateStatus(ctx);
+				// 走 applySelection：含陈旧引用交互式修复（ADR-0065）
+				await applySelection(name, ctx);
 				return;
 			}
 
@@ -1207,6 +1400,25 @@ export default function presetExtension(pi: ExtensionAPI) {
 		if (typeof presetFlag === 'string' && presetFlag) {
 			const scoped = resolveScopedPreset(presetFlag);
 			if (scoped) {
+				if (ctx.mode === 'tui') {
+					const issues = detectStaleIssues(scoped.preset, ctx);
+					if (issues.length > 0) {
+						const proceed = await repairStaleRefs(
+							presetFlag,
+							scoped.preset,
+							issues,
+							ctx,
+						);
+						if (!proceed) {
+							// 取消 = 本次不激活任何 preset：工具轴必须回到默认工具选择，
+							// 否则 pi 从会话记录恢复的旧限制会留在「无 preset」状态里（ADR-0065）。
+							applyToolsOverlay(null);
+							persistSessionState();
+							updateStatus(ctx);
+							return;
+						}
+					}
+				}
 				await applyPreset(presetFlag, scoped.preset, ctx);
 				ctx.ui.notify(`预设 "${presetFlag}" 已激活`, 'info');
 			} else {
@@ -1264,6 +1476,12 @@ export default function presetExtension(pi: ExtensionAPI) {
 				activePreset = undefined;
 				persistSessionState();
 			}
+		} else if (hasStoredState && restoredActiveName === null) {
+			// 已清除的预设：会话层状态是权威判据（ADR-0049 决策 2），工具轴据此复位。
+			// 只有当前分支末端不是 name=null 时才补写 entry，避免每次 session_start
+			// 都往 transcript 追一条重复记录（ADR-0065）。
+			applyToolsOverlay(null);
+			if (presetEntry?.data?.name != null) persistSessionState();
 		}
 
 		updateStatus(ctx);
@@ -1305,9 +1523,6 @@ export default function presetExtension(pi: ExtensionAPI) {
 	pi.on('turn_start', async (_event, ctx) => {
 		log.debug('event: turn_start');
 		latestCtx = ctx;
-		if (activePresetName) {
-			pi.appendEntry('preset-state', { name: activePresetName });
-		}
 		// 状态稳定边界：兜底回滚锁定 preset 的偏离维度（tools/skills/instructions 无修改事件，
 		// 只能 turn 边界兜底；model/thinking 事件回滚失败的残留也在此兜底），再刷新状态栏。
 		await rollbackDrift(ctx);

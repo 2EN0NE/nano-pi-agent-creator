@@ -16,8 +16,6 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
-	formatSkillsForPrompt: (skills: Array<{ name: string; description: string }>) =>
-		skills.map((s) => s.name).join(','),
 	DynamicBorder: class {},
 	getSettingsListTheme: () => ({}),
 }));
@@ -130,12 +128,11 @@ async function driveAndInit(notifyCalls: Array<{ message: string; type: string }
 	const { pi, handlers } = makeFakePi();
 	skillsExtension(pi as never);
 	const ctx = makeCtx(notifyCalls, tmpCwd);
-	// systemPrompt 需包含 formatSkillsForPrompt 的 mock 输出，供过滤 replace 命中
-	const skillsXml = ALL_SKILLS.map((s) => s.name).join(',');
+	// 提示词裁剪走 options.skills（ADR-0066），这里只需让技能清单被收集
 	await fireEvent(
 		handlers,
 		'before_agent_start',
-		{ systemPromptOptions: { skills: ALL_SKILLS }, systemPrompt: skillsXml },
+		{ systemPromptOptions: { skills: ALL_SKILLS }, systemPrompt: '' },
 		ctx,
 	);
 	return { handlers, ctx };

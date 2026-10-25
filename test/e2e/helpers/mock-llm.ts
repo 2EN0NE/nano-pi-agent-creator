@@ -19,7 +19,12 @@
  */
 
 import { registerFauxProvider } from '@earendil-works/pi-ai/compat';
-import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import {
+	fauxAssistantMessage,
+	fauxToolCall,
+	getCurrentSystemMessage,
+	getSystemMessageText,
+} from '@earendil-works/pi-ai';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-agent';
@@ -124,6 +129,31 @@ export function applyVars(value: unknown, vars: Record<string, string>): unknown
 /** 成员目录里的脚本文件名（被唤醒进程无法从 env 收脚本，改由 cwd 文件提供；shell 侧按此硬编码，见 smoke.test.sh） */
 const TOOL_SCRIPT_FILE = '.mock-llm-script.json';
 
+/**
+ * 从 provider 请求里切出**模型当前可见**的技能名（`<available_skills>` 内的 `<name>`）。
+ *
+ * 只看 replay 后的当前 system prompt：pi 用 section patch 增量更新 system prompt，
+ * 历史轮次的 patch 仍留在 messages 里，若直接扫整个 context（含历史 patch），
+ * 会把「上一轮广告过、本轮已被裁掉」的技能名也算进来。
+ */
+function advertisedSkillNamesOf(context: unknown): string[] {
+	const ctx = (context ?? {}) as { messages?: unknown; systemPrompt?: unknown };
+	let systemText = typeof ctx.systemPrompt === 'string' ? ctx.systemPrompt : '';
+	if (Array.isArray(ctx.messages)) {
+		try {
+			const head = getCurrentSystemMessage(ctx.messages as never);
+			if (head) systemText = getSystemMessageText(head) || systemText;
+		} catch {
+			// 结构异常时回落 systemPrompt 字段
+		}
+	}
+	const out = new Set<string>();
+	for (const block of systemText.matchAll(/<available_skills>([\s\S]*?)<\/available_skills>/g)) {
+		for (const m of block[1].matchAll(/<name>([^<]*)<\/name>/g)) out.add(m[1].trim());
+	}
+	return [...out];
+}
+
 function readCwdScriptFile(): string | undefined {
 	try {
 		return readFileSync(join(process.cwd(), TOOL_SCRIPT_FILE), 'utf8');
@@ -156,6 +186,10 @@ export default function (pi: ExtensionAPI) {
 	// messages）到 stdout，供 e2e 断言"LLM 收到零文本"——invisible continue
 	// marker 应已被 context hook 过滤，不出现在任何请求里。
 	const recordContext = process.env.MOCK_LLM_RECORD_CONTEXT === '1';
+	// MOCK_LLM_RECORD_SKILLS=1：把每次请求里**模型实际可见**的技能名导出到 stdout
+	// （`[mock-llm-skills] a,b`），供 e2e 断言 preset 的 skills 白名单真的落到了
+	// system prompt 上——这层由 pi 渲染，单测只能断言 options 字段，证明不了。
+	const recordSkills = process.env.MOCK_LLM_RECORD_SKILLS === '1';
 	const INVISIBLE_MARKER = 'custom-compaction:invisible-continue';
 
 	// MOCK_LLM_TOOL_SCRIPT：顺序回放脚本（ADR-0045 D3）——多 agent 自主闭环的"外置大脑"。
@@ -254,6 +288,17 @@ export default function (pi: ExtensionAPI) {
 		const LONG_REPLY =
 			'This is a very long assistant reply that exceeds the ninety one column terminal width and wraps onto a second physical line in the chat area.';
 		faux.setResponses(Array.from({ length: repeat }, () => fauxAssistantMessage(LONG_REPLY)));
+	} else if (recordSkills) {
+		// 每次请求导出模型可见的技能面（函数自追加 = 无限响应，避免后续请求卡在
+		// "No more faux responses queued"）。断言对象是**渲染后的 system prompt**，
+		// 从而覆盖 vitest 无法证明的 "options.skills → pi 渲染" 这一段。
+		const loop = async (context: unknown) => {
+			const names = advertisedSkillNamesOf(context);
+			console.log(`[mock-llm-skills] ${names.length > 0 ? names.join(',') : '(none)'}`);
+			faux.appendResponses([loop]);
+			return fauxAssistantMessage('Mock LLM is ready.');
+		};
+		faux.setResponses([loop]);
 	} else {
 		faux.setResponses([fauxAssistantMessage('Mock LLM is ready.')]);
 	}

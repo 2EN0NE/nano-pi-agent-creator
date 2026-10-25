@@ -3,17 +3,19 @@
  *
  * Provides a /tools command to enable/disable tools interactively.
  *
- * 状态模型（ADR-0049 / ADR-0050）：
- * - **基础层（base）**：`disabledTools`（opt-out）。用户显式禁用的工具；新注册工具默认启用。
- *   基础层由用户经 /tools 维护，持久化到 session entry `tools-config`。
- * - **叠加层（overlay）**：`presetOverlay`。preset 激活时设置的**封闭集白名单**（非 null 时生效）。
- *   有效活动集 = overlay ∩ allTools；overlay 为 null 时 = allTools - 基础禁用。
- * - preset **不得**把约束写进基础层；清除 preset 仅置 overlay 为 null。
+ * 状态模型（ADR-0065，取代 ADR-0049 的"两层"假设）：
+ * - **无 preset 状态** = pi 的**默认工具选择**：`defaultTools` 设置（`+name`/`-name` 修饰按 pi 语义）
+ *   ∪ 非内置工具。本扩展**不持有**任何基础层快照，也不再写 `tools-config` entry。
+ * - **preset 叠加层**：`presetOverlay`。preset 激活时设置**封闭集白名单**（非 null 时生效）；
+ *   有效活动集 = overlay ∩ allTools。清除 / 切换 preset → 复位到默认工具选择。
+ * - **会话恢复**：只按会话里已落痕的 preset 状态判定——已清除则复位，仍激活则由 preset 重放；
+ *   从未涉及 preset 则**不干预** pi（尊重 pi 自己的装载清单恢复）。
+ * - `/tools` 手改直接写 pi 的活动集（由 pi 记录），**不跨** preset 切换保留。
  *
- * 限制权归属（ADR-0050）：活动工具集的"限制"只有 preset（overlay）与 /tools（基础层）
+ * 限制权归属（ADR-0050）：活动工具集的"限制"只有 preset（overlay）与 `/tools`（用户手改）
  * 两个来源；其它扩展/实验只能观测，不得调 setActiveTools 缩减。
  * `tool-range` 实验默认只观测、不限制；仅当用户在 extensions-data/tools/config.json
- * 显式设置 `enableToolRange: true` 报名后，才把臂结果写进基础层。
+ * 显式设置 `enableToolRange: true` 报名后，才按其臂结果收紧活动集（不落任何长期状态）。
  */
 
 import type { ExtensionAPI, ExtensionContext, ToolInfo } from '@earendil-works/pi-coding-agent';
@@ -42,9 +44,26 @@ export function resolveCoreToolNames(allNames: string[]): string[] {
 	return [...base, ...search];
 }
 
-/** 基础层持久化状态：用户显式禁用的工具（opt-out）。 */
-interface ToolsState {
-	disabledTools: string[];
+/** pi 的内置默认工具（`defaultTools` 未配置时的启动默认，与 pi 语义一致）。 */
+const DEFAULT_TOOL_NAMES = ['read', 'bash', 'edit', 'write'];
+
+/** `+name` / `-name` 修饰项判定（与 pi 的 defaultTools 语义一致）。 */
+function isToolModifier(entry: string): boolean {
+	return entry.startsWith('+') || entry.startsWith('-');
+}
+
+/** 按 pi 语义解析声明的 defaultTools：纯名字替换默认集，`+name`/`-name` 依次增删。 */
+export function resolveDeclaredDefaultTools(entries: string[]): string[] {
+	const plain = entries.filter((e) => !isToolModifier(e));
+	const base = plain.length > 0 || entries.length === 0 ? [...plain] : [...DEFAULT_TOOL_NAMES];
+	for (const entry of entries) {
+		if (!isToolModifier(entry)) continue;
+		const name = entry.slice(1);
+		const index = base.indexOf(name);
+		if (entry.startsWith('+') && index === -1 && name) base.push(name);
+		else if (entry.startsWith('-') && index !== -1) base.splice(index, 1);
+	}
+	return base;
 }
 
 interface ToolRangeConfig {
@@ -53,8 +72,8 @@ interface ToolRangeConfig {
 }
 
 export default function toolsExtension(pi: ExtensionAPI) {
-	/** 基础层：用户显式禁用的工具（opt-out）。 */
-	let disabledTools: Set<string> = new Set();
+	/** 本次应用是否要复位到默认工具选择（preset 清除 / 恢复会话时置位）。 */
+	let resetPending = false;
 	let allTools: ToolInfo[] = [];
 	/**
 	 * preset 叠加层：非 null 时活动集 = 该白名单 ∩ allTools（封闭集）。
@@ -76,7 +95,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 	/**
 	 * 有效活动工具集：
 	 * - overlay 存在（preset 激活）→ 白名单 ∩ allTools（封闭集，遮蔽运行时新注册的工具）
-	 * - overlay 为 null → allTools - 基础禁用
+	 * - overlay 为 null → pi 自身的活动集（本扩展不持有基础层）
 	 */
 	function effectiveTools(): string[] {
 		const names = toolNames();
@@ -84,72 +103,103 @@ export default function toolsExtension(pi: ExtensionAPI) {
 			const overlay = new Set(presetOverlay);
 			return names.filter((n) => overlay.has(n));
 		}
-		return names.filter((n) => !disabledTools.has(n));
+		// 无 overlay：以 pi 自身的活动集为准（本扩展不持有基础层）。
+		return pi.getActiveTools().filter((n) => names.includes(n));
 	}
 
-	// Persist base-layer state to session entry
-	function persistState() {
-		pi.appendEntry<ToolsState>('tools-config', {
-			disabledTools: Array.from(disabledTools),
-		});
+	/**
+	 * 默认工具选择：pi 的 `defaultTools`（含 `+name`/`-name` 修饰）解析结果 ∪ 非内置工具。
+	 *
+	 * pi 启动时「内建工具跟随 defaultTools，扩展注册的工具按注册即启用」，这里按同语义
+	 * 复算，供 preset 清除 / 会话恢复时复位用（ADR-0065）。
+	 */
+	function defaultToolSelection(): string[] {
+		const names = toolNames();
+		const declared = pi.getSettings().defaultTools;
+		const base = Array.isArray(declared)
+			? resolveDeclaredDefaultTools(declared.filter((t) => typeof t === 'string'))
+			: DEFAULT_TOOL_NAMES;
+		const extensionTools = allTools
+			.filter((t) => t.sourceInfo?.source !== 'builtin')
+			.map((t) => t.name);
+		const wanted = new Set([...base, ...extensionTools]);
+		return names.filter((n) => wanted.has(n));
+	}
+
+	// Compute effective set and push to pi runtime
+	/**
+	 * 计算本次要推给 pi 的工具集；`null` = 不干预（保持 pi 现状）。
+	 *
+	 * - overlay 存在（preset 激活）→ 白名单 ∩ allTools（封闭集）
+	 * - resetPending（preset 清除 / 恢复会话）→ 默认工具选择 - 实验注入
+	 * - 仅有实验注入 → 当前活动集 - 注入
+	 * - 否则 → null（尊重 pi 的装载清单，绝不从活动集反推）
+	 */
+	function targetSelection(): string[] | null {
+		const names = toolNames();
+		if (presetOverlay !== null) {
+			const overlay = new Set(presetOverlay);
+			return names.filter((n) => overlay.has(n));
+		}
+		if (resetPending) {
+			return defaultToolSelection().filter((n) => !labInjectedDisabled.has(n));
+		}
+		if (labInjectedDisabled.size > 0) {
+			const injected = labInjectedDisabled;
+			return pi.getActiveTools().filter((n) => names.includes(n) && !injected.has(n));
+		}
+		return null;
 	}
 
 	// Compute effective set and push to pi runtime
 	function applyTools(source: string) {
 		// 每次重算前刷新工具清单（运行时可能新注册工具）
 		allTools = pi.getAllTools();
-		const effective = effectiveTools();
-		pi.setActiveTools(effective);
+		const target = targetSelection();
+		if (target === null) {
+			log.info('tools untouched', {
+				source,
+				reason: 'no overlay, no reset, no experiment injection',
+				activeCount: pi.getActiveTools().length,
+				total: allTools.length,
+			});
+			return;
+		}
+		pi.setActiveTools(target);
+		resetPending = false;
 		log.info('tools applied', {
 			source,
-			baseDisabled: Array.from(disabledTools),
 			overlay: presetOverlay,
-			effectiveCount: effective.length,
+			experimentInjected: Array.from(labInjectedDisabled),
+			effectiveCount: target.length,
 			total: allTools.length,
-			effective,
+			effective: target,
 		});
 		// 通知 preset 即时刷新偏离状态（用户手动改 tools 后「已偏离 tools」立即出现）
 		(globalThis as { __presetDriftRefresh?: () => void }).__presetDriftRefresh?.();
 	}
 
 	/**
-	 * 从 session 记录恢复基础层。
+	 * session 恢复 / 树导航时对齐工具集（ADR-0065）。
 	 *
-	 * 使用 getEntries()（全局视图）而非 getBranch()（树路径过滤），
-	 * 因为工具配置是 session 级全局设定，不受分支导航影响。
-	 *
-	 * 旧格式迁移：历史 entry 含 `enabledTools`（白名单）时，换算为
-	 * 「禁用 = 全集 - enabled」，把旧的融合状态还原为基础层。
+	 * 判据只来自会话里已落痕的 preset 状态（`preset-state` entry 的最后一条）：
+	 * - 有记录且 name 为空 → preset 曾激活后已清除 → 复位到默认工具选择
+	 * - 有记录且 name 非空 → preset 仍激活 → 由 preset 重放 overlay（此处不干预）
+	 * - 无任何记录 → 本会话未涉及 preset，**不干预** pi 的装载清单
 	 */
-	function restoreFromBranch(ctx: ExtensionContext) {
+	function syncToolsWithPresetState(ctx: ExtensionContext): void {
 		allTools = pi.getAllTools();
-		const names = toolNames();
-		const entries = ctx.sessionManager.getEntries();
-		let savedDisabled: string[] | undefined;
-
-		for (const entry of entries) {
-			if (entry.type === 'custom' && entry.customType === 'tools-config') {
-				const data = entry.data as
-					{ disabledTools?: string[]; enabledTools?: string[] } | undefined;
-				if (data?.enabledTools) {
-					const enabled = new Set(data.enabledTools);
-					savedDisabled = names.filter((n) => !enabled.has(n));
-				} else if (data?.disabledTools) {
-					savedDisabled = data.disabledTools;
-				}
-			}
+		const last = ctx.sessionManager
+			.getEntries()
+			.filter((e) => e.type === 'custom' && e.customType === 'preset-state')
+			.pop() as { data?: { name?: string | null } } | undefined;
+		if (!last) {
+			log.info('tools untouched', { source: 'restore', reason: 'no preset involvement' });
+			return;
 		}
-
-		if (savedDisabled) {
-			disabledTools = new Set(savedDisabled.filter((n) => names.includes(n)));
-		} else if (presetOverlay === null) {
-			// 无持久状态：以 pi 当前活动集为基准（未激活者视为基础禁用）。
-			// overlay 生效时**不得**这么做：此刻活动集 == overlay 白名单，反推会把
-			// overlay 排除的工具写成基础层禁用，清除预设后约束无法撤回（ADR-0049 决策 5）。
-			const active = new Set(pi.getActiveTools());
-			disabledTools = new Set(names.filter((n) => !active.has(n)));
-		}
-		applyTools('restore');
+		if (last.data?.name) return; // preset 仍激活，overlay 由 preset 侧施加
+		resetPending = true;
+		applyTools('preset-clear');
 	}
 
 	// Register /tools command
@@ -261,23 +311,24 @@ export default function toolsExtension(pi: ExtensionAPI) {
 								};
 							}
 						).__presetGuard;
+						const enabledNow = new Set(effectiveTools());
+						const willEnable = !enabledNow.has(id);
+						const nextTools = new Set(enabledNow);
+						if (willEnable) nextTools.add(id);
+						else nextTools.delete(id);
+
 						if (guard) {
-							const nextTools = new Set(effectiveTools());
-							if (disabledTools.has(id) || !nextTools.has(id)) nextTools.add(id);
-							else nextTools.delete(id);
 							const r = guard.canModify('tools', [...nextTools]);
 							if (!r.allowed) {
 								ctx.ui.notify(r.reason ?? 'tools 修改不被允许', 'error');
 								return;
 							}
 						}
-						if (disabledTools.has(id)) {
-							disabledTools.delete(id);
+
+						if (willEnable) {
 							// 用户在 core 臂下启用被实验禁用的工具 → 整体退出实验注入
-							if (labInjectedDisabled.has(id)) {
-								for (const injected of labInjectedDisabled) {
-									disabledTools.delete(injected);
-								}
+							if (labInjectedDisabled.size > 0) {
+								for (const tool of allTools) nextTools.add(tool.name);
 								labInjectedDisabled.clear();
 								log.info(
 									'tool-range: user override — experiment injection exited',
@@ -287,14 +338,26 @@ export default function toolsExtension(pi: ExtensionAPI) {
 								);
 							}
 						} else {
-							disabledTools.add(id);
 							labInjectedDisabled.delete(id);
 						}
-						applyTools('manual');
-						persistState();
+
+						// 手改直接写 pi 的活动集（pi 自己记录装载清单），不再维护私有基础层
+						const names = new Set(toolNames());
+						const applied = [...nextTools].filter((n) => names.has(n));
+						pi.setActiveTools(applied);
+						log.info('tools applied', {
+							source: 'manual',
+							effectiveCount: applied.length,
+							total: allTools.length,
+							effective: applied,
+						});
+						(
+							globalThis as { __presetDriftRefresh?: () => void }
+						).__presetDriftRefresh?.();
+
 						const toggled = items.find((i) => i.id === id);
 						if (toggled) {
-							toggled.label = `${!disabledTools.has(id) ? '• ' : '  '}${id}`;
+							toggled.label = `${willEnable ? '• ' : '  '}${id}`;
 						}
 						tui.requestRender();
 					},
@@ -304,7 +367,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 						log.info('tools config closed', {
 							enabled,
 							total,
-							disabled: Array.from(disabledTools),
+							active: pi.getActiveTools(),
 						});
 						done(undefined);
 					},
@@ -334,7 +397,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 
 	/**
 	 * Hard block: intercept every tool call.
-	 * 不在有效活动集内的已知工具一律拦截（preset 封闭集 / 基础禁用）。
+	 * 不在有效活动集内的已知工具一律拦截（preset 封闭集 / 用户手改）。
 	 */
 	pi.on('tool_call', (_event, ctx) => {
 		const event = _event as { toolName?: string };
@@ -358,7 +421,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 	});
 
 	// ── pi-lab 实验接入（tool-range，select 型）──────────────────
-	// 默认只观测不限制；仅显式报名（config.json enableToolRange=true）后写基础层。
+	// 默认只观测不限制；仅显式报名（config.json enableToolRange=true）后按其臂收紧活动集。
 	function initToolRangeExperiment(_ctx: ExtensionContext): void {
 		// SAFETY: globalThis.__labApi 由 pi-lab 扩展在加载时挂载；缺失时判空降级。
 		const mgr = (
@@ -405,16 +468,10 @@ export default function toolsExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	/** session 里是否已有 tools-config entry（用户显式 /tools 写过） */
-	function hasUserToolConfig(ctx: ExtensionContext): boolean {
-		const entries = ctx.sessionManager.getEntries();
-		return entries.some((e) => e.type === 'custom' && e.customType === 'tools-config');
-	}
-
 	/**
 	 * 实验分流（仅显式报名时）。
 	 * 未报名：只观测，不改变活动集（ADR-0050 决策 3 / B2）。
-	 * 返回是否实际写入了基础层。
+	 * 返回是否实际收紧了活动集。
 	 */
 	async function assignToolRangeArm(ctx: ExtensionContext): Promise<boolean> {
 		labInjectedDisabled = new Set();
@@ -427,10 +484,6 @@ export default function toolsExtension(pi: ExtensionAPI) {
 		}).config;
 		if (!cfg.enableToolRange) {
 			log.info('tool-range: not enrolled — observe only, no restriction');
-			return false;
-		}
-		if (hasUserToolConfig(ctx)) {
-			log.info('tool-range: skipped (user has explicit tools config)');
 			return false;
 		}
 		// --preset 指定（无论 preset 是否含 tools）视为用户显式意图，跳过实验
@@ -457,11 +510,8 @@ export default function toolsExtension(pi: ExtensionAPI) {
 		const allNames = toolNames();
 
 		if (armId === 'core') {
-			const coreNames = resolveCoreToolNames(allNames);
-			disabledTools = new Set(allNames.filter((n) => !coreNames.includes(n)));
-			labInjectedDisabled = new Set(disabledTools);
-		} else {
-			disabledTools = new Set();
+			const coreNames = new Set(resolveCoreToolNames(allNames));
+			labInjectedDisabled = new Set(allNames.filter((n) => !coreNames.has(n)));
 		}
 
 		applyTools('tool-range');
@@ -473,25 +523,27 @@ export default function toolsExtension(pi: ExtensionAPI) {
 			);
 		}
 		// 消息内嵌 arm/effective：file appender 的 pattern 不含 details，
-		// 仅传对象参数会让该结果在日志文件中不可观测（e2e 无法断言分流结果）。
-		log.info('tool-range assigned arm=%s effective=%d', armId, effectiveTools().length);
+		log.info(
+			'tool-range assigned arm=%s effective=%d injected=%d',
+			armId,
+			effectiveTools().length,
+			labInjectedDisabled.size,
+		);
 		return true;
 	}
 
-	// Restore base state on session start, then (only if enrolled) run experiment
+	// 会话恢复 / 树导航：对齐 preset 状态与工具集（ADR-0065），随后（仅报名时）跑实验
 	pi.on('session_start', async (_event, ctx) => {
-		restoreFromBranch(ctx);
+		syncToolsWithPresetState(ctx);
 		initToolRangeExperiment(ctx);
 		await assignToolRangeArm(ctx);
 	});
 
-	// Re-apply on branch navigation (base layer re-read; overlay unchanged)
 	pi.on('session_tree', async (_event, ctx) => {
-		restoreFromBranch(ctx);
+		syncToolsWithPresetState(ctx);
 	});
-
 	// 动态注册遮蔽：preset overlay 生效时，每次请求前重算（封闭集遮蔽运行时新注册的工具）。
-	// 无 overlay 时不干预：基础层由用户/注册方自管（org off-duty 收回自有工具不应被覆盖）。
+	// 无 overlay 时不干预：pi 的活动集由用户/注册方自管（org off-duty 收回自有工具不应被覆盖）。
 	pi.on('before_agent_start', () => {
 		if (presetOverlay === null) return;
 		applyTools('before_agent_start');
@@ -503,16 +555,20 @@ export default function toolsExtension(pi: ExtensionAPI) {
 	// ──────────────────────────────────────────────────────────
 	(globalThis as any).__toolsApi = {
 		/**
-		 * 设置 preset 叠加层（封闭集白名单）。不写基础层。
+		 * 设置 preset 叠加层（封闭集白名单）。不写任何长期工具状态。
 		 */
 		setOverlay(toolNames: string[]) {
 			allTools = pi.getAllTools();
 			presetOverlay = [...toolNames];
 			applyTools('preset-overlay');
 		},
-		/** 撤回 preset 叠加层（清除预设）。基础层原样保留。 */
+		/**
+		 * 撤回 preset 叠加层（切换 / 清除预设）：
+		 * 活动集复位到**默认工具选择**（pi 的 defaultTools 解析 ∪ 非内置工具）。
+		 */
 		clearOverlay() {
 			presetOverlay = null;
+			resetPending = true;
 			applyTools('preset-clear');
 		},
 		/** 当前有效活动集（供测试/调试观测）。 */
@@ -522,21 +578,25 @@ export default function toolsExtension(pi: ExtensionAPI) {
 		/** 撤回 tool-range 注入的限制（preset 激活时实验退避）。 */
 		clearExperimentInjection() {
 			if (labInjectedDisabled.size === 0) return;
-			for (const t of labInjectedDisabled) disabledTools.delete(t);
 			labInjectedDisabled = new Set();
 			applyTools('experiment-backoff');
 		},
 		/**
-		 * 兼容旧 API：设置基础层禁用集（禁用 = 全集 - 给定列表）。
+		 * 兼容旧 API：把活动集直接设为给定列表（等价于有人在 `/tools` 里逐项改）。
 		 * 新代码请用 setOverlay/clearOverlay。
 		 */
 		replaceTools(names: string[]) {
 			allTools = pi.getAllTools();
-			const all = toolNames();
-			const wanted = new Set(names.filter((n) => all.includes(n)));
-			disabledTools = new Set(all.filter((n) => !wanted.has(n)));
-			applyTools('replace-base');
-			persistState();
+			const all = new Set(toolNames());
+			const wanted = names.filter((n) => all.has(n));
+			pi.setActiveTools(wanted);
+			log.info('tools applied', {
+				source: 'replace',
+				effectiveCount: wanted.length,
+				total: allTools.length,
+				effective: wanted,
+			});
+			(globalThis as { __presetDriftRefresh?: () => void }).__presetDriftRefresh?.();
 		},
 	};
 }

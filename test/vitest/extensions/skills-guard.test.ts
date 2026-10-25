@@ -24,8 +24,6 @@ const hooks = vi.hoisted(() => ({
 }));
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
-	formatSkillsForPrompt: (skills: Array<{ name: string; description: string }>) =>
-		skills.map((s) => s.name).join(','),
 	DynamicBorder: class {},
 	getSettingsListTheme: () => ({}),
 }));

@@ -15,11 +15,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import {
-	getSettingsListTheme,
-	formatSkillsForPrompt,
-	DynamicBorder,
-} from '@earendil-works/pi-coding-agent';
+import { getSettingsListTheme, DynamicBorder } from '@earendil-works/pi-coding-agent';
 import {
 	Container,
 	type SettingItem,
@@ -35,6 +31,49 @@ import { resolveConfigPaths } from '@zenone/pi-config';
 
 const log = createLogger('skills');
 
+// ── Prompt 文本兜底（仅当 options.skills 进不了本次请求时使用） ──────
+
+/** 反转 pi 在 `<available_skills>` 里对技能名做的 XML 转义（pi 只转义这 5 个实体）。 */
+function decodeXml(s: string): string {
+	return s
+		.replace(/&lt;/g, '<')
+		.replace(/&gt;/g, '>')
+		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
+		.replace(/&amp;/g, '&');
+}
+
+/** 提示词里所有 `<available_skills>` 块广告的技能名（pi 只渲染一块，但兜底不假设数量）。 */
+function advertisedSkillNames(text: string): string[] {
+	const names: string[] = [];
+	for (const block of text.matchAll(/<available_skills>([\s\S]*?)<\/available_skills>/g)) {
+		for (const m of block[1].matchAll(/<name>([^<]*)<\/name>/g)) {
+			names.push(decodeXml(m[1].trim()));
+		}
+	}
+	return names;
+}
+
+/**
+ * 从提示词文本里每个 `<skills>` section 中裁掉不在 `visible` 中的技能条目。
+ * 返回 null = 文本里没有 `<skills>` section（无从裁剪，交由调用方告警）。
+ *
+ * ⚠ 替换一律用**函数**形式：字符串形式的 `String.replace` 会展开 `$$` / `$&` / `` $` ``
+ * 等替换模式，而 `pruned` 就是整段系统提示词（含 AGENTS.md、自定义 prompt），
+ * 其中的 shell 片段会被静默改写。
+ */
+function pruneSkillsSection(text: string, visible: Set<string>): string | null {
+	if (!/<skills>[\s\S]*?<\/skills>/.test(text)) return null;
+	return text.replace(/<skills>[\s\S]*?<\/skills>/g, (section) => {
+		const pruned = section.replace(/<skill>[\s\S]*?<\/skill>/g, (entry) => {
+			const name = /<name>([^<]*)<\/name>/.exec(entry);
+			return name && visible.has(decodeXml(name[1].trim())) ? entry : '';
+		});
+		// 条目全被裁掉时整段移除，避免留下空的 <available_skills></available_skills>
+		return /<skill>/.test(pruned) ? pruned : '';
+	});
+}
+
 // ── State ──────────────────────────────────────────────────────────
 
 interface SkillsState {
@@ -45,6 +84,12 @@ export default function skillsExtension(pi: ExtensionAPI) {
 	log.info('Skills extension loaded');
 	let enabledSkills: Set<string> = new Set();
 	let allSkills: { name: string; description: string }[] = [];
+	/**
+	 * `allSkills` 是否已按本会话收集过。
+	 * 只有「收集过」时 `getSkillNames()` 才可信——未收集时它返回 []，
+	 * 消费方（preset 的陈旧引用检测）必须据此跳过，否则会把技能全判成不存在（ADR-0065）。
+	 */
+	let skillsKnown = false;
 	let initialized = false;
 	let configFilePath: string | undefined;
 	/**
@@ -272,6 +317,7 @@ export default function skillsExtension(pi: ExtensionAPI) {
 			}
 
 			allSkills = dedupeSkills(skills);
+			skillsKnown = true;
 			initialize(ctx);
 
 			// ── Build tool name list for fuzzy matching ──
@@ -464,49 +510,67 @@ export default function skillsExtension(pi: ExtensionAPI) {
 					description: s.description,
 				})),
 			);
+			skillsKnown = true;
 			initialize(ctx);
 		}
 
 		// 有效可见集 = 基础层 ∩ preset overlay（ADR-0049 R1/R3）；overlay 存在时
 		// preset 是唯一策略源，必须真正作用于 system prompt，而非只影响偏离检测。
+		//
+		// 主路径（ADR-0066）：`event.systemPromptOptions` 是可变对象，`event.systemPrompt`
+		// 是懒渲染（每次读取都从 options 重建）——裁剪 options.skills 后 pi 自己渲染出
+		// 新的 <available_skills> 并以 section diff 下发。不要 `return { systemPrompt }`：
+		// 那会转成 forceSystemPrompt，把整段提示词钉死、失去 diff（不利于 prompt cache）。
 		const visibleSkills = systemSkills.filter((s) => isSkillEnabled(s.name));
 		if (visibleSkills.length === systemSkills.length) return;
 
-		const fullXml = formatSkillsForPrompt(systemSkills);
-		const filteredXml = formatSkillsForPrompt(visibleSkills);
+		event.systemPromptOptions.skills = visibleSkills;
+		const visibleNames = new Set(visibleSkills.map((s) => s.name));
 
-		if (fullXml) {
-			// Replace the <available_skills> XML block using regex, which is
-			// robust against ordering differences between the prompt and the
-			// output of formatSkillsForPrompt (exact string match can fail
-			// when the skill arrays are sorted differently).
-			let newPrompt = event.systemPrompt.replace(fullXml, filteredXml);
-			if (newPrompt === event.systemPrompt) {
-				// Exact match failed — fall back to regex-based replacement
-				// of just the <available_skills>…</available_skills> block.
-				const filteredBlock = filteredXml.match(
-					/<available_skills>[\s\S]*<\/available_skills>/,
+		// 兜底：若提示词快照里仍广告着被禁技能，说明 options.skills 进不了本次请求。
+		// 两种成因：① 更早的 handler 返回过 `{ systemPrompt }`（forceSystemPrompt 会在
+		// 发请求前整段覆盖 sections，早于本 handler 的 force 会拿到未过滤的快照）；
+		// ② 基座的 systemPrompt 是静态快照，不回渲染 options。两者都与注册顺序有关，
+		// 故不能只依赖主路径——preset 的 skills 白名单是硬策略（ADR-0049）。
+		const rendered = event.systemPrompt;
+		const stale = advertisedSkillNames(rendered).filter((n) => !visibleNames.has(n));
+		let path: 'options' | 'force' | 'snapshot' = 'options';
+		let forcedPrompt: string | undefined;
+		if (stale.length > 0) {
+			const pruned = pruneSkillsSection(rendered, visibleNames);
+			if (pruned === null) {
+				// 无从裁剪：本次提示词里没有 <skills> section。message 里带数字（details 不落盘），
+				// 且**不打** path 日志——此时白名单对本次请求并未生效，标任何 path 都是误导。
+				log.warn(
+					'skills: no <skills> section to prune (visible=%s total=%s stale=%s)',
+					visibleSkills.length,
+					systemSkills.length,
+					stale.join(','),
 				);
-				if (filteredBlock) {
-					newPrompt = event.systemPrompt.replace(
-						/<available_skills>[\s\S]*?<\/available_skills>/,
-						filteredBlock[0],
-					);
-				} else if (visibleSkills.length === 0) {
-					// 全部禁止（skills: []）：filteredXml 为空，整块移除
-					newPrompt = event.systemPrompt.replace(
-						/\n*<available_skills>[\s\S]*?<\/available_skills>/,
-						'',
-					);
-				}
+				return;
 			}
-			if (newPrompt !== event.systemPrompt) {
-				return { systemPrompt: newPrompt };
+			if (event.systemPromptOptions.forceSystemPrompt !== undefined) {
+				// 就地改写已被钉死的整段提示词（force 路径下 options 裁剪不参与渲染）
+				event.systemPromptOptions.forceSystemPrompt = pruned;
+				path = 'force';
+			} else {
+				// 基座不回渲染 options：沿用旧契约返回改写后的提示词
+				path = 'snapshot';
+				forcedPrompt = pruned;
 			}
 		}
+
+		log.info('Skills: prompt skills filtered (path=%s)', path, {
+			visible: visibleSkills.length,
+			total: systemSkills.length,
+			visibleNames: visibleSkills.map((s) => s.name),
+		});
+		if (forcedPrompt !== undefined) return { systemPrompt: forcedPrompt };
 	});
 
 	pi.on('session_start', async () => {
+		// 技能清单只能在首次 before_agent_start 里拿到（event.systemPromptOptions.skills）；
+		// 在那之前 `getSkillNames()` 不可信，消费方须按 `isLoaded()` 跳过（ADR-0065）。
 		log.info('Skills: session started');
 	});
 
@@ -548,7 +612,11 @@ export default function skillsExtension(pi: ExtensionAPI) {
 			});
 			refreshDrift();
 		},
-		/** 当前已加载的技能名列表（allSkills 未加载时为空数组）。 */
+		/** 技能名是否已按本会话收集过（false = 未收集，`getSkillNames()` 不可信）。 */
+		isLoaded(): boolean {
+			return skillsKnown;
+		},
+		/** 本会话可用的技能名列表。 */
 		getSkillNames(): string[] {
 			return allSkills.map((s) => s.name);
 		},
