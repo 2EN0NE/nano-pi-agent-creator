@@ -721,29 +721,9 @@ isIdle = () => !this.isStreaming;
 
 ### 3. `complete()` 调用全流程注意事项
 
-`@earendil-works/pi-ai` 的 `complete()` 有两处文档未提及的细节：
+两处 `@earendil-works/pi-ai` 文档未提的细节：① Auth **只查环境变量**（`getEnvApiKey`），不读 `models.json`/auth storage——必须先用 `ctx.modelRegistry.getApiKeyAndHeaders()` 解析并把 `apiKey`/`headers` 传进 options；② `stopReason: "error"` 时 `Response.errorMessage` 有值，必须读它才拿得到失败原因。
 
-**① Auth 解析不会走 Pi 的 ModelRegistry**
-
-内部通过 `getEnvApiKey(model.provider)` 解析 API Key，**只检查环境变量**。但用户通常通过 `models.json` / auth storage 配置 Key。必须手动调用 `ctx.modelRegistry.getApiKeyAndHeaders()` 解析后传入 options：
-
-```typescript
-const auth = await ctx.modelRegistry.getApiKeyAndHeaders(modelInfo);
-const options: Record<string, unknown> = { maxTokens: 8192, signal };
-if (auth.ok) {
-	if (auth.apiKey) options.apiKey = auth.apiKey;
-	if (auth.headers) options.headers = auth.headers;
-}
-const response = await complete(modelInfo, { messages }, options as any);
-```
-
-**② `Response.errorMessage` 在 `stopReason: "error"` 时有值**
-
-```typescript
-if (response.stopReason === 'error') {
-	log.error('Model call failed', { errorMessage: response.errorMessage });
-}
-```
+> 代码示例见 [`docs/pi-ext-knowledge/complete-call-flow.md`](docs/pi-ext-knowledge/complete-call-flow.md)。
 
 ### 5. `npx pi` vs 全局 `pi` 的 CLI 参数差异
 
@@ -783,32 +763,10 @@ if (response.stopReason === 'error') {
 
 ### 8. `/reload` 后状态丢失 — 三种纠正策略
 
-跨多个扩展项目验证的结论。`/reload` 会导致 jiti 重新加载模块，`import.meta.url` 路径不一致，扩展实例的 in-memory 状态全部重置。
+`/reload` 让 jiti 重新加载模块、实例 in-memory 状态全丢。三种纠正：配置存 `extensions-data/<name>/<sessionId>.json`；文件路径用 `os.homedir()` 而非 `import.meta.url`；树状状态用 `pi.appendEntry()` 在 `session_start` 重建。
 
-| 策略             | 适用场景           | 实现方式                                               |
-| ---------------- | ------------------ | ------------------------------------------------------ |
-| **配置存入文件** | session 级持久化   | `~/.pi/agent/extensions-data/<name>/<sessionId>.json`  |
-| **路径确定性**   | 所有文件操作       | 用 `os.homedir()` 拼接路径，**不用** `import.meta.url` |
-| **entry 持久化** | 树状状态（非配置） | `pi.appendEntry()` 写入会话树，`session_start` 时重建  |
-
-**示例（配置存入文件）**：
-
-```typescript
-// session_start 时设置 sessionId
-pi.on('session_start', async (_event, ctx) => {
-	const sid = ctx.sessionManager.getSessionId();
-	if (sid) setSessionId(sid); // 加载 <sessionId>.json
-});
-
-// /reload 时重新加载
-pi.on('session_start', async (_event, ctx) => {
-	const sid = ctx.sessionManager.getSessionId();
-	if (sid) setSessionId(sid);
-	else reloadConfig();
-});
-```
-
-> ⚠️ **/reload 的关键行为**：`session_shutdown` 先触发（清理旧实例），然后 `session_start` 触发（新实例）。因此旧扩展实例中的闭包、变量、定时器全部失效。所有状态必须在 `session_start` 中重建。
+> 策略对照表、示例代码与事件时序（`session_shutdown` 先、`session_start` 后，旧闭包/定时器全失效）见
+> [`docs/pi-ext-knowledge/reload-state-loss.md`](docs/pi-ext-knowledge/reload-state-loss.md)。
 
 ### 9. E2E 测试扩展的常见陷阱
 
@@ -836,32 +794,10 @@ pi.on('session_start', async (_event, ctx) => {
 
 ### 10. 累加式指标追踪器的 checkpoint 设计模式
 
-对于在会话中累积指标（计数、Set 去重、比率等）的扩展，`session_shutdown` 保存不够——`/reload` 后 tracker 从 0 开始，sigma 全偏差。
+累积指标（计数 / Set / 比率）的扩展只靠 `session_shutdown` 保存不够——`/reload` 后 tracker 从 0 开始。要点：导出/导入**原始计数**（非比率）、三个 checkpoint 时机（指标变化 / `turn_end` / 销毁）、`session_start` 恢复。
 
-**关键设计**：
-
-```typescript
-// ① tracker 提供原始状态的导出/导入（非 ratio，是原始计数）
-exportRawState(): TrackerRawState {
-  return { thinkingSteps, userQuestions, agentTurns, toolTypes: [...set] };
-}
-importRawState(state): void { /* 恢复所有计数器 + Set */ }
-
-// ② 三个 checkpoint 时机：指标变化时 + turn 边界 + 销毁时
-function saveCheckpoint() { saveLiveState(sessionId, tracker.exportRawState()); }
-// refreshMessage 检测到指标变化后 → saveCheckpoint()
-// turn_end → saveCheckpoint()（turn 边界安全点）
-// session_shutdown → appendSession() + deleteLiveState()（清理）
-
-// ③ session_start 时恢复
-const live = await loadLiveState(sessionId);
-if (live) tracker.importRawState(live);
-```
-
-**触发条件**：扩展在会话中累积计数/集合/比率，且需要跨 `/reload` 保持一致性。
-**反模式**：只在 `session_shutdown` 保存，或只保存比率不保存原始计数。
-
-> 具体实现参考：`extensions/tui/whimsical/metrics.ts` / `index.ts` / `session-store.ts` 中的 save/load/delete checkpoint 完整实现。
+> 代码骨架、触发条件与反模式见
+> [`docs/pi-ext-knowledge/accumulating-metrics-checkpoint.md`](docs/pi-ext-knowledge/accumulating-metrics-checkpoint.md)。
 
 ### 11. Pi 挂起调试：扩展 vs 无扩展对比诊断
 
@@ -911,6 +847,14 @@ Pi 内置 bash 工具的 `timeout` 参数 schema 是 `optional, no default timeo
 | operations 替换    | `createBashTool(cwd, { operations })` 接管 | sandbox          |
 
 超时语义（改 `input.timeout` 不改变 Pi 的 kill 逻辑）：`spawn(bash, ["-c", 整条命令])` 后自 spawn 起计墙钟时间，超时 `killProcessTree` 用 `kill(-pid, SIGKILL)` 杀进程组。`a | b` 共享一个超时、`a; b` 合计、`a & b` 中 shell 提前退出则超时不触发且后台孤儿可能漏杀——均为 Pi 既有边界，非扩展引入（详见 ADR-0025）。
+
+### 15. 判定模型（classifier）：存在性与准入
+
+Pi 除 chat 外还有两类非对话模型：`classifier`（`bool` / `choice` / `score`，返回概率）与 `image`（生图）；两者**不出现在 `/model`**，只能经 `codemode` 或扩展 API 调用。
+**有条目 ≠ 能用**（内置 catalog 多数 classifier 无凭证）：准入先查 `getAvailableOfType('classifier', provider)`，没配就 `return` 走原逻辑（fail-open）；`classify()` 永不 reject，失败只落 `stopReason: "error"`。
+
+> 校验代码、`registerProvider` 接自建判定服务、`models.json` 覆盖 `baseUrl`、坑清单与实测记录见
+> [`docs/pi-ext-knowledge/classifier-models-jev.md`](docs/pi-ext-knowledge/classifier-models-jev.md)。
 
 ---
 
