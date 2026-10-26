@@ -75,6 +75,19 @@ function emit(pi: ExtensionAPI, level: LogLevel, message: string, details?: unkn
 	pi.events.emit(LOG_EVENT_CHANNEL, event);
 }
 
+/**
+ * 落一条 session 启动记录。
+ *
+ * 必须在 session_start 处理器里**直接调用**，不能靠订阅 session_start 实现——
+ * runner 派发事件时对处理器列表做快照，处理函数内部新注册的同事件监听收不到本次派发。
+ */
+export function emitSessionStart(pi: ExtensionAPI, ctx: ExtensionContext, reason: string): void {
+	emit(pi, 'info', `[session] →  reason=${reason}`, {
+		sessionId: ctx.sessionManager.getSessionId(),
+		reason,
+	});
+}
+
 // ============================================================================
 // Setup: register all lifecycle hooks
 // ============================================================================
@@ -86,7 +99,17 @@ function emit(pi: ExtensionAPI, level: LogLevel, message: string, details?: unkn
  * @param _ctx - ExtensionContext for session info
  * @returns A cleanup function (currently a no-op, as pi manages disposable handlers)
  */
-export function setupLifecycleCapture(pi: ExtensionAPI, _ctx: ExtensionContext): () => void {
+export function setupLifecycleCapture(
+	pi: ExtensionAPI,
+	_ctx: ExtensionContext,
+	reason = 'startup',
+): () => void {
+	// ── Session（启动记录必须在这里直接落）───────────────────────────────
+	// 不能靠 pi.on('session_start') 订阅：pi 的 ExtensionRunner 在派发事件时会**快照**该事件的
+	// 处理器列表，因此在 session_start 处理函数内部新注册的 session_start 监听对本次派发不可见，
+	// 启动记录将永远不落（历史缺陷）。启动记录由调用方（session_start 处理器）直接触发。
+	emitSessionStart(pi, _ctx, reason);
+
 	// ── Tool Execution ──────────────────────────────────────────────────
 
 	pi.on(
@@ -207,14 +230,6 @@ export function setupLifecycleCapture(pi: ExtensionAPI, _ctx: ExtensionContext):
 	);
 
 	// ── Session ──────────────────────────────────────────────────────────
-
-	pi.on('session_start', (event: { reason: string }) => {
-		const sid = _ctx.sessionManager.getSessionId();
-		emit(pi, 'info', `[session] → ${sid}  reason=${event.reason}`, {
-			sessionId: sid,
-			reason: event.reason,
-		});
-	});
 
 	pi.on('session_shutdown', (event: { reason: string }) => {
 		emit(pi, 'info', `[session] ←  reason=${event.reason}`, {

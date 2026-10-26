@@ -622,7 +622,7 @@ export default function loggerExtension(pi: ExtensionAPI) {
 	});
 
 	// 2. On session_start: reload config with proper cwd and reinit appender
-	pi.on('session_start', async (_event, ctx) => {
+	pi.on('session_start', async (event, ctx) => {
 		// Reload config (bundled + user + project), resolve paths against cwd
 		loadConfiguration(ctx.cwd);
 
@@ -641,7 +641,8 @@ export default function loggerExtension(pi: ExtensionAPI) {
 		// Import and setup lifecycle capture dynamically
 		try {
 			const { setupLifecycleCapture } = await import('./lifecycle-capture.js');
-			lifecycleUnsubscribe = setupLifecycleCapture(pi, ctx);
+			// 传入 reason：启动记录在 setup 内部直接落盘（不能靠订阅 session_start，见该函数注释）
+			lifecycleUnsubscribe = setupLifecycleCapture(pi, ctx, event.reason);
 		} catch (err) {
 			// Lifecycle capture is optional; if it fails, continue without it
 			const msg = err instanceof Error ? err.message : String(err);
