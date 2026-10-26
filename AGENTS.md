@@ -448,9 +448,12 @@ HOME="$test_home/home" pi -a --no-session -p "hi"
 
 **压缩/继续类集成链路必须用 TUI 模式验证。** 两个关键事实：
 
-1. `ctx.compact()` 是 fire-and-forget——`--no-session` 下 pi 处理完 prompt 立即退出，
+1. `ctx.compact()` 是 fire-and-forget——`-p`（打印模式）下 pi 处理完 prompt 立即退出，
    摘要→onComplete 异步链来不及完成，日志只见「触发信号」、无 onComplete/onError。
    只有 `pi -a`（TUI 交互模式，pi 不退出）才能确定性验证压缩完成 + auto-continue。
+   `--no-session` **不影响**这条链路（内存会话同样有 branch，`prepareCompaction` 照常返回 preparation）：
+   实测 `pi -a --no-session` 连发 12 条 prompt 一样压缩成功并 auto-continue，故按
+   「Pi 启动参数约定」默认加 `--no-session` 即可。真正的不确定项是 `-p`（打印模式处理完即退出）。
 2. Pi 的 `prepareCompaction` 用 `keepRecentTokens=20000` 从后往前累积找切分点。
    **单条超长 user 消息会把切分点顶到第一条消息**，`messagesToSummarize` 为空
    （报 "Nothing to compact"）。要触发成功压缩，需**多条 user 消息**（每条 <20000
@@ -683,42 +686,52 @@ describe('MyPanel TUI', () => {
 
 ```
 compact() 内部:
-  1. _disconnectFromAgent()    ← ⚠ 先断开 agent 连接
-  2. abort()
-  3. emit(session_before_compact)  ← 扩展在这里拦截或提供自定义摘要
-  4. appendCompaction()
-  5. emit(session_compact)     ← ⚠ 此时 agent 已断开
-  6. finally: _reconnectToAgent()  ← 重连 agent
-  7. return → onComplete()     ← ✓ agent 已重连，安全状态
+  1. abort()
+  2. _compactionAbortController = new AbortController()  ← 从此进入“压缩进行中”
+  3. _emit(compaction_start)
+  4. prepareCompaction()
+  5. emit(session_before_compact)  ← 扩展在这里拦截或提供自定义摘要
+  6. 生成摘要（内置默认生成器，或扩展提供的 compaction）
+  7. appendCompaction() + _refreshFinalizedContext()
+  8. emit(session_compact)     ← ⚠ 压缩控制器仍处于“进行中”
+  9. _clearManualCompactionState()  ← 控制器在这里才被清除
+ 10. _emit(compaction_end)
+ 11. return → onComplete()     ← ✓ 压缩已彻底结束，安全状态
 ```
 
 **关键结论：**
 
-- `session_compact` 事件触发时 agent **已断开连接**。在此事件中调用 `pi.sendUserMessage()` → `this.prompt()` **不可靠**（agent 不在线，prompt 和消息发送无法正常处理）。
-- `onComplete` 回调在 `compact()` **完全返回后**触发，此时 agent **已重连**。所有需要与 agent 交互的操作（如 `sendUserMessage`）必须放在 `onComplete` 中。
+- `compact()` **从不断开 agent**（`_disconnectFromAgent()` 只在 `dispose()` 里调用）。旧版本文档“session_compact 时 agent 已断开”的**理由已作废**。
+- 但**结论不变**：在 `session_compact` 里调用 `pi.sendUserMessage()` 会**确定性失败**——`prompt()` 在压缩进行中直接 `throw new Error("Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.")`，而压缩控制器要到第 9 步才清除。所有需要与 agent 交互的操作（如 `sendUserMessage`）仍然**只能**放在 `onComplete`。
+- 失败是**静默的**：扩展侧 `pi.sendUserMessage()` 是 fire-and-forget（返回 `void`），`prompt()` 的异常只经 `runner.emitError({ event: "send_user_message" })` 上报，调用方拿不到返回值。
+- 上游 `compact()` 里 `compaction_end` 那行注释写着“listeners may submit queued prompts”，但 `compaction_end` **不是扩展事件**（只在会话内部 emitter 上发），扩展拿不到——不要指望它。
 - 如果需要捕获触发压缩时的配置状态，使用闭包：`const triggerProfile = profile; ctx.compact({ onComplete: () => { /* 用 triggerProfile */ } })`
 
 ### 2. `isIdle()` 的时机限制
 
-`ctx.isIdle()` 的实现本质是：
+`ctx.isIdle()` 的口径是“没有活动 run、且不在压缩中”：
 
 ```typescript
-isIdle = () => !this.isStreaming;
+get isIdle() {
+    return !this._isAgentRunActive && !this.isCompacting;
+}
 ```
+
+（旧版本文档记的 `!this.isStreaming` 已作废——它既没涵盖 run 的启动/收尾窗口，也没涵盖压缩。）
 
 关于 `isIdle()` 有几个坑：
 
-| 事件            | isIdle() 状态                    | 说明                                                   |
-| --------------- | -------------------------------- | ------------------------------------------------------ |
-| `turn_end`      | `false`                          | agent 仍在事件循环中                                   |
-| `agent_end`     | **可能仍为 false**               | `isStreaming` 标志结束时间 **滞后于** `agent_end` 事件 |
-| `agent_settled` | `true`（除非其他扩展启动新 run） | 这是唯一保证 idle 的事件                               |
+| 事件            | isIdle() 状态                    | 说明                                   |
+| --------------- | -------------------------------- | -------------------------------------- |
+| `turn_end`      | `false`                          | agent 仍在事件循环中                   |
+| `agent_end`     | **可能仍为 false**               | run 的收尾 **滞后于** `agent_end` 事件 |
+| `agent_settled` | `true`（除非其他扩展启动新 run） | 这是唯一保证 idle 的事件               |
 
 **正确用法：**
 
 - 不要用 `isIdle()` 来判断压缩时机——用 **独立 flag**（如 `compactingInProgress`）做重入保护
 - 要监听 idle 状态用 `agent_settled`，不是 `agent_end`
-- `agent_end` 后虽然 `isIdle()` 可能仍 false，但可以用 `compactingInProgress` flag 防止多实例冲突
+- **在 `agent_settled` 处理器里发 prompt 是安全的**：`prompt()` 检测到正在派发 settled 时会把调用塞进 deferred 队列，settled 结束后自动执行（不是丢弃）。
 
 ### 3. `complete()` 调用全流程注意事项
 
@@ -735,15 +748,23 @@ isIdle = () => !this.isStreaming;
 
 **e2e 测试必须用 `$(which pi)`**，不能用 `npx pi`。
 
-### 6. `sendUserMessage()` 的可靠性限制
+### 6. `sendUserMessage()` 的时机限制
 
-`pi.sendUserMessage()` 内部调用 `this.prompt()`。当 agent 处于断开状态时（如 `session_compact` 事件期间），`prompt()` 的调用路径不可靠，且错误被 `.catch()` 吞掉（`agent-session.js:1717`），没有失败的信号。
+`pi.sendUserMessage()` 是 **fire-and-forget**（返回 `void`），内部调用 `this.prompt()`。`prompt()` 有两个**直接 throw** 的前置守卫：
 
-**正确用法**：只在以下时机调用 `sendUserMessage`：
+| 守卫           | 触发条件                                             | 报错文本                                                                                               |
+| -------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| 压缩进行中     | 压缩控制器仍存在（含整个 `session_compact` 派发）    | `Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.`     |
+| 正在 streaming | `isStreaming` 且未给 `streamingBehavior`/`deliverAs` | `Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.` |
 
-- `onComplete` 回调中（已确认 agent 重连）
-- 普通事件处理器中（确保 agent 在线）
-- 使用 `deliverAs: "followUp"` 作为默认（排队等待当前处理后执行）
+失败**不是静默消失**：异常经 `runner.emitError({ event: "send_user_message" })` 派发到宿主 `onError` → `showExtensionError()`，用户会看到错误框，日志里也有记录。（旧版本文档“错误被 `.catch()` 吞掉、没有失败信号”已作废——被吞的只是异常的向外传播，信号仍到 UI/日志。）
+
+**两种合法姿势（二选一，别混用）：**
+
+- **(A) 先确认不在 streaming**：如 `if (!ctx.isIdle()) return;`，或在一个 `fork` 出来的新会话里发。适合“只在空闲时才该发生”的动作（典型：`continue` 类插件）。
+- **(B) 带 `deliverAs` 排队**：`{ deliverAs: "followUp" }`（当前轮结束后执行）或 `"steer"`（插话）。适合“必须送达、可以等”的动作。
+
+无论哪种，`session_compact` 事件内都不合法（见第 1 条）。
 
 ### 7. `Failed to load extension` 调试路径
 
@@ -825,29 +846,18 @@ pi-lab（`extensions/meta/pi-lab/`）是实验框架，不自带实验。消费�
 
 > 完整规范（含代码示例）见 `docs/pi-ext-knowledge/pi-lab-consumer-integration.md`；设计见 `docs/adr/0003-pi-lab-extension-registration-mechanism.md`。
 
-### 13. pi-tui doRender 的 fullRender 机制与自定义组件高度铁律
+### 13. pi-tui 渲染机制与自定义组件高度铁律
 
-`doRender()` 的 diff：`firstChanged` 从渲染树行 0 逐行对比 previousLines/newLines；**`firstChanged < prevViewportTop` → fullRender(true)**（`\x1b[2J\x1b[H\x1b[3J` 清屏+清 scrollback + 整树重绘，依赖 `\x1b[?2026h` 同步输出原子性）。
-
-- **铁律**：任何替换 editorContainer 的自定义组件，**总高必须 ≤ 终端视口高度（rows）**。否则组件顶部（树行/光标行）落在视口上方，滚动时 `firstChanged < viewportTop` 恒触发 fullRender → 同步输出失效链路（tmux/SSH/Windows Terminal）上表现为**重影/错位**。
-- **铁律 2（header 动态内容）**：渲染树**第 0 行（header）不得放随光标/滚动变化的动态内容**（当前节点 ID、计数等）——第 0 行一变，`firstChanged=0 < viewportTop`（总高略超视口即触发）就 fullRender 重影。动态状态信息应放**底部 footer**（最后一行的 firstChanged 被树内更靠前的光标行变化「掩盖」，不触发 fullRender）。**例外**：显式上下文切换（如公司/数据源切换，org 看板标题 `── org:<公司名> ──` 随 Tab 切公司更新）允许第 0 行变更——切换时内容区整体换数据本就接近全量重绘，不引入滚动重影；同一上下文内仍须恒定。
-- **参考原生 `/tree`**（pi-mono tree-selector.js）：`maxVisibleLines = floor(terminalHeight/2)` 自适应 + 选中行居中（`startIndex = selected - floor(maxVisibleLines/2)`），组件总高 ≤ 视口 → 滚动纯 diff。
-- **观测工具**：`PI_TUI_DEBUG=1` → diff 渲染日志 `/tmp/tui/render-*.log`（含完整 newLines JSON）；`PI_DEBUG_REDRAW=1` → fullRender 原因 `~/.pi/agent/pi-debug.log`。
-- **e2e 盲区**：固定 80 列 + 短树（< pageSize 行）时滚动路径零覆盖——滚动类 bug 必须用长树用例（mock-llm 的 `MOCK_LLM_REPEAT` 发多条消息造 50+ 稳定节点树）。
-- 附带：扩展运行时 `setInterval`/`setTimeout` 回调**正常触发**（2026-09-10 实测，见 ADR-0040 F1；旧结论「运行时根本不触发」已作废）。定时器可直接用于后台轮询；但 `/reload` 会令旧实例的定时器失效、必须重建（见 #8）。
+`tuiMode` 默认 **fullscreen**（1.0.0 起，见 pi CHANGELOG `## [1.0.0]`），走 `TuiAltScreen`（layout root + 固定输入 dock + 自管滚动）；
+`firstChanged < prevViewportTop → fullRender` 那套内联渲染语义**只在 `tuiMode: "regular"` 下成立**。
+两条铁律（总高 ≤ 视口、header 不得放动态内容）、观测工具（`PI_TUI_DEBUG` / `PI_DEBUG_REDRAW`）
+与滚动类 e2e 盲区见 [`docs/pi-ext-knowledge/fullrender-and-fullscreen.md`](docs/pi-ext-knowledge/fullrender-and-fullscreen.md)。
 
 ### 14. 内置 bash 工具 timeout 无默认值 + 两条干预路径
 
-Pi 内置 bash 工具的 `timeout` 参数 schema 是 `optional, no default timeout`——agent 不显式传就无限等待（macOS 无 GNU `timeout`，尤为危险）。`bash-timeout` 扩展（`extensions/accuracy/bash-timeout.ts`）在 `tool_call` 钩子里补默认 300s 兜底（`@zenone/pi-config` 双层可配，配置项 `defaultTimeoutSeconds`，设 0 即禁用），仅当 agent 未指定时注入、不设上限。
-
-干预内置 bash 工具有两条路径，单个扩展须二选一。两条路径可共存（tool_call 钩子注入不与 sandbox 的 operations 替换冲突）；真正互斥的是同用 operations 替换的多个扩展之间：
-
-| 路径               | 机制                                       | 采用者           |
-| ------------------ | ------------------------------------------ | ---------------- |
-| tool_call 钩子注入 | `pi.on('tool_call', ...)` mutate `input`   | uv、bash-timeout |
-| operations 替换    | `createBashTool(cwd, { operations })` 接管 | sandbox          |
-
-超时语义（改 `input.timeout` 不改变 Pi 的 kill 逻辑）：`spawn(bash, ["-c", 整条命令])` 后自 spawn 起计墙钟时间，超时 `killProcessTree` 用 `kill(-pid, SIGKILL)` 杀进程组。`a | b` 共享一个超时、`a; b` 合计、`a & b` 中 shell 提前退出则超时不触发且后台孤儿可能漏杀——均为 Pi 既有边界，非扩展引入（详见 ADR-0025）。
+`timeout` 参数 **无默认值**；`bash-timeout` 在 `tool_call` 钩子里补默认 300s 兜底。干预内置 bash 只有两条路径、
+单个扩展须二选一：**tool_call 钩子注入**（uv、bash-timeout）或 **operations 替换**（sandbox 接管）。
+超时语义（进程组 kill、`a | b` 共享超时等）见 [`docs/pi-ext-knowledge/bash-timeout-intervention.md`](docs/pi-ext-knowledge/bash-timeout-intervention.md)。
 
 ### 15. 判定模型（classifier）：存在性与准入
 

@@ -1656,7 +1656,10 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			projectGuidelines ? 'yes' : 'no',
 		);
 
-		pi.sendUserMessage(fullPrompt);
+		// executeReview 里有多处 await（读 git diff / 项目规范文件）。若期间用户又发起了
+		// 一轮对话，这里就处于 streaming；不带 deliverAs 会 throw（见 AGENTS.md #6）。
+		// 空闲时 followUp 与不传等价，故恒带 followUp。
+		pi.sendUserMessage(fullPrompt, { deliverAs: 'followUp' });
 		return true;
 	}
 
