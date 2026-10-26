@@ -88,6 +88,26 @@ function summaryEntry(
 	} as unknown as SessionEntry;
 }
 
+/** `usage` 记录：缓存保温请求的计费（pi 0.87+ 新增的条目类型）。 */
+function usageEntry(
+	id: string,
+	parentId: string | null,
+	provider: string,
+	model: string,
+	u: Record<string, unknown>,
+): SessionEntry {
+	return {
+		type: 'usage',
+		id,
+		parentId,
+		timestamp: '2026-01-01T00:00:00.000Z',
+		kind: 'cache_warm',
+		provider,
+		model,
+		usage: u,
+	} as unknown as SessionEntry;
+}
+
 function node(entry: SessionEntry, children: SessionTreeNode[] = []): SessionTreeNode {
 	return { entry, children } as SessionTreeNode;
 }
@@ -139,6 +159,33 @@ describe('aggregateModelUsage（官方口径）', () => {
 		expect(tools).toBeDefined();
 		expect(tools!.requests).toBe(3);
 		expect(tools!.totalCost).toBeCloseTo(0.09);
+	});
+
+	it('usage 记录（缓存保温）按自身 provider/model 分桶，与同一模型的对话合并', () => {
+		const entries = [
+			assistant('a1', null, {
+				provider: 'anthropic',
+				model: 'claude-sonnet',
+				u: usage({ input: 10, output: 5, total: 0.01 }),
+			}),
+			usageEntry('u1', 'a1', 'anthropic', 'claude-sonnet', {
+				...usage({ input: 0, output: 0, cacheRead: 5000, total: 0.02 }),
+			}),
+		];
+
+		const { modelUsage, totalCost } = aggregateModelUsage(entries);
+
+		// 与 footer 口径一致：同一 provider/model 合并成一个桶，不是单独一行
+		expect(modelUsage).toHaveLength(1);
+		expect(modelUsage[0].provider).toBe('anthropic');
+		expect(modelUsage[0].model).toBe('claude-sonnet');
+		expect(modelUsage[0].requests).toBe(2); // 缓存保温确实是一次请求
+		expect(modelUsage[0].cacheReadTokens).toBe(5000);
+		expect(modelUsage[0].totalCost).toBeCloseTo(0.03);
+
+		// 模型表总和 == 总计（同一张卡里两块数字不得对不上）
+		const tableSum = modelUsage.reduce((sum, m) => sum + m.totalCost, 0);
+		expect(tableSum).toBeCloseTo(totalCost);
 	});
 });
 

@@ -226,18 +226,58 @@ class QuitTracker {
 //
 // 对齐内置 footer（FooterComponent / usage-totals.js）：
 //   - assistant 消息按 `${provider}/${responseModel ?? model}` 分桶
+//   - usage 记录（缓存保温请求）按自身 `${provider}/${model}` 分桶
 //   - toolResult / compaction / branch_summary 的 usage 归入 "Tools/summaries"
 //   - 费用一律累加 usage.cost.total，不再用静态目录价自行推算
 
-/** 返回条目可计费的 usage（对齐 footer 的四类来源），否则 undefined。 */
-function usageOfEntry(entry: SessionEntry): Usage | undefined {
+/** toolResult / compaction / branch_summary 的 usage 归入的聚合桶（与内置 footer 一致）。 */
+const TOOLS_SUMMARIES_KEY = 'Tools/summaries';
+
+/**
+ * 按内置口径（usage-totals.js 的 getUsageCostBreakdown）给条目分配计费桶。
+ *
+ * 四类来源：
+ *   - assistant 消息 → `${provider}/${responseModel ?? model}`
+ *   - `usage` 记录（缓存保温请求）→ 自身 `${provider}/${model}`
+ *   - toolResult → `Tools/summaries`
+ *   - compaction / branch_summary → `Tools/summaries`
+ *
+ * 规则只在这里实现一次：过去 quit.ts 在两处各写一遍，`usage` 记录被两处同时漏掉。
+ */
+function classifyUsageEntry(entry: SessionEntry): { key: string; usage: Usage } | null {
 	if (entry.type === 'message') {
-		if (entry.message.role === 'assistant') return entry.message.usage;
-		if (entry.message.role === 'toolResult' && entry.message.usage) return entry.message.usage;
-		return undefined;
+		if (entry.message.role === 'assistant') {
+			return {
+				key: `${entry.message.provider}/${entry.message.responseModel ?? entry.message.model}`,
+				usage: entry.message.usage,
+			};
+		}
+		if (entry.message.role === 'toolResult' && entry.message.usage) {
+			return { key: TOOLS_SUMMARIES_KEY, usage: entry.message.usage };
+		}
+		return null;
 	}
-	if (entry.type === 'compaction' || entry.type === 'branch_summary') return entry.usage;
-	return undefined;
+	if (entry.type === 'usage') {
+		const key = `${entry.provider}/${entry.model}`;
+		// 明细留痕：cache_warm 这类记录的 kind 不参与归桶（kind 是自由字符串，
+		// 白名单会静默漏掉上游新增的种类），但排查账单差异时它是最有用的线索。
+		log.debug(
+			`Usage entry | kind=%s bucket=%s cost=%s`,
+			entry.kind ?? '',
+			key,
+			entry.usage?.cost?.total ?? 0,
+		);
+		return { key, usage: entry.usage };
+	}
+	if ((entry.type === 'compaction' || entry.type === 'branch_summary') && entry.usage) {
+		return { key: TOOLS_SUMMARIES_KEY, usage: entry.usage };
+	}
+	return null;
+}
+
+/** 返回条目可计费的 usage（四类来源之一），否则 undefined。 */
+function usageOfEntry(entry: SessionEntry): Usage | undefined {
+	return classifyUsageEntry(entry)?.usage;
 }
 
 export function aggregateModelUsage(entries: SessionEntry[]): {
@@ -248,28 +288,9 @@ export function aggregateModelUsage(entries: SessionEntry[]): {
 	let totalCost = 0;
 
 	for (const entry of entries) {
-		let key: string | null = null;
-		let usage: Usage | undefined;
-
-		if (entry.type === 'message' && entry.message.role === 'assistant') {
-			key = `${entry.message.provider}/${entry.message.responseModel ?? entry.message.model}`;
-			usage = entry.message.usage;
-		} else if (
-			entry.type === 'message' &&
-			entry.message.role === 'toolResult' &&
-			entry.message.usage
-		) {
-			key = 'Tools/summaries';
-			usage = entry.message.usage;
-		} else if (
-			(entry.type === 'compaction' || entry.type === 'branch_summary') &&
-			entry.usage
-		) {
-			key = 'Tools/summaries';
-			usage = entry.usage;
-		}
-
-		if (!key || !usage) continue;
+		const classified = classifyUsageEntry(entry);
+		if (!classified || !classified.usage) continue;
+		const { key, usage } = classified;
 
 		let rec = map.get(key);
 		if (!rec) {

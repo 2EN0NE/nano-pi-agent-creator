@@ -41,55 +41,6 @@ type DowKey = string; // "Mon", "Tue", etc.
 type TodKey = string; // "after-midnight", "morning", "afternoon", "evening", "night"
 type BreakdownView = 'model' | 'cwd' | 'dow' | 'tod';
 
-function sliceByColumn(line: string, startCol: number, length: number, strict = false): string {
-	if (length <= 0) return '';
-	const endCol = startCol + length;
-	const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-	let result = '';
-	let currentCol = 0;
-	let i = 0;
-	let pendingAnsi = '';
-
-	while (i < line.length) {
-		if (line[i] === '\x1b') {
-			const match =
-				/^\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[PX^_][^\x1b]*(?:\x1b\\)|[@-_])/.exec(
-					line.slice(i),
-				);
-			if (match) {
-				if (currentCol >= startCol && currentCol < endCol) {
-					result += match[0];
-				} else if (currentCol < startCol) {
-					pendingAnsi += match[0];
-				}
-				i += match[0].length;
-				continue;
-			}
-		}
-
-		const nextAnsi = line.indexOf('\x1b', i);
-		const textEnd = nextAnsi === -1 ? line.length : nextAnsi;
-		for (const { segment } of segmenter.segment(line.slice(i, textEnd))) {
-			const w = visibleWidth(segment);
-			const inRange = currentCol >= startCol && currentCol < endCol;
-			const fits = !strict || currentCol + w <= endCol;
-			if (inRange && fits) {
-				if (pendingAnsi) {
-					result += pendingAnsi;
-					pendingAnsi = '';
-				}
-				result += segment;
-			}
-			currentCol += w;
-			if (currentCol >= endCol) break;
-		}
-		i = textEnd;
-		if (currentCol >= endCol) break;
-	}
-
-	return result;
-}
-
 const DOW_NAMES: DowKey[] = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 const TOD_BUCKETS: { key: TodKey; label: string; from: number; to: number }[] = [
@@ -273,10 +224,6 @@ function weightedMix(colors: Array<{ color: RGB; weight: number }>): RGB {
 		g: Math.round(g / total),
 		b: Math.round(b / total),
 	};
-}
-
-function ansiBg(rgb: RGB, text: string): string {
-	return `\x1b[48;2;${rgb.r};${rgb.g};${rgb.b}m${text}\x1b[0m`;
 }
 
 function ansiFg(rgb: RGB, text: string): string {
@@ -557,7 +504,8 @@ async function walkSessionFiles(
 	return out;
 }
 
-async function parseSessionFile(
+/** 解析单个会话文件。导出供单测使用（扩展入口的其余逻辑保持内部）。 */
+export async function parseSessionFile(
 	filePath: string,
 	signal?: AbortSignal,
 ): Promise<ParsedSession | null> {
@@ -626,7 +574,56 @@ async function parseSessionFile(
 				continue;
 			}
 
-			if (obj?.type !== 'message') continue;
+			/** 把一条 usage 的 token/成本累加进汇总与按模型 Map，并留一条明细日志。 */
+			const accrueUsage = (mk: ModelKey, u: unknown, detail: string): void => {
+				const tok = extractTokensTotal(u);
+				const c = extractCostTotal(u);
+				if (tok > 0) {
+					tokens += tok;
+					tokensByModel.set(mk, (tokensByModel.get(mk) ?? 0) + tok);
+				}
+				if (c > 0) {
+					totalCost += c;
+					costByModel.set(mk, (costByModel.get(mk) ?? 0) + c);
+				}
+				if (tok > 0 || c > 0) {
+					log.debug(`Usage entry | ${detail} bucket=${mk} tokens=${tok} cost=${c}`);
+				}
+			};
+
+			// 非 message 条目也可能计费：`usage`（缓存保温）按模型归桶，
+			// compaction / branch_summary 归 "Tools/summaries"（与内置 footer 口径一致）。
+			// 它们不是对话消息，因此不计入 messages / messagesByModel。
+			// 新增条目类型只需在这里加一个 case —— 归桶/累加逻辑共用 accrueUsage。
+			switch (obj?.type) {
+				case 'usage': {
+					const u = obj?.usage;
+					if (
+						isFauxModelReference({
+							api: obj?.api,
+							provider: obj?.provider,
+							model: obj?.model,
+						})
+					) {
+						continue;
+					}
+					const mk = modelKeyFromParts(obj?.provider, obj?.model) ?? currentModel;
+					if (mk) accrueUsage(mk, u, `kind=${String(obj?.kind ?? '')}`);
+					continue;
+				}
+				case 'compaction':
+				case 'branch_summary': {
+					// 这两类条目自身不带 provider/model，只能按当前模型判断 faux ——
+					// 与 message/usage 同口径：mock 模型的合成 token 不计入统计。
+					if (currentModelIsFaux) continue;
+					accrueUsage('Tools/summaries', obj?.usage, `kind=${obj?.type}`);
+					continue;
+				}
+				case 'message':
+					break;
+				default:
+					continue;
+			}
 
 			const { api, provider, model, modelId, usage } = extractProviderModelAndUsage(obj);
 			const explicitMk =
@@ -1112,55 +1109,6 @@ function displayModelName(modelKey: string): string {
 	return idx === -1 ? modelKey : modelKey.slice(idx + 1);
 }
 
-function renderLegendItems(
-	modelColors: Map<ModelKey, RGB>,
-	orderedModels: ModelKey[],
-	otherColor: RGB,
-): string[] {
-	const items: string[] = [];
-	for (const mk of orderedModels) {
-		const c = modelColors.get(mk);
-		if (!c) continue;
-		items.push(`${ansiFg(c, '█')} ${displayModelName(mk)}`);
-	}
-	items.push(`${ansiFg(otherColor, '█')} other`);
-	return items;
-}
-
-function fitRight(text: string, width: number): string {
-	if (width <= 0) return '';
-	let w = visibleWidth(text);
-	let t = text;
-	if (w > width) {
-		t = sliceByColumn(t, w - width, width, true);
-		w = visibleWidth(t);
-	}
-	return ' '.repeat(Math.max(0, width - w)) + t;
-}
-
-function renderLegendBlock(leftLabel: string, items: string[], width: number): string[] {
-	if (width <= 0) return [];
-	if (items.length === 0) return [truncateToWidth(leftLabel, width)];
-
-	const lines: string[] = [];
-	// First line: label on left, first item right-aligned into remaining space.
-	const leftW = visibleWidth(leftLabel);
-	if (leftW >= width) {
-		lines.push(truncateToWidth(leftLabel, width));
-		// Put all items on their own lines right-aligned.
-		for (const it of items) lines.push(fitRight(it, width));
-		return lines;
-	}
-
-	const remaining = Math.max(0, width - leftW);
-	lines.push(leftLabel + fitRight(items[0], remaining));
-
-	for (let i = 1; i < items.length; i++) {
-		lines.push(fitRight(items[i], width));
-	}
-	return lines;
-}
-
 function renderModelTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8): string[] {
 	// Keep this relatively narrow: model + selected metric + cost + share.
 	const metric = graphMetricForRange(range, mode);
@@ -1388,22 +1336,6 @@ function renderTodTable(range: RangeAgg, mode: MeasurementMode): string[] {
 	}
 
 	return lines;
-}
-
-function renderLeftRight(left: string, right: string, width: number): string {
-	const leftW = visibleWidth(left);
-	if (width <= 0) return '';
-	if (leftW >= width) return truncateToWidth(left, width);
-
-	const remaining = width - leftW;
-	let rightText = right;
-	const rightW = visibleWidth(rightText);
-	if (rightW > remaining) {
-		// Keep the *rightmost* part visible.
-		rightText = sliceByColumn(rightText, rightW - remaining, remaining, true);
-	}
-	const pad = Math.max(0, remaining - visibleWidth(rightText));
-	return left + ' '.repeat(pad) + rightText;
 }
 
 function rangeSummary(range: RangeAgg, days: number, mode: MeasurementMode): string {
