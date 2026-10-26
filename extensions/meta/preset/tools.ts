@@ -45,7 +45,10 @@ export function resolveCoreToolNames(allNames: string[]): string[] {
 }
 
 /** pi 的内置默认工具（`defaultTools` 未配置时的启动默认，与 pi 语义一致）。 */
-const DEFAULT_TOOL_NAMES = ['read', 'bash', 'edit', 'write'];
+// 注意：pi 的 `DEFAULT_TOOL_NAMES` 没有从包根 re-export（exports 只有根与 rpc-entry），
+// 所以这里只能硬编码同名字面量。一致性由 `test/vitest/extensions/preset-default-tools.test.ts`
+// 护栏（升级基座后 pi 改了默认集 → 该测试立刻红）。
+export const DEFAULT_TOOL_NAMES = ['read', 'bash', 'edit', 'write'];
 
 /** `+name` / `-name` 修饰项判定（与 pi 的 defaultTools 语义一致）。 */
 function isToolModifier(entry: string): boolean {

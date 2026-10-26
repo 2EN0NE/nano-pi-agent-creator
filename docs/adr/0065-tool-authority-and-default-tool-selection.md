@@ -86,6 +86,11 @@ preset 引用的工具 / 技能 / 模型 / provider 在**本地**不存在时（
   在复位时会被并入活动集。如果要精确复刻 pi 的注册期行为，需要引入会话级基线快照
   （本 ADR 明确拒绝的方案）；当前按 D1 的声明语义实现，属可接受的已知偏差。
 
+- **`DEFAULT_TOOL_NAMES` 只能硬编码，无法 import**：pi 的该常量只在核心模块导出，
+  包 `exports` 仅暴露 `.` 与 `./rpc-entry`。因此 `tools.ts` 的手写字面量与 pi 的默认集**只能靠护栏
+  保持一致** —— 见 `test/vitest/extensions/preset-default-tools.test.ts`（从已安装 pi 的构建产物里
+  读常量比对）。升级基座后若该测试变红，说明 pi 改了内置默认工具集，需同步 `tools.ts` 与本 ADR。
+
 ## 被否掉的替代方案
 
 | 方案                                       | 否决理由                                                           |

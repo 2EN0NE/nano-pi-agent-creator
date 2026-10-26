@@ -1170,3 +1170,58 @@ describe('preset editField 真实 closure 六字段', () => {
 		cleanupDirs();
 	});
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// /tree 分支切换后的工具集（ADR-0065：限制权只来自 preset + 复位到默认工具选择）
+// pi 1.4.0 修了「resume/`/tree` 后扩展工具漏激活」——升级后必须验证 preset 的
+// 封闭集不会因为切分支被放宽，且已清除的 preset 不会因此复活。
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('preset 与 /tree 分支切换', () => {
+	it('preset 仍激活时，session_tree 后下一次请求仍按白名单限制工具', async () => {
+		setupDirs({ plan: { tools: ['read'] } });
+		const { pi, rec, commands, handlers } = makeFakePi({
+			allTools: ['read', 'bash', 'edit', 'write'],
+		});
+		presetExtension(pi as never);
+		const { ctx } = makeCtx({ findModel: () => ({ provider: 'mock', id: 'm1' }) });
+
+		await fireEvent(handlers, 'session_start', null, ctx);
+		await commands['preset']('plan', ctx);
+		rec.setActiveToolsCalls.length = 0;
+
+		await fireEvent(handlers, 'session_tree', null, ctx);
+		// before_agent_start 的其它处理器会读 systemPromptOptions，这里给最小合法事件
+		await fireEvent(
+			handlers,
+			'before_agent_start',
+			{ systemPromptOptions: { skills: [] } },
+			ctx,
+		);
+
+		expect(rec.setActiveToolsCalls.at(-1)).toEqual(['read']);
+		cleanupDirs();
+	});
+
+	it('已清除 preset 时，session_tree 后工具回到默认选择（不复活限制）', async () => {
+		setupDirs({});
+		const toolsRef = { current: ['read'] };
+		const { pi, rec, handlers } = makeFakePi({
+			allTools: ['read', 'bash', 'edit', 'write'],
+			activeToolsRef: toolsRef,
+		});
+		presetExtension(pi as never);
+		const { ctx } = makeCtx({
+			entries: [
+				{ type: 'custom', customType: 'preset-state', data: { name: null } },
+			] as never,
+		});
+
+		await fireEvent(handlers, 'session_tree', null, ctx);
+
+		const last = rec.setActiveToolsCalls.at(-1);
+		expect(last).toBeDefined();
+		expect(last!.includes('bash')).toBe(true);
+		cleanupDirs();
+	});
+});
