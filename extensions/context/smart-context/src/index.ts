@@ -72,7 +72,17 @@ export default function (pi: ExtensionAPI) {
 		}
 		try {
 			ctx.ui.setWorkingMessage('Routing...');
-			const decision = await router.pick(event.prompt, ctx);
+			// pi 1.2+ 的 before_agent_start 是联合类型：只有用户提交的 prompt 带 event.prompt，
+			// 自定义触发的 run（loop / goal / org 等 sendMessage({triggerTurn:true})）只有 event.message。
+			// 这类续跑不重新分类（理由见 router.pick 内的守卫注释），但大上下文保护照旧生效。
+			const prompt = event.messageType === 'user' ? event.prompt : undefined;
+			if (!prompt) {
+				log.info(
+					'Routing skipped classification | messageType=%s reason=no-user-prompt',
+					event.messageType,
+				);
+			}
+			const decision = await router.pick(prompt, ctx);
 			if (!decision) {
 				log.info('No route — keeping current model');
 				if (debug) ctx.ui.notify('smart-context: 无路由（保持当前模型）', 'info');

@@ -38,7 +38,6 @@
 		"extensions/tui/DEMO:catch-the-fox",
 		"extensions/meta/_widget-wrangler",
 		"extensions/security/secret-firewall",
-		"extensions/context/smart-context",
 		"extensions/verification/ci-watch",
 		"extensions/auto/cloud-sessions"
 	]

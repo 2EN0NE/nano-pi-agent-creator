@@ -31,19 +31,25 @@ const CLASSIFICATION_PROMPT = `你是一个编码助手的任务复杂度分类�
 
 export function createRouter(_pi: ExtensionAPI) {
 	return {
-		async pick(prompt: string, ctx: any): Promise<PickDecision | null> {
+		async pick(prompt: string | undefined, ctx: any): Promise<PickDecision | null> {
 			const config = loadConfig(ctx.cwd);
 
 			const usage = ctx.getContextUsage?.();
-			log.info(
-				`Router pick started | cwd=%s cfg=%s tokens=%s threshold=%s classifier=%s/%s`,
-				ctx.cwd,
-				configFilePath(ctx.cwd) ?? '<none>',
-				usage?.tokens ?? 'n/a',
-				config.largeContext.thresholdTokens,
-				config.classifier.provider,
-				config.classifier.model,
-			);
+
+			// 自定义触发的 run 不进入路由（见下方守卫）。这里只为"真正开始路由"留痕，
+			// 使日志里 `Router pick started` 恰好等于"发生了分类决策"的次数。
+			const customRun = prompt === undefined;
+			if (!customRun) {
+				log.info(
+					`Router pick started | cwd=%s cfg=%s tokens=%s threshold=%s classifier=%s/%s`,
+					ctx.cwd,
+					configFilePath(ctx.cwd) ?? '<none>',
+					usage?.tokens ?? 'n/a',
+					config.largeContext.thresholdTokens,
+					config.classifier.provider,
+					config.classifier.model,
+				);
+			}
 
 			// ── 大上下文保护 ──
 			if (usage && usage.tokens > config.largeContext.thresholdTokens) {
@@ -60,6 +66,22 @@ export function createRouter(_pi: ExtensionAPI) {
 					reason: 'largeContext',
 					detail: `上下文 tokens ${usage.tokens} 超过阈值 ${config.largeContext.thresholdTokens}，强制使用大上下文模型`,
 				};
+			}
+
+			// ── 自定义触发的 run：不分类 ──
+			// messageType=custom（loop / goal / org 等用 sendMessage({triggerTurn:true}) 发起的续跑）
+			// 没有用户 prompt。续跑应沿用父任务已选定的模型——用合成文本（“继续”/目标延续提示）
+			// 重新分类会在任务中途把模型降档或跳走，并丢掉 prompt cache。
+			// 也不按 customType 做白名单：那会让本插件认识具体消费方，违反分层。
+			// 大上下文保护与 prompt 无关，已在上方照旧生效。
+			// 结构性替代方案（per-request 虚拟模型）见 ADR-0067 E2，本轮不实施。
+			if (customRun) {
+				log.info(
+					`Routing decision | branch=customRun target=keep-current tokens=%s threshold=%s`,
+					usage?.tokens ?? 'n/a',
+					config.largeContext.thresholdTokens,
+				);
+				return null;
 			}
 
 			// ── 分类器调用 ──

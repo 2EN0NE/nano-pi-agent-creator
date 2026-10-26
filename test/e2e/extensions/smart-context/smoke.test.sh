@@ -63,6 +63,11 @@ BRIDGE
       cp "$ROOT_DIR/test/e2e/helpers/mock-llm.ts" \
         "$test_home/.pi/extensions/mock-llm/index.ts"
       ;;
+    emit-custom-turn)
+      mkdir -p "$test_home/.pi/extensions/emit-custom-turn"
+      cp "$ROOT_DIR/test/e2e/extensions/smart-context/helpers/emit-custom-turn.ts" \
+        "$test_home/.pi/extensions/emit-custom-turn/index.ts"
+      ;;
     esac
   done
 
@@ -211,6 +216,99 @@ test_it "no ERROR in logs" <<'TEST'
     echo "WARN: No logs directory found"
   fi
 
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ====================================================================
+# 场景 4：自定义触发的 run 不进入复杂度分类
+#
+#   loop / goal / org 等插件用 sendMessage({triggerTurn:true}) 续跑时，
+#   pi 的 before_agent_start 只提供 event.message（messageType=custom），没有 event.prompt。
+#   旧实现直接读 event.prompt 做分类 → TypeError → ERROR 日志 + 用户可见 warning toast。
+#
+#   坑：分类器模型若不在 registry，会走一条“找不到分类器模型就早退”的路径，
+#   把本 bug 完全遮蔽（测试假绿）。因此这里必须预置配置把分类器指向 mock 模型。
+# ====================================================================
+test_it "custom-triggered run skips classification" <<'TEST'
+  local slug="e2e-sc-s4-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  setup_sandbox "$test_home" mock-llm smart-context emit-custom-turn
+
+  local cfg_dir="$test_home/.pi/extensions-data/smart-context"
+  mkdir -p "$cfg_dir"
+  cat >"$cfg_dir/config.json" <<'JSON'
+{
+  "activeProfile": "e2e",
+  "profiles": {
+    "e2e": {
+      "classifier": { "provider": "mock-llm", "model": "mock-model-1" },
+      "routing": {
+        "trivial": { "provider": "mock-llm", "model": "mock-model-1" },
+        "simple": { "provider": "mock-llm", "model": "mock-model-1" },
+        "medium": { "provider": "mock-llm", "model": "mock-model-1" },
+        "complex": { "provider": "mock-llm", "model": "mock-model-1" }
+      },
+      "largeContext": {
+        "thresholdTokens": 500000,
+        "model": { "provider": "mock-llm", "model": "mock-model-1" }
+      }
+    }
+  }
+}
+JSON
+
+  # 自定义消息会触发**第二个** run，mock-llm 需要准备两轮响应
+  # （否则 pi 以 "No more faux responses queued" 退出，测的就变成 mock 而不是被测逻辑）
+  export MOCK_LLM_REPEAT=2
+  run_pi "$test_home" "hi"
+  local ec=$?
+  unset MOCK_LLM_REPEAT
+
+  if [[ "$ec" -ne 0 && "$ec" -ne 124 ]]; then
+    echo "FAIL: unexpected exit code $ec"
+    cat "$test_home/pi-stdout.log"
+    exit 1
+  fi
+
+  if grep -q "Failed to load extension" "$test_home/pi-stdout.log" 2>/dev/null; then
+    echo "FAIL: extension load failure in stdout"
+    grep "Failed to load extension" "$test_home/pi-stdout.log"
+    exit 1
+  fi
+
+  local logs_dir="$test_home/.pi/logs"
+
+  # 断言只看「custom run 有没有进入路由」，不看 ERROR ——
+  # 第一次（用户）run 的分类器调用在 e2e 沙箱里必然失败：mock-llm 用 faux provider
+  # 注册，宿主 pi-ai 的 complete() 不认识这个 api（"No API provider registered for api: faux:…"）。
+  # 这是沙箱限制，不是被测行为；被测行为是 custom run **根本不该走到分类器**。
+  local picks
+  # 注意 `set -o pipefail`：grep 无匹配会返回 1，必须 || true 兜住，否则脚本静默退出
+  picks=$( (grep -rh "Router pick started" "$logs_dir" 2>/dev/null || true) | wc -l | tr -d ' ')
+  if [[ "$picks" != "1" ]]; then
+    echo "FAIL: expected exactly 1 router pick (user run), got $picks —— custom run 不得进入路由"
+    grep -rh "Router pick started\|branch=customRun" "$logs_dir" 2>/dev/null | head -10
+    exit 1
+  fi
+
+  if ! grep -rq "branch=customRun" "$logs_dir" 2>/dev/null; then
+    echo "FAIL: custom run was not observed (branch=customRun missing)"
+    grep -rh "smart-context" "$logs_dir" 2>/dev/null | tail -20
+    exit 1
+  fi
+
+  # 反向证明用例有效：custom run 若走旧路径会抛 TypeError（"Cannot read properties of
+  # undefined (reading 'slice')"），出现两次路由错误而不是一次。
+  local typeerrors
+  typeerrors=$( (grep -rh "reading 'slice'" "$logs_dir" 2>/dev/null || true) | wc -l | tr -d ' ')
+  if [[ "$typeerrors" != "0" ]]; then
+    echo "FAIL: custom run hit the old prompt.slice TypeError"
+    grep -rh "reading 'slice'" "$logs_dir" 2>/dev/null | head -3
+    exit 1
+  fi
+
+  echo "PASS: custom run skipped classification without error"
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
   exit 0
 TEST
