@@ -43,9 +43,9 @@
 	},
 	"devDependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.26",
-		"@earendil-works/pi-ai": "1.3.0",
-		"@earendil-works/pi-coding-agent": "1.3.0",
-		"@earendil-works/pi-tui": "1.3.0",
+		"@earendil-works/pi-ai": "1.4.0",
+		"@earendil-works/pi-coding-agent": "1.4.0",
+		"@earendil-works/pi-tui": "1.4.0",
 		"@eslint/js": "^10.0.1",
 		"@types/js-yaml": "^4.0.9",
 		"@zenone/pi-config": "file:extensions/meta/pi-config",

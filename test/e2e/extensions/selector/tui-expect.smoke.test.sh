@@ -25,7 +25,9 @@ test_it "expect: renders TUI welcome screen" <<'TEST'
   tui_expect_test "selector" '
   ' 15
 
-  tui_assert_matches "pi v[0-9]+\.[0-9]+\.[0-9]+" "TUI welcome banner should show pi version"
+  # pi 1.4 的欢迎横幅把 logo 渲染成块状字形（`▀▀█  v1.4.0`），不再有字面量 "pi v"。
+  # 断言收窄为"横幅里有版本号"，避免绑定上游 banner 版式。
+  tui_assert_matches "^.*v[0-9]+\.[0-9]+\.[0-9]+" "TUI welcome banner should show pi version"
   tui_assert_contains "Extensions" "Extensions section should appear"
   tui_cleanup
 TEST
