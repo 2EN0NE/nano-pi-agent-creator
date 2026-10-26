@@ -26,6 +26,11 @@ import { getAdapter } from './mechanisms/index.js';
 
 const log = createLogger('custom-compaction:compactor');
 
+/** 溢出恢复时的摘要预算：上下文已近满，用小预算尽快拿到可用摘要。 */
+const OVERFLOW_SUMMARY_MAX_TOKENS = 2048;
+/** 模型未暴露可用输出上限时的保守回退值。 */
+const FALLBACK_SUMMARY_MAX_TOKENS = 8192;
+
 // ── Pending supplement ──────────────────────────────────────────
 // Stored before compact() is called, consumed in session_before_compact.
 // Thread-safe because compactingInProgress prevents concurrent compactions.
@@ -288,11 +293,32 @@ ${conversationText}
 			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(modelInfo);
 			// Overflow recovery retries an aborted turn right after compacting:
 			// the model context is already near capacity, so a shorter summary
-			// (2048 vs 8192 tokens) gets the retry going sooner with less risk of
-			// a second overflow.
+			// gets the retry going sooner with less risk of a second overflow.
 			const overflowRecovery = event.reason === 'overflow' || event.willRetry;
+			// 非溢出恢复：取当前模型的上限（与 1.4.0 内置摘要口径一致——内置不再传固定值，
+			// 由模型输出上限决定；这里显式传同一个值，便于日志留痕）。
+			// 溢出恢复仍用 2048：上下文已近满，用小预算尽快拿到可用摘要，与上限无关。
+			const modelCeiling = modelInfo.maxTokens;
+			const ceilingUsable = Number.isFinite(modelCeiling) && modelCeiling > 0;
+			const summaryMaxTokens = overflowRecovery
+				? OVERFLOW_SUMMARY_MAX_TOKENS
+				: ceilingUsable
+					? modelCeiling
+					: FALLBACK_SUMMARY_MAX_TOKENS;
+			if (!ceilingUsable && !overflowRecovery) {
+				log.warn(
+					`Model reports no usable output limit (${String(modelCeiling)}); falling back to ${summaryMaxTokens} for summary`,
+				);
+			}
+			log.info(
+				`Summary request | model=%s/%s maxTokens=%s overflowRecovery=%s`,
+				modelInfo.provider,
+				modelInfo.id,
+				summaryMaxTokens,
+				overflowRecovery,
+			);
 			const completeOptions: Record<string, unknown> = {
-				maxTokens: overflowRecovery ? 2048 : 8192,
+				maxTokens: summaryMaxTokens,
 				signal,
 			};
 			if (auth.ok) {

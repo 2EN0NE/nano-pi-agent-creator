@@ -187,3 +187,69 @@ describe('buildCompactionHandler — uses profile prompt', () => {
 		expect(text).toContain('PROFILE_CUSTOM_PROMPT');
 	});
 });
+
+// ── 摘要请求的 maxTokens 口径（对齐 pi 1.4 内置：取模型输出上限） ──────────
+// 内置 1.4 起不再固定摘要上限，由模型 output limit 决定；溢出恢复路径保留小预算。
+
+describe('buildCompactionHandler — summary maxTokens', () => {
+	beforeEach(() => {
+		vi.mocked(complete).mockClear();
+	});
+
+	function ctxWith(maxTokens: number): any {
+		return {
+			model: { provider: 'mock', id: 'm1', maxTokens },
+			modelRegistry: {
+				getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: 'key' }),
+			},
+			ui: { notify: vi.fn() },
+		};
+	}
+
+	function eventWith(over: { reason?: string; willRetry?: boolean } = {}): any {
+		return {
+			reason: over.reason ?? 'manual',
+			willRetry: over.willRetry ?? false,
+			preparation: {
+				messagesToSummarize: [{ role: 'user', content: 'hi' }],
+				turnPrefixMessages: [],
+				tokensBefore: 1000,
+				firstKeptEntryId: 'first',
+				previousSummary: undefined,
+			},
+			signal: { aborted: false },
+		};
+	}
+
+	async function runAndGetMaxTokens(ctx: any, event: any): Promise<number | undefined> {
+		setPendingProfile({ ...createDefaultProfile(), model: 'current' });
+		vi.mocked(getAdapter).mockReturnValue(undefined);
+		vi.mocked(complete).mockResolvedValue({
+			content: [{ type: 'text', text: 'summary ok' }],
+			stopReason: 'end_turn',
+		} as any);
+
+		await buildCompactionHandler()(event, ctx);
+		const call = vi.mocked(complete).mock.calls[0];
+		expect(call).toBeDefined();
+		return (call[2] as { maxTokens?: number }).maxTokens;
+	}
+
+	it('uses the model output limit for a normal summary', async () => {
+		expect(await runAndGetMaxTokens(ctxWith(64000), eventWith())).toBe(64000);
+	});
+
+	it('keeps the small budget when recovering from overflow', async () => {
+		expect(await runAndGetMaxTokens(ctxWith(64000), eventWith({ reason: 'overflow' }))).toBe(
+			2048,
+		);
+	});
+
+	it('keeps the small budget when the event will be retried', async () => {
+		expect(await runAndGetMaxTokens(ctxWith(64000), eventWith({ willRetry: true }))).toBe(2048);
+	});
+
+	it('falls back to the conservative value when the model reports no usable limit', async () => {
+		expect(await runAndGetMaxTokens(ctxWith(0), eventWith())).toBe(8192);
+	});
+});
