@@ -54,6 +54,51 @@ import {
 	wrapTextWithAnsi,
 } from '@earendil-works/pi-tui';
 import { topBorder } from '../../../src/tui/helpers.js';
+import { initUnattended, isArmed, logSkipNoDefault, logSkipWithDefault } from './unattended.js';
+import { createLogger } from '@zenone/pi-logger';
+
+// 远端豁免模式（ADR-0068）公共接口，供其它扩展从 @zenone/pi-selector 直接使用
+export {
+	arm,
+	initUnattended,
+	disarm,
+	hasLicense,
+	isArmed,
+	isAttended,
+	logSkipNoDefault,
+	logSkipWithDefault,
+	unattendedStatus,
+	UNATTENDED_FLAG,
+	UNATTENDED_STATUS_KEY,
+} from './unattended.js';
+export type { ConfirmGateApi, ConfirmGateStatus, UnattendedMode } from './unattended.js';
+
+const log = createLogger('selector');
+
+type UnattendedSkip<T> =
+	| { skip: false }
+	| { skip: true; action: 'cancel' }
+	| { skip: true; action: 'default'; value: T };
+
+/**
+ * 远端豁免模式下「这次要不要跳过对话框、跳过时用什么答案」。
+ *
+ * 跳过逻辑只实现这一处：未 armed 不跳过；armed 且声明了默认值 → 用默认值；
+ * armed 但未声明 → 按取消（fail-closed）。
+ */
+function decideUnattended<T>(
+	kind: string,
+	title: string,
+	declared: T | undefined,
+): UnattendedSkip<T> {
+	if (!isArmed()) return { skip: false };
+	if (declared === undefined) {
+		logSkipNoDefault(kind, title);
+		return { skip: true, action: 'cancel' };
+	}
+	logSkipWithDefault(kind, title, declared);
+	return { skip: true, action: 'default', value: declared };
+}
 
 // ============================================================
 // 类型定义
@@ -71,7 +116,7 @@ export interface SelectResult<T = string> {
 	supplement?: string;
 }
 
-export interface SelectOptions {
+export interface SelectOptions<T = string> {
 	/** 是否允许用户输入补充信息（默认 false） */
 	allowOther?: boolean;
 	/** 补充信息的占位符文本 */
@@ -82,6 +127,13 @@ export interface SelectOptions {
 	mode?: 'default' | 'warning' | 'danger';
 	/** 外部取消信号：abort 时关闭对话框（等效于 Esc，返回 null） */
 	signal?: AbortSignal;
+	/**
+	 * 远端豁免模式生效（armed）时采用的答案（ADR-0068）。
+	 *
+	 * 声明 = 允许「无人在场时自动放行」；不声明 = fail-closed（按取消处理）。
+	 * 值必须是 options 里真实存在的 `value`，否则按取消处理。
+	 */
+	unattendedDefault?: T;
 }
 
 // ============================================================
@@ -107,10 +159,22 @@ export async function showSelect<T = string>(
 	ctx: ExtensionContext,
 	title: string,
 	options: SelectOption<T>[],
-	opts?: SelectOptions,
+	opts?: SelectOptions<T>,
 ): Promise<SelectResult<T> | null> {
 	if (!ctx.hasUI) return null;
 	if (options.length === 0) return null;
+
+	// 远端豁免模式生效 → 不弹框（ADR-0068 D5）
+	const skip = decideUnattended('showSelect', title, opts?.unattendedDefault);
+	if (skip.skip) {
+		if (skip.action === 'cancel') return null;
+		const hit = options.find((o) => o.value === skip.value);
+		if (!hit) {
+			log.warn('unattendedDefault 不在选项内，按取消处理：title=%s', title);
+			return null;
+		}
+		return { value: hit.value, label: hit.label };
+	}
 
 	const allowOther = opts?.allowOther ?? false;
 
@@ -408,10 +472,13 @@ export async function showConfirm(
 	title: string,
 	message: string,
 	mode?: 'default' | 'warning' | 'danger',
-	opts?: { signal?: AbortSignal },
+	opts?: { signal?: AbortSignal; unattendedDefault?: boolean },
 ): Promise<boolean> {
 	if (!ctx.hasUI) return false;
 
+	// 远端豁免模式生效 → 不弹框（ADR-0068 D5）
+	const skip = decideUnattended('showConfirm', title, opts?.unattendedDefault);
+	if (skip.skip) return skip.action === 'default' ? skip.value : false;
 	const result = await showSelect(
 		ctx,
 		title,
@@ -433,7 +500,7 @@ export async function showConfirmDestructive(
 	ctx: ExtensionContext,
 	title: string,
 	message: string,
-	opts?: { signal?: AbortSignal },
+	opts?: { signal?: AbortSignal; unattendedDefault?: boolean },
 ): Promise<boolean> {
 	return showConfirm(ctx, title, message, 'danger', opts);
 }
@@ -443,6 +510,8 @@ export async function showConfirmDestructive(
 // ============================================================
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
-export default function (_pi: ExtensionAPI) {
-	// 本扩展还作为 Pi 的自动发现入口，功能通过 @zenone/pi-selector 的 import 提供
+export default function (pi: ExtensionAPI) {
+	// 本扩展作为 Pi 的自动发现入口：功能通过 @zenone/pi-selector 的 import 提供，
+	// 同时承载「远端豁免模式」的 flag 注册与状态机（ADR-0068，唯一注册者）。
+	initUnattended(pi);
 }

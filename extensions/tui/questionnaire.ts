@@ -13,7 +13,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { showSelect } from '@zenone/pi-selector';
+import { isAttended, logSkipNoDefault, showSelect } from '@zenone/pi-selector';
 import {
 	Editor,
 	type EditorTheme,
@@ -195,6 +195,17 @@ export default function questionnaire(pi: ExtensionAPI) {
 				multiSelect: q.multiSelect === true,
 			}));
 
+			// 远端豁免模式生效（ADR-0068）：本工具不声明默认答案 → 按取消处理。
+			// 单问题路径由 showSelect 闸门覆盖，多问题/多选走 ctx.ui.custom，
+			// 必须在这里拦，否则无人值守下会永久挂起。
+			if (!isAttended(ctx)) {
+				logSkipNoDefault('questionnaire', questions.map((q) => q.label).join(', '));
+				return {
+					content: [{ type: 'text', text: 'User cancelled the questionnaire' }],
+					details: { questions, answers: [], cancelled: true },
+					terminate: true,
+				};
+			}
 			// ── Single question without multi-select: delegate to showSelect ──
 			const anyMultiSelect = questions.some((q) => q.multiSelect === true);
 			if (questions.length === 1 && !anyMultiSelect) {

@@ -26,6 +26,7 @@ export default function (pi: ExtensionAPI) {
 				ctx,
 				'Clear session?',
 				'This will delete all messages in the current session.',
+				{ unattendedDefault: true },
 			);
 
 			if (!confirmed) {
@@ -50,6 +51,7 @@ export default function (pi: ExtensionAPI) {
 				ctx,
 				'Switch session?',
 				'You have messages in the current session. Switch anyway?',
+				{ unattendedDefault: true },
 			);
 
 			if (!confirmed) {
@@ -76,7 +78,7 @@ export default function (pi: ExtensionAPI) {
 				{ value: 'yes', label: '是，创建分叉' },
 				{ value: 'no', label: '否，留在当前会话' },
 			],
-			{ mode: 'danger' },
+			{ mode: 'danger', unattendedDefault: 'yes' },
 		);
 
 		if (choice?.value !== 'yes') {

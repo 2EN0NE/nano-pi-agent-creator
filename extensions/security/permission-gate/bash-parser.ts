@@ -22,7 +22,11 @@ const log = createLogger('permission-gate/bash-parser');
 // Types
 // ============================================================================
 
-/** 重定向：operator 是 > >> < << 等，direction 从 operator 推断 */
+/**
+ * 重定向：operator 是 > >> < << 等，direction 从 operator 推断。
+ *
+ * **不含 fd 复制**（`2>&1` / `>&2` / `>&-`）：那不是文件目标，见 `extractRedirect`。
+ */
 export interface BashRedirect {
 	operator: string;
 	target: string;
@@ -39,12 +43,29 @@ export interface BashCommand {
 	pathArguments: string[];
 	/** 该命令关联的重定向 */
 	redirects: BashRedirect[];
+	/**
+	 * 参数位上**无法归属**的节点原文（`$VAR` / `${VAR}` / `$(cmd)` / `` `cmd` `` /
+	 * `a$b` / `FOO=1` / `{a,b}` / `>(cat)` …）。
+	 *
+	 * 这些节点不是 `word`，不进 `arguments`；但它们的展开结果是真实的命令行参数。
+	 * 单独列出来，是为了让调用方把「解析器没提取到」与「命令里没有」区分开——
+	 * 前者必须按「不可静态解析」处理（fail-closed），否则 `rm -rf ./x $DANGER`
+	 * 会被误判成「目标只有 `./x`」。
+	 */
+	unresolved: string[];
 }
 
 export interface BashParseResult {
 	/** 解析是否成功；false 表示 parser 未预热（fallback 到 whole-string） */
 	ok: boolean;
 	commands: BashCommand[];
+	/**
+	 * 依附在**复合体**（subshell / group / pipeline / list）上的写重定向原文。
+	 *
+	 * `(rm -rf x) > /tmp/out` 的写目标在 `subshell` 上，不属于任何一条命令的目标清单，
+	 * 因此无法归属；调用方必须按「不可静态解析」处理（fail-closed），否则越界写会整条漏掉。
+	 */
+	unattributedRedirects: string[];
 	raw: string;
 }
 
@@ -128,7 +149,7 @@ export function resetWarmBashParser(): void {
 // AST 遍历与提取
 // ============================================================================
 
-const WRITE_OPERATORS = new Set(['>', '>>', '&>', '&>>', '>|']);
+// 只列读操作符：direction 默认按写处理（未知 / `>&` / `<>` 等一律写，fail-closed）
 const READ_OPERATORS = new Set(['<', '<<', '<<<', '<&']);
 
 /** 树中的词类节点（word/string/raw_string/number）——参数、重定向目标、命令名候选 */
@@ -145,7 +166,20 @@ function stripShellQuotes(text: string): string {
 	return text.replace(/["']/g, '');
 }
 
-function extractRedirect(node: TSNode): BashRedirect {
+/**
+ * fd 复制操作符：`2>&1` / `>&2` / `0<&3` / `>&-`。
+ *
+ * bash 里这两个操作符的目标是**数字 fd**（或 `-` 关闭）时只复制/关闭描述符，不打开任何文件；
+ * 只有目标是别的词（`cmd >& /tmp/out`）才等价于 `&>` 写文件。误当写目标有两处后果：
+ * 判定层把不存在的相对路径 `1`/`2` 当成 cwd 内写目标（审计 `targets` 出现虚假路径），
+ * 分级层则凭空得到 `write=true`。故 extractRedirect 对 fd 目标返回 null。
+ */
+const FD_DUP_OPERATORS = new Set(['>&', '<&']);
+/** `>&-` / `<&-`（关闭描述符）：tree-sitter 把 `-` 并进 operator，没有 target */
+const FD_CLOSE_OPERATORS = new Set(['>&-', '<&-']);
+const FD_TARGET = /^(?:\d+|-)$/;
+
+function extractRedirect(node: TSNode): BashRedirect | null {
 	let operator = '';
 	let target = '';
 	for (let i = 0; i < node.childCount; i++) {
@@ -158,6 +192,10 @@ function extractRedirect(node: TSNode): BashRedirect {
 			target = stripShellQuotes(c.text);
 		}
 	}
+	// fd 复制 / 关闭（`2>&1` / `>&-`）：不是文件目标，不能进 redirects
+	// （否则 `1` / `2` 会被当成相对路径目标，`>&-` 会变成空目标写重定向）
+	if (FD_CLOSE_OPERATORS.has(operator)) return null;
+	if (FD_DUP_OPERATORS.has(operator) && FD_TARGET.test(target)) return null;
 	const direction: 'read' | 'write' = READ_OPERATORS.has(operator) ? 'read' : 'write';
 	return { operator, target, direction };
 }
@@ -191,6 +229,7 @@ function extractCommand(node: TSNode, redirects: BashRedirect[]): BashCommand {
 	let commandName = '';
 	const args: string[] = [];
 	const pathArgs: string[] = [];
+	const unresolved: string[] = [];
 
 	for (let i = 0; i < node.childCount; i++) {
 		const c = node.child(i);
@@ -203,20 +242,41 @@ function extractCommand(node: TSNode, redirects: BashRedirect[]): BashCommand {
 			// 路径参数按去除 shell 引号后的文本提取，保持引号命令与裸命令分级一致（fail-open 修复）
 			const clean = stripShellQuotes(text);
 			if (isPathLike(clean)) pathArgs.push(extractPath(clean));
+		} else if (c.isNamed) {
+			// 参数位上的展开 / 替换 / 赋值 / 拼接：展开结果是真实参数，但文本无法静态判定。
+			// 不丢：交给调用方按「不可解析」处理（见 BashCommand.unresolved）
+			unresolved.push(c.text);
 		}
 	}
 
-	return { commandName, arguments: args, pathArguments: pathArgs, redirects };
+	return { commandName, arguments: args, pathArguments: pathArgs, redirects, unresolved };
+}
+
+/** 子节点里除重定向外的命名节点（复合体重定向的归属判定用） */
+function nonRedirectChildren(node: TSNode): TSNode[] {
+	const body: TSNode[] = [];
+	for (let i = 0; i < node.childCount; i++) {
+		const c = node.child(i);
+		if (c && c.isNamed && c.type !== 'file_redirect') body.push(c);
+	}
+	return body;
 }
 
 /** 递归遍历，收集所有 command；遇到 command 时关联其 redirected_statement 父节点的重定向 */
-function collectCommands(node: TSNode, parent: TSNode | null, out: BashCommand[]): void {
+function collectCommands(
+	node: TSNode,
+	parent: TSNode | null,
+	out: BashCommand[],
+	unattributedRedirects: string[],
+): void {
 	if (node.type === 'command') {
 		const redirects: BashRedirect[] = [];
 		if (parent && parent.type === 'redirected_statement') {
 			for (let i = 0; i < parent.childCount; i++) {
 				const c = parent.child(i);
-				if (c && c.type === 'file_redirect') redirects.push(extractRedirect(c));
+				if (!c || c.type !== 'file_redirect') continue;
+				const rd = extractRedirect(c);
+				if (rd) redirects.push(rd);
 			}
 		}
 		out.push(extractCommand(node, redirects));
@@ -224,9 +284,25 @@ function collectCommands(node: TSNode, parent: TSNode | null, out: BashCommand[]
 	}
 	if (node.type === 'file_redirect') return; // 已在 command 提取时处理
 
+	// 复合体（subshell / compound_statement / pipeline / list）自带的重定向：
+	// `(rm -rf x) > /tmp/out` 的写目标挂在 subshell 上，无法归属到任何一条命令 → 记下来，
+	// 否则「解析结果里没有越界写目标」会被误读成「没有越界写」
+	if (node.type === 'redirected_statement') {
+		const body = nonRedirectChildren(node);
+		const bodyIsSingleCommand = body.length === 1 && body[0].type === 'command';
+		if (!bodyIsSingleCommand) {
+			for (let i = 0; i < node.childCount; i++) {
+				const c = node.child(i);
+				if (!c || c.type !== 'file_redirect') continue;
+				// fd 复制不是写目标（extractRedirect 返回 null），不能算「无法归属的越界写」
+				if (extractRedirect(c)?.direction === 'write') unattributedRedirects.push(c.text);
+			}
+		}
+	}
+
 	for (let i = 0; i < node.childCount; i++) {
 		const c = node.child(i);
-		if (c) collectCommands(c, node, out);
+		if (c) collectCommands(c, node, out, unattributedRedirects);
 	}
 }
 
@@ -243,18 +319,19 @@ function collectCommands(node: TSNode, parent: TSNode | null, out: BashCommand[]
 export function parseBashCommand(command: string): BashParseResult {
 	const parser = getWarmBashParser();
 	if (!parser) {
-		return { ok: false, commands: [], raw: command };
+		return { ok: false, commands: [], unattributedRedirects: [], raw: command };
 	}
 
 	const tree = parser.parse(command);
 	if (!tree) {
-		return { ok: false, commands: [], raw: command };
+		return { ok: false, commands: [], unattributedRedirects: [], raw: command };
 	}
 
 	try {
 		const commands: BashCommand[] = [];
-		collectCommands(tree.rootNode, null, commands);
-		return { ok: true, commands, raw: command };
+		const unattributedRedirects: string[] = [];
+		collectCommands(tree.rootNode, null, commands, unattributedRedirects);
+		return { ok: true, commands, unattributedRedirects, raw: command };
 	} finally {
 		tree.delete();
 	}

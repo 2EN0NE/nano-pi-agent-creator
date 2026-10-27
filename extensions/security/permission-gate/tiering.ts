@@ -21,7 +21,7 @@
 
 import { homedir } from 'node:os';
 import { parseBashCommand } from './bash-parser.js';
-import type { DangerTier, PermissionGateConfig } from './config.js';
+import { getDefaultConfig, type DangerTier, type PermissionGateConfig } from './config.js';
 import { FALLBACK_EXPLAIN, type ReasonKey } from './notes.js';
 
 /** 单条命中明细（展示层逐条渲染） */
@@ -31,6 +31,13 @@ export interface TierHit {
 	reason: string;
 	/** 来源层：builtin 清单命中 vs 拦截模式（pattern） */
 	source: 'builtin' | 'pattern';
+	/**
+	 * `reason === 'pattern'` 时：该 pattern 是否为本机自增（不在内置默认清单里）。
+	 *
+	 * 远端豁免（ADR-0068）需要区分内置 `rm -rf` 与用户自加的拦截模式——
+	 * 后者代表「本机额外声明的确认意图」，不能被远端模式代答。
+	 */
+	userPattern?: boolean;
 	/** 解释文案（条目 note 优先，否则分类兜底） */
 	explain: string;
 }
@@ -368,6 +375,14 @@ function assessSingleCommand(info: CommandInfo, config: PermissionGateConfig): T
 	return hits;
 }
 
+/**
+ * 内置默认 pattern 集合（正则字符串）。
+ *
+ * 用于区分「内置规则命中」与「用户自加的拦截模式」：远端豁免只允许前者
+ * （用户自加 pattern 代表本机额外声明的确认意图，见 ADR-0068 D2）。
+ */
+const BUILTIN_PATTERN_SET = new Set(getDefaultConfig().patterns.map((p) => p.pattern));
+
 /** 收集用户 patterns 的全部命中（不再只取最高） */
 function assessPatterns(command: string, config: PermissionGateConfig): TierHit[] {
 	const hits: TierHit[] = [];
@@ -383,6 +398,7 @@ function assessPatterns(command: string, config: PermissionGateConfig): TierHit[
 			tier: entry.tier,
 			reason: 'pattern',
 			source: 'pattern',
+			userPattern: !BUILTIN_PATTERN_SET.has(entry.pattern),
 			explain: explainFor('pattern', entry.note),
 		});
 	}

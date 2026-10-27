@@ -46,7 +46,7 @@ async function checkDirtyRepo(
 			{ value: 'proceed', label: '是，仍然继续' },
 			{ value: 'cancel', label: '否，让我先提交' },
 		],
-		{ mode: 'warning' },
+		{ mode: 'warning', unattendedDefault: 'proceed' },
 	);
 
 	if (choice?.value !== 'proceed') {

@@ -83,3 +83,68 @@ export const FALLBACK_EXPLAIN: Record<ReasonKey, string> = {
 	'system-dir-read': '读取系统关键目录',
 	pattern: '匹配拦截模式（未写备注）',
 };
+
+/**
+ * 远端豁免失败的类别（ADR-0068 D3）。
+ *
+ * 与 `note`（为什么危险）正交：第三层回答「**怎样合理操作**」。
+ * 由 `unattended-exempt.ts` 的判定产出，随 `block.reason` 回给模型。
+ */
+export type UnattendedDenyReason =
+	| 'unparsed'
+	| 'cd-in-chain'
+	| 'non-file-op'
+	| 'path-qualified-op'
+	| 'no-target'
+	| 'unresolvable-target'
+	| 'outside-cwd'
+	| 'cwd-root'
+	| 'protected-internal'
+	| 'user-pattern'
+	| 'privileged-hit';
+
+/**
+ * 不能豁免时的「怎样合理操作」文案。
+ *
+ * 约束：**不得暗示「换个写法即可通过」**——拒绝不是话术游戏，绕过拦截不属于自愈。
+ */
+export const UNATTENDED_REMEDY: Record<UnattendedDenyReason, string> = {
+	unparsed: '命令无法被静态解析。请改写为可直接判定的简单命令（避免嵌套 shell / 函数）后重试。',
+	'cd-in-chain':
+		'不要在命令里改变目录。请直接给出相对或绝对的字面路径，例如 `rm -rf .scratch/tmp`。',
+	'non-file-op':
+		'这类动作没有可判定的「工作目录内文件目标」，远端模式不会自动放行。请在工作目录的 TUI 中确认，或为它添加手动策略。',
+	'path-qualified-op':
+		'命令带了路径前缀（如 `./rm`、`/tmp/x/unlink`），无法确认它就是标准的 rm / rmdir / unlink。请直接使用命令名本身（`rm -rf .scratch/tmp`）。',
+	'no-target': '没有识别到文件目标。请给出明确的字面路径。',
+	'unresolvable-target':
+		'目标含变量、通配符、引号或转义，无法确认真实路径。请改用不加引号/转义的裸字面路径（如 `rm -rf .scratch/tmp`）。',
+	'outside-cwd':
+		'目标不在 pi 的启动工作目录内。远端模式只豁免该目录内的破坏性写；请改用目录内路径，或到 TUI 确认。',
+	'cwd-root':
+		'不要把工作目录本身当作删除目标。请给出目录内的具体子路径，例如 `rm -rf .scratch/tmp`。',
+	'protected-internal':
+		'`.git` / `.pi` 不在 pi-rewind 快照内（删除不可回滚）。远端模式不豁免，请在 TUI 确认。',
+	'user-pattern':
+		'命中你为本机添加的拦截模式（非内置规则）。远端模式不代答这条确认，请在 TUI 确认，或调整该 pattern。',
+	'privileged-hit':
+		'命中提权 / 凭证 / 系统目录等分类，远端模式不豁免。请在 TUI 确认，或添加手动策略。',
+};
+
+/**
+ * 拒绝原因里「讲路径作用域」的那一类（ADR-0068 D2/D3）。
+ *
+ * `block.reason` 首行按此分流：路径类讲「证明不了只在 cwd 内」；其余类（`non-file-op` /
+ * `user-pattern` / `privileged-hit`）**不讲路径**——否则会暗示「补个 cwd 内路径就能过」，
+ * 与 D3「指引不得暗示换个写法即可通过」相反。
+ */
+export const PATH_SCOPED_DENY: ReadonlySet<UnattendedDenyReason> = new Set<UnattendedDenyReason>([
+	'unparsed',
+	'cd-in-chain',
+	'path-qualified-op',
+	'no-target',
+	'unresolvable-target',
+	'outside-cwd',
+	'cwd-root',
+	'protected-internal',
+]);

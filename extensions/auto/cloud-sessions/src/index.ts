@@ -11,6 +11,7 @@ import {
 	readRawConfigFile,
 	type CloudSessionsConfig,
 } from './config.js';
+import { isAttended } from '@zenone/pi-selector';
 import { Sync, type SyncResult } from './sync.js';
 import { selectPanel } from './select-panel.js';
 import {
@@ -240,7 +241,8 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 	// This covers both /resume in TUI and pi -r (TUI mode session selection).
 	pi.on('session_before_switch', async (event, ctx) => {
 		if (event.reason !== 'resume' || !event.targetSessionFile) return;
-		if (!ctx.hasUI) return;
+		// 远端豁免模式生效时视为「无人在场」：跳过 cwd 修复，直接放行切换（ADR-0068 D7）
+		if (!isAttended(ctx)) return;
 
 		if (!needsCwdFix(event.targetSessionFile, ctx.cwd)) return;
 
@@ -297,7 +299,7 @@ export default function cloudSessions(pi: ExtensionAPI): void {
 	// broken because the original cwd doesn't exist. Offer to fix it now.
 	pi.on('session_start', async (event, ctx) => {
 		if (event.reason !== 'resume' && event.reason !== 'startup') return;
-		if (!ctx.hasUI) return;
+		if (!isAttended(ctx)) return;
 
 		const sessionFile = ctx.sessionManager.getSessionFile();
 		const mismatch = detectCwdMismatch(sessionFile, ctx.cwd);

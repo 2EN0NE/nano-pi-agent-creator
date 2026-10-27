@@ -29,6 +29,7 @@ import { StringEnum } from '@earendil-works/pi-ai/compat';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { createLogger } from '@zenone/pi-logger';
+import { isAttended } from '@zenone/pi-selector';
 
 const log = createLogger('goal');
 
@@ -670,7 +671,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 		}
 
 		if (wasLastAssistantAborted(event.messages)) {
-			if (!ctx.hasUI) {
+			if (!isAttended(ctx)) {
 				setGoalStatus('paused');
 				persist('status');
 				updateStatus(ctx);

@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { createLogger } from '@zenone/pi-logger';
 import { resolveConfigPaths } from '@zenone/pi-config';
+import { isAttended } from '@zenone/pi-selector';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import {
 	TODO_ID_PREFIX,
@@ -630,7 +631,7 @@ async function acquireLock(
 					error: `待办 ${displayTodoId(id)} 已被锁定${owner}。请稍后重试。`,
 				};
 			}
-			if (!ctx.hasUI) {
+			if (!isAttended(ctx)) {
 				return {
 					error: `待办 ${displayTodoId(id)} 的锁已过期；请在交互模式下重新运行以抢占。`,
 				};

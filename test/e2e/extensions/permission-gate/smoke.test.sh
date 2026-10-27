@@ -44,6 +44,18 @@ setup_sandbox() {
   cp "$ROOT_DIR/test/e2e/extensions/permission-gate/helpers/mock-llm.ts" \
     "$test_home/.pi/extensions/mock-llm/index.ts"
 
+  # 远端豁免场景：`--unattended-confirm` 由 selector 扩展注册（flag 的唯一注册者），
+  # 再装一个「通道模拟器」在 session_start 时 arm()（ADR-0068 D4：许可 ≠ 生效）
+  case "$scenario" in
+  unattended_*)
+    cp -r "$ROOT_DIR/extensions/meta/selector" \
+      "$test_home/.pi/extensions/selector"
+    mkdir -p "$test_home/.pi/extensions/arm-channel"
+    cp "$ROOT_DIR/test/e2e/extensions/permission-gate/helpers/arm-channel.ts" \
+      "$test_home/.pi/extensions/arm-channel/index.ts"
+    ;;
+  esac
+
   # pi-logger 配置
   if [[ -f "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" ]]; then
     cp "$ROOT_DIR/extensions/meta/pi-logger/pi-logger.json" \
@@ -156,6 +168,19 @@ JSON
 }
 JSON
     ;;
+  unattended_*)
+    # 远端豁免场景：动态策略关掉，保证危险命令一定走到「需要确认」这条路径，
+    # 从而验证的是 armed 分支（而不是 graduated/阈值自动放行）
+    cat >"$config_file" <<'JSON'
+{
+  "enabled": true,
+  "dynamicPolicyEnabled": false,
+  "patterns": [
+    { "pattern": "\\brm\\s+(-rf?|--recursive)", "tier": "critical" }
+  ]
+}
+JSON
+    ;;
   esac
 }
 
@@ -165,6 +190,7 @@ JSON
 run_pi() {
   local test_home="$1"
   local prompt="${2:-hi}"
+  local extra_args="${3:-}"
   local timeout_seconds="${RUN_PI_TIMEOUT:-120}"
 
   local stdout_file="$test_home/pi-stdout.log"
@@ -174,11 +200,11 @@ run_pi() {
   if command -v timeout >/dev/null 2>&1; then
     # Linux（CI）有 GNU timeout
     HOME="$test_home/home" timeout "$timeout_seconds" \
-      pi -a --no-session -p "$prompt" >"$stdout_file" 2>&1
+      pi -a --no-session $extra_args -p "$prompt" >"$stdout_file" 2>&1
     local ec=$?
   else
     # macOS 无 GNU timeout：background + wait + kill 兜底
-    HOME="$test_home/home" pi -a --no-session -p "$prompt" \
+    HOME="$test_home/home" pi -a --no-session $extra_args -p "$prompt" \
       >"$stdout_file" 2>&1 &
     local pid=$!
     local waited=0
@@ -706,6 +732,380 @@ print('PASS: 不挂条件 → auto（同一条命令，差别只在条件）')
     echo "FAIL: audit dir NOT created at $audit_dir"
     exit 1
   fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ====================================================================
+# 远端豁免模式（ADR-0068）：真实 pi + 真实审计落盘
+#
+# 许可（--unattended-confirm）与生效（arm）分离：arm-channel 辅助扩展在 session_start
+# 调用 arm('e2e-channel')，permission-gate 的 armed 分支才生效。
+# ====================================================================
+
+# ── 场景 7：armed + cwd 内目标 → 自动放行并写 allowed-unattended ──
+test_it "unattended: cwd 内 rm -rf 自动放行（审计 allowed-unattended）" <<'TEST'
+  local slug="e2e-pg-un1-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  mkdir -p "$test_home"
+  setup_sandbox "$test_home" unattended_exempt
+
+  # 目标必须真实存在：断言「命令真的执行了」（目录被删掉），而不只是审计写了什么
+  mkdir -p "$test_home/.scratch/tmp"
+  touch "$test_home/.scratch/tmp/probe.txt"
+
+  export PG_E2E_DANGEROUS_COMMAND="rm -rf .scratch/tmp"
+  run_pi "$test_home" "clean up the scratch dir" "--unattended-confirm" || true
+  unset PG_E2E_DANGEROUS_COMMAND
+
+  dump_perm_logs "$test_home"
+
+  if [[ -d "$test_home/.scratch/tmp" ]]; then
+    echo "FAIL: armed 下 cwd 内 rm -rf 未被执行（目标仍存在）"
+    exit 1
+  fi
+  echo "PASS: 目标目录已删除（命令真的执行）"
+
+  local audit_dir="$test_home/home/.pi/agent/extensions-data/permission-gate/audit"
+  local logs_dir="$test_home/.pi/logs"
+  python3 -c "
+import json, glob
+files = glob.glob('$audit_dir/*.jsonl')
+entries = []
+for f in files:
+    for line in open(f):
+        if line.strip():
+            entries.append(json.loads(line))
+hits = [e for e in entries if e.get('originalCommand') == 'rm -rf .scratch/tmp']
+assert hits, f'no audit entry for the exempted command (got {[e.get(\"originalCommand\") for e in entries]})'
+e = hits[-1]
+assert e['decision'] == 'allowed-unattended', f'expected allowed-unattended, got {e[\"decision\"]}'
+assert e['tier'] == 'critical', f'expected tier preserved, got {e[\"tier\"]}'
+assert e['reasons'], 'reasons must be preserved'
+print('PASS: 审计 decision=allowed-unattended，tier/reasons 保留')
+" || {
+      echo "FAIL: allowed-unattended 审计校验失败"
+      echo "--- audit dump ---"
+      cat "$audit_dir"/*.jsonl 2>/dev/null || echo "(no audit file at $audit_dir)"
+      exit 1
+    }
+
+  if grep -q "Unattended exempt" "$logs_dir"/permission-gate*.log 2>/dev/null; then
+    echo "PASS: 日志记录了 Unattended exempt"
+  else
+    echo "FAIL: 未找到 Unattended exempt 日志"
+    exit 1
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ── 场景 8：armed + cwd 外目标 → 拒绝（denyCause=unattended）且不执行 ──
+test_it "unattended: cwd 外 rm -rf 被拒（denyCause=unattended）且未执行" <<'TEST'
+  local slug="e2e-pg-un2-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  local outside="/tmp/pg-unattended-outside-$$"
+  rm -rf "$outside"
+  mkdir -p "$outside"
+  touch "$outside/keep.txt"
+
+  mkdir -p "$test_home"
+  setup_sandbox "$test_home" unattended_deny
+
+  export PG_E2E_DANGEROUS_COMMAND="rm -rf $outside"
+  run_pi "$test_home" "clean up the outside dir" "--unattended-confirm" || true
+  unset PG_E2E_DANGEROUS_COMMAND
+
+  dump_perm_logs "$test_home"
+
+  if [[ -f "$outside/keep.txt" ]]; then
+    echo "PASS: cwd 外目标未被删除（拒绝真的生效）"
+  else
+    echo "FAIL: cwd 外目标被删除，豁免越界"
+    rm -rf "$outside"
+    exit 1
+  fi
+  rm -rf "$outside"
+
+  local audit_dir="$test_home/home/.pi/agent/extensions-data/permission-gate/audit"
+  local logs_dir="$test_home/.pi/logs"
+  python3 -c "
+import json, glob
+files = glob.glob('$audit_dir/*.jsonl')
+entries = []
+for f in files:
+    for line in open(f):
+        if line.strip():
+            entries.append(json.loads(line))
+target = 'rm -rf $outside'
+hits = [e for e in entries if e.get('originalCommand') == target]
+assert hits, f'no audit entry for {target}'
+e = hits[-1]
+assert e['decision'] == 'deny', f'expected deny, got {e[\"decision\"]}'
+assert e.get('denyCause') == 'unattended', f'expected denyCause=unattended, got {e.get(\"denyCause\")}'
+print('PASS: 审计 decision=deny + denyCause=unattended')
+" 2>/dev/null || {
+      echo "FAIL: deny 审计校验失败"
+      exit 1
+    }
+
+  if grep -q "Unattended deny (outside-cwd)" "$logs_dir"/permission-gate*.log 2>/dev/null; then
+    echo "PASS: 日志记录了 Unattended deny (outside-cwd)"
+  else
+    echo "FAIL: 未找到 Unattended deny 日志（或失败类别不是 outside-cwd）"
+    exit 1
+  fi
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ── 场景 9：armed + 引号包裹的 cwd 外目标 → 拒绝（回归：引号曾绕过 cwd 判定）──
+# 解析器给的参数是原文（保留引号），`resolve` 会把 `".."` / `"/x"` 当字面段 → 词法上像 cwd 内，
+# 而 shell 执行时还原成 cwd 外。本用例走真实 pi + 真实 bash，断言目标未被删除。
+test_it "unattended: 引号包裹的 cwd 外 rm -rf 被拒（引号不得绕过 cwd 判定）" <<'TEST'
+  local slug="e2e-pg-un3-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  local outside="/tmp/pg-unattended-quoted-$$"
+  rm -rf "$outside"
+  mkdir -p "$outside"
+  touch "$outside/keep.txt"
+
+  mkdir -p "$test_home"
+  setup_sandbox "$test_home" unattended_deny
+
+  # 双引号包裹的绝对路径：shell 会原样还原成 cwd 外路径
+  export PG_E2E_DANGEROUS_COMMAND="rm -rf \"$outside\""
+  run_pi "$test_home" "clean up the outside dir" "--unattended-confirm" || true
+  unset PG_E2E_DANGEROUS_COMMAND
+
+  dump_perm_logs "$test_home"
+
+  if [[ -f "$outside/keep.txt" ]]; then
+    echo "PASS: 引号包裹的 cwd 外目标未被删除"
+  else
+    echo "FAIL: 引号绕过了 cwd 判定，cwd 外目标被删除"
+    rm -rf "$outside"
+    exit 1
+  fi
+  rm -rf "$outside"
+
+  local logs_dir="$test_home/.pi/logs"
+  if grep -q "Unattended deny (unresolvable-target)" "$logs_dir"/permission-gate*.log 2>/dev/null; then
+    echo "PASS: 日志记录 Unattended deny (unresolvable-target)"
+  else
+    echo "FAIL: 未找到 unresolvable-target 拒绝日志（引号目标应判不可解析）"
+    tail -10 "$logs_dir"/permission-gate*.log 2>/dev/null
+    exit 1
+  fi
+
+  local audit_dir="$test_home/home/.pi/agent/extensions-data/permission-gate/audit"
+  python3 -c "
+import json, glob
+entries = []
+for f in glob.glob('$audit_dir/*.jsonl'):
+    for line in open(f):
+        if line.strip():
+            entries.append(json.loads(line))
+target = 'rm -rf \"$outside\"'
+hits = [e for e in entries if e.get('originalCommand') == target]
+assert hits, f'no audit entry for {target}'
+assert hits[-1]['decision'] == 'deny', f'expected deny, got {hits[-1][\"decision\"]}'
+assert hits[-1].get('denyCause') == 'unattended', 'expected denyCause=unattended'
+print('PASS: 审计 decision=deny + denyCause=unattended')
+" 2>/dev/null || {
+      echo "FAIL: 引号目标的 deny 审计校验失败"
+      exit 1
+    }
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ── 场景 10：armed + 字面目标里混入变量 → 拒绝（回归：解析器丢弃展开曾导致越界删除）──
+# `rm -rf .scratch/tmp $DANGER`：解析器只把 `.scratch/tmp` 收进 arguments，`$DANGER` 不是 word
+# 节点。若判定层把「没提取到」当成「命令里没有」，就会以「目标只有 .scratch/tmp」放行，
+# 而 shell 实际把 $DANGER 展开成 cwd 外路径一起删。本用例走真实 pi + 真实 bash 断言未删除。
+test_it "unattended: 字面目标混入变量被拒（\$VAR 不得从判定里消失）" <<'TEST'
+  local slug="e2e-pg-un4-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  local outside="/tmp/pg-unattended-var-$$"
+  rm -rf "$outside"
+  mkdir -p "$outside"
+  touch "$outside/keep.txt"
+
+  mkdir -p "$test_home"
+  setup_sandbox "$test_home" unattended_deny
+  mkdir -p "$test_home/.scratch/tmp"
+
+  export PG_E2E_DANGEROUS_COMMAND="rm -rf .scratch/tmp \$PG_OUTSIDE_DIR"
+  export PG_OUTSIDE_DIR="$outside"
+  run_pi "$test_home" "clean up the scratch dir" "--unattended-confirm" || true
+  unset PG_E2E_DANGEROUS_COMMAND PG_OUTSIDE_DIR
+
+  dump_perm_logs "$test_home"
+
+  if [[ -f "$outside/keep.txt" ]]; then
+    echo "PASS: 变量指向的 cwd 外目标未被删除"
+  else
+    echo "FAIL: \$VAR 被从判定里丢掉，cwd 外目标被删除"
+    rm -rf "$outside"
+    exit 1
+  fi
+  rm -rf "$outside"
+
+  local logs_dir="$test_home/.pi/logs"
+  if grep -q "Unattended deny (unresolvable-target)" "$logs_dir"/permission-gate*.log 2>/dev/null; then
+    echo "PASS: 日志记录 Unattended deny (unresolvable-target)"
+  else
+    echo "FAIL: 未找到 unresolvable-target 拒绝日志（变量目标应判不可解析）"
+    tail -10 "$logs_dir"/permission-gate*.log 2>/dev/null
+    exit 1
+  fi
+
+  local audit_dir="$test_home/home/.pi/agent/extensions-data/permission-gate/audit"
+  python3 -c "
+import json, glob
+entries = []
+for f in glob.glob('$audit_dir/*.jsonl'):
+    for line in open(f):
+        if line.strip():
+            entries.append(json.loads(line))
+target = 'rm -rf .scratch/tmp \$PG_OUTSIDE_DIR'
+hits = [e for e in entries if e.get('originalCommand') == target]
+assert hits, f'no audit entry for {target}'
+assert hits[-1]['decision'] == 'deny', f'expected deny, got {hits[-1][\"decision\"]}'
+assert hits[-1].get('denyCause') == 'unattended', 'expected denyCause=unattended'
+print('PASS: 审计 decision=deny + denyCause=unattended')
+" 2>/dev/null || {
+      echo "FAIL: 变量目标的 deny 审计校验失败"
+      exit 1
+    }
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ── 场景 11：armed + 路径限定的 rm → 拒绝（回归：按 basename 认命令曾放行任意可执行文件）──
+# 前置条件无需任何确认即可达成：`install -m 755 payload ./rm` 不命中任何内置 pattern；
+# 若豁免把 `./rm` 当 coreutils 的 rm，随后的 `./rm -rf .scratch/tmp` 就会执行这段任意脚本并放行。
+test_it "unattended: 路径限定的 ./rm 被拒（不按 basename 认命令）" <<'TEST'
+  local slug="e2e-pg-un5-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  mkdir -p "$test_home"
+  setup_sandbox "$test_home" unattended_deny
+
+  mkdir -p "$test_home/.scratch/tmp"
+  # 假 rm：被真正执行就会留下 PWNED 标记（比「目标还在」更直接地证明它被执行过）
+  printf '#!/bin/sh\ntouch "%s/PWNED"\n' "$test_home" >"$test_home/rm"
+  chmod +x "$test_home/rm"
+
+  export PG_E2E_DANGEROUS_COMMAND="./rm -rf .scratch/tmp"
+  run_pi "$test_home" "clean up the scratch dir" "--unattended-confirm" || true
+  unset PG_E2E_DANGEROUS_COMMAND
+
+  dump_perm_logs "$test_home"
+
+  if [[ -f "$test_home/PWNED" ]]; then
+    echo "FAIL: ./rm 被当作可豁免的文件操作执行了（basename 判定回归）"
+    exit 1
+  fi
+  echo "PASS: ./rm 未被当作可豁免的文件操作执行"
+
+  if [[ -d "$test_home/.scratch/tmp" ]]; then
+    echo "PASS: 目标目录仍在（命令未执行）"
+  else
+    echo "FAIL: 目标目录被删除，豁免越界"
+    exit 1
+  fi
+
+  local logs_dir="$test_home/.pi/logs"
+  if grep -q "Unattended deny (path-qualified-op)" "$logs_dir"/permission-gate*.log 2>/dev/null; then
+    echo "PASS: 日志记录 Unattended deny (path-qualified-op)"
+  else
+    echo "FAIL: 未找到 path-qualified-op 拒绝日志"
+    tail -10 "$logs_dir"/permission-gate*.log 2>/dev/null
+    exit 1
+  fi
+
+  local audit_dir="$test_home/home/.pi/agent/extensions-data/permission-gate/audit"
+  python3 -c "
+import json, glob
+entries = []
+for f in glob.glob('$audit_dir/*.jsonl'):
+    for line in open(f):
+        if line.strip():
+            entries.append(json.loads(line))
+target = './rm -rf .scratch/tmp'
+hits = [e for e in entries if e.get('originalCommand') == target]
+assert hits, f'no audit entry for {target}'
+assert hits[-1]['decision'] == 'deny', f'expected deny, got {hits[-1][\"decision\"]}'
+assert hits[-1].get('denyCause') == 'unattended', 'expected denyCause=unattended'
+print('PASS: 审计 decision=deny + denyCause=unattended')
+" 2>/dev/null || {
+      echo "FAIL: ./rm 的 deny 审计校验失败"
+      exit 1
+    }
+
+  rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
+  exit 0
+TEST
+
+# ── 场景 12：armed + 任意层级的 .git → 拒绝（回归：只比对顶层 .git 曾放行嵌套仓库）──
+# pi-rewind 按**目录名**剔除 .git/.pi（任意深度），嵌套仓库 / 子模块同样没有快照可恢复。
+test_it "unattended: 嵌套 .git 被拒（任意层级无快照可回滚）" <<'TEST'
+  local slug="e2e-pg-un6-$$"
+  local test_home="$ROOT_DIR/.pi/tmp/$slug"
+  mkdir -p "$test_home"
+  setup_sandbox "$test_home" unattended_deny
+
+  # 嵌套仓库（子模块 / monorepo 子项目）的 .git：删掉即丢历史，且不在 pi-rewind 快照内
+  mkdir -p "$test_home/packages/sub/.git"
+  touch "$test_home/packages/sub/.git/HEAD"
+  touch "$test_home/packages/sub/.git/keep-marker"
+
+  export PG_E2E_DANGEROUS_COMMAND="rm -rf packages/sub/.git"
+  run_pi "$test_home" "clean up the nested git dir" "--unattended-confirm" || true
+  unset PG_E2E_DANGEROUS_COMMAND
+
+  dump_perm_logs "$test_home"
+
+  if [[ -f "$test_home/packages/sub/.git/keep-marker" ]]; then
+    echo "PASS: 嵌套 .git 未被删除（拒绝真的生效）"
+  else
+    echo "FAIL: 嵌套 .git 被删除，豁免越界（不可回滚）"
+    exit 1
+  fi
+
+  local logs_dir="$test_home/.pi/logs"
+  if grep -q "Unattended deny (protected-internal)" "$logs_dir"/permission-gate*.log 2>/dev/null; then
+    echo "PASS: 日志记录 Unattended deny (protected-internal)"
+  else
+    echo "FAIL: 未找到 protected-internal 拒绝日志"
+    tail -10 "$logs_dir"/permission-gate*.log 2>/dev/null
+    exit 1
+  fi
+
+  local audit_dir="$test_home/home/.pi/agent/extensions-data/permission-gate/audit"
+  python3 -c "
+import json, glob
+entries = []
+for f in glob.glob('$audit_dir/*.jsonl'):
+    for line in open(f):
+        if line.strip():
+            entries.append(json.loads(line))
+target = 'rm -rf packages/sub/.git'
+hits = [e for e in entries if e.get('originalCommand') == target]
+assert hits, f'no audit entry for {target}'
+assert hits[-1]['decision'] == 'deny', f'expected deny, got {hits[-1][\"decision\"]}'
+assert hits[-1].get('denyCause') == 'unattended', 'expected denyCause=unattended'
+print('PASS: 审计 decision=deny + denyCause=unattended')
+" 2>/dev/null || {
+      echo "FAIL: 嵌套 .git 的 deny 审计校验失败"
+      exit 1
+    }
 
   rm -rf "$test_home" "$ROOT_DIR/.pi/tmp/${slug}"*
   exit 0

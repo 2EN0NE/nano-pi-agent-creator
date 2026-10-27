@@ -62,6 +62,25 @@ describe('parseBashCommand — 重定向（读写方向）', () => {
 			{ operator: '<', target: '/tmp/script.sh', direction: 'read' },
 		]);
 	});
+	// 回归：`2>&1` / `>&-` 是 **fd 复制**，不打开任何文件。曾把目标当成普通 word（`1` / `2`），
+	// 于是它变成一条「写重定向到相对路径 1」——审计 targets 出现虚假路径，分级层也凭空得到 write=true。
+	it.each([
+		['stdout 复制到 stderr', 'cat f 2>&1'],
+		['stderr 复制到 stdout', 'cat f >&2'],
+		['关闭 fd', 'cat f >&-'],
+		['stdin 复制', 'cat f 0<&3'],
+	])('%s → 不算重定向（fd 复制不是文件目标）', (_label, cmd) => {
+		const r = parseBashCommand(cmd);
+		expect(r.ok).toBe(true);
+		expect(r.commands[0].redirects).toEqual([]);
+	});
+
+	it('`>&` 的目标是路径时仍是写重定向（bash 等价于 &>）', () => {
+		const r = parseBashCommand('cat f >& /tmp/x');
+		expect(r.commands[0].redirects).toEqual([
+			{ operator: '>&', target: '/tmp/x', direction: 'write' },
+		]);
+	});
 });
 
 describe('parseBashCommand — 复合命令拆分', () => {
@@ -114,5 +133,55 @@ describe('parseBashCommand — 引号路径与引号重定向目标（fail-open 
 		const r = parseBashCommand('cp "$HOME/.aws/credentials" /tmp/x');
 		expect(r.ok).toBe(true);
 		expect(r.commands[0].pathArguments).toContain('$HOME/.aws/credentials');
+	});
+});
+
+describe('parseBashCommand — 不可归属的节点必须显式交出（fail-closed 的前提）', () => {
+	// 这些节点不是 word，不进 arguments；若解析器直接丢掉，调用方会把「没提取到」
+	// 误读成「命令里没有」→ 远端豁免下 `rm -rf ./x $DANGER` 会被判成「只碰 ./x」。
+	it.each([
+		['变量展开', 'rm -rf ./x $DANGER', '$DANGER'],
+		['花括号展开', 'rm -rf ./x ${DANGER}', '${DANGER}'],
+		['命令替换', 'rm -rf ./x $(echo /etc)', '$(echo /etc)'],
+		['反引号替换', 'rm -rf ./x `echo /etc`', '`echo /etc`'],
+		['参数拼接', 'rm -rf ./x a$b', 'a$b'],
+		['环境变量前缀', 'FOO=1 rm -rf ./x', 'FOO=1'],
+		['进程替换', 'rm -rf ./x >(cat)', '>(cat)'],
+	])('%s → commands[0].unresolved 含 %s，且该文本不进 arguments', (_l, cmd, frag) => {
+		const r = parseBashCommand(cmd);
+		expect(r.ok).toBe(true);
+		expect(r.commands[0].unresolved.join('\n')).toContain(frag);
+		expect(r.commands[0].arguments.join('\n')).not.toContain(frag);
+	});
+
+	it('纯字面路径命令没有 unresolved（不误伤放行路径）', () => {
+		expect(parseBashCommand('rm -rf .scratch/tmp').commands[0].unresolved).toEqual([]);
+		expect(
+			parseBashCommand('rm -rf .scratch/tmp > /dev/null 2>&1').commands[0].unresolved,
+		).toEqual([]);
+	});
+
+	it('单条命令的写重定向仍归属到该命令（不进 unattributedRedirects）', () => {
+		const r = parseBashCommand('rm -rf ./x > /tmp/out');
+		expect(r.commands[0].redirects).toEqual([
+			{ operator: '>', target: '/tmp/out', direction: 'write' },
+		]);
+		expect(r.unattributedRedirects).toEqual([]);
+	});
+
+	// `(rm -rf ./x) > /tmp/out` 的写目标挂在 subshell 上，不属于任何一条命令：
+	// 只按 command 提取会整条丢失 → 调用方误判「没有越界写目标」。
+	it.each([
+		['subshell', '(rm -rf ./x) > /tmp/out'],
+		['group', '{ rm -rf ./x; } > /tmp/out'],
+	])('%s 的写重定向 → unattributedRedirects（命令自身无 redirects）', (_l, cmd) => {
+		const r = parseBashCommand(cmd);
+		expect(r.commands[0].redirects).toEqual([]);
+		expect(r.unattributedRedirects.join('\n')).toContain('/tmp/out');
+	});
+
+	it('复合体的**读**重定向不记为不可归属（不误伤）', () => {
+		const r = parseBashCommand('(rm -rf ./x) < /tmp/input');
+		expect(r.unattributedRedirects).toEqual([]);
 	});
 });

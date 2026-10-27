@@ -27,12 +27,20 @@ const log = createLogger('permission-gate:audit');
  *   blocked-no-ui — 无界面时的自动拦截（**不是**用户意图，不得计入「用户拒绝」）
  *   deny-legacy   — 旧数据迁移而来的条目（成因不可判定）
  */
-export type AuditDecision = 'allow' | 'ask' | 'auto' | 'deny' | 'blocked-no-ui' | 'deny-legacy';
+export type AuditDecision =
+	| 'allow'
+	| 'ask'
+	| 'auto'
+	| 'deny'
+	| 'blocked-no-ui'
+	| 'deny-legacy'
+	/** 远端豁免模式生效时按声明自动放行（ADR-0068） */
+	| 'allowed-unattended';
 
-/** 拒绝类决策的成因分类 */
-export type DenyCause = 'user' | 'no-ui' | 'unknown';
+/** 拒绝类决策的成因分类（`unknown` = 拆分前写入的历史行，成因不可判定） */
+export type DenyCause = 'user' | 'no-ui' | 'unattended' | 'unknown';
 
-/** 是否属于「拒绝」类决策（用户拒绝 / 无界面自动拦截 / 迁移条目） */
+/** 是否属于「拒绝」类决策（用户拒绝 / 无界面自动拦截 / 远端豁免自动拒绝 / 迁移条目） */
 export function isDenyDecision(decision: AuditDecision): boolean {
 	return decision === 'deny' || decision === 'blocked-no-ui' || decision === 'deny-legacy';
 }
@@ -75,7 +83,7 @@ export interface AuditEntry {
 	/**
 	 * 拒绝成因（仅拒绝类决策有意义）。
 	 *
-	 * 写入端只在**确知**成因时标记（用户拒绝 → `'user'`）；旧行缺此字段，
+	 * 写入端只在**确知**成因时标记（用户拒绝 → `'user'`，远端豁免自动拒绝 → `'unattended'`）；旧行缺此字段，
 	 * 读取端归类为 `unknown`，绝不把「拆分前的无界面拦截」误计入用户拒绝。
 	 */
 	denyCause?: DenyCause;

@@ -76,6 +76,24 @@ describe('computeAnalytics 审计分析聚合（T10）', () => {
 		expect(m.criticalGraduated).toContain('rm /etc/x');
 	});
 
+	it('allowed-unattended 计入 auto 桶，但不进 criticalGraduated', () => {
+		const entries: AuditEntry[] = [
+			entry({
+				ts: '2026-01-15T10:00:00Z',
+				command: 'rm -rf .scratch/tmp',
+				tier: 'critical',
+				decision: 'allowed-unattended',
+			}),
+		];
+
+		const m = computeAnalytics(entries);
+		// 「拦截总数」与三桶之和必须对得上：豁免放行不是拦截，但也不是「未命中」
+		expect(m.byTier.critical).toEqual({ confirmed: 0, auto: 1, blocked: 0 });
+		expect(m.totalIntercepted).toBe(1);
+		// 显式许可 ≠ 策略沉淀（critical 只存 session），不得进异常清单
+		expect(m.criticalGraduated).toHaveLength(0);
+	});
+
 	it('高频被确认命令 Top N（降序）', () => {
 		const entries: AuditEntry[] = [
 			entry({

@@ -671,6 +671,32 @@ describe('MyPanel TUI', () => {
 
 详细用法和 API 参考见 [`docs/tui-headless-testing.md`](docs/tui-headless-testing.md)。框架源码位于 [`src/tui-testing/`](src/tui-testing/)。
 
+### 确认对话框与远端豁免（ADR-0068）【强制】
+
+- **先分 A / B 类，再决定用哪个判据**（分类清单见 [ADR-0068 D6 表](docs/adr/0068-remote-mode-confirm-exemption-cwd-scoped.md)）：
+    - **A 类 = 无人追加操作也会自动出现的对话框**（`/new`、`/resume`、`/fork`、`agent_end`、工具内提问），
+      按**落点**二选一：
+        - **经 `showSelect` / `showConfirm` 的落点**（`confirm-destructive`、`dirty-repo-guard`）：由 selector 闸门
+          按 `unattendedDefault` 统一处置，**不要再改成 `isAttended` 前置返回**——`ctx.hasUI` 在这里只允许作为
+          「完全无 UI」的前置返回存在，**不得**当作在场判据。改成 `isAttended` 会改出回归：`dirty-repo-guard`
+          的 `!hasUI` 分支是 `cancel`（拦截切换），`confirm-destructive` 提前 return 会丢掉 `skip-with-default` 留痕。
+        - **直调 `ctx.ui.*`（不经 selector）的落点**（`goal`、`loop`、`todos`、`cloud-sessions`、`pi-rewind`、
+          `questionnaire`、permission-gate 确认树）：判据**必须**用 `isAttended(ctx)`（来自 `@zenone/pi-selector`，
+          = `ctx.hasUI && !isArmed()`），并复用各插件既有的 `!ctx.hasUI` 降级分支。
+          `ctx.hasUI` **不得**当作在场判据——它只表示「有 UI 对象」，TUI 与 RPC 下都为真（ADR-0068 事实 2），
+          裸用 `!hasUI` 的降级分支在 TUI 里永不触发。
+    - **B 类 = 命令 / 面板主动打开的对话框**：**仍用 `ctx.hasUI`，不做改造**——它们本来就要求人工显式触发，
+      远端触发时挂起属已记录的残余风险；不要为了「统一口径」去逐个改造，也不要往 B 类里加豁免判断。
+      判断不了属于哪一类时按 B 类处理，并在 PR 里说明理由，不要自行扩大改造范围。
+- 新增弹框时：允许「无人在场时自动放行」就声明 `unattendedDefault`（`showSelect` / `showConfirm`），
+  不允许就不声明（fail-closed → 按取消）。默认值必须是该对话框里真实存在的选项值。
+- `--unattended-confirm`（许可）与 `arm(owner)`（生效，引用计数）由 `@zenone/pi-selector` **唯一注册与维护**；
+  状态栏 `| unattended` = 生效中。**flag 必须先同步扩展、再写进启动命令**——pi 遇到未注册 `--flag` 会直接退出（ADR-0051 `D8`）。
+- 豁免判定的 cwd 边界**看目标子树**，不只看目标路径段：`rm -rf packages` 会连带删掉 `packages/sub/.git`，
+  与直接删它后果相同（无快照、丢历史）→ 命中即 `protected-internal`；子树扫不完/读不到 = 证明不出来 → 不放行。
+- 硬拦截（`protected-paths` / `secret-firewall` / sandbox）**不受**该模式影响，不要往里加豁免判断。
+- 手动切换：`/unattended status|arm|disarm`。决策与责任分工见 [ADR-0068](docs/adr/0068-remote-mode-confirm-exemption-cwd-scoped.md)。
+
 ---
 
 ## 开发Pi插件一些补充信息
@@ -682,30 +708,10 @@ describe('MyPanel TUI', () => {
 
 ### 1. `compact()` 内部事件时序
 
-`ctx.compact()` 或内置 compaction 的内部执行顺序（需逆向阅读 `agent-session.js`）：
-
-```
-compact() 内部:
-  1. abort()
-  2. _compactionAbortController = new AbortController()  ← 从此进入“压缩进行中”
-  3. _emit(compaction_start)
-  4. prepareCompaction()
-  5. emit(session_before_compact)  ← 扩展在这里拦截或提供自定义摘要
-  6. 生成摘要（内置默认生成器，或扩展提供的 compaction）
-  7. appendCompaction() + _refreshFinalizedContext()
-  8. emit(session_compact)     ← ⚠ 压缩控制器仍处于“进行中”
-  9. _clearManualCompactionState()  ← 控制器在这里才被清除
- 10. _emit(compaction_end)
- 11. return → onComplete()     ← ✓ 压缩已彻底结束，安全状态
-```
-
-**关键结论：**
-
-- `compact()` **从不断开 agent**（`_disconnectFromAgent()` 只在 `dispose()` 里调用）。旧版本文档“session_compact 时 agent 已断开”的**理由已作废**。
-- 但**结论不变**：在 `session_compact` 里调用 `pi.sendUserMessage()` 会**确定性失败**——`prompt()` 在压缩进行中直接 `throw new Error("Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.")`，而压缩控制器要到第 9 步才清除。所有需要与 agent 交互的操作（如 `sendUserMessage`）仍然**只能**放在 `onComplete`。
-- 失败是**静默的**：扩展侧 `pi.sendUserMessage()` 是 fire-and-forget（返回 `void`），`prompt()` 的异常只经 `runner.emitError({ event: "send_user_message" })` 上报，调用方拿不到返回值。
-- 上游 `compact()` 里 `compaction_end` 那行注释写着“listeners may submit queued prompts”，但 `compaction_end` **不是扩展事件**（只在会话内部 emitter 上发），扩展拿不到——不要指望它。
-- 如果需要捕获触发压缩时的配置状态，使用闭包：`const triggerProfile = profile; ctx.compact({ onComplete: () => { /* 用 triggerProfile */ } })`
+11 步时序（`abort` → … → `_clearManualCompactionState` → `compaction_end` → `onComplete`）与三条关键结论：
+① `compact()` **不断开 agent**；② `session_compact` 里 `sendUserMessage()` 仍**确定性失败**（控制器要到第 9 步才清除，
+只能放 `onComplete`）；③ 失败是**静默的**（`emitError` 上报，调用方拿不到返回值）。完整时序、`compaction_end`
+不是扩展事件、闭包捕获触发态等细节见 [`docs/pi-ext-knowledge/compact-event-timing.md`](docs/pi-ext-knowledge/compact-event-timing.md)。
 
 ### 2. `isIdle()` 的时机限制
 
@@ -870,6 +876,21 @@ Pi 除 chat 外还有两类非对话模型：`classifier`（`bool` / `choice` / 
 ### 16. `before_agent_start`：`systemPromptOptions` 可变、`systemPrompt` 是懒渲染
 
 `event.systemPrompt` 是 **getter**（每次读取都拿同一个 `systemPromptOptions` 重建），`systemPromptOptions` 是**可变**对象（后注册的 handler 能看到前面的修改）。所以运行时裁剪技能/工具说明只需就地写 `event.systemPromptOptions.skills`，pi 自己渲染并以 **section diff** 增量下发；`return { systemPrompt }` 等价 `forceSystemPrompt`（整段钉死、失去 diff、不利缓存），只留给整段重写场景。两个已知坑：① **就地裁剪 = 改变共享字段语义**——之后读 `options.skills` 的扩展（如 resources-tree 的分母）看到的是「可见集」而非「全量」，要用 `pi.getCommands()`（`source === "skill"`）拿全量；② **force 会整段覆盖 sections**，早于裁剪方的 force 会把未过滤快照钉死，而扩展加载顺序由 `readdirSync` 决定、pi 不排序 → 裁剪方必须自带兜底（见 `skills.ts` 的 `path: options|force|snapshot`）。细节见 [`ADR-0066`](docs/adr/0066-skills-runtime-filtering-via-system-prompt-options.md)。
+
+### 17. `pi.getFlag()`：扩展**加载期**拿不到启动参数真值
+
+- **问题**：在扩展工厂函数里 `pi.getFlag('my-flag')` 读到的是**默认值**（`registerFlag` 声明的那个），不是用户命令行传的真值。
+- **根因**：argv 解析发生在**扩展加载之后**、`session_start` **之前**。所以「工厂期读一次 flag 缓存起来」不可靠；
+  若另一个扩展在**更早注册的 `session_start` handler** 里依赖这份缓存（handler 按加载顺序执行、pi 不排序），
+  就会误判成「未授权/未启用」，且只留一条 warn（默认失效，静默）。实测复现：`permission-gate` e2e 首跑
+  `[arm-channel] arm() 被拒绝：启动命令未带 --unattended-confirm`。
+- **修复**：**不要在加载期把 flag 值当最终结论**。两种写法：① 真正使用点（命令/`arm()`/状态查询）**回读**
+  `pi.getFlag()`——需要把 `pi` 存进状态里（`selector/unattended.ts` 的
+  `arm()` / `hasLicense()` / `unattendedStatus()` 即此写法）；
+  ② 或把逻辑挪到 `session_start` 之后、且不依赖 handler 顺序的事件（如 `before_agent_start`）。
+- **触发条件**：用 flag 当**开关/许可**（尤其要和别处共享状态）时必踩；只做「有值就换默认行为」的一次性读取可不受影响。
+  配套：`--flag` 必须由扩展 `registerFlag` 注册，否则 pi 直接以 `Unknown option` 退出（ADR-0051 `D8`）；
+  e2e 沙箱里要同时装「注册 flag 的扩展」本体，只放 `node_modules` 包不会注册 flag。
 
 ---
 

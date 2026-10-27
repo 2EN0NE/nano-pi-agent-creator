@@ -147,6 +147,7 @@ const DECISION_LABEL: Record<AuditDecision, string> = {
 	deny: '用户拒绝（拦截）',
 	'blocked-no-ui': '无界面自动拦截',
 	'deny-legacy': '拒绝（历史迁移，成因不可判定）',
+	'allowed-unattended': '远端豁免自动放行',
 };
 
 /** 列表行用的短标签（控制在 7 列内，避免长决策名把列表列撑乱） */
@@ -157,7 +158,20 @@ const DECISION_SHORT: Record<AuditDecision, string> = {
 	deny: 'deny',
 	'blocked-no-ui': 'no-ui',
 	'deny-legacy': 'legacy',
+	'allowed-unattended': 'unatt',
 };
+
+/**
+ * 历史详情的中文说明：`deny` 需要看 `denyCause` 才知道是「人拒绝」还是「系统自动拒绝」。
+ *
+ * 远端豁免模式自动拒绝（ADR-0068）与无界面拦截一样**不是用户意图**，不能显示成「用户拒绝」。
+ */
+function decisionLabel(entry: Pick<AuditEntry, 'decision' | 'denyCause'>): string {
+	if (entry.decision === 'deny' && entry.denyCause === 'unattended') {
+		return '远端豁免自动拒绝';
+	}
+	return DECISION_LABEL[entry.decision];
+}
 
 // ============================================================================
 // 数据构建
@@ -2279,7 +2293,7 @@ export class TwoTabPanel {
 			const e = h.entry;
 			lines.push(
 				truncateToWidth(
-					pad + th.fg('accent', `决策: ${DECISION_LABEL[e.decision]} (${e.decision})`),
+					pad + th.fg('accent', `决策: ${decisionLabel(e)} (${e.decision})`),
 					width,
 				),
 			);

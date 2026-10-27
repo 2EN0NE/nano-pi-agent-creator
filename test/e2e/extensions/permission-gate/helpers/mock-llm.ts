@@ -47,12 +47,15 @@ export default function (pi: ExtensionAPI) {
 		})),
 	});
 
-	// 默认 mock 回复：生成一个危险的 bash 工具调用 + 后续文本
+	// 默认 mock 回复：生成一个危险的 bash 工具调用 + 后续文本。
+	// PG_E2E_DANGEROUS_COMMAND 可替换为指定命令（远端豁免用例需要 cwd 内 / cwd 外两种目标）。
+	const dangerousCommand =
+		process.env.PG_E2E_DANGEROUS_COMMAND ?? 'rm -rf ./permission-gate-test-target';
 	faux.setResponses([
 		fauxAssistantMessage(
 			[
 				fauxToolCall('bash', {
-					command: 'rm -rf ./permission-gate-test-target',
+					command: dangerousCommand,
 				}),
 			],
 			{ stopReason: 'toolUse' as any },

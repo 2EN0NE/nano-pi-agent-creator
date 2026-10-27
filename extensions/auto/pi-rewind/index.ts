@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext, SessionEntry } from '@earendil-wor
 import path from 'node:path';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createLogger } from '@zenone/pi-logger';
+import { isAttended } from '@zenone/pi-selector';
 import {
 	createDefaultRepoProvider,
 	safeCloneSessionCheckpointStorage,
@@ -243,7 +244,8 @@ export default function (pi: ExtensionAPI, provider?: RepoProvider) {
 		let restoreCode = mode === 'always';
 		if (
 			mode === 'ask' &&
-			ctx.hasUI &&
+			// 在场判定（ADR-0068 D7）：远端豁免模式生效时无人应答，按不恢复处理
+			isAttended(ctx) &&
 			hasCheckpointFileChanges(ctx.sessionManager.getEntries())
 		) {
 			const choice = await ctx.ui.select('同步文件？', ['是', '否']);

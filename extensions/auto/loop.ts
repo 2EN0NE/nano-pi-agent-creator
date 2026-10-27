@@ -14,6 +14,7 @@ import { Container, type SelectItem, SelectList, Text } from '@earendil-works/pi
 import { DynamicBorder } from '@earendil-works/pi-coding-agent';
 import { TitleBar } from '../../src/tui/helpers.js';
 import { createLogger } from '@zenone/pi-logger';
+import { isAttended } from '@zenone/pi-selector';
 
 const log = createLogger('loop');
 
@@ -429,7 +430,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 		log.debug('event: agent_end');
 		if (!loopState.active) return;
 
-		if (ctx.hasUI && wasLastAssistantAborted(event.messages)) {
+		if (isAttended(ctx) && wasLastAssistantAborted(event.messages)) {
 			const confirm = await ctx.ui.confirm(
 				'Break active loop?',
 				'Operation aborted. Break out of the loop?',

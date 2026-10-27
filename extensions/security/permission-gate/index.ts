@@ -45,6 +45,9 @@ import {
 	cleanupManualStrategiesStore,
 } from './manual-strategies.js';
 import { warmBashParser } from './bash-parser.js';
+import { judgeUnattended } from './unattended-exempt.js';
+import { FALLBACK_EXPLAIN, PATH_SCOPED_DENY, UNATTENDED_REMEDY, type ReasonKey } from './notes.js';
+import { isArmed } from '@zenone/pi-selector';
 import { showConfirmTree, type ConfirmTreeLeaf } from './confirm-tree.js';
 import {
 	appendAudit,
@@ -640,6 +643,79 @@ async function handleToolCall(
 
 	// 有需确认的条目
 	if (needsConfirm.length > 0) {
+		// 远端豁免模式生效（ADR-0068）：能证明只作用于 cwd 内 → 自动放行 + 审计；
+		// 否则直接拒绝（不弹树），把「为什么 + 怎样合理操作」回给模型。
+		if (isArmed()) {
+			// 判定只看命中明细（含「是否用户自加 pattern」与分类白名单），审计仍用扁平 reasons
+			const dangerousHits = results.filter((r) => r.dangerous).flatMap((r) => r.hits);
+			const dangerousReasons = [...new Set(dangerousHits.map((h) => h.reason))];
+			const verdict = judgeUnattended(fullCommand, ctx.cwd, dangerousHits);
+			if (verdict.exempt) {
+				audit({
+					id: requestId,
+					ts,
+					tool: 'bash',
+					command: summarizeCommand(fullCommand),
+					tier: highestTier,
+					decision: 'allowed-unattended',
+					reasons: dangerousReasons,
+					projectKey,
+					originalCommand: fullCommand,
+					subCommands,
+				});
+				// warn 级：无人值守下自动放行危险命令，属需事后回看的事件（与 selector 的 skip-* 对齐）
+				log.warn(
+					'Unattended exempt: %s targets=%s',
+					summarizeCommand(fullCommand).slice(0, 80),
+					verdict.targets.join(','),
+				);
+				return;
+			}
+
+			audit({
+				id: requestId,
+				ts,
+				tool: 'bash',
+				command: summarizeCommand(fullCommand),
+				tier: highestTier,
+				decision: 'deny',
+				// 系统自动拒绝（不是用户意图）：与 blocked-no-ui 同类，必须与用户拒绝区分
+				denyCause: 'unattended',
+				reasons: dangerousReasons,
+				projectKey,
+				originalCommand: fullCommand,
+				subCommands,
+			});
+			// 「为什么」优先用命中的**具体**解释（与确认树同一来源），兜底才用分类文案
+			const specificWhy = [
+				...new Set(needsConfirm.flatMap((r) => r.hits.map((h) => h.explain))),
+			];
+			const why =
+				specificWhy.length > 0
+					? specificWhy.join('；')
+					: dangerousReasons.map((r) => FALLBACK_EXPLAIN[r as ReasonKey] ?? r).join('；');
+			const remedy = verdict.deny ? UNATTENDED_REMEDY[verdict.deny] : '';
+			log.warn(
+				'Unattended deny (%s): %s',
+				verdict.deny ?? 'unknown',
+				summarizeCommand(fullCommand).slice(0, 80),
+			);
+			// 首行按原因类别分流：只有「路径作用域」类才讲 cwd，否则会暗示「换写法即可通过」
+			const headline =
+				verdict.deny && !PATH_SCOPED_DENY.has(verdict.deny)
+					? 'Blocked -- unattended mode does not auto-approve this kind of action.'
+					: `Blocked -- unattended mode cannot prove this only touches paths inside ${ctx.cwd}.`;
+			return {
+				block: true,
+				reason: [
+					headline,
+					`\`${summarizeCommand(fullCommand)}\``,
+					`为什么：${why}`,
+					`怎样合理操作：${remedy}`,
+				].join('\n'),
+			};
+		}
+
 		// No-UI 模式 → 全部 block
 		if (!ctx.hasUI) {
 			log.warn('Dangerous command blocked (no UI): %s', fullCommand.slice(0, 80));

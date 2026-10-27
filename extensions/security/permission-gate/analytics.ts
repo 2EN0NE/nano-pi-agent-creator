@@ -65,9 +65,11 @@ export function computeAnalytics(entries: AuditEntry[], days?: number, topN = 5)
 		if (e.decision === 'ask') {
 			counts.confirmed++;
 			confirmedCounts.set(e.command, (confirmedCounts.get(e.command) ?? 0) + 1);
-		} else if (e.decision === 'auto') {
+		} else if (e.decision === 'auto' || e.decision === 'allowed-unattended') {
+			// 远端豁免自动放行计入 auto（否则「拦截总数」与三桶之和对不上）；
+			// 但不进 criticalGraduated——那不是策略沉淀，是本次会话的显式许可
 			counts.auto++;
-			if (tier === 'critical') criticalGraduated.add(e.command);
+			if (e.decision === 'auto' && tier === 'critical') criticalGraduated.add(e.command);
 		} else if (isDenyDecision(e.decision)) {
 			counts.blocked++;
 			if (classifyDeny(e) === 'user') userBlocked++;

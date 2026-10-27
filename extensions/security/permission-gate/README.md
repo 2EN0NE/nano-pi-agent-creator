@@ -72,6 +72,71 @@ interface PermissionGateApi {
 - **超时/作废归通道**：permission-gate 不管理外部通道的超时与作废（微信端短码过期等由通道自己控制）。
 - **decision 与 TUI 选项对齐**：`confirm` 的取值即 TUI 确认选项，保证外部确认与人工操作语义一致。
 
+## 远端豁免模式（`--unattended-confirm`）
+
+远端通道（微信等）发起 `session_before_switch` 等动作时，TUI 确认框无人应答会**永久阻塞**。
+本模式让**可询问拦截**在无人在场时按声明处置；**硬拦截**（`protected-paths` / `secret-firewall` / sandbox）
+完全不受影响。完整决策见 [ADR-0068](../../../docs/adr/0068-remote-mode-confirm-exemption-cwd-scoped.md)。
+
+### 状态机（许可 ≠ 生效）
+
+| 状态            | 触发                            | 行为                                             |
+| --------------- | ------------------------------- | ------------------------------------------------ |
+| `off`           | 启动未带 `--unattended-confirm` | 与今天一致：弹框、等待                           |
+| `licensed-idle` | 带 flag，但无通道占用           | 与今天一致（许可只是授权，不自动生效）           |
+| `armed`         | 通道 `arm()` 占用               | 不弹框；需确认的动作按下列规则处置，**全部审计** |
+
+### 豁免规则
+
+- 命中 reason 必须落在白名单 `{destructive, pattern}` 内，且 `pattern` 必须是**内置规则**——
+  **你自己新增的拦截模式不算**（远端模式不代答本机额外声明的确认意图）；
+- 静态目标**全部**在 `ctx.cwd` 内 → 放行，审计 `decision: 'allowed-unattended'`（保留 `tier` / `reasons` / 命中叶子）；
+  「在 cwd 内」按 **realpath 真实路径**判定：cwd 与目标两侧都归一化，cwd 内软链指到外面 → 判越界；
+  写重定向目标同等判定，仅 `/dev/null` 视为丢弃输出。
+- 目标**不得是 cwd 本身**（`rm -rf .`），也不得在 **`.git` / `.pi`** 内——这两个目录被 pi-rewind 快照恒剔除，
+  **任意层级**都算（按目录名剔除：`packages/sub/.git` 这类嵌套仓库 / 子模块同样没有快照），
+  删掉不可回滚（仓库历史 / 项目配置与待办）。目标本身是目录时还会扫**子树**：`rm -rf packages` 会连带
+  删掉 `packages/sub/.git`，同样不豁免；子树扫不完或不可读 = 证明不出来 → 不放行。
+- 文件操作命令必须是**裸命令名**（`rm` / `rmdir` / `unlink`）：`./rm`、`/tmp/x/unlink` 是任意可执行文件，
+  不能按 basename 当 coreutils 处理，否则「参数都在 cwd 内」的判定会去放行一段不受约束的代码 → `path-qualified-op`。
+- 无目标 / 目标不可静态解析（变量 / 通配符 / `~user` / 写重定向目标为解析不出的空串）/ 命令链含 `cd` / `permission-related` / `credential` / `system-dir-*`
+  / 用户自加 pattern / `.git`·`.pi`·cwd 根
+  → **不豁免**（审计 `decision: 'deny'` + `denyCause: 'unattended'`），`block.reason` 回给模型，
+  文案 = `note`（为什么危险）+ `remedy`（怎样合理操作），模型可据此自愈重试。
+- 判定按「**证明得出**」而非「没看见就当作没有」：参数位含展开 / 替换 / 赋值（`$VAR`、`${VAR}`、`$(cmd)`、
+  `` `cmd` ``、`FOO=1`、`a$b`）或复合体（`( … )` / `{ …; }`）上的写重定向，解析层无法把它们归属到可信目标，
+  一律**不豁免**——`rm -rf ./x $DANGER` 不会被读成「目标只有 `./x`」。
+
+### 给人类
+
+1. 启动命令加 `--unattended-confirm`。**先同步扩展再改命令**——flag 未注册时 pi 会以 `Unknown option` 退出（ADR-0051 `D8`）。
+2. 状态栏 `| unattended` = 生效中；`licensed-idle` 不显示该标记。
+3. 临时恢复确认：`/unattended disarm`（清空**所有** owner，含通道；通道崩溃未及 `disarm()` 时也有效），
+   或让通道 `disarm()`、停用桥。`/unattended status` 可查当前 owner 列表。
+
+### 给通道消费方
+
+```typescript
+interface ConfirmGateApi {
+	hasLicense(): boolean;
+	isArmed(): boolean;
+	owners(): string[];
+	arm(owner: string): (() => void) | undefined; // 无许可 → undefined（fail-soft，不抛错）
+	status(): {
+		license: boolean;
+		armed: boolean;
+		owners: string[];
+		mode: 'off' | 'licensed-idle' | 'armed';
+	};
+}
+```
+
+1. `session_start` 后读接口；不存在 → `log.warn` + 回执说明「本机未提供豁免接口」，不 `arm`。
+2. `hasLicense() === false` → 不 `arm`，在 `/status` 与回执里提示「未授权：启动命令需加 `--unattended-confirm`」。
+3. 连接就绪 → `arm('wechat')`；断开 / `session_shutdown` / 停用 → `disarm()`（幂等）。
+4. **执行 `/new` 等动作前先自检 `isArmed()`**，未生效即回执拒绝 + 指引，不要让用户等挂起。
+5. 每次 `arm` / `disarm` 与状态变化留日志（通道名 + 结果）。
+
 ## 系统通知
 
 复用 `extensions/auto/notify.ts`（升级 osascript，不引入 alerter 重依赖），通过 `globalThis.__notifyApi` 弱桥接调用；仅在 `ask`（拦截需人工确认）时触发。
