@@ -9,7 +9,7 @@
  *   - 假时钟注入断言具体时长
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -218,14 +218,19 @@ describe('preset-usage 实验（record 型）', () => {
 		const ctx = { ...fakeCtx, cwd: tmpCwd };
 		await fireEvent(pi, 'session_start', null, ctx);
 
-		// 用户级 config.json 应被自动生成，含三个内置默认 preset
-		const userCfg = JSON.parse(
-			readFileSync(
-				resolve(tmpHome, '.pi', 'agent', 'extensions-data', 'preset', 'config.json'),
-				'utf8',
-			),
+		// 契约（2026-10-28 起）：**不落盘**，默认值只在内存里兜底。
+		// 曾经的「首次启动 seed 一份用户级 config.json」是读取即写入的副作用：
+		// 任何跑 pi 的进程都会在真实 $HOME 留下 extensions-data/preset/config.json，
+		// CI 的严格环境哨兵因此必然判红（见 extensions/meta/preset/index.ts 注释）。
+		const userCfgPath = resolve(
+			tmpHome,
+			'.pi',
+			'agent',
+			'extensions-data',
+			'preset',
+			'config.json',
 		);
-		expect(Object.keys(userCfg).sort()).toEqual(['implement', 'plan', 'raw']);
+		expect(existsSync(userCfgPath)).toBe(false);
 
 		// /preset plan 能激活默认 plan（产生 record）
 		const cmd = pi._commands['preset'];

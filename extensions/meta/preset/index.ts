@@ -132,14 +132,20 @@ interface FilePresets {
  */
 function loadFilePresets(cwd: string): FilePresets {
 	const paths = resolveConfigPaths('preset', { cwd });
-	const user = (readJsonFile(paths.userFile) as PresetsConfig | null) ?? {};
+	// 用户级文件缺失时用**内存里**的默认值，不落盘。
+	// 曾经的做法是 session_start 里 seed 一份用户级 config.json，但那是一次
+	// 「读取即写入」的副作用：任何跑 pi 的进程（含 e2e）都会在 `$HOME/.pi/agent/
+	// extensions-data/preset/` 留下文件。CI 的严格环境哨兵因此每次判红
+	// （`+ ~/.pi/agent/extensions-data/preset/config.json`）——而 guard 只重定向
+	// pi 内核目录，extensions-data 走 os.homedir() 不在覆盖范围（ADR-0045 D6）。
+	const user = (readJsonFile(paths.userFile) as PresetsConfig | null) ?? DEFAULT_PRESETS;
 	const project = (readJsonFile(paths.projectFile) as PresetsConfig | null) ?? {};
 	return { user, project };
 }
 
 /**
- * 内置默认全局 preset（首次启动且无用户配置时写入用户级 config.json）。
- * 写入后用户可自由修改 config.json，此处仅作为「种子」，不覆盖已有配置。
+ * 内置默认全局 preset：**只在内存里作为兜底**（用户级 config.json 缺失时生效），
+ * 不落盘——读取不产生写入副作用。用户一旦保存即写入 config.json，此后以文件为准。
  */
 export const DEFAULT_PRESETS: PresetsConfig = {
 	plan: {
@@ -167,18 +173,6 @@ export const DEFAULT_PRESETS: PresetsConfig = {
 		skills: [],
 	},
 };
-
-/**
- * 首次启动（用户级 config.json 不存在）时，写入内置默认 preset。
- * 已存在则跳过，尊重用户已有配置（不覆盖、不合并）。
- */
-function ensureDefaultPresets(cwd: string): void {
-	const paths = resolveConfigPaths('preset', { cwd });
-	if (!existsSync(paths.userFile)) {
-		writeJsonAtomic(paths.userFile, DEFAULT_PRESETS);
-		log.info('已生成默认全局 preset（plan/implement/raw）', { path: paths.userFile });
-	}
-}
 
 /**
  * 合并三级 preset（纯函数，供测试）：同名 session > project > user（shadow）。
@@ -232,7 +226,11 @@ export function persistPresetToProject(cwd: string, name: string, preset: Preset
  */
 export function persistPresetToUser(cwd: string, name: string, preset: Preset): PresetsConfig {
 	const paths = resolveConfigPaths('preset', { cwd });
-	const userRaw = (readJsonFile(paths.userFile) as PresetsConfig | null) ?? {};
+	// 与 loadFilePresets 同源：文件不存在时以内存默认值为基底，
+	// 否则首次保存只会写回被编辑的那一个 preset，其余内置默认项会消失。
+	const userRaw = (readJsonFile(paths.userFile) as PresetsConfig | null) ?? {
+		...DEFAULT_PRESETS,
+	};
 	userRaw[name] = preset;
 	writeJsonAtomic(paths.userFile, userRaw);
 	return userRaw;
@@ -1365,7 +1363,6 @@ export default function presetExtension(pi: ExtensionAPI) {
 		log.debug('event: session_start');
 		latestCtx = ctx;
 		// 首次启动生成默认全局 preset（plan/implement/raw），已存在则跳过
-		ensureDefaultPresets(ctx.cwd);
 
 		// Load file-level presets from config files (user + project 分层)
 		const filePresets = loadFilePresets(ctx.cwd);
