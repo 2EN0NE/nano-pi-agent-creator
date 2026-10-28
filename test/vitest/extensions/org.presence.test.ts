@@ -14,17 +14,19 @@ import * as net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+	countOnlineByPid,
 	hasPendingDelivery,
 	inspectMember,
 	inspectMembers,
 	judgePresence,
+	mergePresenceStates,
 	onlineFor,
 	readRuntime,
 	sweepStaleRuntime,
 	type MemberPresence,
 	type RuntimeRecord,
 } from '../../../extensions/auto/org/presence.js';
-import { runtimeFile } from '../../../extensions/auto/org/orgstore.js';
+import { createOrg, runtimeFile } from '../../../extensions/auto/org/orgstore.js';
 import {
 	closeServers,
 	killIfAlive,
@@ -302,5 +304,74 @@ describe('onlineFor —— 在岗时长', () => {
 		expect(onlineFor(withStarted(new Date(now - 3 * 3600_000).toISOString()), now)).toBe(
 			'3h0m',
 		);
+	});
+});
+
+describe('mergePresenceStates — 多所属合并（ADR-0070 D1）', () => {
+	it('同一成员出现在多家 org：只计一次', () => {
+		const merged = mergePresenceStates([
+			{ name: 'w1', state: 'idle' },
+			{ name: 'w1', state: 'idle' },
+		]);
+		expect(merged).toEqual(['idle']);
+	});
+
+	it('冲突取最活跃：某家残留的睡眠 runtime 不把已上岗的统计拉低', () => {
+		const merged = mergePresenceStates([
+			{ name: 'w1', state: 'sleeping' },
+			{ name: 'w1', state: 'working' },
+		]);
+		expect(merged).toEqual(['working']);
+	});
+
+	it('活跃序 sleeping < idle < delivered < working', () => {
+		const pairs: [
+			'sleeping' | 'idle' | 'delivered' | 'working',
+			'sleeping' | 'idle' | 'delivered' | 'working',
+			string,
+		][] = [
+			['sleeping', 'idle', 'idle'],
+			['idle', 'delivered', 'delivered'],
+			['delivered', 'working', 'working'],
+			['working', 'sleeping', 'working'],
+		];
+		for (const [a, b, want] of pairs) {
+			expect(
+				mergePresenceStates([
+					{ name: 'x', state: a },
+					{ name: 'x', state: b },
+				]),
+			).toEqual([want]);
+		}
+	});
+
+	it('不同成员各计一条（空输入 → 空结果）', () => {
+		expect(mergePresenceStates([])).toEqual([]);
+		expect(
+			mergePresenceStates([
+				{ name: 'a', state: 'working' },
+				{ name: 'b', state: 'sleeping' },
+			]),
+		).toEqual(['working', 'sleeping']);
+	});
+});
+
+describe('countOnlineByPid — 非当前 org 的廉价在岗计数（ADR-0070 D7）', () => {
+	it('org 读不到 → **抛出**（不静默降级成 0 人；0 在 D8 里是「确定无人在岗」的语义）', async () => {
+		await expect(countOnlineByPid('no-such-org')).rejects.toThrow();
+	});
+
+	it('无 runtime → 0；runtime 的 pid 存活 → 1（不看 socket 能不能连）', async () => {
+		const dir = join(root, 'worker-a-dir');
+		mkdirSync(dir, { recursive: true });
+		await createOrg(ORG, { name: 'worker-a', dir });
+		expect(await countOnlineByPid(ORG)).toBe(0);
+
+		// socket 故意指向不存在的路径：廉价判据只看 pid（这正是 D7 接受的精度损失）
+		await writeRuntimeFile(ORG, 'worker-a', {
+			pid: process.pid,
+			socketPath: join(root, 'no-such.sock'),
+		});
+		expect(await countOnlineByPid(ORG)).toBe(1);
 	});
 });

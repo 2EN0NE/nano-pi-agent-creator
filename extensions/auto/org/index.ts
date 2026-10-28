@@ -86,7 +86,9 @@ import {
 	PRESENCE_POLL_MS,
 	PRESENCE_WORDS,
 	isPidAlive,
+	mergePresenceStates,
 	readRuntime,
+	type PresenceState,
 } from './presence.js';
 import { ACTIVITY_FAIL_TEXT, interruptMember } from './activity.js';
 import { commitInboxFlush, planContent, planInboxFlush } from './inbox.js';
@@ -462,21 +464,38 @@ export default function (pi: ExtensionAPI) {
 	/**
 	 * 刷新状态栏 `|org: x/y/z成员`（ADR-0043 D3）。
 	 * 只读巡检（不唤醒、不清理）→ 守 ADR-0040 D4「感知不写副作用」。
-	 * 多 org 时取第一个（落地选择：单段显示"当前 org"，见 ADR-0043 待定项①）。
+	 *
+	 * **多所属**（ADR-0070 D1/D11-adjacent）：本目录可同时属于多家 org，而本进程上岗时会在
+	 * 每一家各写一份在岗注册，所以计数必须覆盖**全部**所属组织——旧实现只取 `me.orgs[0]`，
+	 * 那个"第一个"其实是字母序第一，与本目录的归属无关。
+	 *
+	 * 跨 org 去重按**成员名**：同一目录在各 org 里的名字相同（名字来自 manifest 或目录 basename，
+	 * 与 org 无关），故同名即同一名成员；不同目录恰好同名会被并成一条（罕见，且只影响计数展示）。
+	 * 状态取"最活跃"的那个（在岗优先于睡眠），避免一个组织里残留的睡眠 runtime 把已上岗的统计拉低。
 	 */
 	async function refreshStatus(): Promise<void> {
 		const ctx = liveCtx;
 		if (!ctx) return;
 		const me = await resolveSelf();
-		const first = me.orgs[0];
-		if (!first) return;
-		// 状态栏只关心「在岗 / 忙」：交付态不影响计数 → tasks 传空数组，省一次账本读
-		const presences = await inspectMembers(
-			first.org.name,
-			first.org.members.map((m) => m.name),
-			[],
+		if (me.orgs.length === 0) return;
+		// 状态栏只关心「在岗 / 忙」：交付态不影响计数 → tasks 传空数组，省一次账本读。
+		// 多所属合并（去重 + 取最活跃）在 presence 的纯函数里做，便于穷举测试。
+		// 各家 org **并发**探测：单家 socket 探活最坏 1.2s（SOCKET_PROBE_TIMEOUT_MS），串行会把
+		// 4s 节拍按 org 数放大到重叠（定时器无重入保护），并发则与改前的单 org 延迟一致。
+		const perOrg = await Promise.all(
+			me.orgs.map(({ org }) =>
+				inspectMembers(
+					org.name,
+					org.members.map((m) => m.name),
+					[],
+				),
+			),
 		);
-		const counts = countOrgStatus([...presences.values()].map((p) => p.state));
+		const entries: { name: string; state: PresenceState }[] = [];
+		for (const presences of perOrg) {
+			for (const [name, p] of presences) entries.push({ name, state: p.state });
+		}
+		const counts = countOrgStatus(mergePresenceStates(entries));
 		ctx.ui.setStatus(
 			'org',
 			formatOrgStatus(counts, (tone, text) => {
@@ -1070,9 +1089,14 @@ export default function (pi: ExtensionAPI) {
 		const me = await resolveSelf();
 		switch (sub) {
 			case '': {
-				// 无参数：交互终端打开任务看板 TUI；非交互（print/脚本/CI）回退帮助
-				if (process.stdout.isTTY) {
+				// 无参数：**tui 模式**才开看板面板；rpc/print/json 一律回退文本帮助（ADR-0070 D10）。
+				// 判据是运行时模式，不是 stdout 是否终端——后者在「终端里跑 print 模式」时仍为真，
+				// 而该模式 uiContext 是 noOp（custom 立刻返回 undefined）→ 面板不开、帮助也不打 = 静默无输出。
+				if (ctx.mode === 'tui') {
 					const meName0 = me.orgs[0]?.member.name ?? '';
+					// 所属组织集合（ADR-0070 D1）：成员注册表精确匹配的结果，直接交给看板，
+					// 看板不再自己从名单反推"我的组织"。`resolveSelf` 已在上面算过。
+					const ownOrgs = me.orgs.map((o) => o.org.name);
 					try {
 						await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 							// theme 官方窄类型与板组件的宽松签名（兼容 headless mock）之间显式桥接
@@ -1081,28 +1105,35 @@ export default function (pi: ExtensionAPI) {
 								bold: (text: string) => string;
 								bg?: (color: unknown, text: string) => string;
 							};
-							return new OrgBoard(meName0, tui, boardTheme, done, {
-								onAction: (orgName, taskId, action, detail) =>
-									log.info('board action', {
-										org: orgName,
-										task: taskId,
-										action,
-										detail,
-									}),
-								// 上岗入口（ADR-0046 D3）：看板设置行 + `o` 键共用 setDuty
-								duty: {
-									state: () => dutyState({ onDuty: onDutyActive, socketUp }),
-									toggle: async (on: boolean) => {
-										const c = liveCtx;
-										if (!c)
-											return {
-												ok: false,
-												message: '会话尚未就绪，请稍后重试',
-											};
-										return setDuty(on, c);
+							return new OrgBoard(
+								meName0,
+								tui,
+								boardTheme,
+								done,
+								{
+									onAction: (orgName, taskId, action, detail) =>
+										log.info('board action', {
+											org: orgName,
+											task: taskId,
+											action,
+											detail,
+										}),
+									// 上岗入口（ADR-0046 D3）：看板设置行 + `o` 键共用 setDuty
+									duty: {
+										state: () => dutyState({ onDuty: onDutyActive, socketUp }),
+										toggle: async (on: boolean) => {
+											const c = liveCtx;
+											if (!c)
+												return {
+													ok: false,
+													message: '会话尚未就绪，请稍后重试',
+												};
+											return setDuty(on, c);
+										},
 									},
 								},
-							});
+								ownOrgs,
+							);
 						});
 					} catch (e) {
 						log.warn('/org 面板关闭或异常', {

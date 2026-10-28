@@ -75,6 +75,23 @@ export async function listTasks(org: string): Promise<Task[]> {
 	return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+/**
+ * 该 org 最近一次派活的时刻（ISO；无任务返回 `null`）。
+ *
+ * 派活 = `createTaskWithId`，任务的 `createdAt` **就是派活时刻**（ADR-0070 D4）。
+ * ⚠️ 不能用任务文件 mtime 代替：`saveTask` 每次改账都会重写文件，mtime 会退化成
+ * "最近一次改账"，认领/交付/验收都会把它顶高。
+ */
+export async function lastDispatchAt(org: string): Promise<string | null> {
+	const tasks = await listTasks(org);
+	let max: string | null = null;
+	for (const t of tasks) {
+		if (!t.createdAt) continue;
+		if (max === null || t.createdAt > max) max = t.createdAt;
+	}
+	return max;
+}
+
 export async function createTaskWithId(
 	org: string,
 	task: Omit<Task, 'id' | 'schemaVersion' | 'updatedAt'>,

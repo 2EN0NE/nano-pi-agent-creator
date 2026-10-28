@@ -48,6 +48,12 @@ const chiefDir = join(tmpdir(), 'org-board-chief');
 const workerDir = join(tmpdir(), 'org-board-worker');
 const workerB = join(tmpdir(), 'org-board-worker-b');
 
+/**
+ * org tab chip 的正则：`[ 名字 <单格盲文点阵> ]`（ADR-0070 D8）。
+ * 点数是动态的（0 人 = `U+2800` 空白盲符），所以断言**形状**而非具体点数。
+ */
+const chipRe = (name: string) => new RegExp(`\\[ ${name} [\\u2800-\\u28ff] \\]`);
+
 const workerManifest = {
 	name: 'worker-a',
 	label: '阿A',
@@ -272,7 +278,7 @@ describe('org TUI 任务看板', () => {
 			const lines = board.render(w);
 			for (const l of lines) expect(visibleWidth(l)).toBeLessThanOrEqual(w);
 			const joined = lines.join('\n');
-			expect(joined).not.toContain('[ dev-team ]'); // 单 org 无假 tab 栏
+			expect(joined).not.toMatch(chipRe('dev-team')); // 单 org 无假 tab 栏
 			expect(joined).toContain('普通待办事项');
 			// 切到进行中 tab 看标注
 		}
@@ -585,8 +591,9 @@ describe('org TUI 任务看板', () => {
 		});
 		// 多 org：顶部公司 chip 行两个 tab 均渲染
 		let j = board.render(80).join('\n');
-		expect(j).toContain('[ demo-org ]');
-		expect(j).toContain('[ dev-team ]');
+		// chip 形状 `[ 名字 <点阵> ]`：点阵是单格盲文（0 人 = U+2800 空白盲符），故不断言具体点数
+		expect(j).toMatch(/\[ demo-org [⠀-⣿] \]/);
+		expect(j).toMatch(/\[ dev-team [⠀-⣿] \]/);
 		// 默认打开字典序首 org（demo-org，无任务）；Tab → dev-team（出现任务）
 		expect(j).not.toContain('写一份周报');
 		board.handleInput('\t');
@@ -611,7 +618,7 @@ describe('org TUI 任务看板', () => {
 			await setupOrg('dev-team');
 		});
 		const j = board.render(80).join('\n');
-		expect(j).not.toContain('[ dev-team ]');
+		expect(j).not.toMatch(chipRe('dev-team'));
 		expect(j).toContain('[ 任务 ]'); // 视角 chip 行
 	});
 	it('四线布局：标题嵌横线 + tab 下分隔 + footer 上界 + 底横线', async () => {
@@ -682,11 +689,11 @@ describe('org TUI 任务看板', () => {
 		board.handleInput('\r'); // 创建
 		for (let i = 0; i < 120; i++) {
 			j = board.render(80).join('\n');
-			if (j.includes('[ acme-corp ]') && !j.includes('公司名:')) break;
+			if (chipRe('acme-corp').test(j) && !j.includes('公司名:')) break;
 			await sleep(15);
 		}
-		expect(j).toContain('[ acme-corp ]'); // 公司 tab 行出现（现在 2 org）
-		expect(j).toContain('[ dev-team ]');
+		expect(j).toMatch(chipRe('acme-corp')); // 公司 tab 行出现（现在 2 org）
+		expect(j).toMatch(chipRe('dev-team'));
 		expect(j).not.toContain('dev 任务'); // 已切到 acme-corp（空）
 		// 落盘校验
 		const orgFile = join(process.env.ORG_ROOT!, 'acme-corp', 'org.json');

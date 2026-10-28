@@ -16,7 +16,7 @@
 // - 本模块不读任务文件：调用方传入当前快照，避免巡检把任务列表刷到用户光标底下。
 import { promises as fs } from 'node:fs';
 import { isSocketAlive, readJson } from './util.js';
-import { runtimeFile } from './orgstore.js';
+import { readOrg, runtimeFile } from './orgstore.js';
 import type { Task } from './types.js';
 
 /** 成员可感知状态（四态） */
@@ -172,6 +172,56 @@ export async function inspectMembers(
 	return map;
 }
 
+/**
+ * 其余 org 的**廉价**在岗计数（ADR-0070 D7）。
+ *
+ * 判据 = 「runtime 记录存在 ∧ `isPidAlive`」：只发 signal-0，零 IPC。理由：非当前 org
+ * 只需要回答"有几个人在岗"这个**计数**，不需要四态精度；而权威判据（socket RPC 探活）
+ * 是跨进程 JSON 往返，乘上 N 家 org 不划算。
+ *
+ * **接受的精度损失**：进程在但 socket 已断（未开 `--session-control`、或 control 服务
+ * 异常）会算作在岗。切到该 org 时 `loadCurrentOrg` 立刻回归权威判据，误差自愈。
+ */
+export async function countOnlineByPid(org: string): Promise<number> {
+	// 读不到 / JSON 损坏**一律抛出**（不在这里降级）：`0` 在 D8 里是「确定无人在岗」的语义，
+	// 与「读不出来」不能混为一谈。降级由调用方决定并留日志（board 的 refreshOnlineCounts）。
+	const file = await readOrg(org);
+	const flags = await Promise.all(
+		file.members.map(async (m) => {
+			const rt = await readRuntime(org, m.name);
+			return rt ? isPidAlive(rt.pid) : false;
+		}),
+	);
+	let online = 0;
+	for (const alive of flags) if (alive) online += 1;
+	return online;
+}
+
+/** 四态的"活跃度"序（合并多所属时取最大者；数值只用于比较，无外部语义） */
+const PRESENCE_RANK: Record<PresenceState, number> = {
+	sleeping: 0,
+	idle: 1,
+	delivered: 2,
+	working: 3,
+};
+
+/**
+ * 多所属合并（ADR-0070，与 D1「所属是集合」配套）：本目录可同时属于多家 org，
+ * 而同一个成员（名字相同 = 同一目录 agent）在每家各有一条四态记录 —— 计数只能算**一次**。
+ *
+ * 冲突时取**最活跃**的那个：某家残留的睡眠 runtime 不该把已上岗的统计拉低。
+ * 名字不同即视为不同成员（同目录在不同 org 里名字相同，故同名即同人）。
+ */
+export function mergePresenceStates(
+	entries: Iterable<{ name: string; state: PresenceState }>,
+): PresenceState[] {
+	const byName = new Map<string, PresenceState>();
+	for (const { name, state } of entries) {
+		const prev = byName.get(name);
+		if (!prev || PRESENCE_RANK[state] > PRESENCE_RANK[prev]) byName.set(name, state);
+	}
+	return [...byName.values()];
+}
 /**
  * 清理残留 runtime（成员进程被 SIGKILL 时 `clearRuntime` 跑不到）。
  *

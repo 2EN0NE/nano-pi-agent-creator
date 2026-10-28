@@ -327,3 +327,85 @@ EOF
   fi
   tui_cleanup
 TEST
+
+test_describe "org extension (TUI 所属组织 / tab 在岗计数 — ADR-0070)"
+
+test_it "expect: 所属组织排最前 + 分段符 + 其余 org 的盲文在岗点数" <<'TEST'
+  ROOT="$(mktemp -d /tmp/org-tui-own-XXXX)"
+  CHIEF_DIR="$ROOT/chief"          # ← pi 的 cwd，也是 zeta 的成员目录（= 本目录所属组织）
+  OTHER_DIR="$ROOT/other"          # ← alpha 的成员目录（不属于我）
+  NOW="2026-01-01T00:00:00.000Z"
+  NEWER="2026-09-01T00:00:00.000Z"
+  mkdir -p "$CHIEF_DIR" "$OTHER_DIR" \
+           "$ROOT/preset/.pi/org/alpha/tasks" \
+           "$ROOT/preset/.pi/org/alpha/runtime" \
+           "$ROOT/preset/.pi/org/zeta/tasks"
+
+  # zeta = 本目录所属（成员目录就是 CHIEF_DIR），但**派活更早**
+  cat >"$ROOT/preset/.pi/org/zeta/org.json" <<EOF
+{"schemaVersion":1,"name":"zeta","chiefName":"chief","chiefDir":"$CHIEF_DIR","createdAt":"$NOW","updatedAt":"$NOW","members":[{"name":"chief","dir":"$CHIEF_DIR","role":"chief","manifest":{"label":"负责人"},"joinedAt":"$NOW"}]}
+EOF
+  cat >"$ROOT/preset/.pi/org/zeta/tasks/M-zzz111.json" <<EOF
+{"schemaVersion":1,"id":"M-zzz111","org":"zeta","title":"我的组织任务","background":"b","items":[],"dispatcher":"chief","dispatcherRole":"chief","dueAt":null,"createdAt":"$NOW","updatedAt":"$NOW","status":"todo","subTasks":[{"id":"S1","description":"s","dueAt":null,"assignees":[]}],"history":[]}
+EOF
+
+  # alpha = 非所属，但**派活更新**（证明"所属优先"压过"最近派活"）
+  cat >"$ROOT/preset/.pi/org/alpha/org.json" <<EOF
+{"schemaVersion":1,"name":"alpha","chiefName":"a-chief","chiefDir":"$OTHER_DIR","createdAt":"$NOW","updatedAt":"$NOW","members":[{"name":"a-chief","dir":"$OTHER_DIR","role":"chief","manifest":{"label":"别家"},"joinedAt":"$NOW"},{"name":"w-other","dir":"$OTHER_DIR/dist","role":"member","manifest":{},"joinedAt":"$NOW"}]}
+EOF
+  mkdir -p "$OTHER_DIR/dist"
+  cat >"$ROOT/preset/.pi/org/alpha/tasks/M-aaa999.json" <<EOF
+{"schemaVersion":1,"id":"M-aaa999","org":"alpha","title":"别家更新的任务","background":"b","items":[],"dispatcher":"a-chief","dispatcherRole":"chief","dueAt":null,"createdAt":"$NEWER","updatedAt":"$NEWER","status":"todo","subTasks":[{"id":"S1","description":"s","dueAt":null,"assignees":[]}],"history":[]}
+EOF
+
+  # alpha 的成员 w-other 有一份"pid 存活"的在岗注册（socket 不可连）：
+  # 非当前 org 走廉价 pid 判据 → 应计为 1 人（点阵 ⠁）
+  sleep 300 &
+  ALIVE_PID=$!
+  # 用例被预算/人工中断时也要收掉这个哨兵进程（否则孤儿 sleep 最长活 300s）
+  trap 'kill "$ALIVE_PID" 2>/dev/null || true' EXIT
+  cat >"$ROOT/preset/.pi/org/alpha/runtime/w-other.json" <<EOF
+{"schemaVersion":1,"name":"w-other","dir":"$OTHER_DIR/dist","pid":$ALIVE_PID,"socketPath":"/nonexistent/org-tui.sock","sessionId":"sess-w","busy":false,"startedAt":"$NOW","updatedAt":"$NOW"}
+EOF
+
+  tui_expect_test "org" '
+    send "/org\r"
+    expect { -re {org:} { } timeout { send_error "FAIL: board did not render\n"; exit 2 } }
+    wait_for {我的组织任务}
+  ' 60 100 "$CHIEF_DIR" "$ROOT/preset"
+
+  FAILED=""
+  if [[ "$TUI_EXIT_CODE" -ne 0 && "$TUI_EXIT_CODE" -ne 124 ]]; then
+    FAILED="expect 异常退出码 $TUI_EXIT_CODE"
+  fi
+
+  VIS="$(extract_visible_text "$TUI_OUTPUT_FILE")"
+  # ① 默认落点 = 所属组织 zeta（不是字母序第一的 alpha）
+  grep -q 'org:zeta' <<<"$VIS" || FAILED="${FAILED:+$FAILED; }标题未落在所属组织 zeta"
+  # ② 所属段在前：必须在**同一行**（org tab 行）里比位置。
+  # 不能拿整屏首个 'zeta' 命中——那是标题行 `── org:zeta`，恒在 tab 行之上，断言会永远通过。
+  TAB_LINE="$(grep -E '[⠀-⣿]' <<<"$VIS" | head -1)"
+  ZETA_POS=$(grep -bo 'zeta' <<<"$TAB_LINE" | head -1 | cut -d: -f1)
+  ALPHA_POS=$(grep -bo 'alpha' <<<"$TAB_LINE" | head -1 | cut -d: -f1)
+  if [[ -z "$TAB_LINE" ]] || [[ -z "$ZETA_POS" ]] || [[ -z "$ALPHA_POS" ]]; then
+    FAILED="${FAILED:+$FAILED; }org tab 行未同时出现 zeta 与 alpha（无法判定顺序）"
+  elif (( ZETA_POS > ALPHA_POS )); then
+    FAILED="${FAILED:+$FAILED; }tab 顺序错误（alpha 在 zeta 之前）"
+  fi
+  # 只在 tab 行上断言分隔符：整屏 grep 会被别处任一 `│`（pi UI/其它行）满足而假通过
+  grep -q '│' <<<"$TAB_LINE" || FAILED="${FAILED:+$FAILED; }缺少所属/非所属分段符"
+  # ④ 非当前 org 的在岗人数以盲文点阵显示（1 人 = ⠁）
+  grep -qF '[ alpha ⠁ ]' <<<"$VIS" || FAILED="${FAILED:+$FAILED; }alpha 的盲文在岗点数不是 ⠁"
+
+  kill "$ALIVE_PID" 2>/dev/null
+  if [[ -n "$FAILED" ]]; then
+    echo "FAIL: $FAILED"
+    echo "--- TUI output (visible text) ---"
+    tail -30 <<<"$VIS"
+    echo "---"
+    tui_cleanup
+    exit 1
+  fi
+  echo "PASS: 所属组织排最前 + 分段符 + 盲文在岗点数正确"
+  tui_cleanup
+TEST

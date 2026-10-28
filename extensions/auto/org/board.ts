@@ -40,10 +40,12 @@ import {
 	approveWithAdoption,
 	cancelTask,
 	humanReassign,
+	lastDispatchAt,
 } from './task.js';
 import {
 	createOrg,
 	defaultAgentName,
+	findOrgsForDir,
 	joinOrg,
 	leaveOrg,
 	listOrgNames,
@@ -64,10 +66,12 @@ import {
 	onlineFor,
 	PRESENCE_POLL_MS,
 	sweepStaleRuntime,
+	countOnlineByPid,
 	type MemberPresence,
 	type PresenceState,
 	PRESENCE_WORDS,
 } from './presence.js';
+import { brailleCount, orderOrgTabs, remapOrgIdxByName, type OrgTabEntry } from './orgtabs.js';
 import { readSlot, type SlotRecord } from './slot.js';
 import { resolveMemberQueueCap } from './config.js';
 import { remainingText } from './briefing.js';
@@ -132,6 +136,12 @@ const VIEW_TABS: { key: BoardView; label: string }[] = [
 	{ key: 'people', label: '成员' },
 	{ key: 'settings', label: '设置' },
 ];
+
+/**
+ * 所属集合为空时的语义尾注（ADR-0070 D3/D6）。
+ * 必要性：D3 要求此时整排 tab 压暗，而「全暗」没有对比项，容易被读成「这些组织都不可用/没权限」。
+ */
+const NOT_OWN_ORG_NOTE = '本目录未加入任何组织';
 
 /** 一次探测的完整结果（状态 + 诊断缓存），供原子提交 */
 interface PresenceBundle {
@@ -209,8 +219,18 @@ export class OrgBoard implements Component {
 	// 加载与导航状态
 	private loading = true;
 	private loadError = '';
+	/**
+	 * org 名单，**顺序即 tab 顺序**（ADR-0070 D2）：所属段在前（最近派活倒序），
+	 * 非所属段在后（字母序）。任何重排都必须同时按名校正 `orgIdx`（见 `reorderOrgTabs`）。
+	 */
 	private orgNames: string[] = [];
 	private orgIdx = 0;
+	/** 打开看板的 cwd 所属的 org 集合（ADR-0070 D1；可能为空集，也可能多元素） */
+	private ownOrgs: Set<string>;
+	/** 各 org 最近一次派活的时刻（排序键；缺失 = 尚无任务，ADR-0070 D4） */
+	private lastDispatchAt = new Map<string, string | null>();
+	/** 各 org 的在岗人数（D7/D8）：当前 org 走权威判据，其余走廉价判据 */
+	private onlineByOrg = new Map<string, number>();
 	private view: BoardView = 'tasks';
 	private taskTab: TaskTabIdx = 0;
 	private selIdx = 0; // 当前列表选中行
@@ -220,6 +240,13 @@ export class OrgBoard implements Component {
 	private snap: Map<string, OrgSnapshot> = new Map();
 	// 可感知状态：仅缓存**当前 org**成员（ADR-0040 D4/D5）；巡检只读刷新，不唤醒不杀停
 	private presence = new Map<string, MemberPresence>();
+	/**
+	 * `presence` 这份权威快照属于哪家 org。
+	 * 用途：巡检是异步的，探测期间人可能切了公司——`refreshOnlineCounts` 若无条件把这些旧状态
+	 * 当作"当前 org"的权威计数，切换后的一拍就会显示错误数字（与 `computePresence` 里
+	 * 「探测期间人类可能切了公司 → 丢弃过期结果」同源的坑）。
+	 */
+	private presenceOrg = '';
 	private presenceTimer: ReturnType<typeof setInterval> | null = null;
 	private closed = false;
 	// 瞬态提示（唤醒/睡眠结果）：任何下一次按键即清除；noticeSeq 丢弃过期异步结果
@@ -283,7 +310,13 @@ export class OrgBoard implements Component {
 		},
 		done: (result: string | null) => void,
 		hooks: BoardHooks = {},
+		/**
+		 * 打开看板的 cwd 所属的 org 集合（ADR-0070 D1）。由命令层用成员注册表精确匹配算出后传入——
+		 * 看板自己不再从 `orgNames` 反推"我的组织"（旧 `meOrgPref()` 就是这么错的）。
+		 */
+		ownOrgs: readonly string[] = [],
 	) {
+		this.ownOrgs = new Set(ownOrgs);
 		this.meName = meName;
 		this.humanId = `human@${path.basename(process.cwd()) || 'local'}`;
 		this.tui = tui;
@@ -305,16 +338,29 @@ export class OrgBoard implements Component {
 	private async initialize(): Promise<void> {
 		try {
 			const names = await listOrgNames();
-			this.orgNames = names;
-			// 默认打开：当前会话所属的第一个 org，否则第一个存在的 org
-			const mineFirst = this.orgNames.indexOf(this.meOrgPref());
-			this.orgIdx = mineFirst >= 0 ? mineFirst : 0;
-			if (this.orgIdx >= this.orgNames.length) this.orgIdx = 0;
+			// 排序键（ADR-0070 D4）：各 org 最近派活时刻，打开时并发算一次。
+			// 当前 org 之后随账本重载实时更新；其余 org 保持此值（陈旧只影响非当前 org 的
+			// 相对次序，不影响"人正在看的那家"）。
+			const dispatchPairs = await Promise.all(
+				names.map(async (n): Promise<[string, string | null]> => [
+					n,
+					await this.dispatchKeyOf(n),
+				]),
+			);
+			this.lastDispatchAt = new Map(dispatchPairs);
+			this.orgNames = this.orderTabNames(names);
+			// 默认打开：所属段首位（即所属中最近派活的那家）；无所属则回落字母序第一（ADR-0070 D1/D2）
+			this.orgIdx = 0;
+			if (this.orgNames.length > 0) {
+				const firstOwn = this.orgNames.findIndex((n) => this.ownOrgs.has(n));
+				this.orgIdx = firstOwn >= 0 ? firstOwn : 0;
+			}
 			// 快照就绪前不得清 loading：否则看板会以"已加载"姿态渲染空成员表，
 			// 此时按键（w/s/m/d）取不到成员 → **静默 no-op**（org T3「唤醒幂等」曾因此偶发失败：
 			// 按 w 时 hasSnap=false，既无"正在唤醒…"也无任何提示）。
 			if (this.orgNames.length > 0) {
 				await this.loadCurrentOrg();
+				await this.refreshOnlineCounts();
 			}
 			this.loading = false;
 			this.invalidate();
@@ -325,8 +371,127 @@ export class OrgBoard implements Component {
 		}
 	}
 
-	private meOrgPref(): string {
-		return this.orgNames[0] ?? '';
+	/** 按当前排序键把 org 名单排成 tab 顺序（ADR-0070 D2：所属段在前，段内按最近派活倒序） */
+	private orderTabNames(names: readonly string[]): string[] {
+		const entries: OrgTabEntry[] = names.map((n) => ({
+			name: n,
+			own: this.ownOrgs.has(n),
+			lastDispatchAt: this.lastDispatchAt.get(n) ?? null,
+		}));
+		return orderOrgTabs(entries).map((e) => e.name);
+	}
+
+	/**
+	 * 读某 org 的「最近派活」排序键（ADR-0070 D4）。
+	 * 读失败留 debug 痕迹后按"无派活"处理：排序键坏掉不该阻断看板，但也不能静默把故障
+	 * 显示成事实（"这家从来没派过活"）。
+	 */
+	private async dispatchKeyOf(name: string): Promise<string | null> {
+		try {
+			return await lastDispatchAt(name);
+		} catch (e) {
+			log.debug('排序键读取失败（按无派活处理）', { org: name, err: String(e) });
+			return null;
+		}
+	}
+
+	/**
+	 * 重算「所属组织」集合（ADR-0070 D1：目录精确匹配成员注册表）。
+	 * **必须可重算**：新建/改名/加入公司都会改变"本目录属于谁"（新建与加入会把 cwd 登记为成员，
+	 * 改名会换掉 ownOrgs 里存的 org 名），只留构造期快照会让新组织仍被当成"非所属"压暗，
+	 * 甚至继续显示「本目录未加入任何组织」。
+	 */
+	private async refreshOwnOrgs(): Promise<void> {
+		try {
+			const found = await findOrgsForDir(process.cwd());
+			this.ownOrgs = new Set(found.map((o) => o.name));
+		} catch (e) {
+			log.warn('重算所属组织失败（沿用旧值）', { err: String(e) });
+			return;
+		}
+		this.reorderOrgTabs();
+	}
+
+	/**
+	 * 按最新排序键重排 tab，并**按 org 名跟住当前 tab**（ADR-0070 D5）。
+	 * 返回是否真的换了顺序（调用方据此决定是否重绘）。
+	 */
+	private reorderOrgTabs(): boolean {
+		const next = this.orderTabNames(this.orgNames);
+		const same =
+			next.length === this.orgNames.length && next.every((n, i) => n === this.orgNames[i]);
+		if (same) return false;
+		const keepName = this.orgNames[this.orgIdx];
+		this.orgNames = next;
+		this.orgIdx = remapOrgIdxByName(next, this.orgIdx, keepName);
+		return true;
+	}
+
+	/** 所属段长度（所属恒排在前面，故它就是两段之间分隔符的位置） */
+	private ownOrgCount(): number {
+		let n = 0;
+		for (const name of this.orgNames) if (this.ownOrgs.has(name)) n += 1;
+		return n;
+	}
+
+	/**
+	 * 单枚 org chip（ADR-0070 D6/D8）。三条轴互不覆盖：
+	 * - **所属** → 名字段色调强弱（所属 muted / 非所属 dim）；
+	 * - **当前** → accent + bold（比任何 dim 都亮，故四态可分）；
+	 * - **在岗人数** → 点阵，**独立着色**（有在线 muted / 无在线 dim）——若跟着 chip 一起 dim，
+	 *   暗盲文点会糊成一团。因此点阵必须拆出来单独上色，不能整枚 chip 一次串色。
+	 */
+	private orgChip(name: string, active: boolean): string {
+		const th = this.th;
+		const own = this.ownOrgs.has(name);
+		const style = active ? (s: string) => th.accent(th.bold(s)) : own ? th.muted : th.dim;
+		const online = this.onlineByOrg.get(name) ?? 0;
+		const glyph = brailleCount(online);
+		const dot = online > 0 ? th.muted(glyph) : th.dim(glyph);
+		return `${style(`[ ${name} `)}${dot}${style(' ]')}`;
+	}
+
+	/**
+	 * 刷新各 org 的在岗计数（ADR-0070 D7/D8）：当前 org 取权威四态里的"非睡眠"数，
+	 * 其余 org 走廉价 pid 判据。返回是否变化。
+	 */
+	private async refreshOnlineCounts(): Promise<boolean> {
+		const cur = this.orgNames[this.orgIdx];
+		// 只有 presence 确实属于当前 org 时才可当权威计数；否则（刚切过来、巡检还没回来）
+		// 对 cur 也先用廉价判据兜一拍，下一拍权威结果到位即替换。
+		const authoritative = cur !== '' && this.presenceOrg === cur;
+		const others = await Promise.all(
+			this.orgNames
+				.filter((n) => n !== cur || !authoritative)
+				.map(async (n): Promise<[string, number]> => {
+					try {
+						return [n, await countOnlineByPid(n)];
+					} catch (e) {
+						log.debug('在岗计数读取失败（按 0 人处理）', { org: n, err: String(e) });
+						return [n, 0];
+					}
+				}),
+		);
+		// 探测期间人可能切了公司 → 丢弃过期结果（与 computePresence 的「探测期间切公司」同源）：
+		// 否则旧 cur 的计数会用新 org 的 presence 算出，还可能晚于切 org 那次调用落盘。
+		if (this.orgNames[this.orgIdx] !== cur) return false;
+		const next = new Map<string, number>(others);
+		if (cur && authoritative) {
+			let online = 0;
+			for (const p of this.presence.values()) if (p.state !== 'sleeping') online += 1;
+			next.set(cur, online);
+		}
+		let changed = next.size !== this.onlineByOrg.size;
+		if (!changed) {
+			for (const [n, c] of next) {
+				if (this.onlineByOrg.get(n) !== c) {
+					changed = true;
+					break;
+				}
+			}
+		}
+		this.onlineByOrg = next;
+		return changed;
 	}
 
 	private fail(e: unknown): void {
@@ -363,11 +528,12 @@ export class OrgBoard implements Component {
 	}
 
 	/** 提交探测结果，返回"状态是否变化"（供巡检决定要不要重绘） */
-	private commitPresence(bundle: PresenceBundle): boolean {
+	private commitPresence(org: string, bundle: PresenceBundle): boolean {
 		const changed =
 			bundle.next.size !== this.presence.size ||
 			[...bundle.next].some(([n, p]) => this.presence.get(n)?.state !== p.state);
 		this.presence = bundle.next;
+		this.presenceOrg = org;
 		this.tmuxManaged = bundle.managed;
 		this.lastSessions = bundle.lastSessions;
 		return changed;
@@ -380,7 +546,7 @@ export class OrgBoard implements Component {
 		if (!name || !snap) return false;
 		const bundle = await this.computePresence(name, snap, opts);
 		if (!bundle) return false;
-		return this.commitPresence(bundle);
+		return this.commitPresence(name, bundle);
 	}
 
 	/**
@@ -517,8 +683,11 @@ export class OrgBoard implements Component {
 		this.presenceTimer = setInterval(() => {
 			if (this.closed) return;
 			void this.refreshPresence({ sweep: true })
-				.then((changed) => {
-					if (changed) this.refresh();
+				.then(async (changed) => {
+					// tab 上的在岗计数（ADR-0070 D7）：当前 org 读权威四态、其余走廉价判据。
+					// 放在权威探测之后，保证当前 org 的数字与成员列表来自同一拍。
+					const countsChanged = await this.refreshOnlineCounts().catch(() => false);
+					if (changed || countsChanged) this.refresh();
 				})
 				.catch((e: unknown) => {
 					log.debug('巡检失败（忽略，下一轮重试）', { err: String(e) });
@@ -568,8 +737,21 @@ export class OrgBoard implements Component {
 				this.notice = `成员简档刷新失败：${e instanceof Error ? e.message : String(e)}`;
 			}
 		}
+		// 排序键一起重算（ADR-0070 D4）：`initialize` 只在打开面板时算过一次，
+		// 别家 org 之后又派了活时，只按"打开那一刻"的顺序排会让 `r` 显得没生效。
+		const pairs = await Promise.all(
+			this.orgNames.map(async (n): Promise<[string, string | null]> => [
+				n,
+				await this.dispatchKeyOf(n),
+			]),
+		);
+		this.lastDispatchAt = new Map(pairs);
+		// 注意：这里**不**重算所属（ADR-0070 D4 同源取舍）——所属是「打开面板那一刻的目录事实」，
+		// 面板内的新建/改名/加入/删除/踢退自己会各自重算（见 refreshOwnOrgs）；外部进程改注册表不在本拍覆盖范围。
+		this.reorderOrgTabs();
 		this.snap.clear();
 		await this.loadCurrentOrg();
+		await this.refreshOnlineCounts();
 	}
 
 	private async loadCurrentOrg(): Promise<void> {
@@ -587,7 +769,7 @@ export class OrgBoard implements Component {
 			// 先探测再一次性提交：避免"成员已渲染但状态未就绪"造成的圆点空白闪烁
 			const bundle = await this.computePresence(name, snap, { sweep: true });
 			this.snap.set(name, snap);
-			if (bundle) this.commitPresence(bundle);
+			if (bundle) this.commitPresence(name, bundle);
 		} catch (e) {
 			this.loadError = e instanceof Error ? e.message : String(e);
 		}
@@ -646,12 +828,21 @@ export class OrgBoard implements Component {
 
 		// 公司 tab 行：仅当本机加入 >1 个 org 才显示（Tab / Shift+Tab 循环切换，高亮当前）
 		// 单 org 不渲染该行——避免「只有一个 tab 的假 tab 栏」（TUI 002 反馈）
+		const ownCount = this.ownOrgCount();
 		if (this.orgNames.length > 1) {
-			const chip = (n: string, active: boolean) =>
-				active ? th.accent(th.bold(`[ ${n} ]`)) : th.muted(`[ ${n} ]`);
-			lines.push(
-				L(this.orgNames.map((n, i) => chip(n, i === this.orgIdx)).join(th.muted(' '))),
-			);
+			const parts: string[] = [];
+			this.orgNames.forEach((n, i) => {
+				// 所属段与非所属段之间的分界：让「从第几家开始不是我的」显性可见（ADR-0070 D6）。
+				// 所属为空时不画——「整排没有分界」本身就是「没有所属段」的信号。
+				if (ownCount > 0 && i === ownCount) parts.push(th.dim('│'));
+				parts.push(this.orgChip(n, i === this.orgIdx));
+			});
+			lines.push(L(parts.join(' ')));
+		}
+		// 所属为空时的语义尾注：否则整排压暗会被读成「全部不可用/没权限」（ADR-0070 D3/D6）。
+		// **单 org 也显示**——那时连 tab 行都不渲染，人本来零提示。
+		if (this.orgNames.length > 0 && ownCount === 0) {
+			lines.push(L(` ${NOT_OWN_ORG_NOTE}`, th.dim));
 		}
 
 		// 视角 tab 行（←→ 切换；样式同 todos TabBar：[当前] accent，其余 muted）
@@ -803,6 +994,17 @@ export class OrgBoard implements Component {
 				: undefined;
 			snap.tasks = tasks;
 			snap.loadedAt = nowIso();
+			// 排序键保鲜（ADR-0070 D4）：只更新当前 org —— 它是唯一被持续重读账本的一家。
+			// 新任务即新派活，因此这一步顺带让「最近派活」排序跟着动；
+			// reorderOrgTabs 内部按 org 名跟住当前 tab，不会把屏幕换到别家（D5）。
+			this.lastDispatchAt.set(
+				name,
+				tasks.reduce<string | null>(
+					(acc, t) => (t.createdAt && (!acc || t.createdAt > acc) ? t.createdAt : acc),
+					null,
+				),
+			);
+			this.reorderOrgTabs();
 			if (onTaskList) {
 				this.selIdx = remapSelectionById(
 					this.applyFilterAndSort(this.tasksOfTab(tasks)),
@@ -1416,14 +1618,19 @@ export class OrgBoard implements Component {
 			this.inputMode = null;
 			this.orgNameInput = '';
 			this.createErr = '';
-			// 重建列表并切到目标公司（改名/新建后视角落回任务）
+			// 新建 / 改名都会改变「本目录属于谁」（新建把 cwd 登记为负责人；改名换掉 ownOrgs 里存的名字）
+			// → 先重算所属，再按 tab 顺序重建名单（ADR-0070 D1/D2），否则新组织仍被当成"非所属"压暗
+			await this.refreshOwnOrgs();
 			const names = await listOrgNames();
-			this.orgNames = names;
-			this.orgIdx = Math.max(0, names.indexOf(name));
+			this.lastDispatchAt.set(name, await this.dispatchKeyOf(name));
+			this.orgNames = this.orderTabNames(names);
+			this.orgIdx = Math.max(0, this.orgNames.indexOf(name));
 			this.view = 'tasks';
 			this.selIdx = 0;
 			this.snap.clear();
 			await this.loadCurrentOrg();
+			// 新建/改名后当前 org 换了，tab 上的在岗计数要跟着重算（否则点阵停在旧 org 的数字，最长等一拍）
+			await this.refreshOnlineCounts();
 			this.refresh();
 		} catch (e) {
 			this.createErr = e instanceof Error ? e.message : String(e);
@@ -1469,13 +1676,18 @@ export class OrgBoard implements Component {
 				return;
 			}
 			this.inputMode = null;
+			// 加入公司把 cwd 登记为成员 → 所属变了（ADR-0070 D1），必须重算后再排 tab
+			await this.refreshOwnOrgs();
 			const names = await listOrgNames();
-			this.orgNames = names;
-			this.orgIdx = Math.max(0, names.indexOf(orgName));
+			this.lastDispatchAt.set(orgName, await this.dispatchKeyOf(orgName));
+			this.orgNames = this.orderTabNames(names);
+			this.orgIdx = Math.max(0, this.orgNames.indexOf(orgName));
 			this.view = 'tasks';
 			this.selIdx = 0;
 			this.snap.clear();
 			await this.loadCurrentOrg();
+			// 加入后当前 org 就是新加入这家，点阵要立刻按权威判据重算（否则停在上一次的廉价值）
+			await this.refreshOnlineCounts();
 			this.refresh();
 		} catch (e) {
 			this.createErr = e instanceof Error ? e.message : String(e);
@@ -1504,13 +1716,18 @@ export class OrgBoard implements Component {
 				return;
 			}
 			this.hooks.onAction?.(orgName, '', 'delete-org', res.archivedTo ?? '');
-			const names = await listOrgNames();
+			// 删除会改变「本目录属于谁」（可能删掉的正是我的组织）→ 先重算所属再排 tab
+			await this.refreshOwnOrgs();
+			this.lastDispatchAt.delete(orgName);
+			const names = this.orderTabNames(await listOrgNames());
 			this.orgNames = names;
 			this.orgIdx = Math.min(this.orgIdx, Math.max(0, names.length - 1));
 			this.view = 'tasks';
 			this.selIdx = 0;
 			this.snap.clear();
 			if (names.length > 0) await this.loadCurrentOrg();
+			// 名单变了（删掉一家）→ 点阵表也要跟着重建，别把已删 org 的计数留在 map 里
+			await this.refreshOnlineCounts();
 			this.refresh();
 		} catch (e) {
 			this.loadError = e instanceof Error ? e.message : String(e);
@@ -1532,6 +1749,8 @@ export class OrgBoard implements Component {
 			await leaveOrg(orgName, m.dir, `人类踢退（${this.humanId}）`);
 			this.hooks.onAction?.(orgName, '', 'kick', memberName);
 			this.snap.delete(orgName);
+			// 踢退可能踢掉的是**本目录自己** → 「本目录属于谁」变了，必须和新建/改名/加入/删除同源重算
+			await this.refreshOwnOrgs();
 			await this.loadCurrentOrg();
 			this.refresh();
 		} catch (e) {
@@ -2526,7 +2745,12 @@ export class OrgBoard implements Component {
 				this.drillCursors = [];
 				this.selIdx = 0;
 				this.snap.clear();
-				void this.loadCurrentOrg();
+				// 切 org 后重算 tab 上的在岗计数：新 org 用权威判据、旧 org 退回廉价判据
+				void this.loadCurrentOrg()
+					.then(() => this.refreshOnlineCounts())
+					.catch((e: unknown) => {
+						log.debug('切换 org 后的计数刷新失败（忽略）', { err: String(e) });
+					});
 			}
 			return;
 		}

@@ -77,6 +77,15 @@ preset 引用的工具 / 技能 / 模型 / provider 在**本地**不存在时（
 
 ## 已知限制
 
+- **org 的自门控是「限制权只有两个来源」的已知例外**（2026-10-28，ADR-0070 `D11`）：
+  `extensions/auto/org` 的 `/org off` 会用 `setActiveTools()` 把**自己注册的** org 工具移出活动集。
+  它与本 ADR 禁止的「限制他人工具」不同型——只增删自己注册的工具，且 pi 没有 `unregisterTool`，
+  **撤回工具的唯一手段就是 `setActiveTools()`**；`defaultActive: false` 帮不上（它只影响注册那一刻
+  是否自动激活，而 org 本来只在在岗时才注册）。因此本轮**不改代码，登记为例外**。
+  ⚠️「org × 封闭集 preset 叠加时是否真冲突」**尚未实测**——降级这条例外之前必须先做该实测
+  （e2e 已有 `跨扩展防护（preset × org）` 一条，但只覆盖 preset 应用后 org 工具不丢，未覆盖
+  off-duty 撤回与 preset 复位的先后顺序）。
+
 - **`--tools` 的 `+name` / `-name` 修饰不参与复位**：pi 把这类修饰保存在 `AgentSession` 构造参数
   （`defaultToolModifiers`）里，扩展侧无读取入口；`tools.ts` 只能按 `getSettings().defaultTools`
   复算。`--exclude-tools` 与 `--tools` 白名单在注册期即被 pi 过滤（不在 `getAllTools()` 中），
