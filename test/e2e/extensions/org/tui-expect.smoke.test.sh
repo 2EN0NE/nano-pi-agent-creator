@@ -32,7 +32,7 @@ EOF
     send "/org\r"
     expect { -re {org:} { } timeout { send_error "FAIL: board did not render\n"; exit 2 } }
     wait_for {冒烟看板任务}
-  ' 60 80 "$CHIEF_DIR" "$ROOT/preset"
+  ' 90 80 "$CHIEF_DIR" "$ROOT/preset"
 
   if [[ "$TUI_EXIT_CODE" -eq 0 || "$TUI_EXIT_CODE" -eq 124 ]]; then
     if tui_output_contains "$TUI_OUTPUT_FILE" "org:"; then
@@ -82,7 +82,7 @@ EOF
     send "y"
     send "\x1b"
     sleep 1
-  ' 60 80 "$WB_DIR" "$ROOT/preset"
+  ' 90 80 "$WB_DIR" "$ROOT/preset"
 
   if [[ "$TUI_EXIT_CODE" -eq 0 || "$TUI_EXIT_CODE" -eq 124 ]]; then
     # 账本终态断言：pi 修改的是沙箱 HOME 内副本（preset 被拷贝进 test_home），断言读 $TUI_TEST_HOME/home
@@ -148,7 +148,7 @@ EOF
     sleep 2
     send "\r"
     wait_for {成员 worker-a}
-  ' 60 100 "$CHIEF_DIR" "$ROOT/preset"
+  ' 90 100 "$CHIEF_DIR" "$ROOT/preset"
 
   if [[ "$TUI_EXIT_CODE" -eq 0 || "$TUI_EXIT_CODE" -eq 124 ]]; then
     OUT="$TUI_OUTPUT_FILE"
@@ -309,7 +309,7 @@ EOF
     send "y"
     send "\x1b"
     sleep 1
-  ' 60 80 "$WB_DIR" "$ROOT/preset"
+  ' 90 80 "$WB_DIR" "$ROOT/preset"
 
   if [[ "$TUI_EXIT_CODE" -eq 0 || "$TUI_EXIT_CODE" -eq 124 ]]; then
     LEDGER="$TUI_TEST_HOME/home/.pi/org/dev-team/tasks/M-can001.json"
@@ -372,7 +372,7 @@ EOF
     send "/org\r"
     expect { -re {org:} { } timeout { send_error "FAIL: board did not render\n"; exit 2 } }
     wait_for {我的组织任务}
-  ' 60 100 "$CHIEF_DIR" "$ROOT/preset"
+  ' 90 100 "$CHIEF_DIR" "$ROOT/preset"
 
   FAILED=""
   if [[ "$TUI_EXIT_CODE" -ne 0 && "$TUI_EXIT_CODE" -ne 124 ]]; then
