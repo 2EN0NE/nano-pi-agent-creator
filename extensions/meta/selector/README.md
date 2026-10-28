@@ -110,11 +110,15 @@ interface ConfirmGateApi {
 ```
 
 - 解释只在**底部信息栏**显示当前选中项，不首屏全铺。
-- `解除豁免` → 二次确认（列出将撤销的 owner 与计数）→ `disarmAll()`；非 armed 时不出现该项。
+- `解除豁免` → 二次确认（列出将撤销的 owner 与计数）→ `disarmAll()` → **关闭面板**；非 armed 时不出现该项。
+- `影响与边界` Enter 进只读详情页、Esc 返回（**不得 no-op**：默认选中落在它时，无反应与卡死无法区分）。
 - 非 TUI（`rpc` / `print` / `json`）：没有面板，输出多行文本，**首行保留旧单行格式**
   （`远端豁免：<mode>（license=…，owners=…）`），外部 grep 不破。
-- **实现铁律**（ADR-0068 D8）：面板**不得**经 `showSelect`——armed 时 selector 的闸门会把它直接跳过，
-  恰好在最需要救援时打不开；判据用 `ctx.mode === 'tui'`，不是 `ctx.hasUI`（RPC 下为 true 但 `custom` 是空实现）。
+- **实现铁律**（ADR-0068 D8）：
+    - 面板**不得**经 `showSelect`——armed 时 selector 的闸门会把它直接跳过，恰好在最需要救援时打不开；
+      判据用 `ctx.mode === 'tui'`，不是 `ctx.hasUI`（RPC 下为 true 但 `custom` 是空实现）。
+    - 入口用**主视图**（`custom` 不传 `overlay`，同 `pi-session-tree.openPanel`），不用浮窗；
+      且 `render()` 行数必须恒定（`PANEL_ROWS` 填充），否则会挤压输入 dock。
 
 占用者显示名：`arm(owner, { label })` 可传中文名；不传则用内置映射（`manual` → 本机手动、
 `e2e-channel` → 测试通道），仍未登记的原样显示并括注。**id 是仲裁键**（计数 / 日志 / 接口），label 只用于展示。

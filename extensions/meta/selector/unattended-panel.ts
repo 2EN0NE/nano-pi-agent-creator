@@ -11,7 +11,7 @@
  *   3. 每行都过 `truncateToWidth`，只用单宽字符（ADR-0023）。
  */
 import type { Component, Focusable } from '@earendil-works/pi-tui';
-import { truncateToWidth } from '@earendil-works/pi-tui';
+import { Key, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 import { bottomBorder, makeThemeColors, topBorder } from '../../../src/tui/helpers.js';
 import {
 	UNATTENDED_ACTIONS,
@@ -41,14 +41,25 @@ export interface UnattendedPanelOptions {
 const ARMED_ITEMS: readonly ActionKey[] = ['disarm', 'scope', 'close'];
 const IDLE_ITEMS: readonly ActionKey[] = ['scope', 'close'];
 
-const KEY_UP = '\x1b[A';
-const KEY_DOWN = '\x1b[B';
-const KEY_ESC = '\x1b';
+/**
+ * 面板固定总高（docs/tui-design-principles.md §7.3 最小高度填充）。
+ * 三视图（menu/confirm/detail）与三态（armed/idle/off）都以它为准，不足补空行。
+ * 行数随视图变化 → overlay 高度抖动 → fullscreen 下渲染溢出（UAT 实测：整屏冻结）。
+ */
+const PANEL_ROWS = 14;
+
+// 按键一律走 matchesKey：终端差异（application cursor mode、Kitty CSI-u 等）会让同一个键
+// 产生不同字节序列。UAT 实测：硬编码 '\x1b' 判 Esc 在 Ghostty 下收不到，面板像卡死。
+const isEsc = (d: string) => matchesKey(d, Key.escape) || matchesKey(d, Key.esc);
+const isEnter = (d: string) => matchesKey(d, Key.enter) || matchesKey(d, Key.return);
+const isUp = (d: string) => matchesKey(d, Key.up);
+const isDown = (d: string) => matchesKey(d, Key.down);
+const isCtrlC = (d: string) => matchesKey(d, Key.ctrl('c'));
 
 export class UnattendedPanel implements Component, Focusable {
 	focused = false;
 
-	private view: 'menu' | 'confirm' = 'menu';
+	private view: 'menu' | 'confirm' | 'detail' = 'menu';
 	private index = 0;
 	private confirmIndex = 0;
 
@@ -72,7 +83,11 @@ export class UnattendedPanel implements Component, Focusable {
 		const w = Math.max(4, width);
 		const c = this.colors;
 		const lines: string[] = [];
-		const add = (line: string) => lines.push(truncateToWidth(line, w));
+		// overlay 模式下面板必须自己填满整行，否则底层文本会从两侧透出来
+		const add = (line: string) => {
+			const cut = truncateToWidth(line, w);
+			lines.push(cut + ' '.repeat(Math.max(0, w - visibleWidth(cut))));
+		};
 		const row = (content: string) => add('  ' + content);
 		const status = this.deps.status();
 
@@ -83,6 +98,12 @@ export class UnattendedPanel implements Component, Focusable {
 		if (this.view === 'confirm') {
 			add('');
 			this.renderConfirm(add, row, status, w);
+		} else if (this.view === 'detail') {
+			add('');
+			const copy = this.infoCopy(status);
+			row(c.cyan(copy.label));
+			add(c.dim(bottomBorder(w)));
+			for (const line of copy.lines) row(c.gray(line));
 		} else {
 			add('');
 			this.renderMenu(row);
@@ -91,14 +112,19 @@ export class UnattendedPanel implements Component, Focusable {
 		}
 
 		add(c.dim(bottomBorder(w)));
-		add(
-			c.dim(
-				this.view === 'confirm'
-					? '  ↑↓ 选择 · Enter 确认 · Esc 返回'
-					: '  ↑↓ 选择 · Enter 继续 · Esc 关闭',
-			),
-		);
+		add(c.dim(`  ${this.hint()}`));
+
+		// §7.3 最小高度填充：menu/confirm/detail 三个视图行数必须**完全相同**。
+		// 行数随视图变化会让 overlay 高度抖动，在 fullscreen（tuiMode 默认）下造成渲染溢出，
+		// UAT 实测表现为整个界面冻结、连 Ctrl+C 都无响应。
+		while (lines.length < PANEL_ROWS) add('');
 		return lines;
+	}
+
+	private hint(): string {
+		if (this.view === 'detail') return 'Esc 返回';
+		if (this.view === 'confirm') return '↑↓ 选择 · Enter 确认 · Esc 返回';
+		return '↑↓ 选择 · Enter 继续 · Esc 关闭';
 	}
 
 	private occupancy(status: ConfirmGateStatus): string {
@@ -119,13 +145,17 @@ export class UnattendedPanel implements Component, Focusable {
 		}
 	}
 
+	private infoCopy(status: ConfirmGateStatus): { label: string; lines: readonly string[] } {
+		const key = this.items()[this.index];
+		if (key === 'scope' && status.mode === 'off') {
+			return { label: '如何开启', lines: statusDetailLines(status) };
+		}
+		return UNATTENDED_ACTIONS[key];
+	}
+
 	private renderInfo(row: (s: string) => void, status: ConfirmGateStatus): void {
 		const c = this.colors;
-		const key = this.items()[this.index];
-		const copy =
-			key === 'scope' && status.mode === 'off'
-				? { label: '如何开启', lines: statusDetailLines(status) }
-				: UNATTENDED_ACTIONS[key];
+		const copy = this.infoCopy(status);
 		row(c.cyan(copy.label));
 		for (const line of copy.lines) row(c.gray(line));
 	}
@@ -137,15 +167,18 @@ export class UnattendedPanel implements Component, Focusable {
 		width: number,
 	): void {
 		const c = this.colors;
-		add(c.red(topBorder('── 确认解除豁免 ', width)));
 		const total = status.owners.reduce((n, o) => n + (status.counts[o] ?? 1), 0);
-		row(c.dim(`将撤销以下占用（合计 ${total} 个计数）：`));
-		for (const owner of status.owners) {
-			row(`  ${ownerLabel(owner)}  x${status.counts[owner] ?? 1}`);
-		}
-		add('');
-		for (const line of UNATTENDED_ACTIONS.disarm.lines) row(c.gray(line));
-		add('');
+		// 高度预算（60x20 视口下必须 ≤ 14 行）：计数进标题、owner 压成一行、说明只留 2 行
+		add(c.red(topBorder(`── 确认解除豁免 · ${total} 个计数 `, width)));
+		row(
+			c.dim(
+				status.owners
+					.map((owner) => `${ownerLabel(owner)} x${status.counts[owner] ?? 1}`)
+					.join(' · '),
+			),
+		);
+		row(c.gray(UNATTENDED_ACTIONS.disarm.lines[0]));
+		row(c.gray(UNATTENDED_ACTIONS.disarm.lines[1]));
 
 		const options = ['确认解除', '取消'];
 		for (let i = 0; i < options.length; i++) {
@@ -155,26 +188,38 @@ export class UnattendedPanel implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		// 逃生通道：Ctrl+C 在任何视图都关面板（终端若把 C-c 送到组件，不能让它「点了没反应」）
+		if (isCtrlC(data)) {
+			this.onClose?.();
+			return;
+		}
+		if (this.view === 'detail') {
+			if (isEsc(data)) {
+				this.view = 'menu';
+				this.onChange?.();
+			}
+			return;
+		}
 		if (this.view === 'confirm') {
 			this.handleConfirmInput(data);
 			return;
 		}
 		const items = this.items();
-		if (data === KEY_UP) {
+		if (isUp(data)) {
 			this.index = (this.index - 1 + items.length) % items.length;
 			this.onChange?.();
 			return;
 		}
-		if (data === KEY_DOWN) {
+		if (isDown(data)) {
 			this.index = (this.index + 1) % items.length;
 			this.onChange?.();
 			return;
 		}
-		if (data === KEY_ESC) {
+		if (isEsc(data)) {
 			this.onClose?.();
 			return;
 		}
-		if (data !== '\r' && data !== '\n') return;
+		if (!isEnter(data)) return;
 
 		const key = items[this.index];
 		if (key === 'disarm') {
@@ -183,25 +228,30 @@ export class UnattendedPanel implements Component, Focusable {
 			this.onChange?.();
 			return;
 		}
+		if (key === 'scope') {
+			// 只读项也必须对 Enter 有反应：no-op 会让面板看起来卡死
+			this.view = 'detail';
+			this.onChange?.();
+			return;
+		}
 		if (key === 'close') {
 			this.onClose?.();
 			return;
 		}
-		// scope：只读项，解释已在信息栏；Enter 无操作
 	}
 
 	private handleConfirmInput(data: string): void {
-		if (data === KEY_ESC) {
+		if (isEsc(data)) {
 			this.view = 'menu';
 			this.onChange?.();
 			return;
 		}
-		if (data === KEY_UP || data === KEY_DOWN) {
+		if (isUp(data) || isDown(data)) {
 			this.confirmIndex = this.confirmIndex === 0 ? 1 : 0;
 			this.onChange?.();
 			return;
 		}
-		if (data !== '\r' && data !== '\n') return;
+		if (!isEnter(data)) return;
 		if (this.confirmIndex === 1) {
 			this.view = 'menu';
 			this.onChange?.();
@@ -215,9 +265,9 @@ export class UnattendedPanel implements Component, Focusable {
 				: '远端豁免当前未生效，无需解除',
 			'info',
 		);
-		this.view = 'menu';
-		this.index = 0;
-		this.onChange?.();
+		// 解除成功后立即关闭：留在面板上焦点会落到只读项（Enter 无反应），
+		// UAT 实测看起来像卡死。notify 文本 + 状态栏消失已足够反馈。
+		this.onClose?.();
 	}
 
 	invalidate(): void {}

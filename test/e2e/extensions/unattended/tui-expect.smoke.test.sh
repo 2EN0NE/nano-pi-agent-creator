@@ -84,7 +84,8 @@ test_it "救援：armed 下面板可打开并解除（不被自身闸门跳过�
   # 这里会直接失败——这正是「armed 后无法救援」的事故形态。
   tui_assert_contains "豁免运维面" "armed 下面板必须能打开（不得被自身闸门跳过）"
   tui_assert_contains "解除豁免" "面板应列出解除动作"
-  tui_assert_contains "licensed-idle" "解除后状态应回到 licensed-idle"
+  # 解除成功后立即关闭面板（不留幽灵面板）：靠 notify 文本与日志确认，而不是面板残留
+  tui_assert_contains "远端豁免已解除" "解除成功应给出结果反馈"
 
   local logs_dir
   logs_dir="$(dirname "$TUI_OUTPUT_FILE")/.pi/logs"

@@ -863,6 +863,12 @@ pi-lab（`extensions/meta/pi-lab/`）是实验框架，不自带实验。消费�
 两条铁律（总高 ≤ 视口、header 不得放动态内容）、观测工具（`PI_TUI_DEBUG` / `PI_DEBUG_REDRAW`）
 与滚动类 e2e 盲区见 [`docs/pi-ext-knowledge/fullrender-and-fullscreen.md`](docs/pi-ext-knowledge/fullrender-and-fullscreen.md)。
 
+**`ctx.ui.custom` 面板另有三铁律**（① 各视图 `render()` 行数恒定 ② 键位一律 `matchesKey`，禁止
+`data === '\x1b'` ③ 入口用主视图，不传 `overlay`）。违反的典型症状是「Enter 能用、Esc 与切换视图失效、
+整屏像卡死」——2026-10 `/unattended` 面板实测事故。细则与代码见
+[`docs/tui-design-principles.md` §7.3.1](docs/tui-design-principles.md)；新增硬编码键比较会被
+`npm run lint:tui` 的 `hardcoded-key-literal` 拦住（存量登记在 `LEGACY_KEY_LITERAL_FILES`）。
+
 ### 14. 内置 bash 工具 timeout 无默认值 + 两条干预路径
 
 `timeout` 参数 **无默认值**；`bash-timeout` 在 `tool_call` 钩子里补默认 300s 兜底。干预内置 bash 只有两条路径、

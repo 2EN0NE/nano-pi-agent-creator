@@ -391,6 +391,36 @@ for (let i = 0; i < padCount; i++) {
 }
 ```
 
+#### 7.3.1 `ctx.ui.custom` 面板三铁律（2026-10 UAT 事故沉淀）
+
+三条都曾在 selector 的 `/unattended` 面板上同时踩中，现象是**整屏冻结、连 Ctrl+C 都没反应**，
+排查顺序也按此表（先高度、再键位、再看入口）：
+
+| 铁律                      | 做法                                                                                | 违反后的现象                                                        |
+| ------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| **① 行数恒定**            | 所有视图（菜单/确认/详情）`render()` 返回**完全相同**行数，不足补空行               | 切换视图时 overlay 高度抖动 → fullscreen 下渲染溢出 → 画面定格      |
+| **② 键位走 `matchesKey`** | `matchesKey(data, Key.escape)`，禁止 `data === '\x1b'`                              | Ghostty（Kitty protocol）发 `\x1b[27u`，硬编码判不到 → Esc 完全失效 |
+| **③ 主视图优先**          | `ctx.ui.custom(factory)` 不传 `overlay`（= 主视图，同 `pi-session-tree.openPanel`） | 浮窗叠在对话上，与本仓库「下半部分主视图」范式不一致                |
+
+```typescript
+// ① 固定高度：常量 + 断言行数一致（vitest）
+export const PANEL_ROWS = 14;
+while (lines.length < PANEL_ROWS) add('');
+
+// ② 键位解析：所有分支统一走 matchesKey
+if (matchesKey(data, Key.escape)) close();
+if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) confirm();
+```
+
+- **① 的验证**：`expect(new Set(各视图行数).size).toBe(1)`，并断言 `≤ 视口高度 - 6`（header/状态栏/输入框）。
+- **② 的门禁**：`scripts/check-tui-compliance.ts` 的 `hardcoded-key-literal` 规则会拦住新增的
+  `data === '\x1b' / '\r' / '\x1b[A' / 'Escape' / 'ArrowUp'` 等比较（存量文件登记在
+  `LEGACY_KEY_LITERAL_FILES`，迁移后删除条目）。
+- **③ 的注意**：主视图不传 overlay 时，**必须**先满足 ①——高度不恒定会把输入 dock 挤出视口，
+  这正是「为了修卡死而误改成浮窗」的由来；正确解法是修高度，不是换浮窗。
+
+> 三条铁律全部来自「`enter` 能用、`Esc` 与切换视图失效」这一组合症状。遇到同类现象先按此表自查。
+
 ### 7.4 公共 TUI 辅助模块（建议参考，非强制）
 
 项目提供 `src/tui/helpers.ts` 供 TUI 面板**参考**，包含：

@@ -33,7 +33,7 @@ function makeFakePi(flags: Record<string, unknown>) {
 }
 
 function makeCtx(mode: string) {
-	const custom = vi.fn(async () => undefined);
+	const custom = vi.fn(async (..._args: unknown[]) => undefined);
 	const notify = vi.fn();
 	const ctx = {
 		hasUI: true,
@@ -66,6 +66,10 @@ describe('/unattended — mode 判据与回退', () => {
 		const { commands, ctx, custom, notify } = await fresh(true, 'tui');
 		await commands.get('unattended')?.('', ctx);
 		expect(custom).toHaveBeenCalledOnce();
+		// 回归锁：必须是主视图（不传 overlay），与 pi-session-tree 一致。
+		// 浮窗（overlay:true）不符合本仓库「优先下半部分主视图」的规范。
+		const options = custom.mock.calls[0][1] as { overlay?: boolean } | undefined;
+		expect(options?.overlay ?? false).toBe(false);
 		expect(notify).not.toHaveBeenCalled();
 	});
 

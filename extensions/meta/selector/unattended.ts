@@ -223,8 +223,7 @@ export const UNATTENDED_ACTIONS = {
 		lines: [
 			'无人应答时，可询问拦截不弹框，按各自声明的默认值处置；未声明的按取消。',
 			'硬拦截（protected-paths / secret-firewall / sandbox）不受影响，直接拒绝。',
-			'不落盘：/reload 与 /new 都不解除，只有进程退出或本面板解除。',
-			'豁免仅限当前工作目录内的文件系统目标；日志见 .pi/logs/unattended_*.log',
+			'不落盘：/reload、/new 都不解除；日志见 .pi/logs/unattended_*.log',
 		],
 	},
 	close: {
@@ -366,6 +365,9 @@ export function initUnattended(pi: ExtensionAPI): void {
 							onChange: () => tui.requestRender(),
 							onClose: () => done(undefined),
 						}),
+					// 不传 overlay（= 主视图），与 pi-session-tree 的 openPanel 一致：
+					// 规范优先「下半部分主视图」而非浮窗（docs/tui-interaction-patterns.md §2）。
+					// 前提是组件高度恒定（PANEL_ROWS 填充），否则会挤压输入 dock。
 				);
 				return;
 			}

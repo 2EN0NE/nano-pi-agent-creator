@@ -13,6 +13,7 @@ import {
 	makeMockTheme,
 	assertWithinWidth,
 } from '../../../src/tui-testing/index.js';
+import { visibleWidth } from '@earendil-works/pi-tui';
 import { UnattendedPanel } from '../../../extensions/meta/selector/unattended-panel';
 import type { ConfirmGateStatus } from '../../../extensions/meta/selector/unattended';
 
@@ -149,7 +150,7 @@ describe('豁免运维面板 — 解除确认', () => {
 		expect(t).toContain('本机手动');
 	});
 
-	it('确认页 Enter：调用 disarmAll 并通知，面板留在原地显示已解除', () => {
+	it('确认页 Enter：调用 disarmAll、通知，并关闭面板（不留幽灵面板）', () => {
 		const h = hub(makeStatus('armed', ['wechat'], { wechat: 1 }));
 		const panel = h.build();
 		panel.handleInput('\r'); // 进确认
@@ -157,8 +158,22 @@ describe('豁免运维面板 — 解除确认', () => {
 
 		expect(h.calls).toContain('disarmAll');
 		expect(h.calls.some((c) => c.startsWith('notify:'))).toBe(true);
-		expect(text(panel)).toContain('licensed-idle');
-		expect(text(panel)).not.toContain('解除豁免');
+		// UAT 实测：若留在面板，焦点落到只读项，Enter 无反应 → 像卡死
+		expect(h.calls).toContain('close');
+	});
+
+	it('只读项 Enter 进详情页、Esc 返回菜单（不得 no-op）', () => {
+		const h = hub(makeStatus('licensed-idle'));
+		const panel = h.build();
+		panel.handleInput('\r');
+		const detail = text(panel);
+		expect(detail).toContain('影响与边界');
+		expect(detail).toContain('硬拦截');
+		expect(detail).toContain('Esc 返回');
+
+		panel.handleInput('\x1b');
+		expect(text(panel)).toContain('↑↓ 选择 · Enter 继续');
+		expect(h.calls).not.toContain('close');
 	});
 
 	it('确认页 Esc：返回菜单且不解除', () => {
@@ -177,4 +192,60 @@ describe('豁免运维面板 — 解除确认', () => {
 		expect(h.calls).toContain('close');
 		expect(h.calls).not.toContain('disarmAll');
 	});
+});
+
+/**
+ * 视口约束（本次 UAT 事故的正式保障）。
+ *
+ * 事故成因：custom 缺省（overlay:false）= 替换主区域，面板一高就把输入 dock 挤出视口，
+ * 表现为「整个 TUI 卡死」。这里把「面板总高必须给 header/状态栏/输入框留出空间」
+ * 变成硬断言——以后往面板里加文案，超限会直接红。
+ */
+const CHROME_ROWS = 6; // header 2 + 状态栏 1 + 输入框 2 + 余量 1
+
+function panelFor(kind: 'armed' | 'idle' | 'off' | 'confirm' | 'detail'): UnattendedPanel {
+	const armed = () =>
+		hub(makeStatus('armed', ['wechat', 'manual'], { wechat: 2, manual: 1 })).build();
+	if (kind === 'armed') return armed();
+	if (kind === 'idle') return hub(makeStatus('licensed-idle')).build();
+	if (kind === 'off') return hub(makeStatus('off')).build();
+	const panel = kind === 'confirm' ? armed() : hub(makeStatus('licensed-idle')).build();
+	panel.handleInput('\r'); // armed → 确认页；idle → 只读详情页
+	return panel;
+}
+
+describe('豁免运维面板 — 视口约束', () => {
+	const viewports: ReadonlyArray<readonly [number, number]> = [
+		[80, 24],
+		[60, 20],
+		[100, 30],
+	];
+	const kinds = ['armed', 'idle', 'off', 'confirm', 'detail'] as const;
+
+	for (const [cols, rows] of viewports) {
+		it(`${cols}x${rows}：所有视图总高 ≤ ${rows - CHROME_ROWS} 行、行宽 ≤ ${cols}`, () => {
+			for (const kind of kinds) {
+				const lines = panelFor(kind).render(cols);
+				expect(lines.length, `${kind} 视图总高`).toBeLessThanOrEqual(rows - CHROME_ROWS);
+				for (const line of lines) {
+					expect(visibleWidth(line), `${kind} 视图行宽`).toBeLessThanOrEqual(cols);
+				}
+			}
+		});
+	}
+
+	// 核心回归锁：行数必须**完全一致**（§7.3）。行数随视图变化会让 overlay 高度抖动，
+	// fullscreen 下渲染溢出 —— UAT 实测就是「整屏冻结、连 Ctrl+C 都没反应」。
+	it('menu / confirm / detail 三视图行数完全一致（§7.3 最小高度填充）', () => {
+		const heights = kinds.map((kind) => ({
+			kind,
+			height: panelFor(kind).render(80).length,
+		}));
+		const distinct = new Set(heights.map((h) => h.height));
+		expect(distinct.size, JSON.stringify(heights)).toBe(1);
+		// 具体值不设断言（改文案时允许调整），只锁「三者必须相等」这个不变量
+	});
+
+	// 注：Ctrl+C 由 pi 在路由到组件前拦截（实测 overlay 打开时按 C-c 组件收不到 \x03），
+	// 因此这里不写「Ctrl+C 关闭」的断言——那会是假保障。退出路径只有 Esc。
 });

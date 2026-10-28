@@ -50,6 +50,24 @@ const EMOJI_RE = /[\p{Extended_Pictographic}\u2713\u2717]/gu;
 // 检测 3：.padEnd / .repeat 调用参数中直接使用 .length（启发式，提示性）
 const LENGTH_ALIGN_RE = /\.(?:padEnd|repeat)\s*\([^)]*\.length\b/g;
 
+// 检测 5：handleInput 里用原始字节字面量判键（data === '\x1b' / '\r' / '\x1b[A' 等）。
+// 根因（实测）：终端按键编码不统一 —— Ghostty 走 Kitty keyboard protocol，Esc 发 `\x1b[27u`；
+// tmux/screen 发 `\x1b`。硬编码比较会让同一个键在部分终端**完全收不到**（现象：面板卡死、Esc 没反应）。
+// 一律用 matchesKey(data, Key.xxx)（docs/tui-design-principles.md §8 按键规则）。
+// 豁免：同一行已有 matchesKey(...) 或 key === '...' 的规范化兜底。
+const HARDCODED_KEY_RE =
+	/\bdata\s*===\s*'(?:\\x1b(?:\[[A-Za-z0-9;~]*)?|\\r|\\n|\\t|\\x03|Escape|Arrow(?:Up|Down|Left|Right))'/g;
+
+// 存量欠账：先登记以阻止**新增**，迁移到 matchesKey 后删除对应条目。
+const LEGACY_KEY_LITERAL_FILES = new Set([
+	'extensions/auto/cloud-sessions/src/index.ts',
+	'extensions/tui/custom-rename/src/ui.ts',
+	'extensions/accuracy/todos/ui/settings.ts',
+	'extensions/meta/pi-session-tree/ui/panel.ts',
+	'extensions/meta/pi-shortcuts/ui/editor.ts',
+	'extensions/tui/files/ui.ts',
+]);
+
 // 检测 4（expect 脚本）：等待循环里只 send/sleep 而不读取 PTY。
 // 根因（实测）：expect 停止读 PTY → pi 的 TUI 写满 PTY 缓冲后**同步阻塞在 write** →
 // 事件循环冻结 → 工具调用不执行、exec 的 close 不再触发、覆盖层不渲染，最终用例超时
@@ -239,6 +257,20 @@ function scanFile(file: string): Finding[] {
 				text: m[0],
 			});
 		}
+		if (!LEGACY_KEY_LITERAL_FILES.has(rel)) {
+			// 同一行已有规范化解析（matchesKey / KeybindingsManager 的 key === '...'）则不算硬编码
+			const hasNormalizedKey = line.includes('matchesKey(') || /\bkey\s*===/.test(line);
+			if (!hasNormalizedKey) {
+				for (const m of line.matchAll(HARDCODED_KEY_RE)) {
+					findings.push({
+						file: rel,
+						line: i + 1,
+						rule: 'hardcoded-key-literal',
+						text: m[0],
+					});
+				}
+			}
+		}
 		// 方角/圆角边框：仅报成对的框（┌┐ 同行顶框、└┘ 同行底框）。
 		// 单独的 └/├（树形 connector，如 '└─ '、'│' 延续）是树结构本体，ADR-0023 豁免。
 		const hasTopCorners = line.includes('\u250c') && line.includes('\u2510');
@@ -288,6 +320,9 @@ function main(): void {
 	console.log('  length-alignment: 对齐用 .length 而非 visibleWidth，宽字符会错位');
 	console.log(
 		'  box-corner: 方角/圆角边框（┌┐└┘╭╮╰╯），纯横线范式禁用（改用 topBorder/bottomBorder）',
+	);
+	console.log(
+		"  hardcoded-key-literal: 用 data === '\\x1b'/\\r 等原始字节判键，改用 matchesKey(data, Key.xxx)（终端编码不统一）",
 	);
 	console.log(
 		'  expect-poll-without-drain: 等待循环只 sleep 不读 PTY → pi 会同步阻塞在 write（循环内调用 drain_pty 20）',
