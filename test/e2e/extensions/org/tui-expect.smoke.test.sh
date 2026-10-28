@@ -384,7 +384,10 @@ EOF
   grep -q 'org:zeta' <<<"$VIS" || FAILED="${FAILED:+$FAILED; }标题未落在所属组织 zeta"
   # ② 所属段在前：必须在**同一行**（org tab 行）里比位置。
   # 不能拿整屏首个 'zeta' 命中——那是标题行 `── org:zeta`，恒在 tab 行之上，断言会永远通过。
-  TAB_LINE="$(grep -E '[⠀-⣿]' <<<"$VIS" | head -1)"
+  # 定位 org tab 行：用**固定字符串**匹配两枚 chip 的同现，不用字符类。
+  # 教训：grep -E '[盲文起-盲文止]' 这类非 ASCII 范围在 GNU grep（Linux/CI）下报
+  # "Invalid collation character"，而 macOS 的 BSD grep 按字节比较能过——本地绿、CI 红。
+  TAB_LINE="$(grep -F '[ zeta ' <<<"$VIS" | grep -F '[ alpha ' | head -1)"
   ZETA_POS=$(grep -bo 'zeta' <<<"$TAB_LINE" | head -1 | cut -d: -f1)
   ALPHA_POS=$(grep -bo 'alpha' <<<"$TAB_LINE" | head -1 | cut -d: -f1)
   if [[ -z "$TAB_LINE" ]] || [[ -z "$ZETA_POS" ]] || [[ -z "$ALPHA_POS" ]]; then
