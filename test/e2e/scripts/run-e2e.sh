@@ -1293,6 +1293,13 @@ run_test_file() {
 		local case_out
 		# 子 shell（命令替换）本就继承 CASE_INDEX / MODULE_DIR / CASE_DIR，无需再赋一遍
 		case_out=$(
+			# 用例体关掉 pipefail（保留 -eu）：`grep … | head -1` 这类**提取式**管道在
+			# GNU grep（Linux/CI）下会因 SIGPIPE 报 `write error: Broken pipe` 并以 2 退出，
+			# pipefail 就把整个用例判死；macOS 的 BSD grep 不报这个错 → 长期「本地绿、CI 红」。
+			# 实证：pi-lab 004 的 CI 日志首行即 `grep: write error: Broken pipe`，
+			# 同批还有 custom-rename / quit / plannotator-tui / tools 的 TUI 用例在 Linux 上红、
+			# 在 macOS 上全绿。断言本身是显式 `grep -q … || FAIL`，不依赖管道整体退出码。
+			set +o pipefail
 			eval "$body" 2>>"$case_log"
 		)
 		local exec_exit=$?
