@@ -129,6 +129,24 @@ ln -sf "$PWD/node_modules/@zenone/pi-config" "$PI_ZENONE/pi-config" 2>/dev/null 
 	ln -sf "$PWD/extensions/meta/pi-config" "$PI_ZENONE/pi-config"
 echo "  linked: $(ls -la "$PI_ZENONE")"
 
+# ── 6.5 预热 fd / rg（必须）──
+# pi 的 tools-manager 优先用**系统二进制**（fd 的系统名含 `fdfind`），缺失时才联网下载到
+# `$HOME/.pi/agent/bin/`。e2e 每个 TUI 用例都用**全新沙箱 HOME**，于是每个用例都要重新下载一遍
+# （CI 日志可见 "fd not found. Downloading..."）：启动被拖慢 5-15s，而 org/ci-watch 的 TUI 用例
+# 靠固定等待就绪 → 面板还没渲染就被判超时（本机 HOME 早就有这两个二进制，所以只红 CI）。
+if ! command -v rg >/dev/null 2>&1 || { ! command -v fd >/dev/null 2>&1 && ! command -v fdfind >/dev/null 2>&1; }; then
+	if command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+		echo "--- Installing fd / ripgrep (pi tools-manager prefers system binaries) ---"
+		sudo apt-get update -qq >/dev/null 2>&1 || true
+		sudo apt-get install -y -qq ripgrep fd-find >/dev/null 2>&1 || true
+		# Debian 系把 fd 装成 fdfind；pi 认得 fdfind，但很多脚本只认 fd → 补一个 fd 入口
+		if ! command -v fd >/dev/null 2>&1 && command -v fdfind >/dev/null 2>&1; then
+			sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd 2>/dev/null || true
+		fi
+		echo "  rg: $(command -v rg || echo MISSING) / fd: $(command -v fd || echo MISSING)"
+	fi
+fi
+
 # ── 7. 清理 ──
 echo ""
 echo "--- Cleaning ---"
