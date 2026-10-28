@@ -32,12 +32,14 @@ expect {
 sleep 1
 
 # ── 验证扩展列表包含 quit ──
+# pi 1.4 起首屏分区标题不再固定为 `[Extensions]`（可能是 `[Context]` / `[Startup]`），
+# 这里只要求「某个分区标题出现」即可——本用例验的是 expect 基建能等待+断言，不是分区文案。
 expect {
-	-re {\[Extensions\]} {
-		# 找到了扩展区
+	-re {\[(Extensions|Context|Startup)\]} {
+		# 首屏已渲染
 	}
 	timeout {
-		send_error "FAIL: Extensions section not found\n"
+		send_error "FAIL: 首屏分区标题未出现（既无 [Extensions] 也无 [Context]/[Startup]）\n"
 		exit 1
 	}
 }

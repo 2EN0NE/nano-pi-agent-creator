@@ -27,10 +27,12 @@ plannotator_visible_text() {
 test_it "expect: outside Herdr → warning, no binary invoked" <<'TEST'
   unset HERDR_ENV HERDR_PANE_ID
 
+  # 不用固定 sleep：CI 首次启动要下载 fd/rg（"Startup is still in progress"），
+  # 2s 内面板还没渲染完 → 断言「告警文本不存在」的假失败。改为等告警文本自己出现。
   tui_expect_test "plannotator-tui" '
     send "/plannotator-tui\r"
-    sleep 2
-  ' 20
+    wait_for {当前不在 Herdr 会话里}
+  ' 30
 
   txt="$TUI_TEST_HOME/visible.txt"
   plannotator_visible_text "$TUI_OUTPUT_FILE" >"$txt"
