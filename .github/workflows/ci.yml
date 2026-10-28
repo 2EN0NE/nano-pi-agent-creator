@@ -9,12 +9,6 @@ on:
 env:
     # 统一 node 版本
     NODE_VERSION: '22'
-    # 统一 npm 大版本。**必须与生成 package-lock.json 的那一版一致**：
-    # 本锁由 npm 11 生成，而 Node 22 自带的 npm 10 会把 `@napi-rs/wasm-runtime` 的
-    # 可选 peer（@emnapi/*，仅 wasm32 绑定用到）判成「lock 缺条目」并拒绝 `npm ci`
-    # （报 `Missing: @emnapi/core@1.11.x from lock file`）。npm 11 对两种锁都宽容，
-    # 所以固定 11 可同时容忍「npm 11 写的锁」与「npm 10 写的锁」。
-    NPM_VERSION: '11'
     CI: true
 
 # ── 通用步骤宏 ──
@@ -32,8 +26,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - run: npm ci
             - name: Check formatting
               run: npm run format:check
@@ -48,8 +40,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - run: npm ci
             - name: TypeScript check
               run: npm run typecheck
@@ -70,8 +60,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - run: npm ci
             - name: ci-watch type check
               run: cd extensions/verification/ci-watch && npx tsc --noEmit
@@ -86,8 +74,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - run: npm ci
             - name: ESLint check
               run: npm run lint
@@ -102,8 +88,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - run: npm ci
             - name: Check TUI compliance (blocking)
               run: npm run lint:tui
@@ -121,8 +105,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - run: npm ci
             - name: Check config anchor rule (blocking)
               run: npm run lint:config:anchor
@@ -169,8 +151,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - run: npm ci
             - name: Setup CI environment
               run: bash scripts/setup-ci.sh
@@ -202,8 +182,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - uses: actions/setup-go@v5
               with:
                   go-version: '1.25.2'
@@ -233,8 +211,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - name: Install project dependencies
               run: npm ci
             - name: Setup CI environment
@@ -295,8 +271,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - name: Install project dependencies
               run: npm ci
             - name: Setup CI environment
@@ -328,8 +302,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - name: Install project dependencies
               run: npm ci
             - name: Setup CI environment
@@ -357,8 +329,6 @@ jobs:
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: npm
-            - name: Pin npm ${{ env.NPM_VERSION }}（锁由 npm 11 生成，npm 10 会误判可选 peer 缺失）
-              run: npm i -g npm@${{ env.NPM_VERSION }}
             - name: Install project dependencies
               run: npm ci
             # pack 要求 $PI_RUNTIME_DIR 是 releases/<版本> 布局（源机由 pi update 生成）。
