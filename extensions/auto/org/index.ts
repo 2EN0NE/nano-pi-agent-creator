@@ -3,7 +3,7 @@
 //       任务/子任务/参与者状态机、交付回传与验收（approve/return）、待办投影（07 基础）、inbox 兜底。
 // 依赖 control（成员侧需 --session-control 收消息）；org 数据全局 ~/.pi/org/<org名>/。
 import { Type } from 'typebox';
-import { appendFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger } from '@zenone/pi-logger';
@@ -1081,44 +1081,24 @@ export default function (pi: ExtensionAPI) {
 - 派发人侧：\`/org cancel <任务号>\`、\`/org reassign <任务号> <子任务号> <agent> [--replace]\`
 - 处理人同意取消：\`/org consent-cancel <任务号>\``;
 
-	// [DEBUG-orgci] 临时插桩（诊断用，事后 grep 本标记整段删除）
-	const dbgci = (m: string): void => {
-		if (process.env.ORG_DEBUG_CI !== '1') return;
-		// 写文件而非 stderr：pi 的 TUI 层会接管 stderr，探针进不了 PTY 捕获。
-		// 该文件由 run-e2e.sh 在用例结束后收进 cases/<NNN>-logs/（进 CI artifact）。
-		try {
-			appendFileSync(
-				process.env.ORG_DEBUG_CI_FILE || '/tmp/orgci-debug.log',
-				`[DEBUG-orgci] pid=${process.pid} cwd=${process.cwd()} ${m}\n`,
-			);
-		} catch {
-			/* 插桩失败不影响业务 */
-		}
-	};
-
 	async function handleOrgCommand(
 		sub: string,
 		rest: string[],
 		ctx: ExtensionCommandContext,
 	): Promise<void> {
-		dbgci(`H1 entered sub=${JSON.stringify(sub)} mode=${ctx.mode} hasUI=${ctx.hasUI}`);
 		const me = await resolveSelf();
-		dbgci(`H2 resolveSelf ok orgs=${me.orgs.length} name=${me.orgs[0]?.member.name ?? '-'}`);
 		switch (sub) {
 			case '': {
 				// 无参数：**tui 模式**才开看板面板；rpc/print/json 一律回退文本帮助（ADR-0070 D10）。
 				// 判据是运行时模式，不是 stdout 是否终端——后者在「终端里跑 print 模式」时仍为真，
 				// 而该模式 uiContext 是 noOp（custom 立刻返回 undefined）→ 面板不开、帮助也不打 = 静默无输出。
-				dbgci(`H3 mode-gate pass=${String(ctx.mode === 'tui')}`);
 				if (ctx.mode === 'tui') {
 					const meName0 = me.orgs[0]?.member.name ?? '';
 					// 所属组织集合（ADR-0070 D1）：成员注册表精确匹配的结果，直接交给看板，
 					// 看板不再自己从名单反推"我的组织"。`resolveSelf` 已在上面算过。
 					const ownOrgs = me.orgs.map((o) => o.org.name);
 					try {
-						dbgci('H5a before ui.custom');
 						await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-							dbgci('H5b board factory invoked');
 							// theme 官方窄类型与板组件的宽松签名（兼容 headless mock）之间显式桥接
 							const boardTheme = theme as {
 								fg: (color: unknown, text: string) => string;
@@ -1155,16 +1135,13 @@ export default function (pi: ExtensionAPI) {
 								ownOrgs,
 							);
 						});
-						dbgci('H5c after ui.custom (returned)');
 					} catch (e) {
-						dbgci(`H4 custom threw: ${e instanceof Error ? e.message : String(e)}`);
 						log.warn('/org 面板关闭或异常', {
 							err: e instanceof Error ? e.message : String(e),
 						});
 					}
 					return;
 				}
-				dbgci('H3b fell through to text HELP (mode != tui)');
 				await respond(HELP);
 				return;
 			}

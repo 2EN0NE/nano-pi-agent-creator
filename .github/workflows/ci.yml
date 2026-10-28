@@ -292,13 +292,15 @@ jobs:
                   name: e2e-test-results-org
                   path: test/results/
 
-    # ── org TUI e2e（非阻塞，TODO P0）──
-    # 与 permission-gate TUI 同类：CI Linux 上 pi-tui 发完终端查询就停住，用例拿不到画面。
-    # 保留为非阻塞，避免趋势丢失；定位后改回阻塞并合并回 e2e-org。
+    # ── org TUI e2e（阻塞）──
+    # **根因（2026-10-28 探针实证，不是 pi-tui 的锅）**：此前 25 条 smoke + 8 条 TUI 塞在同一个
+    # 模块任务里串行执行，TUI 用例排在 smoke 之后，仍在承受前一阶段真实 pi/tmux 进程的余压 →
+    # pi 起得来、`/org` 命令也进了 tui 分支、看板组件被创建（探针 H1→H5c 全通过），但首帧渲染
+    # 迟迟不落地 → 等待超时。拆成独立 job 只跑 8 条 TUI 后，同一份代码 **8/8 全过**。
+    # 结论：别再往「终端能力查询」方向查；保持 org 的 smoke 与 TUI 分 job。
     e2e-org-tui:
-        name: E2E org TUI (non-blocking)
+        name: E2E org TUI
         runs-on: ubuntu-latest
-        continue-on-error: true
         timeout-minutes: 30
         steps:
             - uses: actions/checkout@v4
@@ -313,23 +315,14 @@ jobs:
             - name: Run org TUI e2e
               env:
                   E2E_POOL_SIZE: 2
-                  E2E_BUDGET_STRICT: '0'
+                  E2E_BUDGET_STRICT: '1'
+                  E2E_ENV_SENTINEL: 'strict'
               run: bash test/e2e/scripts/run-e2e.sh --ext org --tui
-            - name: Warn on org TUI quarantine (TODO P0)
-              if: always()
-              run: |
-                  echo "::warning::org TUI 在 CI Linux 上卡 pi-tui 终端查询（TODO P0），当前非阻塞"
             - name: Upload test results
               if: always()
               uses: actions/upload-artifact@v4
               with:
                   name: e2e-test-results-org-tui
-                  path: test/results/
-            - name: Upload test results
-              if: always()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: e2e-test-results-org
                   path: test/results/
 
     # ── permission-gate smoke e2e（阻塞）──
