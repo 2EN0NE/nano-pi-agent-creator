@@ -12,7 +12,16 @@
 | project | `<cwd>/.pi/extensions-data/preset/config.json`   | 文件                            |
 | user    | `~/.pi/agent/extensions-data/preset/config.json` | 文件                            |
 
-无内置默认 preset（ADR-0032）——没有 config.json 时 preset 列表为空。
+没有 config.json 时 preset 列表为空——**但内置默认 preset 例外**：`plan` / `implement` / `raw`
+三个默认项由代码内置（`DEFAULT_PRESETS`），文件缺失时**只在内存里兜底**，**不落盘**。
+
+> **契约变更（2026-10-28）**：此前首次启动会在 `session_start` 里把默认项写成用户级
+> `config.json`（「读取即写入」副作用）。后果是任何跑 pi 的进程（含 e2e）都会在真实
+> `$HOME/.pi/agent/extensions-data/preset/` 留下文件，CI 的严格环境哨兵因此每次判红
+> （`+ ~/.pi/agent/extensions-data/preset/config.json`）——`pi-home-guard` 只重定向 pi 内核
+> 目录，`extensions-data` 走 `os.homedir()` 不在覆盖范围（ADR-0045 D6 已知盲区）。
+> 现在：读取不产生写入；首次**保存**某个 preset 时才落盘，且以 `DEFAULT_PRESETS` 为基底，
+> 不会丢掉其它内置项。改动这段请连带跑 `test/vitest/extensions/preset-usage.test.ts`。
 
 ## tools 字段三态（preset overlay，ADR-0049）
 
