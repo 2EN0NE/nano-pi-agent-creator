@@ -298,6 +298,10 @@ tui_run_pi_test() {
 	local timeout_seconds="${3:-$([[ "${CI:-false}" == "true" ]] && echo 8 || echo 15)}"
 
 	# CI 模式检测：CI=true 时自动注入 mock-llm
+	# [DEBUG-orgci] 临时诊断开关（诊断完成后 grep 本标记删除）：让 org 把 /org 命令的
+	# 分支决策写 stderr，随 PTY 输出落进 cases/<NNN>-tui-output.log → 进 CI artifact。
+	export ORG_DEBUG_CI=1
+
 	local PI_CI_MODE=${CI:-false}
 
 	local slug="tui-test-$$-$RANDOM"
@@ -551,6 +555,8 @@ tui_expect_test() {
 	local preset_home_dir="${6:-}"
 	local pi_args="${7:-}"
 
+	# [DEBUG-orgci] 临时诊断开关（诊断完成后 grep 本标记删除）
+	export ORG_DEBUG_CI=1
 	local PI_CI_MODE=${CI:-false}
 	local slug="tui-exp-$$-$RANDOM"
 	local test_home="${TUI_SANDBOX_ROOT:-$ROOT_DIR/.pi/tmp}/$slug"

@@ -1304,6 +1304,13 @@ run_test_file() {
 		)
 		local exec_exit=$?
 		set -e
+		# [DEBUG-orgci] 临时诊断（事后 grep 本标记删除）：收集 org 探针写的决策日志到用例目录，
+		# 随 artifact 上传——本机 macOS 不复现该 bug，只能在 CI 上读这些值。
+		if [[ -f /tmp/orgci-debug.log ]]; then
+			mkdir -p "$CASE_DIR/${padded}-logs"
+			cp /tmp/orgci-debug.log "$CASE_DIR/${padded}-logs/orgci-debug.log" 2>/dev/null || true
+			rm -f /tmp/orgci-debug.log
+		fi
 		local case_elapsed=$(($(date +%s) - case_start_sec))
 		printf '%s\n' "$case_out" >>"$case_log"
 		[[ -n "$case_out" ]] && printf '%s\n' "$case_out"
