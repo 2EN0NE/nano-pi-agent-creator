@@ -58,3 +58,44 @@ test_it "未 armed: /new 仍弹确认框（反向保护）" <<'TEST'
 
   tui_cleanup
 TEST
+
+test_it "救援：armed 下面板可打开并解除（不被自身闸门跳过）" <<'TEST'
+  tui_expect_test "$EXT_LIST" '
+    proc step_begin {id name} { puts "STEP_BEGIN $id $name" }
+    proc step_ok {id name} { puts "STEP_OK $id $name" }
+
+    send "/unattended arm\r"
+    sleep 3
+
+    step_begin rescue-panel "面板打开"
+    send "/unattended\r"
+    expect -re "豁免运维面"
+    step_ok rescue-panel "面板打开"
+
+    step_begin rescue-disarm "确认解除"
+    send "\r"
+    expect -re "确认解除豁免"
+    send "\r"
+    sleep 2
+    step_ok rescue-disarm "确认解除"
+  ' 60 80 "" "" "$FLAG"
+
+  # 回归锁（ADR-0068 D8 约束 1）：armed 时若误走 showSelect，面板会被自己的闸门跳过，
+  # 这里会直接失败——这正是「armed 后无法救援」的事故形态。
+  tui_assert_contains "豁免运维面" "armed 下面板必须能打开（不得被自身闸门跳过）"
+  tui_assert_contains "解除豁免" "面板应列出解除动作"
+  tui_assert_contains "licensed-idle" "解除后状态应回到 licensed-idle"
+
+  local logs_dir
+  logs_dir="$(dirname "$TUI_OUTPUT_FILE")/.pi/logs"
+  if grep -q "disarmAll" "$logs_dir"/unattended_*.log 2>/dev/null; then
+    echo "PASS: 日志记录了 disarmAll"
+  else
+    echo "FAIL: 未找到 disarmAll 日志（$logs_dir）"
+    tail -20 "$logs_dir"/unattended_*.log 2>/dev/null
+    tui_cleanup
+    exit 1
+  fi
+
+  tui_cleanup
+TEST

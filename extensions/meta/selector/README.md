@@ -64,11 +64,12 @@ interface ConfirmGateApi {
 	hasLicense(): boolean;
 	isArmed(): boolean;
 	owners(): string[];
-	arm(owner: string): (() => void) | undefined; // 无许可 → undefined（fail-soft）
+	arm(owner: string, opts?: { label?: string }): (() => void) | undefined; // 无许可 → undefined（fail-soft）
 	status(): {
 		license: boolean;
 		armed: boolean;
 		owners: string[];
+		counts: Record<string, number>;
 		mode: 'off' | 'licensed-idle' | 'armed';
 	};
 }
@@ -84,7 +85,39 @@ interface ConfirmGateApi {
 **`arm()` 是引用计数，按 owner 分别计**：同一通道重复 `arm('wechat')`（重连而旧连接未及 `disarm()`）
 各自持有凭据，`arm()` 返回的解除函数只释放自己那一次（可重复调用，幂等）；因此不会因为先断开的连接
 一次 `disarm()` 就把仍在连接中的通道打回「弹框等应答」。`disarm(owner)` 释放一次；`/unattended disarm`
-直接清空**所有** owner（含通道），是通道崩溃后人工恢复确认的唯一入口。
+直接清空**所有** owner（含通道），是通道崩溃后人工恢复确认的入口（另一个是 `/unattended` 面板的「解除豁免」）。
+
+## 豁免运维面（`/unattended` 面板）
+
+`/unattended` 无参 → 终端面板：**看清状态 + 救援解除**。它不提供 `arm`——开启路径只有启动 flag +
+通道 `arm()`；`/unattended arm` 保留给 e2e 与脚本（没有生产场景），且**幂等**——先释放 `manual`
+的既有计数再占用一次，重复执行不会在面板里显示「本机手动 x2」。
+
+```text
+── 豁免运维面 / unattended ──────────────────────
+  状态  armed · 许可已授予
+  占用  微信桥 x2 · 本机手动 x1
+
+  > 解除豁免
+    影响与边界
+    关闭
+  ──────────────────────────────────────────────
+  解除豁免
+  撤销全部占用（含通道残留），立即恢复人工确认。
+  通道仍连接时，其下次 arm() 会重新生效。
+  ──────────────────────────────────────────────
+  ↑↓ 选择 · Enter 继续 · Esc 关闭
+```
+
+- 解释只在**底部信息栏**显示当前选中项，不首屏全铺。
+- `解除豁免` → 二次确认（列出将撤销的 owner 与计数）→ `disarmAll()`；非 armed 时不出现该项。
+- 非 TUI（`rpc` / `print` / `json`）：没有面板，输出多行文本，**首行保留旧单行格式**
+  （`远端豁免：<mode>（license=…，owners=…）`），外部 grep 不破。
+- **实现铁律**（ADR-0068 D8）：面板**不得**经 `showSelect`——armed 时 selector 的闸门会把它直接跳过，
+  恰好在最需要救援时打不开；判据用 `ctx.mode === 'tui'`，不是 `ctx.hasUI`（RPC 下为 true 但 `custom` 是空实现）。
+
+占用者显示名：`arm(owner, { label })` 可传中文名；不传则用内置映射（`manual` → 本机手动、
+`e2e-channel` → 测试通道），仍未登记的原样显示并括注。**id 是仲裁键**（计数 / 日志 / 接口），label 只用于展示。
 
 ## 对话框状态通告（既有接口）
 

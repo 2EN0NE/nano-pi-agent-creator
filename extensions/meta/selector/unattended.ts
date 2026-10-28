@@ -25,6 +25,8 @@ export interface ConfirmGateStatus {
 	license: boolean;
 	armed: boolean;
 	owners: string[];
+	/** owner → 占用次数（确认页要显示「x2」这类计数；与 owners 同源） */
+	counts: Record<string, number>;
 	mode: UnattendedMode;
 }
 
@@ -34,7 +36,7 @@ export interface ConfirmGateApi {
 	isArmed(): boolean;
 	owners(): string[];
 	/** 引用计数占用；无许可时返回 `undefined`（fail-soft，不抛错） */
-	arm(owner: string): (() => void) | undefined;
+	arm(owner: string, opts?: ArmOptions): (() => void) | undefined;
 	status(): ConfirmGateStatus;
 }
 
@@ -48,6 +50,11 @@ interface GateState {
 	 * 远端操作重新挂起在 TUI 上——而这正是本特性要消灭的故障。
 	 */
 	owners: Map<string, number>;
+	/**
+	 * 通道自带的中文展示名（ADR-0068 D8）。**id 才是仲裁键**——引用计数、日志、接口都用 id；
+	 * 这里只影响界面显示，缺省时按内置映射或原样 id 兜底。
+	 */
+	labels: Map<string, string>;
 	/** 最近一次 session_start 的 ctx，仅用于刷状态栏 */
 	ctx?: ExtensionContext;
 	/** 注册 flag 的 pi 实例：`arm()` 时会回读许可（消除 session_start 处理器的加载顺序依赖） */
@@ -64,7 +71,11 @@ const STATE_KEY = '__piUnattendedState';
 function gateState(): GateState {
 	// SAFETY: 该 globalThis 槽位由本模块唯一读写，形状由 GateState 约束；跨模块实例共享是有意为之
 	const holder = globalThis as unknown as Record<string, GateState | undefined>;
-	holder[STATE_KEY] ??= { license: false, owners: new Map<string, number>() };
+	holder[STATE_KEY] ??= {
+		license: false,
+		owners: new Map<string, number>(),
+		labels: new Map<string, string>(),
+	};
 	return holder[STATE_KEY] as GateState;
 }
 
@@ -105,13 +116,30 @@ function refreshLicense(s: GateState): boolean {
 	return s.license;
 }
 
+/** 占用者 id → 中文展示名。id 是仲裁键（引用计数/日志/接口），这里只用于界面。 */
+const OWNER_LABELS: Record<string, string> = {
+	manual: '本机手动',
+	'e2e-channel': '测试通道',
+};
+
+/** 占用者显示名：显式 label > 内置映射 > 原样 id（括注未登记，绝不隐藏） */
+export function ownerLabel(owner: string): string {
+	return gateState().labels.get(owner) ?? OWNER_LABELS[owner] ?? `${owner}（未登记）`;
+}
+
+export interface ArmOptions {
+	/** 界面展示名（仅用于豁免运维面板）。缺省走内置映射或原样 id */
+	label?: string;
+}
+
 /** 占用豁免（引用计数）。无许可 → `undefined`。返回幂等的解除函数。 */
-export function arm(owner: string): (() => void) | undefined {
+export function arm(owner: string, opts?: ArmOptions): (() => void) | undefined {
 	const s = gateState();
 	if (!refreshLicense(s)) {
 		log.warn('arm(%s) 被拒绝：未授权（启动命令未带 --%s）', owner, UNATTENDED_FLAG);
 		return undefined;
 	}
+	if (opts?.label) s.labels.set(owner, opts.label);
 	const before = currentMode();
 	s.owners.set(owner, (s.owners.get(owner) ?? 0) + 1);
 	log.info('arm(owner=%s) mode=%s→%s', owner, before, currentMode());
@@ -140,8 +168,9 @@ export function disarm(owner: string): void {
 /**
  * 释放**所有**占用（含通道），返回被清掉的 owner 列表。
  *
- * 这是人工恢复确认的唯一入口：通道崩溃未及 `disarm()` 时，逐个 owner 撤一次仍可能
- * 残留计数（同一 owner 多次 `arm()`），所以这里直接清空。
+ * 人工恢复确认的入口之一（另一个是 `/unattended` 面板的「解除豁免」）：通道崩溃未及
+ * `disarm()` 时，逐个 owner 撤一次仍可能残留计数（同一 owner 多次 `arm()`），
+ * 所以这里直接清空。
  */
 function disarmAll(): string[] {
 	const s = gateState();
@@ -166,14 +195,82 @@ export function unattendedStatus(): ConfirmGateStatus {
 		license: refreshLicense(s),
 		armed: isArmed(),
 		owners: [...s.owners.keys()],
+		counts: Object.fromEntries(s.owners),
 		mode: currentMode(),
 	};
 }
 
+/**
+ * 面板 / 非 TUI 文本共用的动作说明（ADR-0068 D8 约束 3：文案单一来源）。
+ * 每项 `lines` 是 2–4 行短句，直接进底部信息栏，不首屏全铺。
+ */
+export interface UnattendedActionCopy {
+	label: string;
+	lines: string[];
+}
+
+export const UNATTENDED_ACTIONS = {
+	disarm: {
+		label: '解除豁免',
+		lines: [
+			'撤销全部占用（含通道残留），立即恢复人工确认。',
+			'通道仍连接时，其下次 arm() 会重新生效。',
+			'已跳过的动作不会补弹（不可逆），只能查日志。',
+		],
+	},
+	scope: {
+		label: '影响与边界',
+		lines: [
+			'无人应答时，可询问拦截不弹框，按各自声明的默认值处置；未声明的按取消。',
+			'硬拦截（protected-paths / secret-firewall / sandbox）不受影响，直接拒绝。',
+			'不落盘：/reload 与 /new 都不解除，只有进程退出或本面板解除。',
+			'豁免仅限当前工作目录内的文件系统目标；日志见 .pi/logs/unattended_*.log',
+		],
+	},
+	close: {
+		label: '关闭',
+		lines: ['只关闭本面板，不改任何状态。等效按 Esc。'],
+	},
+} as const satisfies Record<string, UnattendedActionCopy>;
+
+/** 非 TUI 输出首行：与旧版逐字一致，外部 grep 不受影响 */
+export function statusHeadline(s: ConfirmGateStatus): string {
+	return `远端豁免：${s.mode}（license=${s.license}，owners=${s.owners.join(',') || '(none)'}）`;
+}
+
+/** 非 TUI 输出追加行：说明影响面与生命周期（面板里同一份文案） */
+export function statusDetailLines(s: ConfirmGateStatus): string[] {
+	if (s.mode === 'off') {
+		return [
+			`未授权：启动命令需加 --${UNATTENDED_FLAG}（先同步扩展再改启动命令）。`,
+			...UNATTENDED_ACTIONS.scope.lines,
+		];
+	}
+	return [...UNATTENDED_ACTIONS.scope.lines];
+}
+
+/** 非 TUI 完整状态文本：首行保留旧单行格式，后面追加影响面说明 */
+function formatStatusText(): string {
+	const s = unattendedStatus();
+	return [statusHeadline(s), ...statusDetailLines(s)].join('\n');
+}
+
 function refreshStatus(): void {
-	const ctx = gateState().ctx;
-	if (!ctx?.hasUI) return;
-	ctx.ui.setStatus(UNATTENDED_STATUS_KEY, isArmed() ? '| unattended' : undefined);
+	const s = gateState();
+	try {
+		// `hasUI` 判定也必须进 try：pi 1.4 的 invalidate 会让旧 ctx 的属性访问本身就可能抛，
+		// 放在 try 外就漏掉了本次要修的场景（arm() 把状态栏刷新失败当成 arm 失败）。
+		const ctx = s.ctx;
+		if (!ctx?.hasUI) return;
+		ctx.ui.setStatus(UNATTENDED_STATUS_KEY, isArmed() ? '| unattended' : undefined);
+	} catch (err) {
+		// 会话替换后旧 ctx 立即失效（pi 1.4 起 `AgentSession.dispose()` 会 invalidate runner）。
+		// 通道的 `session_start` 可能早于本扩展的（handler 顺序不定），此时 `arm()` 会拿着旧 ctx
+		// 刷新状态——若让异常冒泡，通道会把「arm 成功」误判成连接失败。丢弃缓存，等下个 session_start 重绑。
+		// 留痕而不能只吞掉：其它原因导致的 setStatus 失败同样会静默丢弃 ctx（状态栏停更到下次会话）。
+		log.warn('refreshStatus 失败，丢弃缓存的 ctx：%s', String(err));
+		s.ctx = undefined;
+	}
 }
 
 /** 跳过一个对话框时留痕：采用了声明式默认值（warn 级：跳过人工确认属需事后回看的事件） */
@@ -233,24 +330,74 @@ export function initUnattended(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand('unattended', {
-		description: '远端豁免模式：status | arm | disarm',
+		description: '远端豁免模式：无参打开运维面板；status | arm | disarm',
 		handler: async (args, ctx) => {
 			const sub = args.trim().split(/\s+/)[0] ?? '';
+			// 判据必须是 mode，不是 hasUI：RPC 下 hasUI 为 true，但 `ui.custom` 是空实现
+			// （ADR-0068 D8 约束 2）。
+			const isTui = ctx.mode === 'tui';
+
+			if (sub === '') {
+				if (!isTui) {
+					ctx.ui.notify(formatStatusText(), 'info');
+					return;
+				}
+				// 直调 custom，**不经 showSelect**：armed 时 selector 的闸门会把 showSelect
+				// 直接跳过（未声明 unattendedDefault → 取消），恰好在最需要救援时打不开。
+				const { UnattendedPanel } = await import('./unattended-panel.js');
+				await ctx.ui.custom<undefined>(
+					(tui, theme, _kb, done) =>
+						new UnattendedPanel({
+							theme,
+							deps: {
+								status: unattendedStatus,
+								disarmAll,
+								// 面板寿命可能跨会话替换：pi 1.4 起旧 ctx 被 invalidate 后任何访问都抛
+								//（同 refreshStatus 的成因）。覆盖层通常已随会话销毁，这里兜底留痕，
+								// 不把异常抛进输入处理链——此时 disarmAll 已生效，状态是对的。
+								notify: (message, level) => {
+									try {
+										ctx.ui.notify(message, level);
+									} catch (err) {
+										log.warn('面板通知失败（ctx 可能已失效）：%s', String(err));
+									}
+								},
+							},
+							onChange: () => tui.requestRender(),
+							onClose: () => done(undefined),
+						}),
+				);
+				return;
+			}
+
 			if (sub === 'arm') {
-				const disarmFn = arm('manual');
-				if (!disarmFn) {
+				// 无许可时纯只读：不能让下面的幂等清理改动任何计数
+				if (!hasLicense()) {
 					ctx.ui.notify(
 						`未授权：启动命令需加 --${UNATTENDED_FLAG}（先同步扩展再改启动命令）`,
 						'warning',
 					);
 					return;
 				}
-				ctx.ui.notify('远端豁免已生效（owner=manual）', 'info');
+				// 幂等：先释放 manual 的既有计数（重复 `/unattended arm`、或 `/reload` 前的遗留），
+				// 否则面板与确认页会显示「本机手动 x2」「合计 N 个计数」，读起来像有多个占用者。
+				for (let left = unattendedStatus().counts['manual'] ?? 0; left > 0; left--) {
+					disarm('manual');
+				}
+				arm('manual');
+				ctx.ui.notify(
+					isTui
+						? '远端豁免已生效（owner=manual）· 输入 /unattended 查看详情'
+						: '远端豁免已生效（owner=manual）',
+					'info',
+				);
 				return;
 			}
+
 			if (sub === 'disarm') {
 				// 清**所有** owner，不只 manual：通道（如 wechat）崩溃未及 disarm 时，
-				// 只撤 manual 会「提示已解除但实际仍 armed」——而这是唯一能手动恢复确认的入口。
+				// 只撤 manual 会「提示已解除但实际仍 armed」——这是手动恢复确认的入口之一
+				//（另一处是 `/unattended` 面板的「解除豁免」）。
 				const cleared = disarmAll();
 				ctx.ui.notify(
 					cleared.length > 0
@@ -260,13 +407,16 @@ export function initUnattended(pi: ExtensionAPI): void {
 				);
 				return;
 			}
-			if (sub !== '' && sub !== 'status') {
-				ctx.ui.notify('用法：/unattended status | arm | disarm', 'warning');
+
+			if (sub !== 'status') {
+				ctx.ui.notify('用法：/unattended（运维面板）| status | arm | disarm', 'warning');
 				return;
 			}
-			const s = unattendedStatus();
+
 			ctx.ui.notify(
-				`远端豁免：${s.mode}（license=${s.license}，owners=${s.owners.join(',') || '(none)'}）`,
+				isTui
+					? `${statusHeadline(unattendedStatus())} · 输入 /unattended 查看详情`
+					: formatStatusText(),
 				'info',
 			);
 		},

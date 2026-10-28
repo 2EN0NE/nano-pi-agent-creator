@@ -688,6 +688,10 @@ describe('MyPanel TUI', () => {
     - **B 类 = 命令 / 面板主动打开的对话框**：**仍用 `ctx.hasUI`，不做改造**——它们本来就要求人工显式触发，
       远端触发时挂起属已记录的残余风险；不要为了「统一口径」去逐个改造，也不要往 B 类里加豁免判断。
       判断不了属于哪一类时按 B 类处理，并在 PR 里说明理由，不要自行扩大改造范围。
+      **例外（判据，不是豁免）**：B 类要开**终端专用组件**（`ctx.ui.custom`）时，判据必须用
+      `ctx.mode === 'tui'`，**不是** `ctx.hasUI`——RPC 下 `hasUI` 为 true 但 `custom` 是空实现
+      （`dist` 的 RPC `createExtensionUIContext` 里 `async custom(){}`），面板会静默拿不到任何东西；
+      非 tui 走文本回退（`notify`）。闸门行为不变，这不是给 B 类加豁免。实例见 ADR-0068 D8。
 - 新增弹框时：允许「无人在场时自动放行」就声明 `unattendedDefault`（`showSelect` / `showConfirm`），
   不允许就不声明（fail-closed → 按取消）。默认值必须是该对话框里真实存在的选项值。
 - `--unattended-confirm`（许可）与 `arm(owner)`（生效，引用计数）由 `@zenone/pi-selector` **唯一注册与维护**；

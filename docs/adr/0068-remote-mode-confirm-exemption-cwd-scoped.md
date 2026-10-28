@@ -1,6 +1,6 @@
 # ADR-0068: 远端模式的确认豁免（`--unattended-confirm`，cwd 限定）
 
-- 状态：**已接受**（2026-10-26 grilling 收敛；按 D1–D7 实施）
+- 状态：**已接受**（2026-10-26 grilling 收敛；2026-10-28 增补 D8；按 D1–D8 实施）
 - 相关组件：`extensions/meta/selector`（`showSelect`/`showConfirm`，兼承载 flag 与 `__confirmGateApi`）、
   `extensions/security/permission-gate`（判定 + 确认树 + `notes`）、`extensions/security/confirm-destructive`、
   `extensions/security/dirty-repo-guard`、`extensions/auto/cloud-sessions`、`extensions/context/goal`、
@@ -9,7 +9,7 @@
 - 延伸：**修订** ADR-0051 `D6`（其原结论为「不引入确认超时/无人值守降级」「不把无人值守抽象成通用机制」，
   且其残余风险 3 断言「死锁面只收敛在 permission-gate 一处」——本 ADR 实测证伪）；承接 ADR-0028（通道无关
   外部确认）、ADR-0025（危险分级）、ADR-0030（阻断确认树）、ADR-0038（pi-rewind 覆盖边界）
-- 术语：**远端豁免模式** / **可询问拦截** / **硬拦截** / **在场判定** / **声明式默认**（见 `CONTEXT.md`）
+- 术语：**远端豁免模式** / **可询问拦截** / **硬拦截** / **在场判定** / **声明式默认** / **豁免运维面** / **占用者显示名**（见 `CONTEXT.md`）
 
 ## 背景
 
@@ -130,7 +130,8 @@ interface ConfirmGateApi {
 1. 首次配置：把 `--unattended-confirm` 加进常驻启动命令（tmux 启动行 / org 成员 `launchArgs`）。
    **先同步扩展再改启动命令**——flag 未注册时 pi 以 `Unknown option` 直接退出（ADR-0051 `D8` 实测）。
 2. 日常：无需动作；状态栏 `| unattended` = 生效中（`licensed-idle` 不显示）。
-3. 临时恢复确认：让通道 `disarm()`，或停用桥。
+3. 临时恢复确认：`/unattended` 面板 →「解除豁免」（或 `/unattended disarm`；两者都清**全部** owner）。
+   通道仍连着时同时停用桥，否则其下次 `arm()` 会把模式重新点亮。
 4. 排障：`/permission-gate` 历史 tab 查 `allowed-unattended`；日志搜 `arm` / `disarm` /
    `allowed-unattended` / `skip-with-default`。
 
@@ -212,6 +213,27 @@ const isAttended = (ctx: ExtensionContext) => ctx.hasUI && !isArmed();
 理由：`#6`/`#7`/`#8` 由 **agent 自主调用工具或 `agent_end` 事件**触发，用户无法提前预判；`#4`/`#5`
 由 `/resume` 触发。漏任一处，微信日常对话中都会「永久挂起」；而这些处已有经测试的降级路径，点亮它近乎零成本。
 
+### D8 豁免运维面：`/unattended` 面板只做「看清 + 救援」，且必须绕开自身闸门
+
+**形态**：`/unattended` 无参 → 终端面板（`ctx.ui.custom`）。一级三项，解释放**底部信息栏随选中动态显示**（不首屏全铺）：
+
+- `解除豁免` —— armed 时默认选中（救援优先）；Enter 进二级确认，动态列出将被撤销的 owner 与计数
+- `影响与边界` —— 只读：哪些拦截会不弹、硬拦截为何不受影响、`/reload` 与 `/new` 不解除、日志位置（`off` 时该行标题显示为「如何开启」）
+- `关闭` —— 等效 Esc，不改任何状态
+
+**不做的事**：面板不提供 `arm`。开启路径只有两条（启动 flag + 通道 `arm()`）；面板里再放一个手动 `arm` 只会诱导误触，且它本身没有生产场景。`/unattended arm` 命令保留给 e2e 与脚本。
+
+**四条硬约束**（每条都有回归成本，改实现时不得绕过）：
+
+1. **绕开自身闸门**：面板**不得**经 `showSelect` 实现。armed 时 `showSelect` 按 D5 直接跳过（未声明 `unattendedDefault` → 取消），会让「armed 后想解除」这条唯一救援路径在打开瞬间消失。
+2. **判据是 `ctx.mode === 'tui'`，不是 `ctx.hasUI`**：RPC 下 `hasUI` 为 true 但 `custom` 是空实现（`dist` 的 RPC `createExtensionUIContext` 里 `async custom(){}`），面板拿不到任何东西。RPC / print / json 退化为多行文本，**首行保留现有单行格式**（外部脚本 grep 不破）。
+3. **文案单一来源**：面板信息栏、二级确认页、非 TUI 多行文本共用同一份动作说明常量——否则必然漂移成「面板解释了、命令没解释」。
+4. **状态实时读**：每次 render 读 `unattendedStatus()`，不缓存打开时的快照。disarm 的反馈（状态栏消失、占用清空）必须当场可见；面板开着时通道也可能新 `arm`。
+
+**中文映射**：`OWNER_LABELS` 内置表（`manual` → 本机手动、`e2e-channel` → 测试通道）+ `arm(owner, { label })` 可选覆盖 + 未登记原样显示并括注。id 是仲裁键（引用计数 / 日志 / 接口），label 只用于展示。第二参数是可选的，现有调用点不改也照常运行。
+
+**解除语义不变**：面板的「解除豁免」就是 `disarmAll()`——撤销**全部** owner 计数（含通道崩溃残留），不新增「只撤销我这一份」。救援场景下异常往往正是别人开的；确认页用动态列表与「通道仍连接时其下次 `arm()` 会重新生效」这句话补上知情。
+
 ## 后果
 
 - 新增术语：**可询问拦截**（危险分级、切换/分叉确认、工具内提问 → 受远端模式影响）与
@@ -232,6 +254,10 @@ const isAttended = (ctx: ExtensionContext) => ctx.hasUI && !isArmed();
   `permission-gate/notes.ts`，确认树（给人看）与 block reason（给模型看）共用，避免措辞漂移。
 - **明示残余风险**：B 类命令一旦被加入桥侧白名单，远端触发时仍会挂起（有日志可查，可随时从白名单移除）。
 - 桥侧仍需处理 `newSession()` 返回的 `{cancelled}`。
+- 运维面（D8）的代价：面板不提供 `arm`，**只能靠通道或 `/unattended arm` 开启**；RPC / print 下没有面板，
+  只能读多行文本。换取的是「日常 UI 里没有能一键开豁免的按钮」。
+- 面板绕开 `showSelect` 是刻意的例外，不构成「B 类命令可以不走 selector 闸门」的通例——它管理的就是闸门本身，
+  其余 B 类命令仍按 ADR 使用 selector。
 
 ## 验证
 
@@ -257,6 +283,10 @@ const isAttended = (ctx: ExtensionContext) => ctx.hasUI && !isArmed();
 - `arm`/`disarm` 引用计数：两个 owner 时 disarm 一个仍 armed；**同一 owner 重复 `arm()` 各自计数**
   （`arm()` 返回的解除函数只释放自己那一次、可重复调用）；`/unattended disarm` 直接清空全部占用；
   无许可时 `arm()` 返回 `undefined`。
+- 豁免运维面（D8，headless snapshot）：`armed` / `licensed-idle` / `off` 三态在 80 与 60 列下均不超宽；
+  `↑↓` 切换选项时**只有底部信息栏变化**、状态区不动；`armed` 时默认选中「解除豁免」且该行存在，
+  非 `armed` 时该行不出现；确认页列出实际 owner 计数并随 `arm()` 次数变化。
+- `OWNER_LABELS` 解析：显式 label > 内置表 > 原样 id + 括注；`arm()` 不带第二参数时行为与旧版一致。
 
 #### e2e（真实 pi + mock-llm，≤300s/插件，仅 mock LLM）
 
@@ -264,6 +294,8 @@ const isAttended = (ctx: ExtensionContext) => ctx.hasUI && !isArmed();
   permission-gate 用 `helpers/arm-channel.ts` 的 `arm('e2e-channel')`）。
 - 正向：`/new` → 会话已替换、TUI 输出**无** `Clear session` 确认框、日志有 `skip-with-default`
   与状态栏 `| unattended`。
+- 面板救援（D8 约束 1 的回归锁）：`/unattended arm` → `/unattended` **面板必须真的打开**（armed 时若误走
+  `showSelect` 会被自己跳过）→ 选中「解除豁免」→ 确认 → 状态栏 `| unattended` 消失 + 日志出现 `disarm`。
 - 反向：未带 flag / 未 arm 时 `/new` → 仍出现 `Clear session` 确认框（TUI 用例）。
 - permission-gate：`rm -rf .scratch/tmp` → 命令真的执行 + 审计 `decision=allowed-unattended`
   （保留 tier/reasons）；`rm -rf /tmp/<cwd 外>` → 目标仍在（拒绝真的生效）+ 审计

@@ -285,3 +285,43 @@ describe('showSelect / showConfirm — armed 跳过语义', () => {
 		expect(custom).not.toHaveBeenCalled();
 	});
 });
+
+describe('unattended — 会话替换后的旧 ctx（pi 1.4 回归）', () => {
+	it('旧 ctx 失效时 arm() 不抛错，并丢弃缓存；下一次 session_start 恢复状态刷新', async () => {
+		vi.resetModules();
+		const mod = await import('../../../extensions/meta/selector/unattended');
+		const flags: Record<string, unknown> = {};
+		const { pi, handlers } = makeFakePi(flags);
+		mod.initUnattended(pi as never);
+		flags['unattended-confirm'] = true;
+
+		const stale = makeCtx();
+		// 模拟会话替换：旧 runner 被 invalidate，任何 ctx 访问都抛——包括 `hasUI` 属性访问
+		// （refreshStatus 的 `if (!ctx?.hasUI) return;` 若留在 try 外，这条就会漏掉）
+		const staleCtx = stale.ctx as unknown as { ui: { setStatus: AnyFn } };
+		Object.defineProperty(staleCtx, 'hasUI', {
+			get() {
+				throw new Error('stale');
+			},
+		});
+		staleCtx.ui.setStatus = vi.fn(() => {
+			throw new Error('stale');
+		});
+		const start = handlers.get('session_start')![0];
+		await start({ type: 'session_start', reason: 'new' }, stale.ctx);
+
+		// 通道的 session_start 可能早于 selector 的 —— arm() 不能因此抛出
+		expect(() => mod.arm('wechat')).not.toThrow();
+		expect(mod.unattendedStatus()).toMatchObject({ mode: 'armed', owners: ['wechat'] });
+
+		// 下一次 session_start 重绑新 ctx 后，状态刷新恢复
+		const fresh = makeCtx();
+		await start({ type: 'session_start', reason: 'new' }, fresh.ctx);
+		expect(fresh.ctx.ui.setStatus).toHaveBeenCalledWith('unattended', '| unattended');
+
+		// disarm 同样不得冒泡，并清掉状态栏
+		expect(() => mod.disarm('wechat')).not.toThrow();
+		expect(fresh.ctx.ui.setStatus).toHaveBeenLastCalledWith('unattended', undefined);
+		expect(mod.unattendedStatus().mode).toBe('licensed-idle');
+	});
+});
