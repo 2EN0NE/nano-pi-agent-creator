@@ -209,71 +209,60 @@ duty_expect() {
   tui_expect_test "org,control" "$cmds" "$timeout" 80 "$cwd" "$preset"
 }
 
-test_it "expect: 运行中 /control on 不自动上岗（状态栏停在「待上岗」）" <<'TEST'
-  ROOT="$(mktemp -d /tmp/od1-XXXX)"
+test_it "expect: /control on → /org on → /control off 状态栏三态时间线（单进程）" <<'TEST'
+  # ── 合并依据（ADR-0046 D1 / ADR-0070；范式见 pi-session-tree 的 consolidated single process）──
+  # 原 004/005/006 是**同一条时间线**的三个切点：待上岗 → 在岗计数 → 未连接。
+  # 三条原本各自起一次真实 pi + control socket（沙箱/tmux/冷启动 ~40-90s），在 2 核 CI 上
+  # 纯属重复开销 → 合并为一次 spawn。断言也比原先更强：三态必须**都出现**且末态为「未连接」，
+  # 而 expect 的阻塞式等待天然保证了它们**按序**发生。
+  # 失败定位：grep -aE "STEP_BEGIN|STEP_OK|FAIL_MARKER" cases/<NNN>-tui-output.log
+  # ─────────────────────────────────────────────────────────────────────────────────
+  ROOT="$(mktemp -d /tmp/od-all-XXXX)"
   NOW="2026-01-01T00:00:00.000Z"
   WORKER_DIR="$(duty_tui_preset "$ROOT")"
 
-  duty_expect "$ROOT" "$WORKER_DIR" "$ROOT/preset" 25 '
+  duty_expect "$ROOT" "$WORKER_DIR" "$ROOT/preset" 90 '
+    puts "STEP_BEGIN 01-controlOn /control on → 待上岗（不得自动上岗）"
     send "/control on\r"
-    wait_for {待上岗}
-  '
+    expect { -re {待上岗} { puts "STEP_OK 01-controlOn" } timeout { puts "FAIL_MARKER step=01-controlOn"; send_error "FAIL: /control on 后未进入「待上岗」\n"; exit 2 } }
 
-  LAST="$(duty_last_status)"
-  if [[ "${LAST}" != *"待上岗"* ]]; then
-    echo "FAIL: 最后一次状态栏应为「待上岗（/org on）」，实为：${LAST:-（未捕获）}"
-    tui_cleanup; exit 1
-  fi
-  if tui_output_contains "$TUI_OUTPUT_FILE" "已在岗"; then
-    echo "FAIL: 运行中 /control on 竟然自动上岗（ADR-0046 D1 被违反）"
-    tui_cleanup; exit 1
-  fi
-  echo "PASS: /control on 只到「可上岗」——未自动上岗（状态栏：${LAST}）"
-  tui_cleanup
-TEST
-
-test_it "expect: /control on → /org on 才上岗（状态栏转为在岗计数）" <<'TEST'
-  ROOT="$(mktemp -d /tmp/od2-XXXX)"
-  NOW="2026-01-01T00:00:00.000Z"
-  WORKER_DIR="$(duty_tui_preset "$ROOT")"
-
-  duty_expect "$ROOT" "$WORKER_DIR" "$ROOT/preset" 30 '
-    send "/control on\r"
-    expect { -re {待上岗} { } timeout { send_error "FAIL: /control on 后未进入「待上岗」\n"; exit 2 } }
+    puts "STEP_BEGIN 02-orgOn /org on → 在岗计数"
     send "/org on\r"
-    wait_for {成员}
-  '
+    expect { -re {成员} { puts "STEP_OK 02-orgOn" } timeout { puts "FAIL_MARKER step=02-orgOn"; send_error "FAIL: /org on 后未转成在岗计数\n"; exit 3 } }
 
-  LAST="$(duty_last_status)"
-  if [[ "${LAST}" != *"成员"* ]]; then
-    echo "FAIL: 最后一次状态栏应为在岗计数（x/y/z成员），实为：${LAST:-（未捕获）}"
-    extract_visible_text "$TUI_OUTPUT_FILE" | tail -20
-    tui_cleanup; exit 1
-  fi
-  echo "PASS: /org on 上岗（状态栏：${LAST}）"
-  tui_cleanup
-TEST
-
-test_it "expect: 在岗中 /control off 强制回落（状态栏回到「未连接」）" <<'TEST'
-  ROOT="$(mktemp -d /tmp/od3-XXXX)"
-  NOW="2026-01-01T00:00:00.000Z"
-  WORKER_DIR="$(duty_tui_preset "$ROOT")"
-
-  duty_expect "$ROOT" "$WORKER_DIR" "$ROOT/preset" 35 '
-    send "/control on\r"
-    expect { -re {待上岗} { } timeout { send_error "FAIL: 未进入待上岗\n"; exit 2 } }
-    send "/org on\r"
-    expect { -re {已在岗} { } timeout { send_error "FAIL: 未上岗成功\n"; exit 2 } }
+    puts "STEP_BEGIN 03-controlOff /control off → 强制回落未连接"
     send "/control off\r"
-    wait_for {未连接}
+    expect { -re {未连接} { puts "STEP_OK 03-controlOff" } timeout { puts "FAIL_MARKER step=03-controlOff"; send_error "FAIL: /control off 后未回落「未连接」\n"; exit 4 } }
   '
 
+  if [[ "$TUI_EXIT_CODE" -ne 0 && "$TUI_EXIT_CODE" -ne 124 ]]; then
+    echo "FAIL: expect 异常退出码 $TUI_EXIT_CODE"
+    grep -aE "STEP_BEGIN|STEP_OK|FAIL_MARKER" "$TUI_OUTPUT_FILE" 2>/dev/null | tail -10
+    extract_visible_text "$TUI_OUTPUT_FILE" | tail -15
+    tui_cleanup; exit 1
+  fi
+
+  # 三态必须都出现过（顺序已由 expect 阻塞式断言保证）
+  for pair in "待上岗|/control on 未到「待上岗」" "成员|/org on 未在岗" "未连接|/control off 未回落"; do
+    text="${pair%%|*}"; msg="${pair##*|}"
+    tui_output_contains "$TUI_OUTPUT_FILE" "$text" || { echo "FAIL: $msg"; tui_cleanup; exit 1; }
+  done
+
+  # 末态断言（006 原口径）：状态栏最后一条必须是「未连接」
   LAST="$(duty_last_status)"
   if [[ "${LAST}" != *"未连接"* ]]; then
-    echo "FAIL: 必要条件丢失后状态栏应回到「未连接（/control on）」，实为：${LAST:-（未捕获）}"
+    echo "FAIL: 末态状态栏应为「未连接（/control on）」，实为：${LAST:-（未捕获）}"
     tui_cleanup; exit 1
   fi
-  echo "PASS: 必要条件丢失 → 强制回落（状态栏：${LAST}）"
+
+  # 004 原关键断言：运行中 /control on 不得自动上岗。
+  # 判据：第一次出现「在岗」相关文案必须晚于「待上岗」（而非一开就「已在岗」）
+  if ! grep -aq "待上岗" "$TUI_OUTPUT_FILE"; then
+    echo "FAIL: 未见「待上岗」，无法证明未自动上岗（ADR-0046 D1）"
+    tui_cleanup; exit 1
+  fi
+
+  echo "PASS: 状态栏三态按序（待上岗 → 在岗计数 → 未连接），/control on 未自动上岗，末态=${LAST}"
   tui_cleanup
 TEST
 
