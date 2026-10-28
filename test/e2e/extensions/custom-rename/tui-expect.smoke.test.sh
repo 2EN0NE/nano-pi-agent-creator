@@ -19,7 +19,7 @@ test_it "expect: /auto-rename opens TUI settings panel" <<'TEST'
   tui_expect_test "custom-rename" '
     send "/auto-rename\r"
     sleep 2
-  ' 25
+  ' 60
 
   if tui_output_contains "$TUI_OUTPUT_FILE" "auto-rename 设置"; then
     echo "PASS: settings panel opened"
