@@ -314,3 +314,57 @@ jobs:
                   E2E_BUDGET_STRICT: '1'
                   E2E_ENV_SENTINEL: 'strict'
               run: bash test/e2e/scripts/run-e2e.sh --ext worktree
+
+    # ── 离线包工具链 e2e（阻塞）──
+    # AGENTS.md 的强制规则「改 scripts/offline* 后必须先跑通 e2e」此前零自动化保护：
+    # `@zenone/pi-state` 缺失、探针 jiti 别名缺失这类「目标机丢掉整个安全栈」的缺陷
+    # 只靠人肉跑 e2e 才发现（静态检查全绿）。离线目标机没有回滚通道，坏包只能重送介质。
+    offline-e2e:
+        name: Offline bundle e2e
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: npm
+            - name: Install project dependencies
+              run: npm ci
+            # pack 要求 $PI_RUNTIME_DIR 是 releases/<版本> 布局（源机由 pi update 生成）。
+            # 用 --prefix 装到临时目录即可复刻同一布局（hoisted node_modules）。
+            - name: Prepare pi runtime
+              run: |
+                  set -euo pipefail
+                  PI_VERSION="$(node -p "require('./node_modules/@earendil-works/pi-coding-agent/package.json').version")"
+                  mkdir -p "$RUNNER_TEMP/pi-runtime"
+                  npm install --prefix "$RUNNER_TEMP/pi-runtime" --no-audit --no-fund \
+                    "@earendil-works/pi-coding-agent@$PI_VERSION"
+                  node scripts/offline/probe.mjs --preflight --runtime "$RUNNER_TEMP/pi-runtime"
+            # 源机的 ~/.pi/agent 快照：ci runner 上没有，用最小形态合成。
+            # node_modules 只放扩展里真正 import 的非 pi 裸模块（同目录下注释会说明代价）：
+            # 少放一个 → 「探针：扩展加载失败 0 个」直接红，不会静默。
+            - name: Prepare agent dir
+              run: |
+                  set -euo pipefail
+                  AGENT="$RUNNER_TEMP/pi-agent"
+                  mkdir -p "$AGENT"/node_modules "$AGENT"/npm/node_modules "$AGENT"/git \
+                    "$AGENT"/extensions-data "$AGENT"/skills "$AGENT"/themes "$AGENT"/prompts
+                  printf '{"editorPaddingX":1}\n' >"$AGENT/settings.json"
+                  for spec in typebox diff @anthropic-ai/sandbox-runtime; do
+                    mkdir -p "$AGENT/node_modules/$(dirname "$spec")"
+                    ln -sfn "$PWD/node_modules/$spec" "$AGENT/node_modules/$spec"
+                  done
+            - name: Run offline bundle e2e
+              env:
+                  PI_OFFLINE_E2E_WORK: ${{ runner.temp }}/e2e-work
+                  PI_AGENT_DIR: ${{ runner.temp }}/pi-agent
+                  PI_RUNTIME_DIR: ${{ runner.temp }}/pi-runtime
+              run: bash scripts/offline/e2e.sh
+            - name: Upload e2e logs
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: offline-e2e-logs
+                  path: ${{ runner.temp }}/e2e-work/*.log
+                  if-no-files-found: ignore

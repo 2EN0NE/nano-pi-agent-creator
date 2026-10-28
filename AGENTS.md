@@ -1029,24 +1029,68 @@ npx tsx scripts/sync-to-local-pi.ts --dry-run
 
 详细用法参考 [docs/sync-tool.md](docs/sync-tool.md)。
 
-### 离线部署（`scripts/offline.sh`）
+### 离线部署（`scripts/offline.sh` + `scripts/offline/`）
 
-把整个插件体系（pi 运行时 + `~/.pi/agent` 用户目录 + 本地包 + 第三方插件）打包成单个 bundle，在无网络 Linux 目标机解压恢复。
+把 pi 运行时 + 本仓库插件体系 + 第三方插件带到**无网、无 sudo 的老 Linux**。完整手册见
+[`docs/offline-deployment.md`](docs/offline-deployment.md)，决策见 [ADR-0069](docs/adr/0069-offline-bundle-source-install-and-degradation.md)。
 
 ```bash
-# 源机（macOS，有网）打包
-bash scripts/offline.sh pack -o pi-offline-bundle.tar.gz [--arch x64|arm64] [--with-node]
+# 源机（macOS，有网）打包 → 三个交付物在 tmp/offline/
+bash scripts/offline.sh pack --arch x64            # 选项：--arch arm64 | --with-node | -o DIR
 
-# 目标机（Linux，离线）恢复
-bash scripts/offline.sh restore pi-offline-bundle.tar.gz [--force]
+# 目标机（Linux，离线）：tar.gz + .sha256 + install.sh 拷到同一目录后
+bash install.sh pi-offline-<版本>-x64.tar.gz
+
+# 源机预演全流程（本机 4~5 分钟；CI offline-e2e job 阻塞；改 scripts/offline* 后必须先跑通）
+bash scripts/offline/e2e.sh
 ```
+
+**职责切分**：`scripts/offline.sh`（pack，源机、需联网）、`scripts/offline/collect.mjs`（清单）、
+`scripts/offline/native-audit.mjs`（实测 glibc 下限）、`scripts/offline/install.sh`（随包分发的安装器，
+**不依赖仓库**）、`scripts/offline/probe.mjs`（加载探针）、`scripts/offline/e2e.sh`（本机沙箱预演）。
+
+**自动化保护**：CI `offline-e2e` job 每次 PR/push 跑本脚本（`--arch local`，无需网络，用最小 agent 目录 ~90s）；
+`test/vitest/scripts/offline-collect-manifest.test.ts` 钉住 `@zenone/*` import 闭包不变量。
+**边界**：CI 只覆盖 `--arch local` 流程——rg/fd 下载、原生包换血、`native-audit.mjs` 实测 glibc 下限
+**都不在 CI 里**（需要联网 / Linux）。这几块只在实际交付的 x64 包路径上跑，发版前必须人工跑一次
+`bash scripts/offline.sh pack --arch x64` + 目标机安装验证。
 
 **要点（改脚本前先读）：**
 
-1. **离线模式**：restore 生成的 `pi` 是 wrapper，默认 `export PI_OFFLINE=1`（pi 内置离线模式，`PI_OFFLINE` 环境变量）。启动时不联网同步第三方插件；已装的 npm/git 插件靠本地版本匹配（`satisfies()` 纯本地比较）正常加载。这是**保留 settings.json `packages` 字段**而非清空的原因——清空会让第三方插件全部失效。
-2. **符号链接重建**：`~/.pi/agent/node_modules/@zenone/*` 可能指向仓库外绝对路径（worktree），打包时记录映射（`AGENT_LINKS` / `VENDOR_LINKS` 段），restore 时重建为相对链接。源机环境不改动。
-3. **本地包三分类**：agent 内置 → 重建链接；外部源码可用（非 `dist/` 入口或 dist 已构建）→ 解析进 `vendor/`（不在扩展发现路径）；dist 缺失 → 跳过并告警。
-4. **裁剪清单**：默认排除 `sessions/tmp/state/bin/fff/chat/compact-backups/cache/.cache`、`*.log`、`auth.json`（`--keep-sessions`/`--keep-auth` 保留）；`agent/bin`（fd/rg 的 macOS 二进制）必须排除，否则 Linux 不可用。
-5. **bash 3.2 兼容坑**：macOS 自带 bash 3.2 + `set -u` 下，① `local VAR` 分离声明后命令替换赋值可能丢值，一律用单行 `local VAR="$(...)"`；② `$VAR` 后紧跟中文全角标点（`（`/`）` 等，UTF-8 首字节 0xEF）会被吞进变量名报 unbound，须用 `${VAR}` 花括号界定。改脚本时新增中文消息必须遵守。
-6. **平台包补位**：pack 时（有网）用 `npm pack` 下载目标平台的 ast-grep/ffi-rs linux 包进 `offline-tgz/`，restore 时补装；darwin-only 包在 restore 时仅告警（功能降级）。
-7. **模型**：离线机需在 `models.json` 配本地 provider（如 ollama `http://localhost:11434/v1`），`model_check` 只做提示不自动改。
+1. **安装源是仓库源码**（ADR-0069 D1）：扩展/技能/主题从 `extensions/` 等目录取，不是 `~/.pi/agent` 快照；
+   npm 包形态扩展（`pi.extensions` 只在 `dist/` 存在时有效）由 pack 补一个 `index.ts` 桥接，离线机不需要构建。
+2. **离线模式**：安装器写的 `~/.local/bin/pi` 是 wrapper，默认 `export PI_OFFLINE=1`；已装的 npm/git 插件靠本地
+   版本匹配（`satisfies()` 纯本地比较）正常加载。这也是**保留 settings.json `packages` 字段**而非清空的原因。
+3. **备份判据看"目标侧有没有配置"，不看 `installed-bundle.json`**：旧版 `restore` 布局（0.7x 老机器）没有这个
+   身份文件，若按它判"全新安装"会直接把 `settings.json`/`extensions-data` 覆盖掉且不备份。改这段务必保留
+   "配置存在就备份"的语义。
+4. **启动器写入前先 `rm -f "$BIN_DIR/pi"`**：旧布局里它是软链，`cat >` 会写穿到旧运行时、软链却仍指向旧运行时。
+   `--remove-legacy-runtime` 删旧运行时前，还要摘掉 `$BIN_DIR` 下指向它的 `node`/`npm` 软链（否则留下悬空
+   node，PATH 里"能找到但执行失败"）。
+5. **tarball 的 sha256 只能由安装器实测写入**：它不可能在包内 `manifest.json` 里（tar 已封口，打包后再写永远
+   进不了交付物）。sidecar `.sha256` 是唯一来源；缺 sidecar 要**大声告警**，不要假装校验过。
+6. **下载内容要校验来源**：`rg` 用上游 `<asset>.sha256`、`node` 用 `SHASUMS256.txt`；镜像站（ghproxy/ghfast）
+   只保证"下载得到"。`fd` 上游没有 per-asset 校验和 → 记实测 sha256 进 manifest 供追溯。
+7. **失败隔离只覆盖"扩展入口导入失败"**：原生包失败（`nativeFailures`）只报告——依赖方通常运行期才
+   `require`，探针推不出"谁依赖谁"，别在文档里承诺自动隔离。
+8. **探针报告不得跨安装复用**：探针前 `rm -f load-report.json`，且只有 `PROBE_OK=ran` 才读它做隔离，
+   否则"探针崩了 → 拿上次失败清单再禁用一遍扩展"。
+9. **bash 3.2 兼容坑**：macOS 自带 bash 3.2 + `set -u` 下，① `local VAR` 分离声明后命令替换赋值可能丢值，
+   一律用单行 `local VAR="$(...)"`；② `$VAR` 后紧跟中文全角标点（`（`/`）`/`，` 等，UTF-8 首字节 0xEF）
+   会被吞进变量名报 unbound，**必须**写成 `${VAR}`。这条踩过两次（offline.sh 与 install.sh 都中过）。
+10. **无 rsync 时的复制必须仍遵守 excludes**：退回到 `cp -R` 会把 `node_modules/.cache`、`*.log` 和指向源机
+    的 `@zenone` 软链一起打进包；用 tar 管道（`--exclude`）保持与 rsync 同语义。
+11. **原生包"换血"而非重编译**：pack 阶段按已装 darwin 版本 `npm pack` 对应 linux 变体，安装时删掉 darwin 副本
+    并落位 linux 副本；node-pty 仅在本地有 `node:22-bookworm-slim` 时才在容器里编 N-API 预编译。
+12. **模型**：离线机需在 `models.json` 配本地 provider（如 ollama `http://localhost:11434/v1`）；`auth.json`/
+    `models.json` 升级时**不读不写**（只在首次安装缺失时写占位）。
+13. **`@zenone/*` 纯库包必须按源码 import 闭包随包**（`collect.mjs`）：只按 profile 推导会漏掉纯库包——
+    `@zenone/pi-state` 不在 `user-install.extensions` 里，却被 `pi-config` / `permission-gate` / `preset` 直接
+    `import`。漏了它 → `pi-config` 加载失败 → 十几个扩展级联失败 → 探针把安全栈整批隔离（安装仍打印成功）。
+    新增 `@zenone/*` 依赖时不用改清单（闭包自动推导），但要跑 `npm test` 里的 collect 不变量测试。
+14. **探针必须复刻 pi 加载器的 jiti 别名**（`probe.mjs` 的 `piAliases`）：映射写死了 pi 的 `dist` 布局，
+    布局一变（升版）→ 扩展一律解析失败。pack 前 `probe.mjs --preflight` 自检（源机就失败）；安装期探针
+    以**退出码 2** 上报 `runtimeError`，安装器 `die` 而不是把扩展隔离掉（ADR-0069 D6）。
+15. **e2e 沙箱必须在仓库之外**：Node 解析裸模块会逐级上溯，沙箱在仓库内时缺失链接会被 `$REPO_ROOT/node_modules`
+    掩盖（曾让 `@zenone/pi-state` 未打包一路 PASS）。空间不足用 `PI_OFFLINE_E2E_WORK` 指到大盘；
+    脚本对 `/`、`$HOME`、仓库根及其祖先目录 fail-fast（它会 `rm -rf` 该目录）。

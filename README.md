@@ -210,36 +210,34 @@ npx tsx scripts/sync-to-local-pi.ts --ext sandbox --target ./.pi/test
 
 ## 🌐 离线环境部署
 
-`scripts/offline.sh` 把整个 pi 插件体系（pi 运行时 + 用户级扩展 + 本地包 + 第三方插件）打包成单个 bundle，在无网络的 Linux 目标机上解压恢复即可用。
+把 pi 运行时 + 本仓库插件体系（扩展/技能/主题/提示）+ 第三方插件带到**无网、无 sudo 的老 Linux** 上。
+一条命令打包、一条命令安装；决策与取舍见 [ADR-0069](docs/adr/0069-offline-bundle-source-install-and-degradation.md)，
+完整操作手册（升级 / 迁移 / 排障 / 老 glibc 对照）见 [docs/offline-deployment.md](docs/offline-deployment.md)。
 
 ```bash
-# ① 源机（macOS，有网）打包
-bash scripts/offline.sh pack -o pi-offline-bundle.tar.gz
+# ① 源机（macOS，有网）打包 → 产物在 tmp/offline/
+bash scripts/offline.sh pack --arch x64
+#   常用选项：--arch arm64 | --with-node（目标机没有 node 时自带）| -o DIR
 
-# 常用选项
-#   --arch arm64            目标 linux 架构（默认 x64）
-#   --with-node             附带 node 运行时（目标机无 node 时用）
-#   --with-project          附带项目 .pi/ 目录（本项目开发用）
-#   --with-repo             附带仓库源码 + node_modules（离线开发扩展用）
-#   --keep-sessions         保留会话历史
-#   --keep-auth             保留 auth.json（含密钥）
-
-# ② 目标机（Linux，离线）——拷贝 bundle + .sha256 过去后
-bash scripts/offline.sh restore pi-offline-bundle.tar.gz
-
-# restore 选项
-#   --pi-prefix DIR         pi 安装位置（默认 ~/.local/share/pi-runtime）
-#   --bin-dir DIR           pi 软链目录（默认 ~/.local/bin）
-#   --force                 目标已存在时备份后覆盖
-#   --smoke                 启动 pi 冒烟自检
+# ② 目标机（Linux，离线）：把 tar.gz、其 .sha256、install.sh 拷到同一目录后
+bash install.sh pi-offline-<版本>-x64.tar.gz
 ```
 
 ### 离线环境要点
 
-- **离线模式**：restore 生成的 `pi` 是 wrapper，默认设置 `PI_OFFLINE=1`（pi 内置离线模式），启动时不联网同步第三方插件；已安装的 npm/git 插件靠本地版本匹配正常加载。临时联网更新用 `PI_OFFLINE=0 pi`。
+- **交付物是三个文件**：`pi-offline-<版本>-<arch>.tar.gz`、`.sha256`、独立 `install.sh`（目标机不需要仓库、npm、网络）。
+- **安装位置全在 `$HOME`**：运行时 `~/.local/share/pi-offline/runtime/`，启动器 `~/.local/bin/pi`（自动注入
+  `PI_OFFLINE=1`），agent 目录 `~/.pi/agent/`，并在 `~/.bashrc` 维护带标记的 PATH 块。
+- **升级是"备份后替换"**：`settings.json` / `extensions-data/` / `skills/` / `themes/` / `prompts/` 先备份到
+  `.config-backup-<时间戳>/` 再替换（`--restore-config <ts>` 可回填）；`auth.json` / `models.json` 与
+  `sessions/` 等历史缓存**完全不读不写**。
+- **旧版 `restore` 布局的机器（例如 0.7x）会被识别为迁移安装**：配置照样先备份；旧扩展默认保留并在日志里列出
+  （加 `--prune-unknown-extensions` 移入 `extensions-disabled/`）；旧运行时 `~/.local/share/pi-runtime`
+  加 `--remove-legacy-runtime` 清理。
+- **失败隔离**：安装后跑加载探针，把**入口导入失败**的扩展移入 `extensions-disabled/`，pi 仍能启动；
+  原生包（sharp/fff/ast-grep…）失败只如实报告，由人工核对——老 glibc 上的降级清单见操作手册 §6。
 - **模型配置**：`models.json` 需指向离线可达的本地模型（如 ollama `http://localhost:11434/v1`），否则 pi 报无 API key。
-- **已知降级**：dist 未构建的扩展（smart-context/secret-firewall/cloud-sessions/recap/DEMO:catch-the-fox）与 darwin-only 平台包（ast-grep/ffi-rs）在 restore 时会明确告警，不影响核心运行。
-- **符号链接**：`~/.pi/agent/node_modules/@zenone/*` 指向 worktree 绝对路径的问题由脚本在 pack 时记录映射、restore 时重建为相对链接，源机环境不被修改。
+- **源机预览**：`bash scripts/offline/e2e.sh` 在本机沙箱里预演「全新安装 → 升级 → 迁移 → 回填」全流程（本机约 4~5 分钟，CI 最小 agent 目录约 90s）。
 
 ## 目录说明
 

@@ -1,711 +1,615 @@
 #!/usr/bin/env bash
-# =============================================================================
-# offline.sh — pi 插件体系离线迁移工具
 #
-#   pack     在源机器（macOS）执行：把 pi 运行时 + 用户插件体系打包成单个 bundle
-#   restore  在目标机器（Linux，离线）执行：解压 bundle、重建链接、自检
+# 离线包打包器（源机执行；需要联网）
 #
-# 用法:
-#   bash scripts/offline.sh pack [选项]
-#   bash scripts/offline.sh restore <bundle.tar.gz> [选项]
+#   bash scripts/offline.sh pack [--arch x64|arm64|local] [-o DIR]
 #
-# pack 选项:
-#   -o, --output FILE       bundle 输出路径（默认 ./offline-bundle-<日期>.tar.gz）
-#   --with-project          附带项目 .pi/ 目录（本项目开发用，约 900M）
-#   --with-repo             附带仓库源码 + node_modules（离线继续开发扩展用，约 550M）
-#   --with-node             下载 linux-<arch> 版 node 运行时进 bundle（目标机无 node 时用）
-#   --arch ARCH             目标 linux 架构：x64（默认）/ arm64
-#   --keep-sessions         保留会话历史 ~/.pi/agent/sessions（默认排除，720M）
-#   --keep-auth             保留 auth.json（默认排除，含 API 密钥）
-#   --skip-extra-download   跳过缺失平台二进制下载（源机有网时默认下载）
-#   --staging DIR           指定 staging 目录（默认 mktemp -d，结束后清理）
-#   --keep-staging          保留 staging 目录（调试用）
+# 产物目录（默认 tmp/offline/）：
+#   pi-offline-<bundleVersion>-<arch>.tar.gz
+#   pi-offline-<bundleVersion>-<arch>.tar.gz.sha256
+#   install.sh            ← 随包分发的独立安装器（拷到目标机）
+#   README-安装说明.txt
 #
-# restore 选项:
-#   --pi-prefix DIR         pi 运行时安装位置（默认 $HOME/.local/share/pi-runtime）
-#   --bin-dir DIR           pi 可执行软链目录（默认 $HOME/.local/bin）
-#   --agent-dir DIR         agent 用户目录（默认 $HOME/.pi/agent）
-#   --force                 目标目录已存在时备份后覆盖（默认 abort）
-#   --no-model-check        跳过模型配置检查
-#   --smoke                 启动 pi 做冒烟自检（较慢）
+# 决策与语义见 docs/adr/0069-offline-bundle-source-install-and-degradation.md
 #
-# 示例:
-#   bash scripts/offline.sh pack --with-node -o ~/pi-offline-bundle.tar.gz
-#   bash scripts/offline.sh restore pi-offline-bundle.tar.gz --smoke
-# =============================================================================
+set -euo pipefail
 
-set -uo pipefail
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$REPO_ROOT/scripts/offline"
+DEFAULT_OUT="$REPO_ROOT/tmp/offline"
 
-# ──────────────────────────── 基础工具 ────────────────────────────
-C_RED='\033[0;31m'
-C_YEL='\033[0;33m'
-C_GRN='\033[0;32m'
-C_CYN='\033[0;36m'
-C_RST='\033[0m'
-info() { printf "${C_CYN}[offline]${C_RST} %s\n" "$*"; }
-ok() { printf "${C_GRN}[offline]${C_RST} %s\n" "$*"; }
-warn() { printf "${C_YEL}[offline][warn]${C_RST} %s\n" "$*" >&2; }
-fail() {
-  printf "${C_RED}[offline][error]${C_RST} %s\n" "$*" >&2
-  exit 1
+# 老 Linux 上的 bash 可能是 3.2/4.2；打包机是 macOS（bash 3.2），这里统一不用 bash 4 特性。
+say() { printf '[offline/pack] %s\n' "$*"; }
+warn() { printf '[offline/pack] WARN  %s\n' "$*" >&2; }
+die() {
+	printf '[offline/pack] ERROR %s\n' "$*" >&2
+	exit 1
+}
+# 取值型参数缺值时：`set -u` + 越界 `shift` 会让脚本 rc=1 且一个字节都不打印，
+# 使用方只会看到"脚本坏了"。缺值必须显式报错。
+need_value() {
+	[ $# -ge 2 ] || die "$1 需要一个值（见 --help）"
 }
 
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || fail "缺少必需命令: $1"
-}
-
-sha256_of() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else shasum -a 256 "$1" | awk '{print $1}'; fi
+need_cmd() {
+	command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"
 }
 
 usage() {
-  cat <<'EOF'
-用法:
-  bash scripts/offline.sh pack [选项]       # 源机（macOS，有网）打包
-  bash scripts/offline.sh restore <bundle> [选项]  # 目标机（Linux，离线）恢复
+	# 只取文件头的注释块（第 15 行是 `set -euo pipefail`，不能进帮助）
+	sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	cat <<'EOF'
 
-pack 选项:
-  -o, --output FILE       bundle 输出路径
-  --with-project          附带项目 .pi/ 目录（约 900M）
-  --with-repo             附带仓库源码 + node_modules（离线开发扩展用）
-  --with-node             附带 node 运行时（架构由 --arch 决定）
-  --keep-sessions         保留会话历史（默认排除）
-  --keep-auth             保留 auth.json（默认排除，含密钥）
-  --skip-extra-download   跳过缺失平台二进制下载
-
-restore 选项:
-  --pi-prefix DIR         pi 安装位置（默认 ~/.local/share/pi-runtime）
-  --bin-dir DIR           pi 软链目录（默认 ~/.local/bin）
-  --agent-dir DIR         agent 目录（默认 ~/.pi/agent）
-  --force                 目标已存在时备份后覆盖
-  --no-model-check        跳过模型配置检查
-  --smoke                 启动 pi 冒烟自检
+额外选项：
+  --with-node            额外下载 node 运行时进包（目标机没有 node 时用 --use-bundled-node 安装）
+  --node-version VER     指定要下载的 node 版本（默认取当前 node 的 major 线的最新 LTS 版本号）
+  --skip-tools           跳过 rg/fd 下载（仅调试用；下载失败默认是致命错误）
+  --skip-verify          跳过下载内容的 sha256 校验（仅调试用，会失去来源可信性）
+  --skip-native          跳过原生包下载（仅调试用）
+  --keep-work            保留中间目录（调试用）
+  -h, --help             显示本帮助
 EOF
 }
 
-# ──────────────────────────── 常量 ────────────────────────────
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AGENT_DIR="${HOME}/.pi/agent"
-PI_BIN="$(command -v pi 2>/dev/null || true)"
-NODE_REQ="22.19.0"
-ARCH="x64" # 目标 linux 架构（x64 / arm64），pack 时可用 --arch 覆盖
-
-# ──────────────────────────── pack ────────────────────────────
-cmd_pack() {
-  local OUTPUT="" WITH_PROJECT=0 WITH_REPO=0 WITH_NODE=0 KEEP_SESSIONS=0 KEEP_AUTH=0 \
-    SKIP_DL=0 STAGING="" KEEP_STAGING=0
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-    -o | --output)
-      OUTPUT="$2"
-      shift 2
-      ;;
-    --with-project)
-      WITH_PROJECT=1
-      shift
-      ;;
-    --with-repo)
-      WITH_REPO=1
-      shift
-      ;;
-    --with-node)
-      WITH_NODE=1
-      shift
-      ;;
-    --arch)
-      ARCH="$2"
-      [[ "$ARCH" == "x64" || "$ARCH" == "arm64" ]] || fail "不支持的架构: ${ARCH}（仅支持 x64 / arm64）"
-      shift 2
-      ;;
-    --keep-sessions)
-      KEEP_SESSIONS=1
-      shift
-      ;;
-    --keep-auth)
-      KEEP_AUTH=1
-      shift
-      ;;
-    --skip-extra-download)
-      SKIP_DL=1
-      shift
-      ;;
-    --staging)
-      STAGING="$2"
-      shift 2
-      ;;
-    --keep-staging)
-      KEEP_STAGING=1
-      shift
-      ;;
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    *) fail "未知参数: $1（pack 命令）" ;;
-    esac
-  done
-
-  [[ -n "$PI_BIN" ]] || fail "未找到 pi 命令（需要先在源机安装 pi 并确保可用）"
-  require_cmd node
-  require_cmd npm
-  require_cmd tar
-  require_cmd rsync
-
-  local NODE_VER="$(node -v | sed 's/^v//')"
-  info "源机平台: $(uname -s)-$(uname -m) | node $NODE_VER"
-  info "pi: $PI_BIN"
-
-  local PI_PKG_DIR="$(node -e '
-    const fs=require("fs"),path=require("path");
-    let p=process.argv[1];
-    try { p=fs.realpathSync(p); } catch(e){}
-    if (fs.existsSync(p) && !fs.statSync(p).isDirectory()) p=path.dirname(p);
-    while (p && p!=="/") {
-      if (fs.existsSync(path.join(p,"package.json"))) { console.log(p); process.exit(0); }
-      p=path.dirname(p);
-    }
-    process.exit(1);
-  ' "$PI_BIN" 2>/dev/null || true)"
-  [[ -f "${PI_PKG_DIR:-}/package.json" ]] || fail "无法定位 pi 主包目录（找到: ${PI_PKG_DIR:-空}）"
-
-  [[ -d "$AGENT_DIR" ]] || fail "未找到用户插件目录: ${AGENT_DIR}（~/.pi/agent 不存在）"
-
-  # ── 1. staging 准备 ──
-  if [[ -z "$STAGING" ]]; then
-    STAGING="$(mktemp -d /tmp/pi-offline-XXXXXX)"
-    local STAGING_TMP=1
-  fi
-  mkdir -p "$STAGING/pi" "$STAGING/agent" "$STAGING/offline-tgz"
-  info "staging: $STAGING"
-
-  # ── 2. pi 运行时 ──
-  info "收集 pi 运行时 ($(du -sh "$PI_PKG_DIR" 2>/dev/null | cut -f1)) ..."
-  cp -a "$PI_PKG_DIR/." "$STAGING/pi/"
-  rm -rf "$STAGING/pi/node_modules/.cache" 2>/dev/null || true
-
-  # ── 3. agent 用户目录 ──
-  info "收集 ~/.pi/agent 用户目录 ..."
-  local EXCLUDES=(sessions tmp state bin fff chat compact-backups cache .cache)
-  [[ "$KEEP_SESSIONS" == 1 ]] && EXCLUDES=(tmp state bin fff chat compact-backups cache .cache)
-  local EXC_ARGS=()
-  local d
-  for d in "${EXCLUDES[@]}"; do EXC_ARGS+=(--exclude="$d"); done
-  rsync -a "${EXC_ARGS[@]}" "$AGENT_DIR/" "$STAGING/agent/" || fail "复制 agent 目录失败"
-  # 排除日志
-  find "$STAGING/agent" -maxdepth 2 -name "*.log" -delete 2>/dev/null || true
-  rm -f "$STAGING/agent/pi-crash.log" 2>/dev/null || true
-  # 默认排除 auth.json
-  if [[ "$KEEP_AUTH" != 1 && -f "$STAGING/agent/auth.json" ]]; then
-    rm -f "$STAGING/agent/auth.json"
-    warn "已排除 auth.json（含密钥）；如需保留请用 --keep-auth"
-  fi
-
-  # ── 4. @zenone 本地包链接处理 ──
-  #    IN-AGENT 链接  → 记 LINK_MAP，restore 时重建（指向 agent/extensions/ 内）
-  #    外部源码可用包 → 解析内容进 agent-vendor/，restore 时放 agent/vendor/ 并重建链接
-  #    外部不可用包   → 记 SKIPPED（dist 未构建 / 无 package.json）
-  local LINK_MAP="" VENDOR_MAP="" SKIPPED_EXT=""
-  local ZDIR="$AGENT_DIR/node_modules/@zenone"
-  if [[ -d "$ZDIR" ]]; then
-    mkdir -p "$STAGING/agent-vendor"
-    local link
-    for link in "$ZDIR"/*; do
-      [[ -L "$link" ]] || continue
-      local name="$(basename "$link")"
-      local target="$(readlink "$link")"
-      local real="$(cd "$(dirname "$link")" && cd "$(dirname "$target")" 2>/dev/null && pwd)/$(basename "$target")"
-      [[ -n "$real" && -d "$real" ]] || {
-        SKIPPED_EXT+="$name|broken-link"$'\n'
-        continue
-      }
-      if [[ "$real" == "$AGENT_DIR/extensions/"* ]]; then
-        local rel="${real#"$AGENT_DIR/"}"
-        LINK_MAP+="$name|$rel"$'\n'
-      elif [[ -f "$real/package.json" ]]; then
-        if link_target_usable "$real"; then
-          info "  外部源码可用包 → vendor: @zenone/$name"
-          mkdir -p "$STAGING/agent-vendor/$name"
-          cp -aL "$real/." "$STAGING/agent-vendor/$name/" 2>/dev/null || cp -aL "$real" "$STAGING/agent-vendor/$name"
-          rm -rf "$STAGING/agent-vendor/$name/node_modules/.cache" 2>/dev/null || true
-          VENDOR_MAP+="$name"$'\n'
-        else
-          SKIPPED_EXT+="$name|unbuilt-dist"$'\n'
-        fi
-      else
-        SKIPPED_EXT+="$name|no-package"$'\n'
-      fi
-    done
-  fi
-  # 移除 staging 内的 @zenone 链接（restore 时重建）
-  rm -rf "$STAGING/agent/node_modules/@zenone" 2>/dev/null || true
-  if [[ -n "$SKIPPED_EXT" ]]; then
-    warn "以下本地包不可用，未包含（restore 后引用它们的扩展可能加载失败）:"
-    echo "$SKIPPED_EXT" | sed '/^$/d' | sed 's/|/: /' | sed 's/^/    - @zenone\//'
-  fi
-
-  # ── 5. 缺失平台二进制（Linux 目标机补位） ──
-  if [[ "$SKIP_DL" != 1 ]]; then
-    info "下载 Linux(${ARCH}) 平台二进制（源机有网时）..."
-    local AST_GREP_PKG="@ast-grep/napi-linux-${ARCH}-gnu"
-    local FFI_RS_PKG="@yuuang/ffi-rs-linux-${ARCH}-gnu"
-    download_platform_pkg "$AST_GREP_PKG" "$STAGING/offline-tgz" || true
-    download_platform_pkg "$FFI_RS_PKG" "$STAGING/offline-tgz" || true
-  else
-    info "跳过平台二进制下载（--skip-extra-download）"
-  fi
-
-  # ── 6. 可选组件 ──
-  local COMPONENTS="pi,agent"
-  if [[ "$WITH_PROJECT" == 1 ]]; then
-    [[ -d "$REPO_ROOT/.pi" ]] || fail "项目 .pi/ 不存在"
-    info "收集项目 .pi/ ..."
-    cp -a "$REPO_ROOT/.pi/." "$STAGING/project/" 2>/dev/null || {
-      mkdir -p "$STAGING/project"
-      cp -a "$REPO_ROOT/.pi/." "$STAGING/project/"
-    }
-    rm -rf "$STAGING/project/tmp" "$STAGING/project/logs" 2>/dev/null || true
-    COMPONENTS+=",project"
-  fi
-  if [[ "$WITH_REPO" == 1 ]]; then
-    info "收集仓库源码 + node_modules ..."
-    mkdir -p "$STAGING/repo"
-    cp -a "$REPO_ROOT/." "$STAGING/repo/" 2>/dev/null || true
-    rm -rf "$STAGING/repo/.git" "$STAGING/repo/node_modules/.cache" "$STAGING/repo/.ruff_cache" 2>/dev/null || true
-    COMPONENTS+=",repo"
-  fi
-  if [[ "$WITH_NODE" == 1 ]]; then
-    info "下载 linux-${ARCH} node v$NODE_VER ..."
-    download_linux_node "$NODE_VER" "$STAGING/node-linux"
-    COMPONENTS+=",node-linux"
-  fi
-
-  # ── 7. manifest ──
-  info "生成 manifest ..."
-  local TS="$(date +%Y-%m-%dT%H:%M:%S%z)"
-  local SRC_PLAT="$(uname -s)-$(uname -m)"
-  {
-    echo "BUNDLE_VERSION=1.0.0"
-    echo "CREATED_AT='$TS'"
-    echo "SOURCE_PLATFORM='$SRC_PLAT'"
-    echo "SOURCE_NODE='$NODE_VER'"
-    echo "NODE_REQUIRED='$NODE_REQ'"
-    echo "PI_PKG_VERSION='$(node -e "console.log(require('$STAGING/pi/package.json').version)" 2>/dev/null || echo unknown)'"
-    echo "COMPONENTS='$COMPONENTS'"
-    echo "TARGET_ARCH='$ARCH'"
-    echo "# AGENT_LINKS_BEGIN"
-    printf '%s' "$LINK_MAP" | sed '/^$/d' | sed 's/^/# /'
-    echo "# AGENT_LINKS_END"
-    echo "# VENDOR_LINKS_BEGIN"
-    printf '%s' "$VENDOR_MAP" | sed '/^$/d' | sed 's/^/# /'
-    echo "# VENDOR_LINKS_END"
-    echo "# SKIPPED_EXT_BEGIN"
-    printf '%s' "$SKIPPED_EXT" | sed '/^$/d' | sed 's/^/# /'
-    echo "# SKIPPED_EXT_END"
-  } >"$STAGING/manifest.sh"
-  # JSON 副本（供报告/人工查阅）
-  node -e '
-    const fs=require("fs");
-    const t=fs.readFileSync(process.argv[1],"utf8");
-    const g=(s)=>{const m=t.match(new RegExp(s+"=(.*)"));return m?m[1].replace(/^\x27|\x27$/g,""):""};
-    const sec=(a,b)=>{const m=t.match(new RegExp(a+"\\n([\\s\\S]*?)\\n"+b));return m?m[1].split("\n").filter(l=>l.startsWith("# ")).map(l=>l.slice(2)):[]};
-    const j={tool:"nano-pi-agent-creator offline bundle",version:g("BUNDLE_VERSION"),createdAt:g("CREATED_AT"),
-      sourcePlatform:g("SOURCE_PLATFORM"),sourceNode:g("SOURCE_NODE"),nodeRequired:g("NODE_REQUIRED"),
-      piVersion:g("PI_PKG_VERSION"),components:g("COMPONENTS").split(","),targetArch:g("TARGET_ARCH"),
-      agentLinks:sec("AGENT_LINKS_BEGIN","AGENT_LINKS_END").map(l=>l.split("|")),
-      vendorLinks:sec("VENDOR_LINKS_BEGIN","VENDOR_LINKS_END"),
-      skippedExternal:sec("SKIPPED_EXT_BEGIN","SKIPPED_EXT_END")};
-    fs.writeFileSync(process.argv[1].replace(/manifest.sh$/,"manifest.json"),JSON.stringify(j,null,2));
-  ' "$STAGING/manifest.sh" 2>/dev/null || true
-
-  # ── 8. 打包 ──
-  [[ -z "$OUTPUT" ]] && OUTPUT="${REPO_ROOT}/offline-bundle-$(date +%Y%m%d-%H%M%S).tar.gz"
-  info "打包 → $OUTPUT ..."
-  tar -czf "$OUTPUT" -C "$STAGING" .
-  local SH="$(sha256_of "$OUTPUT")"
-  echo "$SH  $OUTPUT" >"${OUTPUT}.sha256"
-  ok "打包完成: $OUTPUT"
-  ok "SHA256: $SH"
-  echo "------------------------------------------------------------"
-  echo "bundle 组成: $COMPONENTS"
-  echo "bundle 大小: $(du -h "$OUTPUT" | cut -f1)（解压后约 $(du -sh "$STAGING" | cut -f1)）"
-  [[ -n "$SKIPPED_EXT" ]] && echo "未包含的本地包（原因）: $(echo "$SKIPPED_EXT" | sed '/^$/d' | tr '\n' ' ')"
-  echo "目标机恢复: 拷贝 bundle + sha256 文件过去，执行"
-  echo "    bash scripts/offline.sh restore ${OUTPUT##*/}"
-  echo "------------------------------------------------------------"
-  if [[ "${STAGING_TMP:-0}" == 1 && "$KEEP_STAGING" != 1 ]]; then
-    rm -rf "$STAGING"
-    info "staging 已清理（--keep-staging 可保留）"
-  fi
+# ── 参数 ────────────────────────────────────────────────────────────
+CMD="${1:-}"
+[ "$CMD" = "pack" ] || {
+	usage
+	exit 1
 }
+shift || true
 
-# 判断扩展包是否"源码可直接用"（有非 dist 入口，或 dist 已构建）
-link_target_usable() {
-  node -e '
-    const fs=require("fs"),path=require("path");
-    const d=process.argv[1];
-    try {
-      const pkg=JSON.parse(fs.readFileSync(path.join(d,"package.json"),"utf8"));
-      const entries=[...(pkg.pi&&pkg.pi.extensions?pkg.pi.extensions:[])];
-      if (pkg.main) entries.push(pkg.main);
-      if (pkg.exports) {
-        const v=typeof pkg.exports==="string"?[pkg.exports]
-          :Object.values(pkg.exports).map(x=>typeof x==="string"?x:(x&&(x.import||x.default))||"").filter(Boolean);
-        entries.push(...v);
-      }
-      const ok=entries.filter(Boolean).some(m => {
-        const mm=m.replace(/^\.\//,"");
-        return !mm.startsWith("dist/") || fs.existsSync(path.join(d,mm));
-      });
-      process.exit(ok?0:1);
-    } catch(e){ process.exit(1); }
-  ' "$1" 2>/dev/null
-}
+ARCH="x64"
+OUT_DIR="$DEFAULT_OUT"
+WITH_NODE=0
+NODE_VERSION=""
+SKIP_TOOLS=0
+SKIP_NATIVE=0
+SKIP_VERIFY=0
+KEEP_WORK=0
 
-download_platform_pkg() {
-  local pkg="$1" dest="$2"
-  local ver
-  ver="$(npm view "$pkg" version 2>/dev/null)" || {
-    warn "无法查询 $pkg 版本（网络？），跳过"
-    return 1
-  }
-  info "  npm pack $pkg@$ver ..."
-  (cd "$dest" && npm pack "$pkg@$ver" --silent >/dev/null 2>&1) || {
-    warn "下载 $pkg 失败，跳过"
-    return 1
-  }
-  ok "  $pkg@$ver 已收录"
-}
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--arch)
+		need_value "$@"
+		ARCH="$2"
+		shift 2
+		;;
+	-o | --out)
+		need_value "$@"
+		OUT_DIR="$2"
+		shift 2
+		;;
+	--with-node)
+		WITH_NODE=1
+		shift
+		;;
+	--node-version)
+		need_value "$@"
+		NODE_VERSION="$2"
+		shift 2
+		;;
+	--skip-tools)
+		SKIP_TOOLS=1
+		shift
+		;;
+	--skip-native)
+		SKIP_NATIVE=1
+		shift
+		;;
+	--skip-verify)
+		SKIP_VERIFY=1
+		shift
+		;;
+	--keep-work)
+		KEEP_WORK=1
+		shift
+		;;
+	-h | --help)
+		usage
+		exit 0
+		;;
+	*) die "未知参数：$1（用 --help 查看用法）" ;;
+	esac
+done
 
-download_linux_node() {
-  local ver="$1" dest="$2"
-  require_cmd curl
-  mkdir -p "$dest"
-  local url="https://nodejs.org/dist/v$ver/node-v$ver-linux-${ARCH}.tar.xz"
-  info "  $url"
-  curl -fsSL "$url" -o "$dest/node-linux-${ARCH}.tar.xz" || {
-    warn "node 下载失败（网络？），跳过 --with-node"
-    rm -rf "$dest"
-    return 1
-  }
-  ok "  node v$ver linux-${ARCH} 已收录 ($(du -h "$dest/node-linux-${ARCH}.tar.xz" | cut -f1))"
-}
-
-# ──────────────────────────── restore ────────────────────────────
-cmd_restore() {
-  local BUNDLE="" PI_PREFIX="${HOME}/.local/share/pi-runtime" BIN_DIR="${HOME}/.local/bin" \
-    AGENT_DEST="${HOME}/.pi/agent" FORCE=0 MODEL_CHECK=1 SMOKE=0
-  [[ $# -gt 0 ]] || {
-    usage
-    fail "restore 需要 bundle 参数"
-  }
-  BUNDLE="$1"
-  shift
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-    --pi-prefix)
-      PI_PREFIX="$2"
-      shift 2
-      ;;
-    --bin-dir)
-      BIN_DIR="$2"
-      shift 2
-      ;;
-    --agent-dir)
-      AGENT_DEST="$2"
-      shift 2
-      ;;
-    --force)
-      FORCE=1
-      shift
-      ;;
-    --no-model-check)
-      MODEL_CHECK=0
-      shift
-      ;;
-    --smoke)
-      SMOKE=1
-      shift
-      ;;
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    *) fail "未知参数: $1（restore 命令）" ;;
-    esac
-  done
-
-  [[ -f "$BUNDLE" ]] || fail "bundle 不存在: $BUNDLE"
-  require_cmd tar
-  # 完整性校验（bundle + .sha256 一并传输；缺失时明确告警）
-  local SHFILE="${BUNDLE}.sha256"
-  if [[ -f "$SHFILE" ]]; then
-    local EXPECT_SHA="$(awk '{print $1}' "$SHFILE" | head -1)"
-    local ACTUAL_SHA="$(sha256_of "$BUNDLE")"
-    [[ -n "$EXPECT_SHA" ]] || fail "SHA256 文件为空: ${SHFILE}"
-    [[ "$EXPECT_SHA" == "$ACTUAL_SHA" ]] || fail "bundle SHA256 校验失败（可能损坏或被篡改）: 期望 ${EXPECT_SHA} / 实际 ${ACTUAL_SHA}"
-    ok "bundle SHA256 校验通过: ${ACTUAL_SHA}"
-  else
-    warn "未找到 ${SHFILE}，跳过完整性校验（建议 pack 时连同 .sha256 一并拷贝）"
-  fi
-
-  local TMP="$(mktemp -d /tmp/pi-restore-XXXXXX)"
-  info "解压 bundle ..."
-  tar -xzf "$BUNDLE" -C "$TMP" || fail "解压失败（bundle 损坏？）"
-  [[ -f "$TMP/manifest.sh" ]] || fail "bundle 缺少 manifest.sh，不是有效的 offline bundle"
-  source "$TMP/manifest.sh"
-  info "bundle: pi ${PI_PKG_VERSION}（源 ${SOURCE_PLATFORM} / node ${SOURCE_NODE}），组件: $COMPONENTS"
-
-  # ── 0. node 检查 ──
-  local NODE_CMD="node"
-  if ! command -v node >/dev/null 2>&1; then
-    if [[ -d "$TMP/node-linux" && -f "$TMP/node-linux/node-linux-${TARGET_ARCH}.tar.xz" ]]; then
-      info "未找到 node，从 bundle 安装 linux-${TARGET_ARCH} node ..."
-      install_node_from_bundle "$TMP/node-linux/node-linux-${TARGET_ARCH}.tar.xz" "$PI_PREFIX/node" "$BIN_DIR" "$TARGET_ARCH"
-      NODE_CMD="$BIN_DIR/node"
-    else
-      fail "目标机没有 node（要求 >= ${NODE_REQ}）。请在目标机安装 node，或 pack 时加 --with-node"
-    fi
-  else
-    local NV="$("$NODE_CMD" -v | sed 's/^v//')"
-    if [[ "$(printf '%s\n' "$NV" "$NODE_REQ" | sort -V | head -1)" != "$NODE_REQ" ]]; then
-      warn "node 版本 $NV 低于要求 ${NODE_REQ}（pi 要求 >= ${NODE_REQ}）；bundle 内含 --with-node 时可自动安装"
-    else
-      ok "node $NV 满足要求"
-    fi
-  fi
-
-  # ── 1. pi 运行时 ──
-  local PI_DEST="$PI_PREFIX/pi-coding-agent"
-  install_dir "$TMP/pi" "$PI_DEST" "pi 运行时"
-  mkdir -p "$BIN_DIR"
-  # pi wrapper：默认启用 pi 内置离线模式（PI_OFFLINE=1），阻止启动时联网同步第三方插件。
-  # 已安装的 npm/git 插件仍会正常加载（版本匹配走本地比较）；如需联网可 PI_OFFLINE=0 pi ... 覆盖。
-  cat >"$BIN_DIR/pi" <<EOF
-#!/usr/bin/env bash
-export PI_OFFLINE="\${PI_OFFLINE:-1}"
-if [[ -x "$BIN_DIR/node" ]]; then
-  export PATH="$BIN_DIR:\$PATH"
-fi
-exec "$PI_DEST/dist/bundle/cli.js" "\$@"
-EOF
-  chmod +x "$BIN_DIR/pi"
-  ok "pi 已安装: $BIN_DIR/pi（wrapper，内置离线模式 PI_OFFLINE=1）"
-  if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-    warn "请把 $BIN_DIR 加入 PATH:  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.bashrc"
-  fi
-
-  # ── 2. agent 用户目录 ──
-  install_dir "$TMP/agent" "$AGENT_DEST" "agent 用户目录 (~/.pi/agent)"
-  # vendor 外部源码包（restore 后放 agent/vendor/，不在扩展发现路径）
-  if [[ -d "$TMP/agent-vendor" && -n "$(ls -A "$TMP/agent-vendor" 2>/dev/null)" ]]; then
-    install_dir "$TMP/agent-vendor" "$AGENT_DEST/vendor" "外部源码包 (agent/vendor)"
-  fi
-  rebuild_agent_links "$AGENT_DEST" || true
-  rewrite_agent_package_json "$AGENT_DEST" || true
-
-  # ── 3. 可选组件 ──
-  if [[ "$COMPONENTS" == *"project"* && -d "$TMP/project" ]]; then
-    install_dir "$TMP/project" "$PWD/.pi" "项目 .pi/"
-  fi
-  if [[ "$COMPONENTS" == *"repo"* && -d "$TMP/repo" ]]; then
-    install_dir "$TMP/repo" "$PWD/pi-source" "仓库源码"
-    ok "仓库源码已放到 $PWD/pi-source（含 node_modules，可离线开发扩展）"
-  fi
-
-  # ── 4. 平台二进制修复 ──
-  fix_platform_bins "$TMP/offline-tgz" "$AGENT_DEST" "$TARGET_ARCH" || true
-
-  # ── 5. 模型配置检查 ──
-  [[ "$MODEL_CHECK" == 1 ]] && model_check "$AGENT_DEST/models.json" "$NODE_CMD"
-
-  # ── 6. 自检 ──
-  verify_install "$BIN_DIR/pi" "$AGENT_DEST" "$SMOKE"
-
-  rm -rf "$TMP"
-  ok "restore 完成！"
-  echo "------------------------------------------------------------"
-  echo "下一步:"
-  echo "  1. export PATH=\"$BIN_DIR:\$PATH\"（若尚未加入）"
-  echo "  2. 配置离线模型: 编辑 $AGENT_DEST/models.json（见上方提示）"
-  echo "  3. 运行 pi 验证: pi"
-  echo "说明:"
-  echo "  - $BIN_DIR/pi 是 wrapper，默认已设 PI_OFFLINE=1（pi 内置离线模式，"
-  echo "    启动时不联网同步第三方插件，已安装的 npm/git 插件仍正常加载）"
-  echo "  - 如需临时联网更新插件: PI_OFFLINE=0 pi ..."
-  echo "------------------------------------------------------------"
-}
-
-install_dir() {
-  local src="$1" dst="$2" label="$3"
-  if [[ -e "$dst" ]]; then
-    if [[ "$FORCE" == 1 ]]; then
-      local bak="${dst}.bak-$(date +%Y%m%d-%H%M%S)"
-      warn "目标 $dst 已存在，备份到 $bak 后覆盖（--force）"
-      mv "$dst" "$bak"
-    else
-      fail "目标 $dst 已存在。请用 --force 覆盖，或先移走旧目录"
-    fi
-  fi
-  mkdir -p "$(dirname "$dst")"
-  cp -a "$src" "$dst" || fail "复制 $label 失败"
-  ok "$label → $dst"
-}
-
-rebuild_agent_links() {
-  local dest="$1"
-  local zdir="$dest/node_modules/@zenone"
-  mkdir -p "$zdir"
-  # IN-AGENT 链接 → 指向 agent/extensions/ 内
-  local links="$(sed -n '/^# AGENT_LINKS_BEGIN$/,/^# AGENT_LINKS_END$/p' "$TMP/manifest.sh" | sed '1d;$d' | sed '/^$/d' | sed 's/^# //')"
-  local n rel
-  while IFS='|' read -r n rel; do
-    [[ -n "$n" ]] || continue
-    rm -f "$zdir/$n"
-    ln -s "../../$rel" "$zdir/$n"
-    ok "链接: @zenone/$n -> $rel"
-  done <<<"$links"
-  # vendor 链接 → 指向 agent/vendor/ 内
-  local vlinks="$(sed -n '/^# VENDOR_LINKS_BEGIN$/,/^# VENDOR_LINKS_END$/p' "$TMP/manifest.sh" | sed '1d;$d' | sed '/^$/d' | sed 's/^# //')"
-  if [[ -n "$vlinks" ]]; then
-    local v
-    while IFS= read -r v; do
-      [[ -n "$v" ]] || continue
-      rm -f "$zdir/$v"
-      ln -s "../../vendor/$v" "$zdir/$v"
-      ok "链接(vendor): @zenone/$v -> vendor/$v"
-    done <<<"$vlinks"
-  fi
-}
-
-rewrite_agent_package_json() {
-  local dest="$1"
-  local pj="$dest/package.json"
-  [[ -f "$pj" ]] || return 0
-  node -e '
-    const fs=require("fs"),path=require("path");
-    const p=process.argv[1], d=process.argv[2];
-    const j=JSON.parse(fs.readFileSync(p,"utf8"));
-    let changed=false, removed=[];
-    if (j.dependencies) {
-      for (const [k,v] of Object.entries(j.dependencies)) {
-        if (typeof v!=="string" || !v.startsWith("/")) continue;
-        const base=v.split("/").pop();
-        let target=null;
-        if (fs.existsSync(path.join(d,"vendor",base))) target="./vendor/"+base;
-        else if (fs.existsSync(path.join(d,"extensions",base))) target="./extensions/"+base;
-        if (target) { j.dependencies[k]=target; changed=true; }
-        else { delete j.dependencies[k]; removed.push(k); }
-      }
-    }
-    if (changed||removed.length) {
-      fs.writeFileSync(p, JSON.stringify(j,null,2)+"\n");
-      if (changed) console.log("    已重写 package.json file: 依赖为相对路径");
-      if (removed.length) console.log("    已移除失效依赖: "+removed.join(", "));
-    }
-  ' "$pj" "$dest" 2>/dev/null || warn "package.json 重写失败（不影响运行，可手动处理）"
-}
-
-install_node_from_bundle() {
-  local tarball="$1" prefix="$2" bindir="$3" arch="$4"
-  mkdir -p "$prefix"
-  tar -xJf "$tarball" -C "$prefix" || fail "node 解压失败"
-  local d="$(ls -d "$prefix"/node-v*-linux-${arch} 2>/dev/null | head -1)"
-  [[ -n "$d" ]] || fail "node 解压结构异常"
-  mkdir -p "$bindir"
-  ln -sfn "$d/bin/node" "$bindir/node"
-  ln -sfn "$d/bin/npm" "$bindir/npm" 2>/dev/null || true
-  ok "node 已安装到 $prefix/node（$bindir/node）"
-}
-
-fix_platform_bins() {
-  local tgzdir="$1" agent_dest="$2" arch="${3:-x64}"
-  [[ -d "$tgzdir" ]] || return 0
-  local npm_nm="$agent_dest/npm/node_modules"
-  local f base pkg_name target
-  for f in "$tgzdir"/*.tgz; do
-    [[ -f "$f" ]] || continue
-    base="$(basename "$f")"
-    case "$base" in
-    ast-grep-*)
-      pkg_name="@ast-grep/napi-linux-${arch}-gnu"
-      target="$npm_nm/@ast-grep/napi-linux-${arch}-gnu"
-      ;;
-    yuuang-ffi-rs-*)
-      pkg_name="@yuuang/ffi-rs-linux-${arch}-gnu"
-      target="$npm_nm/@yuuang/ffi-rs-linux-${arch}-gnu"
-      ;;
-    *) continue ;;
-    esac
-    if [[ -e "$target" ]]; then
-      ok "平台包已存在: $pkg_name"
-      continue
-    fi
-    mkdir -p "$(dirname "$target")"
-    tar -xzf "$f" -C "$(dirname "$target")" 2>/dev/null
-    mv "$(dirname "$target")/package" "$target" 2>/dev/null
-    ok "已补装 Linux 平台包: $pkg_name"
-  done
-  # 提示 darwin-only 包（Linux 下相关插件功能降级）
-  local p
-  for p in @ast-grep/napi-darwin-arm64 @ast-grep/cli-darwin-arm64 @yuuang/ffi-rs-darwin-arm64 node-pty; do
-    if [[ -e "$npm_nm/$p" ]]; then
-      warn "检测到 darwin-only 包 ${p}（Linux 下不可用，相关插件功能降级；如已补装对应 linux 包可忽略）"
-    fi
-  done
-}
-
-model_check() {
-  local mf="$1" node_cmd="$2"
-  [[ -f "$mf" ]] || {
-    warn "未找到 models.json，请手动配置模型"
-    return 0
-  }
-  "$node_cmd" -e '
-    const fs=require("fs");
-    const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-    const prov=j.providers||{};
-    const names=Object.keys(prov);
-    const localish=names.filter(n=>{
-      const u=(prov[n].baseUrl||"").toLowerCase();
-      return u.includes("localhost")||u.includes("127.0.0.1")||u.includes("192.168.")||u.includes("10.")||u.includes("ollama")||u.includes("lmstudio");
-    });
-    if (localish.length) { console.log("OK  检测到疑似本地/内网 provider: "+localish.join(", ")); }
-    else { console.log("WARN 当前 providers 均非本地: "+names.join(", ")); console.log("    离线环境需配置本地模型（如 ollama），示例："); console.log("    providers.ollama = { api: \"openai-completions\", baseUrl: \"http://localhost:11434/v1\", apiKey: \"ollama\", models: [...] }"); }
-  ' "$mf" 2>/dev/null || warn "models.json 解析失败，请手动检查模型配置"
-}
-
-verify_install() {
-  local pi_bin="$1" agent_dest="$2" smoke="$3"
-  info "自检 ..."
-  local out
-  out="$("$pi_bin" --version 2>&1)" && ok "pi 版本: $out" || warn "pi --version 失败: $out"
-  local n_ext=0
-  [[ -d "$agent_dest/extensions" ]] && n_ext="$(find "$agent_dest/extensions" -maxdepth 1 \( -name "*.ts" -o -type d \) 2>/dev/null | wc -l | tr -d ' ')"
-  ok "agent extensions 数量: ${n_ext}（$agent_dest/extensions）"
-  local n_links=0
-  [[ -d "$agent_dest/node_modules/@zenone" ]] && n_links="$(find "$agent_dest/node_modules/@zenone" -maxdepth 1 -type l 2>/dev/null | wc -l | tr -d ' ')"
-  ok "@zenone 本地包链接: $n_links 个"
-  if [[ "$smoke" == 1 ]]; then
-    info "冒烟自检: pi -ne --no-session（无扩展模式，验证 pi 本体可启动）..."
-    "$pi_bin" -ne --no-session -p "say ok" >/dev/null 2>&1 && ok "冒烟通过" || warn "冒烟失败（无扩展模式）— 请查看输出排查"
-  fi
-}
-
-# ──────────────────────────── 入口 ────────────────────────────
-case "${1:-}" in
-pack)
-  shift
-  cmd_pack "$@"
-  ;;
-restore)
-  shift
-  cmd_restore "$@"
-  ;;
--h | --help | help) usage ;;
-*)
-  usage
-  fail "未知命令: ${1:-（空）}。支持 pack / restore"
-  ;;
+case "$ARCH" in
+x64 | arm64 | local) ;;
+*) die "--arch 只能是 x64 / arm64 / local（收到：${ARCH}）" ;;
 esac
+
+# ── 0. 源机预检 ─────────────────────────────────────────────────────
+need_cmd node
+need_cmd npm
+need_cmd tar
+need_cmd git
+if [ "$ARCH" != "local" ]; then
+	need_cmd curl
+fi
+
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+[ "$NODE_MAJOR" -ge 22 ] || die "源机 node 需要 >= 22（当前 $(node -v)）"
+
+# ── 1. pi 运行时（钉仓库 devDependency 版本） ───────────────────────
+PI_VERSION="$(node -p "String(require('$REPO_ROOT/package.json').devDependencies['@earendil-works/pi-coding-agent']||'').replace(/^[\\^~=v\\s]+/,'')")"
+[ -n "$PI_VERSION" ] || die "package.json 里没有 @earendil-works/pi-coding-agent devDependency"
+PI_RUNTIME_DIR="${PI_RUNTIME_DIR:-$HOME/.pi/agent/install/releases/$PI_VERSION}"
+if [ ! -f "$PI_RUNTIME_DIR/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js" ]; then
+	die "找不到 pi 运行时 ${PI_VERSION}：
+  $PI_RUNTIME_DIR/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
+
+修复：让源机的 pi 版本与仓库 devDependency 对齐，例如
+  pi update            # 或重新执行官方安装脚本
+  # 或显式指定运行时目录： PI_RUNTIME_DIR=/path/to/releases/$PI_VERSION bash scripts/offline.sh pack"
+fi
+ACTUAL_PI_VERSION="$(node -p "require('$PI_RUNTIME_DIR/node_modules/@earendil-works/pi-coding-agent/package.json').version")"
+[ "$ACTUAL_PI_VERSION" = "$PI_VERSION" ] || die "运行时版本 $ACTUAL_PI_VERSION 与仓库期望 $PI_VERSION 不一致（先对齐再打包）"
+# 运行时自检（源机能发现的问题留在源机）：probe.mjs 的 jiti 别名映射硬编码了 pi 的
+# dist 布局；布局一变，目标机上扩展会**全部**加载失败并被隔离（安装仍打印成功）。
+say "校验运行时布局（探针别名映射）..."
+node "$SCRIPT_DIR/probe.mjs" --preflight --runtime "$PI_RUNTIME_DIR" ||
+	die "运行时预检失败：pi $PI_VERSION 的 dist 布局与 scripts/offline/probe.mjs 的 jiti 别名映射不匹配。
+  修好探针映射后再打包（否则目标机上扩展会被整批隔离）。"
+
+REPO_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+REPO_SHORT="$(printf '%s' "$REPO_COMMIT" | cut -c1-8)"
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)" ]; then
+	DIRTY="dirty"
+	warn "工作区有未提交改动，bundle 标记为 dirty（便于追溯）"
+else
+	DIRTY="clean"
+fi
+DATE_TAG="$(date +%Y%m%d)"
+BUNDLE_VERSION="pi$PI_VERSION-$REPO_SHORT-$DATE_TAG"
+[ "$DIRTY" = "dirty" ] && BUNDLE_VERSION="$BUNDLE_VERSION-dirty"
+
+mkdir -p "$OUT_DIR"
+WORK="$OUT_DIR/.work-$BUNDLE_VERSION-$ARCH"
+PAYLOAD="$WORK/payload"
+rm -rf "$WORK"
+mkdir -p "$PAYLOAD"
+
+cleanup() {
+	if [ "$KEEP_WORK" -eq 0 ]; then rm -rf "$WORK"; else say "中间目录保留：$WORK"; fi
+}
+trap cleanup EXIT
+
+# ── 2. 复制工具函数 ─────────────────────────────────────────────────
+copy_tree() {
+	# copy_tree <src> <dst> [exclude...]
+	local src="$1" dst="$2"
+	shift 2
+	mkdir -p "$dst"
+	if command -v rsync >/dev/null 2>&1; then
+		local args=()
+		local e
+		for e in "$@"; do args+=("--exclude=$e"); done
+		# bash 3.2 + set -u：空数组不能直接用 "${args[@]}"，否则 unbound variable
+		if [ ${#args[@]} -eq 0 ]; then
+			rsync -a "$src/" "$dst/"
+		else
+			rsync -a "${args[@]}" "$src/" "$dst/"
+		fi
+	else
+		# 没有 rsync 时不能退回到 `cp -R`：那会把 excludes 全部丢掉，
+		# 把 node_modules/.cache、*.log 甚至指向源机路径的 @zenone 软链打进包。
+		# 这里用 tar 管道（macOS bsdtar / GNU tar 都支持 --exclude），语义与 rsync 一致。
+		local targs=(-cf -)
+		local e
+		for e in "$@"; do targs+=("--exclude=$e"); done
+		(cd "$src" && tar "${targs[@]}" .) | (cd "$dst" && tar -xf -)
+	fi
+}
+
+size_of() {
+	du -sh "$1" 2>/dev/null | cut -f1 | tr -d ' '
+}
+
+# GitHub release 资产在部分网络下直连会超时；按候选链回退下载（镜像在前，直连兜底）。
+fetch_first() {
+	# fetch_first <dest> <url...>
+	local dest="$1"
+	shift
+	local cand
+	for cand in "$@"; do
+		if curl -fsSL --max-time 900 "$cand" -o "$dest" 2>/dev/null && [ -s "$dest" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+fetch_text_first() {
+	# fetch_text_first <url...> → stdout（用于取上游 checksum 清单）
+	local cand
+	for cand in "$@"; do
+		if curl -fsSL --max-time 120 "$cand" 2>/dev/null; then return 0; fi
+	done
+	return 1
+}
+
+sha256_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+
+# 校验下载内容的 sha256（fail-fast）。
+# 必要性：二进制优先从第三方镜像（ghproxy/ghfast）取——镜像只保证"下载得到"，
+# 不保证"和上游发布的一致"。离线机没有任何再校验的机会，所以来源必须在这里钉住。
+verify_download() {
+	# verify_download <file> <expected-hex|空> <label>
+	local file="$1" expect="$2" label="$3" actual
+	if [ "$SKIP_VERIFY" -eq 1 ]; then
+		warn "  --skip-verify：跳过 $label 的 sha256 校验"
+		return 0
+	fi
+	if [ -z "$expect" ]; then
+		warn "  $label 上游未发布 sha256（无法校验来源，仅记录实测值）"
+		return 0
+	fi
+	actual="$(sha256_of "$file")"
+	[ "$actual" = "$expect" ] || die "$label sha256 不匹配：
+  期望：$expect
+  实际：$actual
+  说明：镜像/直连返回的内容与上游发布的不一致，或传输损坏。"
+	say "  $label sha256 校验通过"
+}
+
+# ripgrep 的 release 资产自带 <asset>.sha256
+rg_expected_sha() {
+	# rg_expected_sha <sha256-url...> → stdout 期望值（取不到则为空）
+	local text
+	text="$(fetch_text_first "$@" || true)"
+	[ -n "$text" ] || return 0
+	printf '%s' "$text" | awk '{print $1; exit}'
+}
+
+# node 的 dist 目录有 SHASUMS256.txt：`<hex>  <filename>`
+node_expected_sha() {
+	# node_expected_sha <shasums-url...> <filename>
+	local file="${!#}" text
+	local urls=("$@")
+	unset "urls[$((${#urls[@]} - 1))]"
+	text="$(fetch_text_first "${urls[@]}" || true)"
+	[ -n "$text" ] || return 0
+	printf '%s' "$text" | awk -v f="$file" '{n=$2; sub(/^\*/,"",n); if (n==f) {print $1; exit}}'
+}
+
+# ── 3. 运行时 ───────────────────────────────────────────────────────
+say "复制 pi 运行时 $PI_VERSION ..."
+copy_tree "$PI_RUNTIME_DIR" "$PAYLOAD/runtime" \
+	"node_modules/.cache" "*.log" "node_modules/.package-lock.json"
+
+# ── 4. 仓库源码（安装源） ───────────────────────────────────────────
+say "复制仓库源码（extensions / skills / themes / prompts）..."
+mkdir -p "$PAYLOAD/source"
+copy_tree "$REPO_ROOT/extensions" "$PAYLOAD/source/extensions" \
+	"node_modules" "*.tsbuildinfo" "test" "*.log"
+if [ -d "$REPO_ROOT/skills" ]; then
+	copy_tree "$REPO_ROOT/skills" "$PAYLOAD/source/skills" "node_modules" "*.log"
+fi
+if [ -d "$REPO_ROOT/themes" ]; then
+	copy_tree "$REPO_ROOT/themes" "$PAYLOAD/source/themes"
+fi
+mkdir -p "$PAYLOAD/source/prompts"
+# 共享模块：扩展用相对路径 import 仓库根的 src/tui/*.js，安装后需落在 dirname(agentDir)/src/tui
+if [ -d "$REPO_ROOT/src/tui" ]; then
+	mkdir -p "$PAYLOAD/source/src"
+	copy_tree "$REPO_ROOT/src/tui" "$PAYLOAD/source/src/tui"
+fi
+
+# ── 5. 依赖快照 + 配置 ──────────────────────────────────────────────
+AGENT_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"
+[ -d "$AGENT_DIR" ] || die "找不到 agent 目录：$AGENT_DIR"
+say "复制依赖快照（node_modules / npm / git）..."
+mkdir -p "$PAYLOAD/deps"
+if [ -d "$AGENT_DIR/node_modules" ]; then
+	copy_tree "$AGENT_DIR/node_modules" "$PAYLOAD/deps/node_modules" \
+		"@zenone" ".cache" "*.log"
+fi
+if [ -d "$AGENT_DIR/npm" ]; then
+	copy_tree "$AGENT_DIR/npm" "$PAYLOAD/deps/npm" \
+		"node_modules/.cache" ".cache" "*.log"
+fi
+if [ -d "$AGENT_DIR/git" ]; then
+	copy_tree "$AGENT_DIR/git" "$PAYLOAD/deps/git" ".cache" "*.log"
+fi
+
+say "复制配置（settings.json / extensions-data / 内嵌技能）..."
+mkdir -p "$PAYLOAD/config"
+for f in settings.json; do
+	[ -f "$AGENT_DIR/$f" ] && cp "$AGENT_DIR/$f" "$PAYLOAD/config/$f"
+done
+for d in extensions-data skills themes prompts; do
+	if [ -d "$AGENT_DIR/$d" ]; then
+		copy_tree "$AGENT_DIR/$d" "$PAYLOAD/config/$d" ".cache" "*.log"
+	fi
+done
+[ -f "$AGENT_DIR/models.json" ] || warn "源机没有 models.json（目标机会写入占位模板）"
+
+# ── 6. 清单（profile 是唯一事实来源） ───────────────────────────────
+say "构建 manifest 骨架（解析 sync-profiles.yaml）..."
+MANIFEST_RAW="$WORK/manifest-collect.json"
+node "$SCRIPT_DIR/collect.mjs" --arch "$ARCH" --agent-dir "$AGENT_DIR" --out "$MANIFEST_RAW" \
+	>/dev/null || die "collect.mjs 失败（见上方错误）"
+
+# npm 包形态扩展（pi.extensions → dist）在 bundle 里补一个桥接入口：
+# pi 的加载器在 dist 缺失时回退到同目录 index.ts，因此离线机不需要构建 dist。
+node -e '
+const fs=require("fs"),path=require("path");
+const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const srcRoot=process.argv[2];
+let bridged=0, ok=0, broken=[];
+for (const e of m.extensions||[]) {
+  if (e.kind!=="dir") continue;
+  if (e.library) continue; // 纯库包（如 @zenone/pi-state）：pi 不加载它，只被其它扩展 import
+  const dir=path.join(srcRoot,e.source);
+  const declaredEntry=e.entry?path.join(dir,e.entry):null;
+  if (declaredEntry && fs.existsSync(declaredEntry)) { ok++; continue; }
+  const srcIndex=path.join(dir,"src","index.ts");
+  if (fs.existsSync(srcIndex)) {
+    fs.writeFileSync(path.join(dir,"index.ts"),"// Auto-generated by offline packer - do not edit\nexport { default } from \"./src/index.ts\";\n");
+    bridged++;
+  } else {
+    broken.push(e.name);
+  }
+}
+if (broken.length) {
+  console.error(`[offline/pack] 以下扩展既无可用入口也无 src/index.ts，无法离线加载：${broken.join(", ")}`);
+  process.exit(2);
+}
+process.stdout.write(`${bridged} 个桥接, ${ok} 个自带入口`);
+' "$MANIFEST_RAW" "$PAYLOAD/source" >"$WORK/bridges" || die "扩展入口检查失败（见上方列表）"
+say "扩展入口：$(cat "$WORK/bridges")"
+
+# ── 7. 工具二进制（rg / fd，Linux 静态 musl） ────────────────────────
+TOOLS_JSON="$WORK/tools.json"
+printf '{}\n' >"$TOOLS_JSON"
+if [ "$ARCH" = "local" ]; then
+	say "local 模式：跳过 rg/fd 与原生包（本机自测用包）"
+else
+	[ "$SKIP_TOOLS" -eq 1 ] && warn "--skip-tools：不下载 rg/fd（目标机 grep/find 将不可用）"
+	if [ "$SKIP_TOOLS" -eq 0 ]; then
+		case "$ARCH" in
+		x64) RUST_TARGET="x86_64-unknown-linux-musl" ;;
+		arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;;
+		esac
+		mkdir -p "$PAYLOAD/tools/$ARCH"
+		say "下载 rg / fd（${RUST_TARGET}）..."
+
+		RG_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/BurntSushi/ripgrep/releases/latest 2>/dev/null | sed 's#.*/tag/##' || true)"
+		[ -n "$RG_TAG" ] || RG_TAG="14.1.1"
+		FD_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/sharkdp/fd/releases/latest 2>/dev/null | sed 's#.*/tag/##' || true)"
+		[ -n "$FD_TAG" ] || FD_TAG="v10.2.0"
+
+		RG_TMP="$WORK/rg.tgz"
+		FD_TMP="$WORK/fd.tgz"
+		RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/$RG_TAG/ripgrep-$RG_TAG-$RUST_TARGET.tar.gz"
+		FD_URL="https://github.com/sharkdp/fd/releases/download/$FD_TAG/fd-$FD_TAG-$RUST_TARGET.tar.gz"
+		fetch_first "$RG_TMP" "https://ghproxy.net/$RG_URL" "https://ghfast.top/$RG_URL" "$RG_URL" ||
+			die "ripgrep 下载失败（$RG_TAG/${RUST_TARGET}），镜像与直连都不可用"
+		fetch_first "$FD_TMP" "https://ghproxy.net/$FD_URL" "https://ghfast.top/$FD_URL" "$FD_URL" ||
+			die "fd 下载失败（$FD_TAG/${RUST_TARGET}），镜像与直连都不可用"
+		# 来源校验：ripgrep 发布 <asset>.sha256；fd 上游没有 per-asset sha256（实测 10.5.0 无），
+		# 只能记录实测值 + 查 ELF 头。镜像链下"下载成功"不等于"内容可信"。
+		RG_SHA="$(rg_expected_sha "https://ghproxy.net/$RG_URL.sha256" "https://ghfast.top/$RG_URL.sha256" "$RG_URL.sha256" || true)"
+		verify_download "$RG_TMP" "$RG_SHA" "ripgrep $RG_TAG"
+		verify_download "$FD_TMP" "" "fd $FD_TAG"
+		mkdir -p "$WORK/rg" "$WORK/fd"
+		tar -xzf "$RG_TMP" -C "$WORK/rg" --strip-components=1
+		tar -xzf "$FD_TMP" -C "$WORK/fd" --strip-components=1
+		for pair in "rg:$WORK/rg/rg" "fd:$WORK/fd/fd"; do
+			name="${pair%%:*}"
+			path="${pair#*:}"
+			[ -f "$path" ] || die "$name 解包后找不到可执行文件"
+			# 校验 ELF 头，避免把 macOS 二进制或 HTML 错误页打进包
+			head -c 4 "$path" | od -An -tx1 | tr -d ' \n' | grep -q '^7f454c46$' ||
+				die "$name 不是 ELF 可执行文件（下载内容异常）"
+			cp "$path" "$PAYLOAD/tools/$ARCH/$name"
+			chmod 755 "$PAYLOAD/tools/$ARCH/$name"
+		done
+		# 把实测 sha256 记进 manifest：上游没给校验和的项至少能事后追溯
+		printf '{"rg":{"version":"%s","binarySha256":"%s","tarballSha256":"%s"},"fd":{"version":"%s","binarySha256":"%s","tarballSha256":"%s","upstreamSha256":"none"}}\n' \
+			"$RG_TAG" "$(sha256_of "$PAYLOAD/tools/$ARCH/rg")" "$(sha256_of "$RG_TMP")" \
+			"$FD_TAG" "$(sha256_of "$PAYLOAD/tools/$ARCH/fd")" "$(sha256_of "$FD_TMP")" >"$TOOLS_JSON"
+		say "rg $RG_TAG / fd $FD_TAG 就绪"
+	fi
+
+	# ── 8. 原生包换血：按已装 darwin 版本下载 linux 变体 ──
+	if [ "$SKIP_NATIVE" -eq 0 ]; then
+		mkdir -p "$PAYLOAD/tools/$ARCH/native"
+		node -e '
+const fs=require("fs"),path=require("path"),{execFileSync}=require("child_process");
+const manifest=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const dest=process.argv[2];
+const out=[];
+for (const p of manifest.nativePackages||[]) {
+  if (p.strategy!=="npm-pack"||!p.linuxName) { out.push({...p,status:p.strategy==="remove-only"?"remove-only":"expected-degraded"}); continue; }
+  const spec=`${p.linuxName}@${p.version}`;
+  try {
+    const stdout=execFileSync("npm",["pack",spec,"--pack-destination",dest],{encoding:"utf8",stdio:["ignore","pipe","pipe"]});
+    const tarball=String(stdout).trim().split("\n").filter(Boolean).pop()||"";
+    out.push({...p,spec,tarball,status:"ok"});
+  } catch (err) {
+    out.push({...p,spec,status:"failed",error:String(err.stderr||err.message).trim().split("\n")[0]});
+  }
+}
+fs.writeFileSync(process.argv[3],JSON.stringify(out,null,2)+"\n");
+' "$MANIFEST_RAW" "$PAYLOAD/tools/$ARCH/native" "$WORK/native.json" || die "原生包下载失败"
+
+		node -e '
+const n=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+const bad=n.filter(x=>x.status!=="ok");
+if(bad.length){console.error("[offline/pack] WARN 以下原生包未能取得 linux 变体（安装后由探针隔离对应插件）：");for(const b of bad)console.error(`  - ${b.name} (${b.version}) → ${b.linuxName||"无映射"}: ${b.error||b.status}`)}
+const ok=n.filter(x=>x.status==="ok");console.error(`[offline/pack] 原生包换血：${ok.length} 个已就绪，${bad.length} 个降级`);
+' "$WORK/native.json"
+
+		say "测量原生包/工具的 glibc 下限（决定老机器上哪些功能会降级）..."
+		if node "$SCRIPT_DIR/native-audit.mjs" "$WORK/native.json" "$PAYLOAD/tools/$ARCH/native" "$TOOLS_JSON" >"$WORK/glibc.txt" 2>&1; then
+			while IFS= read -r line; do say "  $line"; done <"$WORK/glibc.txt"
+		else
+			warn "glibc 下限测量失败（不影响打包，安装时由探针兜底）"
+		fi
+
+		# node-pty 没有 linux 预编译；仅在本地已有 Linux node 镜像时尝试交叉编译
+		if [ -d "$AGENT_DIR/npm/node_modules/node-pty" ]; then
+			if command -v docker >/dev/null 2>&1 && docker image inspect node:22-bookworm-slim >/dev/null 2>&1; then
+				say "尝试在容器内编译 node-pty（N-API，跨 Node 版本可用）..."
+				mkdir -p "$WORK/node-pty"
+				copy_tree "$AGENT_DIR/npm/node_modules/node-pty" "$WORK/node-pty"
+				mkdir -p "$WORK/node-pty/node_modules"
+				[ -d "$AGENT_DIR/npm/node_modules/node-addon-api" ] && copy_tree "$AGENT_DIR/npm/node_modules/node-addon-api" "$WORK/node-pty/node_modules/node-addon-api"
+				if docker run --rm -v "$WORK/node-pty:/src" -w /src node:22-bookworm-slim \
+					bash -lc 'npm config set nodedir /usr/local >/dev/null 2>&1; npx --yes node-gyp@10 rebuild >/tmp/build.log 2>&1 || { tail -20 /tmp/build.log; exit 1; }; ls build/Release/pty.node' \
+					>/dev/null 2>&1; then
+					mkdir -p "$PAYLOAD/tools/$ARCH/compiled/node-pty/prebuilds/linux-$ARCH"
+					cp "$WORK/node-pty/build/Release/pty.node" "$PAYLOAD/tools/$ARCH/compiled/node-pty/prebuilds/linux-$ARCH/pty.node"
+					printf '{"name":"node-pty","status":"compiled","arch":"%s"}\n' "$ARCH" >"$WORK/node-pty.json"
+					say "node-pty 编译成功"
+				else
+					warn "node-pty 编译失败，标记为预期降级（依赖它的插件会被探针隔离）"
+					printf '{"name":"node-pty","status":"expected-degraded"}\n' >"$WORK/node-pty.json"
+				fi
+			else
+				warn "本机没有 node:22-bookworm-slim 镜像，跳过 node-pty 编译（标记为预期降级）"
+				printf '{"name":"node-pty","status":"expected-degraded","reason":"no local node image"}\n' >"$WORK/node-pty.json"
+			fi
+		fi
+	fi
+
+	# ── 9. 可选：自带 node 运行时 ──
+	if [ "$WITH_NODE" -eq 1 ]; then
+		if [ -z "$NODE_VERSION" ]; then
+			fetch_first "$WORK/node-index.json" \
+				"https://npmmirror.com/mirrors/node/index.json" \
+				"https://nodejs.org/dist/index.json" || die "下载 node 版本索引失败（镜像与直连都不可用）"
+			NODE_VERSION="$(node -e '
+let s="";
+try{s=require("fs").readFileSync(process.argv[1],"utf8")}catch(e){process.exit(1)}
+const rel=JSON.parse(s).filter(r=>r.lts && !r.security);
+const major=Number(process.argv[2]);
+const pick=rel.find(r=>Number(r.version.replace(/^v/,"").split(".")[0])===major)||rel[0];
+process.stdout.write(pick.version);
+' "$WORK/node-index.json" "$NODE_MAJOR")" || die "解析 node 版本索引失败"
+		fi
+		case "$NODE_VERSION" in v*) ;; *) NODE_VERSION="v$NODE_VERSION" ;; esac
+		NODE_TARBALL="node-$NODE_VERSION-linux-$ARCH.tar.gz"
+		say "下载 node ${NODE_VERSION}（${ARCH}，.tar.gz 以兼容无 xz 的老机器）..."
+		mkdir -p "$PAYLOAD/tools/$ARCH"
+		fetch_first "$PAYLOAD/tools/$ARCH/$NODE_TARBALL" \
+			"https://npmmirror.com/mirrors/node/$NODE_VERSION/$NODE_TARBALL" \
+			"https://nodejs.org/dist/$NODE_VERSION/$NODE_TARBALL" ||
+			die "node 下载失败：$NODE_TARBALL"
+		# 来源校验：node dist 的 SHASUMS256.txt（`<hex>  <filename>`），从同一镜像链取
+		NODE_SHA="$(node_expected_sha \
+			"https://npmmirror.com/mirrors/node/$NODE_VERSION/SHASUMS256.txt" \
+			"https://nodejs.org/dist/$NODE_VERSION/SHASUMS256.txt" \
+			"$NODE_TARBALL" || true)"
+		verify_download "$PAYLOAD/tools/$ARCH/$NODE_TARBALL" "$NODE_SHA" "node $NODE_VERSION"
+		# 记进 manifest，安装器的 --use-bundled-node 依据它定位
+		node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let j={};
+try{j=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){}
+j.node={version:process.argv[2],tarball:process.argv[3]};
+fs.writeFileSync(p,JSON.stringify(j)+"\n");
+' "$TOOLS_JSON" "$NODE_VERSION" "$NODE_TARBALL"
+		say "node $NODE_VERSION 已进包（安装时用 --use-bundled-node 启用）"
+	fi
+fi
+
+# ── 10. 随包脚本 ────────────────────────────────────────────────────
+cp "$SCRIPT_DIR/install.sh" "$PAYLOAD/install.sh"
+cp "$SCRIPT_DIR/probe.mjs" "$PAYLOAD/probe.mjs"
+chmod 755 "$PAYLOAD/install.sh"
+mkdir -p "$PAYLOAD/tools"
+
+# ── 11. 合并最终 manifest ───────────────────────────────────────────
+say "生成 manifest.json ..."
+node -e '
+const fs=require("fs");
+const read=(p,d)=>{try{return JSON.parse(fs.readFileSync(p,"utf8"))}catch{return d}};
+// collect.mjs 的产物是必需输入：坏 JSON 必须大声失败。若和可选输入共用兜底，
+// 会产出一份 extensions: [] / nativePackages: [] 的空包并打印打包成功——离线机没有回滚通道。
+const collect=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const tools=read(process.argv[2],{});
+const native=read(process.argv[3],[]);
+const nodePty=read(process.argv[4],null);
+const manifest={
+  ...collect,
+  bundleVersion: process.argv[5],
+  createdAt: new Date().toISOString().replace(/\.\d+Z$/,"Z"),
+  sourceHost: `${process.platform}-${process.arch}`,
+  node: { minVersion: "22.19.0" },
+  tools,
+  nativePackages: native,
+  nodePty,
+  // 注意：配置类/继承类路径的清单只存在于 install.sh（CONFIG_ITEMS 等），不要在 manifest 里
+  // 复述一份无人读取的副本——两处一旦不同步，按字段接线的人会踩空。
+};
+fs.writeFileSync(process.argv[6],JSON.stringify(manifest,null,2)+"\n");
+' "$MANIFEST_RAW" "$TOOLS_JSON" "$WORK/native.json" "$WORK/node-pty.json" \
+	"$BUNDLE_VERSION" "$PAYLOAD/manifest.json" || die "manifest 合并失败"
+
+node -e '
+const fs=require("fs"),cp=require("child_process");
+const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const p=process.argv[2];
+const size=(f)=>{try{return cp.execFileSync("du",["-sk",f],{encoding:"utf8"}).split("\t")[0]+"K"}catch{return "?"}};
+m.sizes={runtime:size(p+"/runtime"),source:size(p+"/source"),deps:size(p+"/deps"),config:size(p+"/config"),tools:size(p+"/tools")};
+fs.writeFileSync(process.argv[1],JSON.stringify(m,null,2)+"\n");
+' "$PAYLOAD/manifest.json" "$PAYLOAD" || true
+
+cat >"$PAYLOAD/README-安装说明.txt" <<EOF
+pi 离线包 $BUNDLE_VERSION （${ARCH}）
+================================================
+第一步：把这三个文件拷到目标机同一目录（U 盘 / scp 均可）
+
+  pi-offline-$BUNDLE_VERSION-$ARCH.tar.gz
+  pi-offline-$BUNDLE_VERSION-$ARCH.tar.gz.sha256
+  install.sh
+
+第二步：在该目录下执行（Linux；无网、无 sudo 均可）
+
+  bash install.sh pi-offline-$BUNDLE_VERSION-$ARCH.tar.gz
+
+第三步：新开终端（或 source ~/.bashrc），然后
+
+  pi --version      # 应输出 $PI_VERSION
+  pi                # 正常启动
+
+安装日志： ~/.pi/agent/logs/offline-install-<时间戳>.log
+加载报告： ~/.pi/agent/load-report.json
+装的是哪个包： ~/.pi/agent/installed-bundle.json
+
+升级 / 回填配置 / 排障：见 docs/offline-deployment.md
+EOF
+
+# ── 12. 打包 ────────────────────────────────────────────────────────
+TARBALL="pi-offline-$BUNDLE_VERSION-$ARCH.tar.gz"
+say "打包 $TARBALL ..."
+(
+	cd "$PAYLOAD"
+	COPYFILE_DISABLE=1 tar -czf "$OUT_DIR/$TARBALL" .
+)
+SHA="$(shasum -a 256 "$OUT_DIR/$TARBALL" | awk '{print $1}')"
+printf '%s  %s\n' "$SHA" "$TARBALL" >"$OUT_DIR/$TARBALL.sha256"
+
+# 注意：tarball 的 sha256 不可能写进包内 manifest（tar 已封口）。
+# 它只存在于 $TARBALL.sha256 这个 sidecar；安装器自己实测后落进 installed-bundle.json。
+
+cp "$SCRIPT_DIR/install.sh" "$OUT_DIR/install.sh"
+chmod 755 "$OUT_DIR/install.sh"
+cp "$PAYLOAD/README-安装说明.txt" "$OUT_DIR/README-安装说明.txt"
+
+# ── 13. 汇总 ────────────────────────────────────────────────────────
+say "完成。"
+printf '\n'
+printf '  bundle 版本 : %s\n' "$BUNDLE_VERSION"
+printf '  pi 运行时   : %s (%s)\n' "$PI_VERSION" "$(size_of "$PAYLOAD/runtime")"
+printf '  仓库源码    : %s\n' "$(size_of "$PAYLOAD/source")"
+printf '  依赖快照    : %s\n' "$(size_of "$PAYLOAD/deps")"
+printf '  配置        : %s\n' "$(size_of "$PAYLOAD/config")"
+printf '  工具/原生   : %s\n' "$(size_of "$PAYLOAD/tools")"
+printf '  压缩包      : %s\n' "$(size_of "$OUT_DIR/$TARBALL")"
+printf '  sha256      : %s\n' "$SHA"
+printf '\n  产物目录：%s\n' "$OUT_DIR"
+printf '  拷到目标机：%s、其 .sha256、install.sh 三个文件\n\n' "$TARBALL"
