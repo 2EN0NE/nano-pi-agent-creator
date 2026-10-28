@@ -217,7 +217,10 @@ jobs:
               run: bash scripts/setup-ci.sh
             - name: Run bash e2e tests (shard ${{ matrix.shard }})
               env:
-                  E2E_POOL_SIZE: 4
+                  # 2 核 runner 上池化 4 会把「起真实 pi + 真实 tmux」的 TUI 用例拖到超时
+                  # （org / ci-watch / custom-rename 在不同 run 里轮流红）。降到 2：单用例
+                  # 恢复自然耗时，总墙钟增加但仍远低于 40min job 上限（实测 shard 1 ~16min）。
+                  E2E_POOL_SIZE: 2
                   E2E_BUDGET_STRICT: '1'
                   # CI 无并发交互 pi 会话 → 环境哨兵可以硬阻塞：真实 $HOME/.pi 被改动
                   # 一律判失败（护栏见 ADR-0045 D6 修订：pi 配置根 guard + 内容哈希口径）
