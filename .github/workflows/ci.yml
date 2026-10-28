@@ -232,7 +232,7 @@ jobs:
                   #                     CI Linux 崩溃，TODO P0；smoke 走专用 job）
                   bash test/e2e/scripts/run-e2e.sh \
                     --shard "${{ matrix.shard }}/8" \
-                    --exclude worktree,permission-gate
+                    --exclude worktree,permission-gate,org
             - name: Warn on skipped permission-gate TUI (TODO P0)
               if: matrix.shard == 4
               run: |
@@ -259,6 +259,32 @@ jobs:
                   else
                     echo "(no test results directory found)"
                   fi
+
+    # ── org 专用 e2e（阻塞）──
+    # org 的 8 条 TUI 用例每条都要起**真实 pi + 真实 tmux 成员**，25 条 smoke 做真实多进程
+    # 编排。放在 2 核 runner 的共享分片里池化 2 仍会在争用下卡等待超时（实测 6/8 条 TUI 红，
+    # 而本机同 code 全绿）：00 号用例的自然耗时在 CI 争用下会翻倍。故按 worktree /
+    # permission-gate 的既有先例搬进专用 job，`--pool 1` 让单用例回到自然耗时。
+    e2e-org:
+        name: E2E org (dedicated)
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: npm
+            - name: Install project dependencies
+              run: npm ci
+            - name: Setup CI environment
+              run: bash scripts/setup-ci.sh
+            - name: Run org e2e (serial pool)
+              env:
+                  E2E_POOL_SIZE: 1
+                  E2E_BUDGET_STRICT: '1'
+                  E2E_ENV_SENTINEL: 'strict'
+              run: bash test/e2e/scripts/run-e2e.sh --ext org
 
     # ── permission-gate smoke e2e（阻塞）──
     # CI 主矩阵用 `--exclude worktree,permission-gate` 跳过它（TUI expect 在
