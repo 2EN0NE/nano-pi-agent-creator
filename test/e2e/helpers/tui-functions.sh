@@ -627,6 +627,16 @@ tui_expect_test() {
 		while {!\$__quiet && [clock seconds] < \$__ready_deadline} {
 			set timeout 1
 			expect {
+				# ── 终端能力查询应答（ADR-0062 / TODO-9bb23dc9）──────────────────
+				# pi-tui 启动时会问前景色/背景色/调色板/DA1；某些 CI run 上它问完
+				# 就不再出帧（无应答也不超时兜底），表现为「静默 → 误判就绪 →
+				# 后续 /命令 石沉大海 → 用例坐满超时」。这里在**读循环内**顺手应答，
+				# 交互式终端本来就会回，等于把 PTY 补成一个"正常的终端"。
+				# 用 \x1b/\x5c 而非 \033/\\ 是为了躲开 bash→Tcl 双层转义。
+				-re {\]10;\?} { send "\x1b]10;rgb:ffff/ffff/ffff\x1b\x5c"; exp_continue }
+				-re {\]11;\?} { send "\x1b]11;rgb:0000/0000/0000\x1b\x5c"; exp_continue }
+				-re {\]4;([0-9]+);\?} { send "\x1b]4;\$expect_out(1,string);rgb:ffff/ffff/ffff\x1b\x5c"; exp_continue }
+				-re {\x1b\[c} { send "\x1b\[?1;2c"; exp_continue }
 				-re {.+} { exp_continue }
 				timeout { set __quiet 1 }
 			}
