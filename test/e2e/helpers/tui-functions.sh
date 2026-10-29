@@ -623,7 +623,11 @@ tui_expect_test() {
 		# 裸 sleep 会把启动输出留在 pty 缓冲里，随后用例发键时与输出交错，
 		# 实测导致首条命令的 Enter 丢失（如 /preset plan 与下一条 /tools 合并成 "plan/tools"）。
 		set __quiet 0
-		set __ready_deadline [expr {[clock seconds] + 20}]
+		# 就绪的**必要条件**：必须已见到 TUI 进入 alt screen（\x1b[?1049h）。
+		# 只靠「静默 1s」会在 pi 初始化稍慢时误判就绪 —— 实测 CI 红态日志里
+		# `/org` 出现在 `[?1049h` **之前**，命令被 pi 丢掉 → 用例坐满超时。
+		set __saw_alt 0
+		set __ready_deadline [expr {[clock seconds] + 30}]
 		while {!\$__quiet && [clock seconds] < \$__ready_deadline} {
 			set timeout 1
 			expect {
@@ -633,12 +637,13 @@ tui_expect_test() {
 				# 后续 /命令 石沉大海 → 用例坐满超时」。这里在**读循环内**顺手应答，
 				# 交互式终端本来就会回，等于把 PTY 补成一个"正常的终端"。
 				# 用 \x1b/\x5c 而非 \033/\\ 是为了躲开 bash→Tcl 双层转义。
+				-re {\x1b\[\?1049h} { set __saw_alt 1; exp_continue }
 				-re {\]10;\?} { send "\x1b]10;rgb:ffff/ffff/ffff\x1b\x5c"; exp_continue }
 				-re {\]11;\?} { send "\x1b]11;rgb:0000/0000/0000\x1b\x5c"; exp_continue }
 				-re {\]4;([0-9]+);\?} { send "\x1b]4;\$expect_out(1,string);rgb:ffff/ffff/ffff\x1b\x5c"; exp_continue }
 				-re {\x1b\[c} { send "\x1b\[?1;2c"; exp_continue }
 				-re {.+} { exp_continue }
-				timeout { set __quiet 1 }
+				timeout { if {\$__saw_alt} { set __quiet 1 } }
 			}
 		}
 		set timeout $timeout_seconds
