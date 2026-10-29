@@ -292,7 +292,7 @@ jobs:
                   name: e2e-test-results-org
                   path: test/results/
 
-    # ── org TUI e2e（非阻塞，已知间歇红）──
+    # ── org TUI e2e（阻塞）──
     # **已排除**：不是 pi-tui 终端查询、不是 org 代码。2026-10-28 在 CI 上打点实证——
     # `/org` 命令确实进入 tui 分支、`resolveSelf` 正常、看板组件被创建（H1→H2→H3→H5a/b/c
     # 全通过、无异常），但首帧渲染迟迟不落地 → wait_for 超时。
@@ -302,9 +302,8 @@ jobs:
     # 保留非阻塞以不丢趋势信号；结构性修法（把 8 条 TUI 合并成更少的 pi 启动，或改用 tmux
     # 中介终端）需要单独改造，完成后改回阻塞。
     e2e-org-tui:
-        name: E2E org TUI (non-blocking)
+        name: E2E org TUI
         runs-on: ubuntu-latest
-        continue-on-error: true
         timeout-minutes: 30
         steps:
             - uses: actions/checkout@v4
@@ -319,12 +318,9 @@ jobs:
             - name: Run org TUI e2e
               env:
                   E2E_POOL_SIZE: 2
-                  E2E_BUDGET_STRICT: '0'
+                  E2E_BUDGET_STRICT: '1'
+                  E2E_ENV_SENTINEL: 'strict'
               run: bash test/e2e/scripts/run-e2e.sh --ext org --tui
-            - name: Warn on org TUI known flake
-              if: always()
-              run: |
-                  echo "::warning::org TUI 在 2 核 CI 上间歇红（0~6/8），已排除代码与 pi-tui 因素，见 job 注释"
             - name: Upload test results
               if: always()
               uses: actions/upload-artifact@v4
