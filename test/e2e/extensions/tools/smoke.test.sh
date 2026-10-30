@@ -256,7 +256,7 @@ TEST
 # ====================================================================
 # SCENARIO 8: tool-range 显式报名 → 臂结果生效（core 收紧 / full 不限制，不落长期状态）
 # ====================================================================
-test_it "tool-range 显式报名 → 分配臂并生效（core: effective=7 injected>0 / full: injected=0）" <<'TEST'
+test_it "tool-range 显式报名 → 分配臂并生效（core: 生效集收窄且 injected>0 / full: injected=0）" <<'TEST'
   local slug="e2e-tools-s8-$$"
   local test_home="$ROOT_DIR/.pi/tmp/$slug"
   setup_tool_range_enrolled_sandbox "$test_home"

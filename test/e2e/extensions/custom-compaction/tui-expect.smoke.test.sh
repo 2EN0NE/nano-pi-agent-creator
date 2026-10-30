@@ -106,7 +106,24 @@ test_it "expect: invisible continue full chain (marker filtered, zero text)" <<'
     echo 'set stty_init "cols 80 rows 24"'
     echo 'cd $env(TH)'
     echo 'spawn pi -a'
-    echo 'expect { -re {\(auto\)|0\.0%/0} { } timeout { exit 124 } }'
+    # 就绪：读走输出直到静默 1s，**且**已见 alt screen（`[?1049h`）。
+    # 两个条件缺一不可（见 docs/e2e-performance.md §2.1「就绪门」）：
+    #   ① 不要写「状态栏正则就绪」——本路径实测永不匹配；
+    #   ② alt-screen 是必要条件——静默若落在 `[?1049h` 之前，首条 prompt 会被 pi 丢掉
+    #      （CI 上表现为整例坐满超时的两态红）。
+    #   ③ body 必须多行写——单行会被 expect 当成单个 glob 模式，超时动作也不跑。
+    echo 'set __saw_alt 0'
+    echo 'set __deadline [expr {[clock seconds] + 30}]'
+    echo 'while {[clock seconds] < $__deadline} {'
+    echo '  set timeout 1'
+    echo '  expect {'
+    echo '    -re {\x1b\[\?1049h} { set __saw_alt 1; exp_continue }'
+    echo '    -re {.+} { exp_continue }'
+    echo '    timeout { if {$__saw_alt} { break } }'
+    echo '  }'
+    echo '}'
+    echo 'if {!$__saw_alt} { puts "\[tui-warn\] 就绪门超时：30s 内未见 alt-screen，后续 prompt 可能被丢弃"; flush stdout }'
+    echo 'set timeout 120'
     echo 'sleep 1'
     for n in $(seq 1 12); do
       echo "send \"[exec cat \$env(TH)/prompt$n.txt]\\r\""
@@ -115,7 +132,10 @@ test_it "expect: invisible continue full chain (marker filtered, zero text)" <<'
     echo 'sleep 15'
     echo 'send "/quit\r"'
     echo 'sleep 2'
-    echo 'expect { eof { } timeout { exit 124 } }'
+    echo 'expect {'
+    echo '  eof { }'
+    echo '  timeout { exit 124 }'
+    echo '}'
   } > "$TH/test.exp"
   chmod +x "$TH/test.exp"
 

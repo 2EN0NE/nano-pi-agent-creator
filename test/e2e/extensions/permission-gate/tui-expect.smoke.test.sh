@@ -353,10 +353,14 @@ JSON
     # prompt 1：危险命令 → 阻断框
     send "clean the temp dir\r"
     stage "prompt1-sent"
-    # 20s 上限（原 45s）：沙箱里「prompt → 阻断框」实测 0-45s 波动，45s 上限意味着
-    # 最坏情况白等 45s×2；收紧后超时仍带定位标记失败，不掩盖问题。
-    set timeout 20
-    expect { -re {DANGER} { } timeout { send_error "STUCK@prompt1: 20s 内未见阻断框（模型/prompt 层未响应）\n"; exit 3 } }
+    # 45s 上限：沙箱里「prompt → 阻断框」实测 0-45s 波动。此前的 20s 是「断言尚未
+    # 真正生效」（单行 braced body = 空断言）时收的，断言修好后按实测上界取值，
+    # 否则负载稍高就会以 STUCK 假失败（最坏情况仍远低于 300s 模块预算）。
+    set timeout 45
+    expect {
+      -re {DANGER} { }
+      timeout { send_error "STUCK@prompt1: 45s 内未见阻断框（模型/prompt 层未响应）\n"; exit 3 }
+    }
     stage "prompt1-blocked"
     send "\r"
     sleep 3
@@ -364,7 +368,10 @@ JSON
     # 注：expect 会消耗已匹配文本，所以这里匹配到的是**新出现**的 DANGER，不会命中回滚缓冲
     send "clean it again\r"
     stage "prompt2-sent"
-    expect { -re {DANGER} { } timeout { send_error "STUCK@prompt2: 20s 内未见第二个阻断框\n"; exit 3 } }
+    expect {
+      -re {DANGER} { }
+      timeout { send_error "STUCK@prompt2: 45s 内未见第二个阻断框\n"; exit 3 }
+    }
     stage "prompt2-blocked"
     send "\r"
     sleep 3
@@ -410,7 +417,12 @@ JSON
     #   → 不会重绘 → 永远匹配不到，白等到 timeout（实测 25s / 用例）。面板打开与否由
     #   后续步骤自己的 STUCK 标记兜底，这里只给一个短的有界等待。
     set timeout 4
-    expect { timeout { } }
+    # 有界排空 4s（原 `expect { timeout { } }` 单行写法连读都不读，是纯空等）
+    expect {
+      -timeout 4
+      -re {.+} { exp_continue }
+      timeout { }
+    }
     stage "panel2-open"
     sleep 1
     send "p"

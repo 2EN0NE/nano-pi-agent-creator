@@ -138,7 +138,11 @@ function loadFilePresets(cwd: string): FilePresets {
 	// extensions-data/preset/` 留下文件。CI 的严格环境哨兵因此每次判红
 	// （`+ ~/.pi/agent/extensions-data/preset/config.json`）——而 guard 只重定向
 	// pi 内核目录，extensions-data 走 os.homedir() 不在覆盖范围（ADR-0045 D6）。
-	const user = (readJsonFile(paths.userFile) as PresetsConfig | null) ?? DEFAULT_PRESETS;
+	// 必须是**克隆**：DEFAULT_PRESETS 是模块级常量，而 repairStaleRefs → applyStaleFix
+	// 会就地把 preset.tools/skills/provider 改掉；直接返回引用会让「内置默认值」被
+	// 一次修复永久改写（同进程内后续会话/保存都拿到改过的基底）。
+	const user =
+		(readJsonFile(paths.userFile) as PresetsConfig | null) ?? structuredClone(DEFAULT_PRESETS);
 	const project = (readJsonFile(paths.projectFile) as PresetsConfig | null) ?? {};
 	return { user, project };
 }
@@ -228,9 +232,10 @@ export function persistPresetToUser(cwd: string, name: string, preset: Preset): 
 	const paths = resolveConfigPaths('preset', { cwd });
 	// 与 loadFilePresets 同源：文件不存在时以内存默认值为基底，
 	// 否则首次保存只会写回被编辑的那一个 preset，其余内置默认项会消失。
-	const userRaw = (readJsonFile(paths.userFile) as PresetsConfig | null) ?? {
-		...DEFAULT_PRESETS,
-	};
+	// 同样必须**克隆**（同 loadFilePresets 的理由）：浅拷贝仍与 DEFAULT_PRESETS 共享
+	// 嵌套 preset 对象，一旦后续就地改某个 preset 的 tools/skills，常量就被永久污染。
+	const userRaw =
+		(readJsonFile(paths.userFile) as PresetsConfig | null) ?? structuredClone(DEFAULT_PRESETS);
 	userRaw[name] = preset;
 	writeJsonAtomic(paths.userFile, userRaw);
 	return userRaw;

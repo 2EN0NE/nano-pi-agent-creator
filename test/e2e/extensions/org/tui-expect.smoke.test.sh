@@ -30,7 +30,7 @@ EOF
   # 打开 /org 面板：断言标题 + 公司 tab 出现 dev-team + 任务标题渲染
   tui_expect_test "org" '
     send "/org\r"
-    expect { -re {org:} { } timeout { send_error "FAIL: board did not render\n"; exit 2 } }
+    wait_for {org:}
     wait_for {冒烟看板任务}
   ' 60 80 "$CHIEF_DIR" "$ROOT/preset"
 
@@ -71,12 +71,12 @@ EOF
   # 以 worker-b（非派发人）目录打开面板 → 等待验收 tab（3）→ 详情（回车）→ a → y
   tui_expect_test "org" '
     send "/org\r"
-    expect { -re {org:} { } timeout { send_error "FAIL: board did not render\n"; exit 2 } }
+    wait_for {org:}
     wait_for {dev-team}
     send "3"
     wait_for {人类验收目标}
     send "\r"
-    expect { -re {人类强制|a 验收} { } timeout { send_error "FAIL: 详情/操作键未见\n"; exit 4 } }
+    wait_for {人类强制|a 验收}
     send "a"
     wait_for {确认}
     send "y"
@@ -137,7 +137,7 @@ EOF
 
   tui_expect_test "org" '
     send "/org\r"
-    expect { -re {org:} { } timeout { send_error "FAIL: board did not render\n"; exit 2 } }
+    wait_for {org:}
     wait_for {dev-team}
     # 说明：本用例靠方向键导航（右→成员视角、下→选中行），视图切换/选择落定没有
     # 唯一可匹配的屏幕标记（tab 标签与成员名在切换前就已在屏幕上），故这一段保留
@@ -224,15 +224,27 @@ test_it "expect: /control on → /org on → /control off 状态栏三态时间�
   duty_expect "$ROOT" "$WORKER_DIR" "$ROOT/preset" 90 '
     puts "STEP_BEGIN 01-controlOn /control on → 待上岗（不得自动上岗）"
     send "/control on\r"
-    expect { -re {待上岗} { puts "STEP_OK 01-controlOn" } timeout { puts "FAIL_MARKER step=01-controlOn"; send_error "FAIL: /control on 后未进入「待上岗」\n"; exit 2 } }
+    # 注意：expect 的 braced body **必须多行**——整段写在一行时 expect 会把它当成
+    # 单个 glob 模式（`expect -d` 可见 `match glob pattern " -re {…} … "`），
+    # 于是既不会匹配、超时动作也不会执行，等于一条恒真的空断言。
+    expect {
+      -re {待上岗} { puts "STEP_OK 01-controlOn" }
+      timeout { puts "FAIL_MARKER step=01-controlOn"; send_error "FAIL: /control on 后未进入「待上岗」\n"; exit 2 }
+    }
 
     puts "STEP_BEGIN 02-orgOn /org on → 在岗计数"
     send "/org on\r"
-    expect { -re {成员} { puts "STEP_OK 02-orgOn" } timeout { puts "FAIL_MARKER step=02-orgOn"; send_error "FAIL: /org on 后未转成在岗计数\n"; exit 3 } }
+    expect {
+      -re {成员} { puts "STEP_OK 02-orgOn" }
+      timeout { puts "FAIL_MARKER step=02-orgOn"; send_error "FAIL: /org on 后未转成在岗计数\n"; exit 3 }
+    }
 
     puts "STEP_BEGIN 03-controlOff /control off → 强制回落未连接"
     send "/control off\r"
-    expect { -re {未连接} { puts "STEP_OK 03-controlOff" } timeout { puts "FAIL_MARKER step=03-controlOff"; send_error "FAIL: /control off 后未回落「未连接」\n"; exit 4 } }
+    expect {
+      -re {未连接} { puts "STEP_OK 03-controlOff" }
+      timeout { puts "FAIL_MARKER step=03-controlOff"; send_error "FAIL: /control off 后未回落「未连接」\n"; exit 4 }
+    }
   '
 
   if [[ "$TUI_EXIT_CODE" -ne 0 && "$TUI_EXIT_CODE" -ne 124 ]]; then
@@ -255,10 +267,24 @@ test_it "expect: /control on → /org on → /control off 状态栏三态时间�
     tui_cleanup; exit 1
   fi
 
-  # 004 原关键断言：运行中 /control on 不得自动上岗。
-  # 判据：第一次出现「在岗」相关文案必须晚于「待上岗」（而非一开就「已在岗」）
-  if ! grep -aq "待上岗" "$TUI_OUTPUT_FILE"; then
-    echo "FAIL: 未见「待上岗」，无法证明未自动上岗（ADR-0046 D1）"
+  # 004 原关键断言：运行中 /control on 不得自动上岗（ADR-0046 D1）。
+  # 判据：**/control on 那段窗口内**（从开跑到 `STEP_BEGIN 02-orgOn`，即 /org on 发出之前）
+  # 不得出现「已在岗」——一旦自动上岗，applyOnDuty 会打印「已在岗：org 工具…」
+  # （extensions/auto/org/index.ts）。原用例是整份输出的负向断言；合并成单进程后
+  # 「已在岗」在 /org on 之后必然出现，故改为按窗口判定，强度与原断言等价。
+  # 边界取 STEP_BEGIN 02（而不是 STEP_OK 01）：后者在「待上岗」匹配瞬间就打印，
+  # 而自动上岗的消息可能在它之后才落盘，用 STEP_OK 01 会漏判。
+  window_end="$(grep -abo -m1 "STEP_BEGIN 02-orgOn" "$TUI_OUTPUT_FILE" | cut -d: -f1 || true)"
+  # 边界缺失 = 证据链断了（日志被截断 / puts 丢失）：**判失败**，不能让负向断言静默消失。
+  if [[ -z "$window_end" ]]; then
+    echo "FAIL: 日志里找不到 STEP_BEGIN 02-orgOn 窗口边界，无法判定是否自动上岗（ADR-0046 D1）"
+    grep -aE "STEP_BEGIN|STEP_OK|FAIL_MARKER" "$TUI_OUTPUT_FILE" 2>/dev/null | tail -10
+    extract_visible_text "$TUI_OUTPUT_FILE" | tail -20
+    tui_cleanup; exit 1
+  fi
+  if head -c "$window_end" "$TUI_OUTPUT_FILE" | grep -aq "已在岗"; then
+    echo "FAIL: /control on 之后、/org on 之前就出现「已在岗」→ 自动上岗（ADR-0046 D1 被违反）"
+    extract_visible_text "$TUI_OUTPUT_FILE" | tail -20
     tui_cleanup; exit 1
   fi
 
@@ -287,12 +313,12 @@ EOF
   # 以 worker-b（非派发人）目录打开面板 → 待验收 tab（3）→ 详情（回车）→ x → y（确认）
   tui_expect_test "org" '
     send "/org\r"
-    expect { -re {org:} { } timeout { send_error "FAIL: board did not render\n"; exit 2 } }
+    wait_for {org:}
     wait_for {dev-team}
     send "3"
     wait_for {人类取消目标}
     send "\r"
-    expect { -re {人类强制|x 取消} { } timeout { send_error "FAIL: 详情/操作键未见\n"; exit 4 } }
+    wait_for {人类强制|x 取消}
     send "x"
     wait_for {确认}
     send "y"
@@ -359,7 +385,7 @@ EOF
 
   tui_expect_test "org" '
     send "/org\r"
-    expect { -re {org:} { } timeout { send_error "FAIL: board did not render\n"; exit 2 } }
+    wait_for {org:}
     wait_for {我的组织任务}
   ' 60 100 "$CHIEF_DIR" "$ROOT/preset"
 

@@ -64,7 +64,13 @@ test_it "expect: /rewind 真实回退文件到旧 checkpoint 状态" <<'TEST'
       # ⚠️ 轮询期间必须**持续读取 PTY**：只 sleep 不读会让 pi 的 TUI 写满 PTY 缓冲区
       # （macOS PTY 缓冲很小）→ pi 同步阻塞在 write 上 → 事件循环停转 → mock 工具永不执行、
       # exec 的 close 事件也不再触发（实测：整轮 120s 零输出、锁不释放）。
-      expect { -timeout 2 -re {.+} { exp_continue } timeout { } }
+      # braced body 必须多行：整段一行会被当成单个 glob 模式 → 既不排空 PTY，
+      # 又会坐满当前 timeout（曾把本用例拖到 ~120s）。
+      expect {
+        -timeout 2
+        -re {.+} { exp_continue }
+        timeout { }
+      }
       sleep 1
     }
     if {!$ran} { stage "TIMEOUT-agent-tool-ran"; send_error "agent never executed the mock bash tool\n"; exit 124 }
@@ -74,7 +80,10 @@ test_it "expect: /rewind 真实回退文件到旧 checkpoint 状态" <<'TEST'
     # /rewind 打开 checkpoint 选择覆盖层；初始选中「(当前)」，↑ 移到最新 checkpoint
     send "/rewind\r"
     set timeout 60
-    expect { -re {Rewind Checkpoints} { } timeout { stage "TIMEOUT-rewind-overlay"; send_error "no rewind overlay\n"; exit 124 } }
+    expect {
+      -re {Rewind Checkpoints} { }
+      timeout { stage "TIMEOUT-rewind-overlay"; send_error "no rewind overlay\n"; exit 124 }
+    }
     stage "rewind-overlay"
     sleep 1
     send "\033\[A"
@@ -91,7 +100,10 @@ test_it "expect: /rewind 真实回退文件到旧 checkpoint 状态" <<'TEST'
     # target.txt 是 agent 刚写入的未提交改动 → safeCheckout 的 dirty guard 拒绝，
     # 转入兜底选择器（英文标题，可稳定捕获）。
     set timeout 60
-    expect { -re {Files cannot be restored safely} { } timeout { stage "TIMEOUT-dirty-fallback"; send_error "no dirty fallback selector\n"; exit 124 } }
+    expect {
+      -re {Files cannot be restored safely} { }
+      timeout { stage "TIMEOUT-dirty-fallback"; send_error "no dirty fallback selector\n"; exit 124 }
+    }
     stage "dirty-fallback"
     sleep 1
     # 内置 select 只认方向键（j/k 无效），↓ 到第 2 项「Force restore code and conversation」
@@ -105,7 +117,11 @@ test_it "expect: /rewind 真实回退文件到旧 checkpoint 状态" <<'TEST'
     for {set i 0} {$i < 60} {incr i} {
       if {[catch {exec cat [file join $env(E2E_PROJ) target.txt]} o] == 0 && $o eq "v1"} { set restored 1; break }
       # 同上：等文件期间也要读走 PTY，否则阻塞 pi
-      expect { -timeout 2 -re {.+} { exp_continue } timeout { } }
+      expect {
+        -timeout 2
+        -re {.+} { exp_continue }
+        timeout { }
+      }
       sleep 1
     }
     if {!$restored} { stage "TIMEOUT-file-restored"; send_error "restore did not bring target.txt back to v1\n"; exit 124 }

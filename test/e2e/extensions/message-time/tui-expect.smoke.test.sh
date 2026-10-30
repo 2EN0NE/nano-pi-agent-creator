@@ -42,7 +42,12 @@ test_it "expect: user and assistant each carry a [HH:MM:SS] line above their tex
   tui_expect_test "message-time" '
     send "user-msg-alpha\r"
     # 状态驱动：等 mock 回复真的渲染出来（固定 sleep 在负载下会假阴性）
-    expect { -re {Mock LLM is ready\.} { } timeout { send_error "no mock reply\n"; exit 124 } }
+    # （braced body 必须多行：整段写一行会被 expect 当成单个 glob 模式 → 永不匹配，
+    #   超时动作也不执行，等于空断言。`expect -d` 可自查：`match glob pattern " … "`。）
+    expect {
+      -re {Mock LLM is ready\.} { }
+      timeout { send_error "no mock reply\n"; exit 124 }
+    }
     sleep 1
   ' 30
 
@@ -64,7 +69,10 @@ test_it "expect: replaying an old session renders dated forms (cross-year + same
   # ① 真实跑一轮，拿到真实 pi 产出的会话文件（不伪造会话 schema）
   tui_expect_test "message-time" '
     send "replay-fixture-alpha\r"
-    expect { -re {Mock LLM is ready\.} { } timeout { send_error "no mock reply\n"; exit 124 } }
+    expect {
+      -re {Mock LLM is ready\.} { }
+      timeout { send_error "no mock reply\n"; exit 124 }
+    }
     sleep 1
   ' 30
 
@@ -116,13 +124,31 @@ PY
 
   # ③ 恢复该会话（真实 pi，仅 mock LLM），断言历史重绘走了同一条渲染路径
   tui_expect_test "message-time" '
-    # 状态驱动：等历史消息重绘完成再断言时间注记
-    expect { -re {replay-fixture-alpha} { } timeout { send_error "replayed session not rendered\n"; exit 124 } }
-    sleep 1
+    # 历史回放从**启动瞬间**就开始渲染，那批输出已被就绪门读走 → 不能用 expect 匹配
+    # 它（永远等不到「新」输出）。这里只保留一个有界排空（防 pi 写满 PTY 缓冲），
+    # 断言交给 shell 侧**按条件轮询**（ADR-0045 D4：不用固定 sleep 赌渲染时长）。
+    expect {
+      -timeout 5
+      -re {.+} { exp_continue }
+      timeout { }
+    }
   ' 30 "" "" "" "--session $fixture"
 
   txt="$TUI_TEST_HOME/visible.txt"
-  visible_text_clean "$TUI_OUTPUT_FILE" > "$txt"
+  # 回放渲染完成与否靠轮询判定：慢机器上多等几秒，而不是固定等待后假失败。
+  rendered=0
+  for _ in $(seq 1 20); do
+    visible_text_clean "$TUI_OUTPUT_FILE" > "$txt"
+    if grep -qF "Mock LLM is ready." "$txt"; then
+      rendered=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$rendered" -eq 0 ]]; then
+    echo "FAIL: 20s 内未见回放的助手回复（Mock LLM is ready.）"
+    exit 1
+  fi
 
   grep -qF "replay-fixture-alpha" "$txt" || { echo "FAIL: replayed user message not rendered"; exit 1; }
   grep -qF "Mock LLM is ready." "$txt" || { echo "FAIL: replayed assistant reply not rendered"; exit 1; }

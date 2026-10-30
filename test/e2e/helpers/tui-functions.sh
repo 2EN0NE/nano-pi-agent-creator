@@ -625,26 +625,34 @@ tui_expect_test() {
 		set __quiet 0
 		# 就绪的**必要条件**：必须已见到 TUI 进入 alt screen（\x1b[?1049h）。
 		# 只靠「静默 1s」会在 pi 初始化稍慢时误判就绪 —— 实测 CI 红态日志里
-		# `/org` 出现在 `[?1049h` **之前**，命令被 pi 丢掉 → 用例坐满超时。
+		# 「/org」出现在「[?1049h」**之前**，命令被 pi 丢掉 → 用例坐满超时。
+		# ⚠️ heredoc（<<-EXPECT，未加引号）里**禁止出现反引号**：会被 bash 当命令替换执行，
+		# 既往用例日志灌 "command not found" 噪声，还可能把后续行吞进命令替换里。
 		set __saw_alt 0
 		set __ready_deadline [expr {[clock seconds] + 30}]
 		while {!\$__quiet && [clock seconds] < \$__ready_deadline} {
 			set timeout 1
 			expect {
 				# ── 终端能力查询应答（ADR-0062 / TODO-9bb23dc9）──────────────────
-				# pi-tui 启动时会问前景色/背景色/调色板/DA1；某些 CI run 上它问完
-				# 就不再出帧（无应答也不超时兜底），表现为「静默 → 误判就绪 →
-				# 后续 /命令 石沉大海 → 用例坐满超时」。这里在**读循环内**顺手应答，
-				# 交互式终端本来就会回，等于把 PTY 补成一个"正常的终端"。
-				# 用 \x1b/\x5c 而非 \033/\\ 是为了躲开 bash→Tcl 双层转义。
+				# pi-tui 启动时把 OSC「]10;?」「]11;?」「]4;N;?」（BEL 结尾）与 DA1「ESC[c」
+				# 一次性写进 pty，并在收到 **DA1 应答**（ESC[?…c）时判定整组查询完成
+				# （pi-tui tui.js: DEVICE_ATTRIBUTES_RESPONSE_PATTERN →
+				# completeTerminalColorQuery），否则只能等它自带的 100ms 超时兜底。
+				# 这里在**读循环内**替真实终端回一条 DA1，把 PTY 补成"正常的终端"。
+				# OSC 颜色查询**不必应答**：DA1 一到 pi-tui 就收尾；多回的 OSC 字节若被
+				# 分块合并（parseOscColorResponse 是整块锚定匹配）会漏进 handleInput 当按键。
+				# 用 \x1b 而非 \033 是为了躲开 bash→Tcl 双层转义。
 				-re {\x1b\[\?1049h} { set __saw_alt 1; exp_continue }
-				-re {\]10;\?} { send "\x1b]10;rgb:ffff/ffff/ffff\x1b\x5c"; exp_continue }
-				-re {\]11;\?} { send "\x1b]11;rgb:0000/0000/0000\x1b\x5c"; exp_continue }
-				-re {\]4;([0-9]+);\?} { send "\x1b]4;\$expect_out(1,string);rgb:ffff/ffff/ffff\x1b\x5c"; exp_continue }
 				-re {\x1b\[c} { send "\x1b\[?1;2c"; exp_continue }
 				-re {.+} { exp_continue }
 				timeout { if {\$__saw_alt} { set __quiet 1 } }
 			}
+		}
+		# 门放弃等待**必须留痕**：否则「真就绪」与「没进 alt screen、后续命令可能被 pi
+		# 丢掉」在日志里都长成「pi-ready-raw」——与本次修复要消除的静默误判同源。
+		if {!\$__saw_alt} {
+			puts "\[tui-warn\] 就绪门超时：30s 内未见 alt-screen，后续命令可能被丢弃"
+			flush stdout
 		}
 		set timeout $timeout_seconds
 		# 崩溃保险：静默后若 pi 已退出（启动失败），立即判失败而非让后续断言莫名超时

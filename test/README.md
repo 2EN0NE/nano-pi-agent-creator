@@ -143,8 +143,8 @@ cat test/results/$LATEST/extensions/pi-logger/summary.md
 `CI=true` 时自动注入 mock-llm（无需 API Key），并启用**阻塞式**判定：
 
 - **耗时预算**：CI 各 e2e job 设 `E2E_BUDGET_STRICT=1` —— 超过插件预算**判失败**，不因机器负载降级为 WARN。
-- **分片矩阵**：`ci.yml` 的 `e2e` job 跑 `--shard N/8 --exclude worktree,permission-gate`；被排除的两个模块各有专用 job
-  （`e2e-worktree` / `e2e-permission-gate-smoke`），**改分片策略时不得引入硬编码模块清单**（否则新模块会静默无覆盖）。
+- **分片矩阵**：`ci.yml` 的 `e2e` job 跑 `--shard N/8 --exclude worktree,permission-gate,org`；被排除的三个模块各有专用 job
+  （`e2e-worktree` / `e2e-permission-gate-smoke` / `e2e-org`+`e2e-org-tui`），**改分片策略时不得引入硬编码模块清单**（否则新模块会静默无覆盖）。
 - **本地对齐**：pre-push 只跑变更模块；若变更的是 `test/e2e/scripts/*` 或 `test/e2e/helpers/*`（影响所有模块），
   额外跑 `--shard 0/8` 当金丝雀（全量交给 CI）。
 

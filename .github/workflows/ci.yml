@@ -230,6 +230,7 @@ jobs:
                   #   worktree       → e2e-worktree job（vitest + bash e2e + TUI）
                   #   permission-gate → e2e-permission-gate-smoke job（其 TUI 用例在
                   #                     CI Linux 崩溃，TODO P0；smoke 走专用 job）
+                  #   org            → e2e-org（smoke）+ e2e-org-tui（TUI），两个阻塞专用 job
                   bash test/e2e/scripts/run-e2e.sh \
                     --shard "${{ matrix.shard }}/8" \
                     --exclude worktree,permission-gate,org
@@ -260,11 +261,14 @@ jobs:
                     echo "(no test results directory found)"
                   fi
 
-    # ── org 专用 e2e（阻塞：smoke 部分）──
-    # org 的 25 条 smoke 做真实多进程编排（派发/认领/交付/验收/抢占/自愈），6 条 TUI 用例
-    # 在 CI Linux 上卡在 pi-tui 的**终端颜色查询**（`]10;?` `]11;?` `]4;N;?` 发出后无应答，
-    # 画面停在 alt-screen 空屏、120s 等待超时；同 code 本机全绿，见 e2e-org-tui 的 TODO）。
-    # 故按 permission-gate 的既有先例拆分：smoke 阻塞、TUI 走非阻塞 job 保留信号。
+    # ── org 专用 e2e（两个都是阻塞门禁，按 smoke / TUI 拆分只为并行与定位）──
+    # org 的 24 条 smoke 做真实多进程编排（派发/认领/交付/验收/抢占/自愈），6 条 TUI 用例
+    # 各起一次真实 pi（启动 ~40-70s）。拆成两个 job 的目的：① TUI 只跑 6 例、smoke 只跑 24 例，
+    # 单个 job 的耗时与预算互不侵占；② 红的时候一眼看出是编排链路还是 TUI 渲染。
+    # 注意：org 曾因「就绪判据只看静默」在 CI 上两态红（0/8 与 8/8），已由
+    # `test/e2e/helpers/tui-functions.sh` 的 alt-screen 必要条件修复（跑 40824475171 全过），
+    # 故 TUI job **不再降级为非阻塞**——别再按旧的「CI Linux 上必挂」结论给它加
+    # `continue-on-error`。若再出现整批超时，先看日志里的 `[tui-warn] 就绪门超时`。
     e2e-org:
         name: E2E org (smoke)
         runs-on: ubuntu-latest
@@ -281,7 +285,7 @@ jobs:
               run: bash scripts/setup-ci.sh
             - name: Run org smoke e2e
               env:
-                  E2E_POOL_SIZE: 2
+                  # 单目标（--ext 无逗号）走串行 _dispatch，E2E_POOL_SIZE 在此 job 无效，故不设
                   E2E_BUDGET_STRICT: '1'
                   E2E_ENV_SENTINEL: 'strict'
               run: bash test/e2e/scripts/run-e2e.sh --ext org --smoke-only
@@ -315,7 +319,7 @@ jobs:
               run: bash scripts/setup-ci.sh
             - name: Run org TUI e2e
               env:
-                  E2E_POOL_SIZE: 2
+                  # 同上：单目标串行执行，E2E_POOL_SIZE 在此 job 无效
                   E2E_BUDGET_STRICT: '1'
                   E2E_ENV_SENTINEL: 'strict'
               run: bash test/e2e/scripts/run-e2e.sh --ext org --tui

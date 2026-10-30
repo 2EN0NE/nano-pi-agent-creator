@@ -27,7 +27,7 @@
 # test/e2e/budget-overrides.conf
 #   格式：`extensions/<名>` 或 `skills/<名>` = 秒数；`#` 起注释；环境变量优先
 #   规则：能用「缩短等待 / 合并用例」解决的，**不许**加例外
-extensions/org=600   # 25 smoke + 8 TUI 全要起真实 tmux 成员 + 真实 pi 进程
+extensions/org=1200  # 24 smoke + 6 TUI 全要起真实 tmux 成员 + 真实 pi 进程
 ```
 
 - 优先级：`E2E_EXT_BUDGET_OVERRIDES="type/name=秒"` > `budget-overrides.conf` > 默认 300s。
@@ -79,7 +79,7 @@ extensions/org=600   # 25 smoke + 8 TUI 全要起真实 tmux 成员 + 真实 pi 
 | ----------------------- | ------------------ | ------------------------------------------------------ |
 | pi 进程 init + 扩展加载 | **约 0.4s**        | `PI_TIMING=1` 内置计时（CLI 220ms + 扩展 200ms）       |
 | TUI 就绪（修复前）      | **= timeout 参数** | 每用例白等 15s/45s（见 §2.1）                          |
-| TUI 就绪（修复后）      | 3s + 1s 渲染余量   | 固定等待 + 崩溃探测                                    |
+| TUI 就绪（修复后）      | 静默 1s + 1s 余量  | 静默 **且**已进 alt screen（deadline 30s）+ DA1 应答   |
 | 用例内等待              | 取决于用例         | 应使用 `wait_for` / `drain` 轮询到条件，而非长 `sleep` |
 | 收尾（修复前）          | **= timeout 参数** | 覆盖层吞掉 `/quit` → 白等 8-30s（见 §2.2）             |
 | 收尾（修复后）          | ≤ 8s（固定上限）   | 先 ESC 关覆盖层再 `/quit`                              |
@@ -100,12 +100,32 @@ extensions/org=600   # 25 smoke + 8 TUI 全要起真实 tmux 成员 + 真实 pi 
 
 而 `PI_TIMING=1` 显示 pi 自身 init 仅 0.4s —— 即**等待纯粹是浪费**。
 
-**现行做法**（`tui-functions.sh`）：**读到「输出静默」为止**（`expect -re {.+} {exp_continue}` + 1s
-timeout 判静默，上限 20s），随后做一次 eof 崩溃探测（判 126），再 `sleep 1` 首帧余量。实测就绪仅 **+1s**。
+**现行做法**（`tui-functions.sh`）：**「输出静默」+ 「已进 alt screen」两个条件同时成立**才算就绪
+（`expect -re {.+} {exp_continue}` 读走输出 + 1s timeout 判静默；`-re {\x1b\[\?1049h}` 见到 alt-screen
+才允许结束等待，deadline 30s）。读循环里顺手替真实终端回一条 **DA1** 应答（`ESC[?1;2c`），
+让 pi-tui 的终端能力查询立刻收尾。门上没等到 alt-screen 时打 `[tui-warn] 就绪门超时`——
+**这条 warn 必须保留**：否则「真就绪」和「没就绪、后续命令会被丢弃」在日志里都长成 `pi-ready-raw`。
+随后做一次 eof 崩溃探测（判 126），再 `sleep 1` 首帧余量。
 
 > ⚠️ **不要用裸 `sleep` 替代**：裸 sleep 只等待而不**读走**启动输出，残余输出会与用例随后发送的按键
 > 交错，实测导致首条命令的 `Enter` 丢失（`/preset plan` 与下一条 `/tools` 合并成 `plan/tools`，
 > 报 `未知预设 "plan/tools"`）。"读到静默"既快又能避免该竞态。
+
+> ⚠️ **`expect { … }` 的 body 必须多行**（本仓踩过的最隐蔽坑）：整段写在一行时，expect 把 body
+> 当成**一个 glob 模式**而不是 pattern/action 对（`expect -d` 会打印
+> `match glob pattern " -re {X} { } timeout { exit 1 } "? no`）。后果是双重的——模式永不匹配
+> （断言恒真）、`timeout { … }` 动作永不执行（超时不再判失败），唯一症状是该用例白等到当前
+> `timeout` 才继续。实测把一个三态用例从 273s 压到 3s 就是在修这个。门禁：
+> `test/vitest/scripts/e2e-expect-bodies.test.ts`（扫 `test/e2e/**` 的 `.sh`/`.exp`）。
+> 有界排空同样要拆行：
+>
+> ```tcl
+> expect {
+>   -timeout 2
+>   -re {.+} { exp_continue }
+>   timeout { }
+> }
+> ```
 
 ### 2.2 收尾：覆盖层会吞掉 `/quit`
 
@@ -135,29 +155,41 @@ timeout 判静默，上限 20s），随后做一次 eof 崩溃探测（判 126�
 ```tcl
 for {set i 0} {$i < 30} {incr i} {
   if {[file exists $marker]} { break }
-  # -timeout 0 → 立即返回，不改变节奏；有输出就排空
-  expect { -timeout 0 -re {.+} { exp_continue } timeout { } }
+  # 排空：harness 助手 drain_pty —— 无输出立即返回、有输出最多 20 块 break（两个方向都有界）
+  drain_pty 20
   sleep 1
 }
 ```
 
-- 硬等待里用 `-timeout 0`（零延迟）；`send` 连发之间同理（`pi-session-tree` 的 20 连发 + `sleep 8` 窗口
-  ~18s，同型隐患）。
+- 硬等待、`send` 连发之间都要把输出读走且**不要等**：用 `drain_pty N`（零延迟）；别写 `-timeout 0` + `exp_continue`
+  的裸排空（无界，见下）。`pi-session-tree` 的 20 连发 + `sleep 8` 窗口 ~18s 是同型隐患。
 - **门禁**：`npm run lint:tui`（CI 已接入）会扫 `test/e2e/extensions/**/*.test.sh|*.exp`，命中
   `expect-poll-without-drain`（含 sleep 的循环体内无 `expect`/`read`/`drain`）即阻塞。
 
-**排空必须"有界"**：`expect { -timeout 0 -re {.+} { exp_continue } timeout { } }` 单用是**无界**的——
+**排空必须"有界"**：`-timeout 0` + `exp_continue` 的裸排空是**无界**的——
 只要 pi 在流式输出（`PI_TUI_DEBUG` / 工具执行 / agent 活跃）就永远 `exp_continue`，调用方循环永远推进不了。
 实测：`pi-session-tree` case 003（91 列 ghosting 诊断，开 `PI_TUI_DEBUG=1`）因此单次排空不返回，
 15 次滚动迭代连第 1 次都过不去 → 用例挂满 300s 被模块预算杀掉，表现为「用例全过、模块 301s、FAIL [BUDGET]」，
 且**看上去像 runner/管道问题**（曾误判为「孤儿进程持有 `$( )` 管道」）。修后该模块 305s → **138s**（5/5 pass，对齐改动前 137s）。
 
-两种有界写法（择一）：
+两种有界写法（择一）。**两种都必须多行写**——整段写在一行会被 expect 当成单个 glob 模式，连 `-timeout` 也一并
+失效（见 §2.1；实测 `-timeout 1` 退化成等全局 `set timeout`）。
 
-| 写法                                                                | 边界                                | 代价                 |
-| ------------------------------------------------------------------- | ----------------------------------- | -------------------- |
-| `drain_pty 20`（harness 助手，`test/e2e/helpers/tui-functions.sh`） | 无输出立即返回 + 最多 20 块 `break` | 无                   |
-| `expect { -timeout 2 -re {.+} { exp_continue } timeout { } }`       | 最长 2s                             | 静默 PTY 每轮白等 2s |
+**① harness 助手（推荐，零代价）**：无输出立即返回 + 最多 20 块 `break`。
+
+```tcl
+drain_pty 20
+```
+
+**② 自己写有界排空**：最长等 2s；静默 PTY 时每轮白等 2s。
+
+```tcl
+expect {
+  -timeout 2
+  -re {.+} { exp_continue }
+  timeout { }
+}
+```
 
 > 助手名为 `drain_pty`：门禁用 `\bdrain\b` 会漏判（下划线不是词边界），故取前缀匹配；规则 `unbounded-pty-drain` 专抓
 > 「`-timeout 0` + `exp_continue` 且无 `break`」。
